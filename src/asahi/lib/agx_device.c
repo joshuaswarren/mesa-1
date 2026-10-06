@@ -24,7 +24,9 @@
 #include "agx_abi.h"
 #include "agx_bo.h"
 #include "agx_compile.h"
+#ifndef AGX_NO_VIRTIO
 #include "agx_device_virtio.h"
+#endif
 #include "agx_scratch.h"
 #include "decode.h"
 #include "glsl_types.h"
@@ -36,13 +38,19 @@
 #ifdef HAVE_LIBDRM
 #include <xf86drm.h>
 #include "drm-uapi/dma-buf.h"
+#ifndef AGX_NO_VIRTIO
 #include "vdrm.h"
+#endif
 #endif
 #include "util/blob.h"
 #include "util/log.h"
 #include "util/mesa-blake3.h"
 #include "util/os_file.h"
-#ifdef HAVE_LIBDRM
+#ifdef AGX_WINE_UNIXLIB
+/* Wine PE build: mmap/munmap travel through the unixlib (see
+ * src/asahi/d3d12/wine), as does every ioctl behind the xf86drm.h shim. */
+#include "agx_wine_unixlib.h"
+#elif defined(HAVE_LIBDRM)
 #include "util/os_mman.h"
 #endif
 #include "util/os_time.h"
@@ -51,8 +59,41 @@
 #include "util/u_printf.h"
 #include "git_sha1.h"
 #include "nir_serialize.h"
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(AGX_WINE_UNIXLIB)
 #include "agx_device_d3dkmt.h"
+#endif
+
+/* DRM fds in a Wine PE are Unix descriptors, never CRT descriptors. */
+#ifdef HAVE_LIBDRM
+static void
+agx_close_fd(int fd)
+{
+#ifdef AGX_WINE_UNIXLIB
+   d12_wine_close_fd(fd);
+#else
+   close(fd);
+#endif
+}
+
+static int
+agx_dupfd_cloexec(int fd)
+{
+#ifdef AGX_WINE_UNIXLIB
+   return d12_wine_dupfd_cloexec(fd);
+#else
+   return os_dupfd_cloexec(fd);
+#endif
+}
+
+static int64_t
+agx_dmabuf_size(int fd)
+{
+#ifdef AGX_WINE_UNIXLIB
+   return d12_wine_dmabuf_size(fd);
+#else
+   return lseek(fd, 0, SEEK_END);
+#endif
+}
 #endif
 
 /*
@@ -68,11 +109,11 @@
 int
 asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
 {
-   if (dev->is_virtio) {
+#ifndef AGX_NO_VIRTIO
+   if (dev->is_virtio)
       return agx_virtio_simple_ioctl(dev, cmd, req);
-   } else {
-      return drmIoctl(dev->fd, cmd, req);
-   }
+#endif
+   return drmIoctl(dev->fd, cmd, req);
 }
 
 /*
@@ -177,7 +218,7 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 #ifdef HAVE_LIBDRM
    /* prime_fd is always -1 on Windows (no dma-buf import path, SS2.1). */
    if (bo->prime_fd != -1)
-      close(bo->prime_fd);
+      agx_close_fd(bo->prime_fd);
 #endif
 
    /* Reset the handle. This has to happen before the GEM close to avoid a race.
@@ -567,7 +608,7 @@ agx_bo_import(struct agx_device *dev, int fd)
       bo->align = AIL_PAGESIZE;
       bo->handle = bo->uapi_handle = gem_handle;
       bo->prime_fd = -1;
-      bo->size = lseek(fd, 0, SEEK_END);
+      bo->size = agx_dmabuf_size(fd);
 
       /* Sometimes this can fail and return -1. size of -1 is not
        * a nice thing for mmap to try mmap. Be more robust also
@@ -585,7 +626,7 @@ agx_bo_import(struct agx_device *dev, int fd)
       }
 
       bo->flags = AGX_BO_SHARED | AGX_BO_SHAREABLE;
-      bo->prime_fd = os_dupfd_cloexec(fd);
+      bo->prime_fd = agx_dupfd_cloexec(fd);
       bo->label = "Imported BO";
       if (bo->prime_fd < 0)
          goto error;
@@ -601,9 +642,12 @@ agx_bo_import(struct agx_device *dev, int fd)
          goto error;
       }
 
+#ifndef AGX_NO_VIRTIO
       if (dev->is_virtio) {
          bo->uapi_handle = vdrm_handle_to_res_id(dev->vdrm, bo->handle);
-      } else {
+      } else
+#endif
+      {
          bo->uapi_handle = bo->handle;
       }
 
@@ -709,12 +753,12 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
       if (ret || out_sync_fd < 0) {
          error = ret < -1 ? -ret : (errno ? errno : EIO);
          if (out_sync_fd >= 0)
-            close(out_sync_fd);
+            agx_close_fd(out_sync_fd);
          goto error;
       }
 
       ret = agx_import_sync_file(dev, bo, out_sync_fd);
-      close(out_sync_fd);
+      agx_close_fd(out_sync_fd);
       if (ret) {
          error = ret < -1 ? -ret : (errno ? errno : EIO);
          goto error;
@@ -726,7 +770,7 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
    goto out;
 
 error:
-   close(bo->prime_fd);
+   agx_close_fd(bo->prime_fd);
    bo->prime_fd = -1;
 
 out:
@@ -742,7 +786,7 @@ agx_bo_export(struct agx_device *dev, struct agx_bo *bo)
    if (!agx_bo_make_shared(dev, bo))
       return -1;
 
-   return os_dupfd_cloexec(bo->prime_fd);
+   return agx_dupfd_cloexec(bo->prime_fd);
 }
 
 static int
@@ -884,9 +928,65 @@ agx_create_fixed_bo(struct agx_device *dev, size_t size,
    return bo;
 }
 
+/* The caller retains its fd/platform handle when open fails. Track only
+ * completed common initialization stages; never run full close on a partial
+ * device or destroy a mutex whose initialization was not reached. */
+enum agx_device_init_stage {
+   AGX_INIT_VIRTIO = BITFIELD_BIT(0),
+   AGX_INIT_BO_MAP = BITFIELD_BIT(1),
+   AGX_INIT_HEAPS = BITFIELD_BIT(2),
+   AGX_INIT_ALIAS_HEAP = BITFIELD_BIT(3),
+   AGX_INIT_GLSL = BITFIELD_BIT(4),
+   AGX_INIT_PRINTF = BITFIELD_BIT(5),
+   AGX_INIT_CONTEXT_SLOTS = BITFIELD_BIT(6),
+};
+
+static void
+agx_cleanup_partial_device(struct agx_device *dev, unsigned initialized)
+{
+   if (initialized & AGX_INIT_GLSL) {
+      if (initialized & AGX_INIT_CONTEXT_SLOTS)
+         agx_g17p_unbind_render_context_low_slots(
+            dev, ARRAY_SIZE(agx_g17p_render_context_low_slots));
+      agx_bo_unreference(dev, dev->printf.bo);
+      agx_bo_unreference(dev, dev->usc_base_bo);
+      agx_bo_unreference(dev, dev->g17p_render_context_bo);
+      agx_bo_unreference(dev, dev->scratch_bo);
+      agx_bo_unreference(dev, dev->zero_bo);
+      if (initialized & AGX_INIT_PRINTF)
+         u_printf_destroy(&dev->printf);
+      agx_bo_cache_evict_all(dev);
+      glsl_type_singleton_decref();
+   }
+
+   if (dev->replay_heap_initialized)
+      util_vma_heap_finish(&dev->replay_heap);
+   if (initialized & AGX_INIT_ALIAS_HEAP)
+      util_vma_heap_finish(&dev->g17p_vdm_alias_heap);
+   if (initialized & AGX_INIT_HEAPS) {
+      util_vma_heap_finish(&dev->usc_heap);
+      util_vma_heap_finish(&dev->main_heap);
+      simple_mtx_destroy(&dev->vma_lock);
+   }
+   if (initialized & AGX_INIT_BO_MAP) {
+      util_sparse_array_finish(&dev->bo_map);
+      simple_mtx_destroy(&dev->bo_cache.lock);
+      simple_mtx_destroy(&dev->bo_map_lock);
+      agxdecode_destroy_context(dev->agxdecode);
+   }
+#if defined(HAVE_LIBDRM) && !defined(AGX_NO_VIRTIO)
+   if (initialized & AGX_INIT_VIRTIO) {
+      vdrm_device_close(dev->vdrm);
+      dev->vdrm = NULL;
+   }
+#endif
+}
+
 bool
 agx_open_device(void *memctx, struct agx_device *dev)
 {
+   unsigned initialized = 0;
+
    dev->debug =
       debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
 
@@ -918,22 +1018,29 @@ agx_open_device(void *memctx, struct agx_device *dev)
       drmVersionPtr version = drmGetVersion(dev->fd);
       if (!version) {
          fprintf(stderr, "cannot get version: %s", strerror(errno));
-         return false;
+         goto fail;
       }
 
       if (!strcmp(version->name, "asahi")) {
          dev->is_virtio = false;
+         dev->render_rsrc_spec_hi = version->version_major > 0 ||
+                                   version->version_minor >= 2;
          dev->ops = agx_device_drm_ops;
+#ifndef AGX_NO_VIRTIO
       } else if (!strcmp(version->name, "virtio_gpu")) {
          dev->is_virtio = true;
          if (!agx_virtio_open_device(dev)) {
             fprintf(
                stderr,
                "Error opening virtio-gpu device for Asahi native context\n");
-            return false;
+            drmFreeVersion(version);
+            goto fail;
          }
+         initialized |= AGX_INIT_VIRTIO;
+#endif
       } else {
-         return false;
+         drmFreeVersion(version);
+         goto fail;
       }
 
       drmFreeVersion(version);
@@ -941,20 +1048,20 @@ agx_open_device(void *memctx, struct agx_device *dev)
       /* No backend preset and no libdrm to probe one with -- shouldn't
        * happen: every non-HAVE_LIBDRM caller (agx_win_open_device) presets
        * dev->ops itself. */
-      return false;
+      goto fail;
 #endif
    }
 
    params_size = dev->ops.get_params(dev, &dev->params, sizeof(dev->params));
    if (params_size <= 0) {
       fprintf(stderr, "Failed to query AGX device parameters: %m\n");
-      return false;
+      goto fail;
    }
    if ((size_t)params_size < sizeof(dev->params)) {
       fprintf(stderr,
               "AGX parameter reply is too short (%zd, expected at least %zu)\n",
               params_size, sizeof(dev->params));
-      return false;
+      goto fail;
    }
 
    dev->chip = agx_chip_from_params(&dev->params);
@@ -1011,24 +1118,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
                  dev->params.num_clusters_total);
       }
 
-#ifdef HAVE_LIBDRM
-      if (dev->is_virtio) {
-         vdrm_device_close(dev->vdrm);
-         dev->vdrm = NULL;
-      }
-#endif
-
-      return false;
+      goto fail;
    }
 
    const char *product = agx_chip_exact_product_name(dev->chip);
    if (product) {
-      /* Report the marketing name the machine is actually sold as, with no
-       * encoding suffix.  The generation/variant/revision triple is still
-       * printed by the probe logging above for anyone debugging silicon, but
-       * it does not belong in the name every application and About box shows
-       * the user. */
-      snprintf(dev->name, sizeof(dev->name), "Apple %s GPU", product);
+      /* Match the M-series format with the exact GPU codename and revision. */
+      snprintf(dev->name, sizeof(dev->name), "Apple %s (%s %02X)", product,
+               agx_chip_name(dev->chip), dev->params.gpu_revision + 0xA0);
    } else {
       const char *variant = " Unknown";
       switch (dev->params.gpu_variant) {
@@ -1176,14 +1273,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
       if (errno != 0 || end == usc_base_env || *end != '\0') {
          fprintf(stderr, "ASAHI_G17P_USC_BASE=\"%s\" is not a number\n",
                  usc_base_env);
-         return false;
+         goto fail;
       }
 
       if ((requested & 0xffffffffull) != 0) {
          fprintf(stderr,
                  "ASAHI_G17P_USC_BASE 0x%llx is not 4GiB aligned\n",
                  requested);
-         return false;
+         goto fail;
       }
 
       dev->shader_base = requested;
@@ -1193,7 +1290,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       /* Our robustness implementation requires the bottom unmapped */
       fprintf(stderr, "Unexpected address layout, can't cope\n");
       assert(0);
-      return false;
+      goto fail;
    }
 
    uint64_t shader_size = 0x100000000ull;
@@ -1261,7 +1358,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               (unsigned long long)user_start,
               (unsigned long long)dev->params.vm_start,
               (unsigned long long)dev->params.vm_end);
-      return false;
+      goto fail;
    }
 
    /* Default to a 32 GiB kernel heap at the top of the address space.
@@ -1296,7 +1393,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    int ret = dev->ops.simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_VM_CREATE failed: %m\n");
-      return false;
+      goto fail;
    }
 
    dev->agxdecode = agxdecode_new_context(dev->shader_base);
@@ -1309,6 +1406,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    simple_mtx_init(&dev->bo_cache.lock, mtx_plain);
    list_inithead(&dev->bo_cache.lru);
    dev->bo_cache.trim_generation = 1;
+   initialized |= AGX_INIT_BO_MAP;
 
    for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
       list_inithead(&dev->bo_cache.buckets[i]);
@@ -1327,7 +1425,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               "sparse aliasing\n",
               (unsigned long long)dev->params.vm_start,
               (unsigned long long)dev->params.vm_end);
-      return false;
+      goto fail;
    }
 
    /* Every vkAllocateMemory() binds a read-only shadow of the allocation at
@@ -1360,7 +1458,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               "read-only alias below %#llx\n",
               (unsigned long long)user_start,
               (unsigned long long)user_limit);
-      return false;
+      goto fail;
    }
 
    dev->sparse_ro_offset = user_size;
@@ -1370,11 +1468,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
    simple_mtx_init(&dev->vma_lock, mtx_plain);
    util_vma_heap_init(&dev->main_heap, user_start, user_size);
    util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
+   initialized |= AGX_INIT_HEAPS;
    if (dev->chip == AGX_CHIP_G17P &&
        !agx_g17p_vdm_alias_heap_init(&dev->g17p_vdm_alias_heap)) {
       fprintf(stderr, "Failed to initialize G17P low VDM alias heap\n");
-      return false;
+      goto fail;
    }
+   if (dev->chip == AGX_CHIP_G17P)
+      initialized |= AGX_INIT_ALIAS_HEAP;
 
    /* util_vma_heap_init() defaults to alloc_high, which puts every shader and
     * Ioto program within a few pages of the TOP of the 4GiB USC window.  The
@@ -1403,7 +1504,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
           dev->sparse_ro_offset, &dev->usc_heap, dev->shader_base,
           shader_size)) {
       fprintf(stderr, "Failed to reserve firmware runtime-graph GPU VA\n");
-      return false;
+      goto fail;
    }
 
    /* Keep captured addresses unavailable to ordinary allocations between
@@ -1414,7 +1515,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          &dev->main_heap, &dev->replay_heap, user_size);
       if (!dev->replay_heap_initialized) {
          fprintf(stderr, "Failed to reserve capture/replay GPU VA\n");
-         return false;
+         goto fail;
       }
    }
 
@@ -1422,12 +1523,13 @@ agx_open_device(void *memctx, struct agx_device *dev)
        !dev->ops.va_init(dev, user_start, user_size, dev->shader_base,
                          shader_size)) {
       fprintf(stderr, "Failed to initialize process GPU VA allocator\n");
-      return false;
+      goto fail;
    }
 
    dev->vm_id = vm_create.vm_id;
 
    glsl_type_singleton_init_or_ref();
+   initialized |= AGX_INIT_GLSL;
 
    if (agx_chip_uses_legacy_precompiled_programs(dev->chip)) {
       if (agx_gather_device_key(dev).needs_g13x_coherency == U_TRISTATE_YES)
@@ -1456,7 +1558,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
                              DRM_ASAHI_BIND_READ, "Zero page");
       if (bo == NULL) {
          fprintf(stderr, "Failed to bind zero page");
-         return false;
+         goto fail;
       }
 
       dev->zero_bo = bo;
@@ -1468,7 +1570,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "Scratch page");
       if (bo == NULL) {
          fprintf(stderr, "Failed to bind scratch page");
-         return false;
+         goto fail;
       }
 
       dev->scratch_bo = bo;
@@ -1476,7 +1578,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
       /* The contents of the scratch page are undefined, but making them nonzero
        * helps fuzz for bugs where we incorrectly read from the write section.
        */
-      memset(agx_bo_map(dev->scratch_bo), 0xCA, AIL_PAGESIZE);
+      void *map = agx_bo_map(dev->scratch_bo);
+      if (!map)
+         goto fail;
+      memset(map, 0xCA, AIL_PAGESIZE);
    }
 
    if (dev->chip == AGX_CHIP_G17P) {
@@ -1488,7 +1593,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          "G17P native render context");
       if (context == NULL) {
          fprintf(stderr, "Failed to bind G17P native render context");
-         return false;
+         goto fail;
       }
 
       if (getenv("ASAHI_G17P_CONTEXT_TRACE")) {
@@ -1510,25 +1615,23 @@ agx_open_device(void *memctx, struct agx_device *dev)
                  DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
       }
 
+      dev->g17p_render_context_bo = context;
       void *context_map = agx_bo_map(context);
       if (context_map == NULL) {
          fprintf(stderr, "Failed to map G17P native render context");
-         return false;
+         goto fail;
       }
       memset(context_map, 0, AGX_G17P_RENDER_CONTEXT_SIZE);
       /* Publish fixed Bind0 exactly once, before any command buffer can
        * reference this context. Mutable PPP payloads use retained uploads. */
       if (!agx_g17p_bind0_initialize(context_map, AGX_G17P_RENDER_CONTEXT_SIZE))
-         return false;
+         goto fail;
       if (agx_bo_sync_for_device(context, 0, AGX_G17P_RENDER_CONTEXT_SIZE))
-         return false;
+         goto fail;
 
-      if (!agx_g17p_bind_render_context_low_slots(dev, context)) {
-         agx_bo_unreference(dev, context);
-         return false;
-      }
-
-      dev->g17p_render_context_bo = context;
+      if (!agx_g17p_bind_render_context_low_slots(dev, context))
+         goto fail;
+      initialized |= AGX_INIT_CONTEXT_SLOTS;
    }
 
    /* AGX3 frontends load this address from runtime root state. M5 also
@@ -1546,7 +1649,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "Printf/abort");
    if (bo == NULL) {
       fprintf(stderr, "Failed to bind printf buffer");
-      return false;
+      goto fail;
    }
 
    if (dynamic_printf &&
@@ -1556,13 +1659,18 @@ agx_open_device(void *memctx, struct agx_device *dev)
            dev->main_heap_size - LIBAGX_PRINTF_BUFFER_SIZE)) {
       fprintf(stderr, "AGX3 printf buffer escaped the allocator-owned heap");
       agx_bo_unreference(dev, bo);
-      return false;
+      goto fail;
    }
 
    dev->printf_buffer_address =
       dynamic_printf ? bo->va->addr : LIBAGX_PRINTF_BUFFER_ADDRESS;
 
-   u_printf_init(&dev->printf, bo, agx_bo_map(bo));
+   dev->printf.bo = bo;
+   uint32_t *printf_map = agx_bo_map(bo);
+   if (!printf_map)
+      goto fail;
+   u_printf_init(&dev->printf, bo, printf_map);
+   initialized |= AGX_INIT_PRINTF;
 
    /* Make the USC exec window's helper page resident on both G17 variants.
     *
@@ -1591,7 +1699,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
       if (!reserved) {
          fprintf(stderr, "Failed to reserve the USC window base page\n");
-         return false;
+         goto fail;
       }
 
       struct agx_bo *usc_base = agx_create_fixed_bo(
@@ -1599,13 +1707,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
          DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "G17 USC window base");
       if (usc_base == NULL) {
          fprintf(stderr, "Failed to bind the USC window base page\n");
-         return false;
+         goto fail;
       }
 
+      dev->usc_base_bo = usc_base;
       void *map = agx_bo_map(usc_base);
       if (map == NULL) {
          fprintf(stderr, "Failed to map the USC window base page\n");
-         return false;
+         goto fail;
       }
 
       memset(map, 0, usc_base_size);
@@ -1619,12 +1728,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
          agx3_build_container_lead(map);
       }
       if (agx_bo_sync_for_device(usc_base, 0, usc_base_size))
-         return false;
+         goto fail;
 
-      dev->usc_base_bo = usc_base;
    }
 
    return true;
+
+fail:
+   agx_cleanup_partial_device(dev, initialized);
+   return false;
 }
 
 void
@@ -1652,13 +1764,15 @@ agx_close_device(struct agx_device *dev)
       util_vma_heap_finish(&dev->g17p_vdm_alias_heap);
    glsl_type_singleton_decref();
 
-   /* Non-DRM winsyses own their platform handles and tear them down after
-    * the common BO caches and VMA heaps have been finalized here. */
-#ifdef _WIN32
+   /* Wine's platform owns the Unix render fd and closes it through unixlib
+    * after common teardown. Native DRM transfers fd ownership on successful
+    * open. D3DKMT has an opaque handle, which its winsys closes here. */
+#if defined(_WIN32) && !defined(AGX_WINE_UNIXLIB)
    if (dev->ops.simple_ioctl == agx_device_d3dkmt_ops.simple_ioctl)
       agx_d3dkmt_close_device(dev);
-#else
+#elif !defined(AGX_WINE_UNIXLIB)
    close(dev->fd);
+   dev->fd = -1;
 #endif
 }
 
@@ -1757,7 +1871,7 @@ agx_export_sync_file(struct agx_device *dev, struct agx_bo *bo)
 
    if (ret || export_sync_file_ioctl.fd < 0) {
       if (export_sync_file_ioctl.fd >= 0)
-         close(export_sync_file_ioctl.fd);
+         agx_close_fd(export_sync_file_ioctl.fd);
       return -1;
    }
 

@@ -43,13 +43,16 @@
  * nir_variables that later passes promote.
  */
 
-#include "d12_dxil.h"
+#include "../d12_buffer_view_core.h"
 #include "../d12_native_descriptor_core.h"
+#include "d12_debug.h"
+#include "d12_dxil.h"
 
 #include "agx_compile.h"
 #include "agx_nir_texture.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "d12_nir_sparse_buffer.h"
 #include "util/log.h"
 #include "util/u_math.h"
 
@@ -318,6 +321,22 @@ enum d12_dxbc_op {
    D12_DXBC_OP_DCL_INDEXABLE_TEMP = 105,
    D12_DXBC_OP_DCL_GLOBAL_FLAGS = 106,
    D12_DXBC_OP_DCL_THREAD_GROUP = 155,
+   D12_DXBC_OP_GATHER4_S = 219,
+   D12_DXBC_OP_GATHER4_C_S = 220,
+   D12_DXBC_OP_GATHER4_PO_S = 221,
+   D12_DXBC_OP_GATHER4_PO_C_S = 222,
+   D12_DXBC_OP_LD_S = 223,
+   D12_DXBC_OP_LD_MS_S = 224,
+   D12_DXBC_OP_LD_UAV_TYPED_S = 225,
+   D12_DXBC_OP_LD_RAW_S = 226,
+   D12_DXBC_OP_LD_STRUCTURED_S = 227,
+   D12_DXBC_OP_SAMPLE_L_S = 228,
+   D12_DXBC_OP_SAMPLE_C_LZ_S = 229,
+   D12_DXBC_OP_SAMPLE_CLAMP_S = 230,
+   D12_DXBC_OP_SAMPLE_B_CLAMP_S = 231,
+   D12_DXBC_OP_SAMPLE_D_CLAMP_S = 232,
+   D12_DXBC_OP_SAMPLE_C_CLAMP_S = 233,
+   D12_DXBC_OP_CHECK_ACCESS_FULLY_MAPPED = 234,
 };
 
 /* Public token encoding from Microsoft's D3D12TokenizedProgramFormat.hpp.
@@ -341,6 +360,8 @@ enum d12_dxbc_op {
 #define D12_DXBC_RESINFO_RETURN_TYPE_SHIFT 11
 #define D12_DXBC_RESINFO_RETURN_FLOAT      0
 #define D12_DXBC_RESINFO_RETURN_UINT       2
+#define D12_DXBC_RESOURCE_RETURN_UNORM     1
+#define D12_DXBC_RESOURCE_RETURN_SNORM     2
 #define D12_DXBC_RESOURCE_RETURN_SINT      3
 #define D12_DXBC_RESOURCE_RETURN_UINT      4
 #define D12_DXBC_RESOURCE_RETURN_FLOAT     5
@@ -2053,15 +2074,16 @@ static nir_def *
 resource_texture_offset(struct d12_dxbc_ctx *ctx,
                         const struct d12_dxbc_operand *operand,
                         enum d12_dxbc_file file, unsigned klass,
-                        const struct d12_dxbc_binding_range *ranges)
+                        const struct d12_dxbc_binding_range *ranges,
+                        unsigned native_stride)
 {
    nir_builder *b = &ctx->b;
    nir_def *slot = resource_binding_slot(ctx, operand, file, klass, ranges);
    if (!slot)
       return NULL;
 
-   if (operand->num_indices != 2)
-      return nir_imul_imm(b, slot, ctx->native_layout.texture_stride_B);
+   if (operand->num_indices != 2 || !operand->index_is_relative[1])
+      return nir_imul_imm(b, slot, native_stride);
 
    const struct d12_dxbc_binding_range *range = &ranges[operand->index[0]];
    unsigned first_slot =
@@ -2078,23 +2100,37 @@ resource_texture_offset(struct d12_dxbc_ctx *ctx,
       b, 1, 64, nir_iadd_imm(b, resource_table, first_slot * sizeof(uint64_t)),
       .align_mul = 8);
    nir_def *relative = nir_iadd_imm(b, slot, -(int64_t)first_slot);
-   return nir_iadd(b, nir_u2u32(b, base),
-                   nir_imul_imm(b, relative,
-                                ctx->native_layout.texture_stride_B));
+   nir_def *index = nir_iadd(b, base, nir_u2u64(b, relative));
+   if (d12_native_descriptor_legacy_shapes(ctx->descriptor_generation)) {
+      unsigned dim = file == D12_DXBC_FILE_UAV
+         ? ctx->uav_dim[operand->index[0]] : ctx->srv_dim[operand->index[0]];
+      const bool array = dim == D12_DXBC_RESOURCE_DIMENSION_TEXTURE_1D_ARRAY ||
+                         dim == D12_DXBC_RESOURCE_DIMENSION_TEXTURE_2D_ARRAY;
+      nir_def *count = nir_udiv_imm(b, root_heap_pbe_null_offset(ctx),
+                                   ctx->native_layout.pbe_stride_B);
+      nir_def *count64 = nir_u2u64(b, count);
+      index = nir_u2u32(b, nir_bcsel(b, nir_ult(b, index, count64),
+                                   index, count64));
+      index = nir_iadd(b, index,
+         nir_imul_imm(b, nir_iadd_imm(b, count, 1), array ? 2 : 1));
+   }
+   return nir_imul_imm(b, nir_u2u32(b, index), native_stride);
 }
 
 static nir_def *
 srv_texture_offset(struct d12_dxbc_ctx *ctx, const struct d12_dxbc_operand *srv)
 {
    return resource_texture_offset(ctx, srv, D12_DXBC_FILE_RESOURCE, D12_RES_SRV,
-                                  ctx->srv_range);
+                                  ctx->srv_range,
+                                  ctx->native_layout.texture_stride_B);
 }
 
 static nir_def *
 uav_texture_offset(struct d12_dxbc_ctx *ctx, const struct d12_dxbc_operand *uav)
 {
    return resource_texture_offset(ctx, uav, D12_DXBC_FILE_UAV, D12_RES_UAV,
-                                  ctx->uav_range);
+                                  ctx->uav_range,
+                                  ctx->native_layout.texture_stride_B);
 }
 
 /*
@@ -2143,11 +2179,13 @@ uav_image_handle(struct d12_dxbc_ctx *ctx,
          .desc_set = D12_UNIFORM_HEAP_PBES);
    }
 
-   nir_def *offset = uav_texture_offset(ctx, uav);
+   nir_def *offset = resource_texture_offset(
+      ctx, uav, D12_DXBC_FILE_UAV, D12_RES_UAV, ctx->uav_range,
+      ctx->native_layout.pbe_stride_B);
    if (!offset)
       return NULL;
-
-   return nir_bindless_image_agx(b, offset, .desc_set = D12_UNIFORM_PBES);
+   return nir_bindless_image_agx(b, offset,
+      .desc_set = uav->num_indices == 2 && uav->index_is_relative[1] ? D12_UNIFORM_HEAP_PBES : D12_UNIFORM_PBES);
 }
 
 static nir_def *
@@ -2193,6 +2231,51 @@ uav_counter_address(struct d12_dxbc_ctx *ctx,
       .align_mul = 8);
 }
 
+/* Reuse the legacy native descriptor windows for every typed access.  Heap
+ * windows share the declaration-shape planes, since a buffer has no shape. */
+static nir_def *
+buffer_native_window(nir_builder *b, nir_def *coord)
+{
+   return nir_umin_imm(b, nir_ushr_imm(b, coord, D12_TYPED_BUFFER_WINDOW_LOG2),
+                       D12_TYPED_BUFFER_WINDOWS - 1);
+}
+
+static nir_def *
+buffer_native_coord(struct d12_dxbc_ctx *ctx, nir_def *coord)
+{
+   nir_builder *b = &ctx->b;
+   if (!d12_native_descriptor_legacy_shapes(ctx->descriptor_generation))
+      return coord;
+   return nir_isub(b, coord,
+                   nir_ishl_imm(b, buffer_native_window(b, coord),
+                                D12_TYPED_BUFFER_WINDOW_LOG2));
+}
+
+static nir_def *
+buffer_native_slot(struct d12_dxbc_ctx *ctx, nir_def *slot, nir_def *coord,
+                   bool heap)
+{
+   nir_builder *b = &ctx->b;
+   if (!d12_native_descriptor_legacy_shapes(ctx->descriptor_generation))
+      return slot;
+   nir_def *stride;
+   if (heap) {
+      stride = nir_iadd_imm(b,
+                            nir_udiv_imm(b, root_heap_pbe_null_offset(ctx),
+                                         ctx->native_layout.pbe_stride_B),
+                            1);
+   } else {
+      nir_def *info =
+         nir_load_global(b, 2, 32,
+                         nir_iadd(b, root_plane(ctx, D12_ROOT_BUFINFO_BASE),
+                                  nir_imul_imm(b, nir_u2u64(b, slot), 8)),
+                         .align_mul = 8);
+      stride = nir_ushr_imm(b, nir_channel(b, info, 1), 16);
+   }
+   return nir_iadd(b, slot,
+                   nir_imul(b, buffer_native_window(b, coord), stride));
+}
+
 /* The AGX buffer-image atomic path does not suppress an out-of-range
  * coordinate itself.  For an SM 5.1 unbounded typed UAV, select either its
  * live PBE descriptor or the extra null descriptor at the end of the bound
@@ -2209,9 +2292,11 @@ uav_rooted_typed_atomic_handle(struct d12_dxbc_ctx *ctx,
       .align_mul = 4);
    nir_def *valid = nir_ult(
       b, nir_u2u32(b, nir_channel(b, element, 0)), count);
-   nir_def *live_offset = nir_imul_imm(
-      b, rooted_native_index(ctx, descriptor),
-      ctx->native_layout.pbe_stride_B);
+   nir_def *live_offset =
+      nir_imul_imm(b,
+                   buffer_native_slot(ctx, rooted_native_index(ctx, descriptor),
+                                      nir_channel(b, element, 0), true),
+                   ctx->native_layout.pbe_stride_B);
 
    return nir_bindless_image_agx(
       b, nir_bcsel(b, valid, live_offset,
@@ -2331,6 +2416,87 @@ robust_load_buffer_vec4(struct d12_dxbc_ctx *ctx, nir_def *address,
    }
 
    return nir_vec(b, values, ARRAY_SIZE(values));
+}
+
+/* The metadata header and the prebiased coherent map use the same ABI as
+ * DXIL. Its zero page is entry 2; the two residency arrays and read-only
+ * sparse VA offset follow the four original header entries. */
+static nir_def *
+buffer_metadata_pointer(struct d12_dxbc_ctx *ctx, unsigned offset_B)
+{
+   nir_builder *b = &ctx->b;
+   nir_def *header = nir_load_global(b, 3, 64, nir_load_root_agx(b),
+                                    .align_mul = 8);
+   return nir_load_global(b, 1, 64,
+                         nir_iadd_imm(b, nir_channel(b, header, 1), offset_B),
+                         .align_mul = 8);
+}
+
+static nir_def *
+buffer_feedback_code(struct d12_dxbc_ctx *ctx,
+                      const struct d12_dxbc_operand *resource,
+                      nir_def *byte, nir_def *access_size_B,
+                      nir_def **read_address)
+{
+   nir_builder *b = &ctx->b;
+   bool uav = resource->file == D12_DXBC_FILE_UAV;
+   nir_def *descriptor = uav ? uav_rooted_descriptor(ctx, resource)
+                             : srv_rooted_descriptor(ctx, resource);
+   nir_def *index = descriptor ? rooted_native_index(ctx, descriptor)
+                    : uav ? uav_binding_slot(ctx, resource)
+                          : srv_binding_slot(ctx, resource);
+   if (!index)
+      return NULL;
+   nir_def *zero_page = buffer_metadata_pointer(ctx, 16);
+   nir_def *table = buffer_metadata_pointer(ctx, descriptor ? 40 : 32);
+   nir_def *has_table = nir_ine_imm(b, table, 0);
+   nir_def *safe_table = nir_bcsel(b, has_table, table, zero_page);
+   nir_def *safe_index = nir_bcsel(b, has_table, index, nir_imm_int(b, 0));
+   nir_def *map = nir_load_global(
+      b, 1, 64, nir_iadd(b, safe_table,
+                         nir_imul_imm(b, nir_u2u64(b, safe_index), 8)),
+      .align_mul = 8);
+   map = nir_bcsel(b, has_table, map, nir_imm_int64(b, 0));
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *base = uav ? uav_buffer_address(ctx, resource, zero, zero, 0)
+                       : srv_buffer_address(ctx, resource, zero, zero, 0);
+   nir_def *size = buffer_view_size_bytes(ctx, resource);
+   if (ctx->error || !base)
+      return NULL;
+   nir_def *status = d12_nir_buffer_residency_status(
+      b, map, base, byte, size, access_size_B, NULL, zero_page);
+   if (read_address) {
+      nir_def *ro_offset = buffer_metadata_pointer(ctx, 48);
+      *read_address = nir_bcsel(b, nir_ine_imm(b, map, 0),
+                                nir_ior(b, *read_address, ro_offset),
+                                *read_address);
+   }
+   /* Match the existing AGX opaque status convention (resident bit 0 is
+    * clear), so texture and buffer codes share CHECK_ACCESS_FULLY_MAPPED. */
+   return nir_iand_imm(b, nir_inot(b, status), 1);
+}
+
+static nir_def *
+buffer_vector_feedback(struct d12_dxbc_ctx *ctx,
+                        const struct d12_dxbc_operand *resource,
+                        const struct d12_dxbc_operand *dst, nir_def *byte,
+                        nir_def **read_address)
+{
+   if (dst->file == D12_DXBC_FILE_NULL || !dst->mask) {
+      fail(ctx, "buffer feedback needs a data destination component mask");
+      return NULL;
+   }
+   unsigned first = 4, last = 0;
+   for (unsigned c = 0; c < 4; c++) {
+      if (dst->mask & (1u << c)) {
+         first = MIN2(first, resource->swizzle[c]);
+         last = MAX2(last, resource->swizzle[c]);
+      }
+   }
+   nir_builder *b = &ctx->b;
+   return buffer_feedback_code(ctx, resource,
+      nir_iadd_imm(b, nir_u2u64(b, nir_channel(b, byte, 0)), first * 4),
+      nir_imm_int(b, (last - first + 1) * 4), read_address);
 }
 
 static void
@@ -3478,8 +3644,46 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          break;
       }
 
-      /* Everything else is operands. */
-      while (avail && nops < D12_DXBC_MAX_OPERANDS) {
+      /* Texture instructions have a fixed operand count. fxc can include
+       * zero padding inside the encoded instruction length (notably
+       * sample_l_s). Decoding that padding as a TEMP operand made the last
+       * source become r0 instead of the explicit LOD. Match the public
+       * formats audited against DXVK's dxbc_defs.cpp, and reject unknown
+       * nonzero payload rather than inventing another operand. */
+      unsigned operand_limit = D12_DXBC_MAX_OPERANDS;
+      switch (opcode) {
+      case D12_DXBC_OP_LD:
+      case D12_DXBC_OP_LD_RAW:
+      case D12_DXBC_OP_LD_UAV_TYPED: operand_limit = 3; break;
+      case D12_DXBC_OP_SAMPLE:
+      case D12_DXBC_OP_GATHER4:
+      case D12_DXBC_OP_LD_MS:
+      case D12_DXBC_OP_LD_STRUCTURED:
+      case D12_DXBC_OP_LD_S:
+      case D12_DXBC_OP_LD_RAW_S:
+      case D12_DXBC_OP_LD_UAV_TYPED_S: operand_limit = 4; break;
+      case D12_DXBC_OP_SAMPLE_C:
+      case D12_DXBC_OP_SAMPLE_C_LZ:
+      case D12_DXBC_OP_SAMPLE_L:
+      case D12_DXBC_OP_SAMPLE_B:
+      case D12_DXBC_OP_GATHER4_C:
+      case D12_DXBC_OP_GATHER4_PO:
+      case D12_DXBC_OP_GATHER4_S:
+      case D12_DXBC_OP_LD_MS_S:
+      case D12_DXBC_OP_LD_STRUCTURED_S: operand_limit = 5; break;
+      case D12_DXBC_OP_SAMPLE_D:
+      case D12_DXBC_OP_GATHER4_PO_C:
+      case D12_DXBC_OP_GATHER4_C_S:
+      case D12_DXBC_OP_GATHER4_PO_S:
+      case D12_DXBC_OP_SAMPLE_L_S:
+      case D12_DXBC_OP_SAMPLE_C_LZ_S:
+      case D12_DXBC_OP_SAMPLE_CLAMP_S: operand_limit = 6; break;
+      case D12_DXBC_OP_GATHER4_PO_C_S:
+      case D12_DXBC_OP_SAMPLE_B_CLAMP_S:
+      case D12_DXBC_OP_SAMPLE_C_CLAMP_S: operand_limit = 7; break;
+      default: break;
+      }
+      while (avail && nops < operand_limit) {
          unsigned n = decode_operand(ctx, args, avail, &o[nops]);
          if (!n) {
             fail(ctx, "malformed operand");
@@ -3488,6 +3692,15 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          args += n;
          avail -= n;
          nops++;
+      }
+      if (operand_limit != D12_DXBC_MAX_OPERANDS) {
+         while (avail) {
+            if (*args++) {
+               fail(ctx, "nonzero payload after texture operands");
+               return;
+            }
+            avail--;
+         }
       }
 
 #define SRC(i) read_src(ctx, &o[i])
@@ -3504,7 +3717,65 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
       }                                                                      \
    } while (0)
 
+      /* SM5 sparse instructions insert a residency destination after the
+       * data destination, and the clamp forms append an optional minimum
+       * LOD. Normalize their operand shape before sharing ordinary texture
+       * translation. This follows DXVK's zlib-licensed instruction formats
+       * (v2.7.1 dxbc_defs.cpp); the NIR residency path is shared with DXIL.
+       */
+      unsigned ordinary_opcode = opcode;
+      bool instruction_clamp = false;
       switch (opcode) {
+      case D12_DXBC_OP_GATHER4_S: ordinary_opcode = D12_DXBC_OP_GATHER4; break;
+      case D12_DXBC_OP_GATHER4_C_S: ordinary_opcode = D12_DXBC_OP_GATHER4_C; break;
+      case D12_DXBC_OP_GATHER4_PO_S: ordinary_opcode = D12_DXBC_OP_GATHER4_PO; break;
+      case D12_DXBC_OP_GATHER4_PO_C_S: ordinary_opcode = D12_DXBC_OP_GATHER4_PO_C; break;
+      case D12_DXBC_OP_LD_S: ordinary_opcode = D12_DXBC_OP_LD; break;
+      case D12_DXBC_OP_LD_MS_S: ordinary_opcode = D12_DXBC_OP_LD_MS; break;
+      case D12_DXBC_OP_LD_UAV_TYPED_S: ordinary_opcode = D12_DXBC_OP_LD_UAV_TYPED; break;
+      case D12_DXBC_OP_LD_RAW_S: ordinary_opcode = D12_DXBC_OP_LD_RAW; break;
+      case D12_DXBC_OP_LD_STRUCTURED_S: ordinary_opcode = D12_DXBC_OP_LD_STRUCTURED; break;
+      case D12_DXBC_OP_SAMPLE_L_S: ordinary_opcode = D12_DXBC_OP_SAMPLE_L; break;
+      case D12_DXBC_OP_SAMPLE_C_LZ_S: ordinary_opcode = D12_DXBC_OP_SAMPLE_C_LZ; break;
+      case D12_DXBC_OP_SAMPLE_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE; instruction_clamp = true; break;
+      case D12_DXBC_OP_SAMPLE_B_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE_B; instruction_clamp = true; break;
+      case D12_DXBC_OP_SAMPLE_D_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE_D; instruction_clamp = true; break;
+      case D12_DXBC_OP_SAMPLE_C_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE_C; instruction_clamp = true; break;
+      default: break;
+      }
+      bool sparse = ordinary_opcode != opcode;
+      struct d12_dxbc_operand feedback_dst = {0};
+      nir_def *instruction_min_lod = NULL;
+      if (sparse) {
+         NEED(2);
+         feedback_dst = o[1];
+         memmove(&o[1], &o[2], (nops - 2) * sizeof(o[0]));
+         nops--;
+         opcode = ordinary_opcode;
+         if (instruction_clamp) {
+            NEED(5);
+            if (o[nops - 1].file != D12_DXBC_FILE_NULL)
+               instruction_min_lod = nir_channel(b, SRC(nops - 1), 0);
+            nops--;
+         }
+         /* A null feedback destination needs the same sampling/clamp
+          * semantics, but no hardware residency result or extra lane. */
+         sparse = feedback_dst.file != D12_DXBC_FILE_NULL;
+      }
+
+      switch (opcode) {
+      case D12_DXBC_OP_CHECK_ACCESS_FULLY_MAPPED: {
+         NEED(2);
+         nir_def *resident = nir_is_sparse_texels_resident(
+            b, 1, nir_channel(b, SRC(1), 0));
+         DST(nir_replicate(b, nir_bcsel(b, resident, nir_imm_int(b, -1),
+                                       nir_imm_int(b, 0)), 4));
+         break;
+      }
       case D12_DXBC_OP_MOV:      NEED(2); DST(SRC(1)); break;
       case D12_DXBC_OP_ADD:      NEED(3); DST(nir_fadd(b, SRC(1), SRC(2))); break;
       case D12_DXBC_OP_MUL:      NEED(3); DST(nir_fmul(b, SRC(1), SRC(2))); break;
@@ -3898,7 +4169,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             nir_def *offset = uav ? uav_texture_offset(ctx, res)
                                   : srv_texture_offset(ctx, res);
             if (!offset) {
-               if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+               if (d12_debug()->validate_bindings) {
                   const struct d12_dxbc_binding_range *range =
                      uav ? &ctx->uav_range[reg] : &ctx->srv_range[reg];
                   mesa_logi("DXBC RESINFO operand: uav=%u reg=%u "
@@ -3915,7 +4186,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                return;
             }
             handle = nir_bindless_image_agx(b, offset,
-                                            .desc_set = D12_UNIFORM_TEXTURES);
+               .desc_set = res->num_indices == 2 && res->index_is_relative[1]
+                  ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
          }
          nir_tex_instr *txs = nir_tex_instr_create(b->shader, is_ms ? 1 : 2);
          txs->op = nir_texop_txs;
@@ -4198,6 +4470,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          uint32_t reg = o[ri].index[0];
          bool uav = o[ri].file == D12_DXBC_FILE_UAV;
          bool tgsm = o[ri].file == D12_DXBC_FILE_TGSM;
+         if (sparse && tgsm) {
+            fail(ctx, "buffer feedback requires an SRV or UAV operand");
+            return;
+         }
          unsigned stride =
             tgsm ? (reg < D12_DXBC_MAX_SIG ? ctx->tgsm[reg].stride : 0)
                  : (uav ? ctx->uav_stride : ctx->srv_stride)
@@ -4227,10 +4503,17 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          nir_def *size = buffer_view_size_bytes(ctx, &o[ri]);
          if (ctx->error)
             return;
+         nir_def *code = sparse
+                            ? buffer_vector_feedback(ctx, &o[ri], &o[0], byte, &addr)
+                            : NULL;
+         if (ctx->error)
+            return;
          nir_def *val = robust_load_buffer_vec4(ctx, addr, byte, size);
          unsigned sw[4] = {o[ri].swizzle[0], o[ri].swizzle[1],
                            o[ri].swizzle[2], o[ri].swizzle[3]};
          DST(nir_swizzle(b, val, sw, 4));
+         if (code)
+            write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
          break;
       }
 
@@ -4255,6 +4538,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
 
          nir_def *zero = nir_imm_int(b, 0);
          bool tgsm = o[ri].file == D12_DXBC_FILE_TGSM;
+         if (sparse && tgsm) {
+            fail(ctx, "buffer feedback requires an SRV or UAV operand");
+            return;
+         }
          nir_def *addr = tgsm
                             ? tgsm_byte_offset(ctx, &o[ri], zero, SRC(1))
                          : o[ri].file == D12_DXBC_FILE_UAV
@@ -4275,10 +4562,17 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          nir_def *size = buffer_view_size_bytes(ctx, &o[ri]);
          if (ctx->error)
             return;
+         nir_def *code = sparse
+                            ? buffer_vector_feedback(ctx, &o[ri], &o[0], SRC(1), &addr)
+                            : NULL;
+         if (ctx->error)
+            return;
          nir_def *val = robust_load_buffer_vec4(ctx, addr, SRC(1), size);
          unsigned sw[4] = {o[ri].swizzle[0], o[ri].swizzle[1],
                            o[ri].swizzle[2], o[ri].swizzle[3]};
          DST(nir_swizzle(b, val, sw, 4));
+         if (code)
+            write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
          break;
       }
 
@@ -4343,6 +4637,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             fail(ctx, "UAV load with no resource operand");
             return;
          }
+         if (sparse && !uav) {
+            fail(ctx, "typed UAV feedback requires a UAV operand");
+            return;
+         }
 
          if (uav && reg < D12_DXBC_MAX_SIG &&
              ctx->uav_dim[reg] != D12_DXBC_RESOURCE_DIMENSION_BUFFER) {
@@ -4355,7 +4653,9 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             unsigned return_type = ctx->uav_return_type[reg];
             if ((dim != D12_DXBC_RESOURCE_DIMENSION_TEXTURE_1D &&
                  dim != D12_DXBC_RESOURCE_DIMENSION_TEXTURE_2D && !is_array) ||
-                (return_type != D12_DXBC_RESOURCE_RETURN_FLOAT &&
+                (return_type != D12_DXBC_RESOURCE_RETURN_UNORM &&
+                 return_type != D12_DXBC_RESOURCE_RETURN_SNORM &&
+                 return_type != D12_DXBC_RESOURCE_RETURN_FLOAT &&
                  return_type != D12_DXBC_RESOURCE_RETURN_UINT &&
                  return_type != D12_DXBC_RESOURCE_RETURN_SINT) ||
                 (resource->num_indices != 1 && resource->num_indices != 2)) {
@@ -4390,7 +4690,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                   return;
 
                handle = nir_bindless_image_agx(
-                  b, offset, .desc_set = D12_UNIFORM_TEXTURES);
+                  b, offset, .desc_set = resource->num_indices == 2 && resource->index_is_relative[1]
+                     ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
             }
             nir_def *coord = SRC(1);
             nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
@@ -4400,6 +4701,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
              * array layer rather than interpreting it as a 1D coordinate. */
             tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
             tex->is_array = is_array;
+            tex->is_sparse = sparse;
             tex->dest_type = return_type == D12_DXBC_RESOURCE_RETURN_UINT
                                 ? nir_type_uint32
                              : return_type == D12_DXBC_RESOURCE_RETURN_SINT
@@ -4417,12 +4719,15 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                      : nir_trim_vector(b, coord, tex->coord_components);
             tex->src[1] =
                nir_tex_src_for_ssa(nir_tex_src_coord, physical_coord);
-            nir_def_init(&tex->instr, &tex->def, 4, 32);
+            nir_def_init(&tex->instr, &tex->def, sparse ? 5 : 4, 32);
             nir_builder_instr_insert(b, &tex->instr);
 
             unsigned rs[4] = {resource->swizzle[0], resource->swizzle[1],
                               resource->swizzle[2], resource->swizzle[3]};
             DST(nir_swizzle(b, &tex->def, rs, 4));
+            if (sparse)
+               write_dst(ctx, &feedback_dst,
+                         nir_replicate(b, nir_channel(b, &tex->def, 4), 4));
             break;
          }
 
@@ -4442,8 +4747,11 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             }
 
             nir_def *handle = nir_bindless_image_agx(
-               b, nir_imul_imm(b, native_slot,
-                               ctx->native_layout.texture_stride_B),
+               b,
+               nir_imul_imm(b,
+                            buffer_native_slot(ctx, native_slot, coord,
+                                               descriptor != NULL),
+                            ctx->native_layout.texture_stride_B),
                .desc_set = desc_set);
             nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
             tex->op = nir_texop_txf;
@@ -4458,13 +4766,25 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             tex->coord_components = 1;
             tex->src[0] = nir_tex_src_for_ssa(
                nir_tex_src_texture_handle, handle);
-            tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+            tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                              buffer_native_coord(ctx, coord));
             nir_def_init(&tex->instr, &tex->def, 4, 32);
             nir_builder_instr_insert(b, &tex->instr);
 
             unsigned rs[4] = {resource->swizzle[0], resource->swizzle[1],
                               resource->swizzle[2], resource->swizzle[3]};
             DST(nir_swizzle(b, &tex->def, rs, 4));
+            if (sparse) {
+               nir_def *count, *stride;
+               buffer_view_info(ctx, resource, &count, &stride);
+               nir_def *code = buffer_feedback_code(
+                  ctx, resource,
+                  nir_imul(b, nir_u2u64(b, coord), nir_u2u64(b, stride)),
+                  stride, NULL);
+               if (ctx->error || !code)
+                  return;
+               write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
+            }
             break;
          }
 
@@ -4561,16 +4881,21 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             if (descriptor) {
                nir_def *native_slot = rooted_native_index(ctx, descriptor);
                handle = nir_bindless_image_agx(
-                  b, nir_imul_imm(b, native_slot,
-                                  ctx->native_layout.pbe_stride_B),
+                  b,
+                  nir_imul_imm(b,
+                               buffer_native_slot(ctx, native_slot,
+                                                  element_or_byte, true),
+                               ctx->native_layout.pbe_stride_B),
                   .desc_set = D12_UNIFORM_HEAP_PBES);
             } else {
                nir_def *slot = uav_binding_slot(ctx, &o[0]);
                if (!slot)
                   return;
                handle = nir_bindless_image_agx(
-                  b, nir_imul_imm(b, slot,
-                                  ctx->native_layout.pbe_stride_B),
+                  b,
+                  nir_imul_imm(
+                     b, buffer_native_slot(ctx, slot, element_or_byte, false),
+                     ctx->native_layout.pbe_stride_B),
                   .desc_set = D12_UNIFORM_PBES);
             }
 
@@ -4578,8 +4903,9 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             nir_push_if(b, nir_ult(b, element_or_byte, count));
             nir_bindless_image_store(
                b, handle,
-               nir_vec4(b, element_or_byte, zero, zero, zero), zero, SRC(2),
-               zero, .image_dim = GLSL_SAMPLER_DIM_BUF,
+               nir_vec4(b, buffer_native_coord(ctx, element_or_byte), zero,
+                        zero, zero),
+               zero, SRC(2), zero, .image_dim = GLSL_SAMPLER_DIM_BUF,
                .image_array = false, .format = PIPE_FORMAT_NONE,
                .access = ACCESS_NON_READABLE);
             nir_pop_if(b, NULL);
@@ -4662,13 +4988,12 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             if (!handle)
                return;
 
-            nir_def *coord = typed_buffer
-                                ? nir_vec4(b, nir_channel(b, SRC(1), 0),
-                                           nir_imm_int(b, 0),
-                                           nir_imm_int(b, 0),
-                                           nir_imm_int(b, 0))
-                                : uav_image_coord(ctx, SRC(1), image_dim,
-                                                  is_array);
+            nir_def *coord =
+               typed_buffer
+                  ? nir_vec4(
+                       b, buffer_native_coord(ctx, nir_channel(b, SRC(1), 0)),
+                       nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0))
+                  : uav_image_coord(ctx, SRC(1), image_dim, is_array);
             enum pipe_format format =
                op == nir_atomic_op_imin || op == nir_atomic_op_imax
                   ? PIPE_FORMAT_R32_SINT
@@ -4780,13 +5105,12 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             if (!handle)
                return;
 
-            nir_def *coord = typed_buffer
-                                ? nir_vec4(b, nir_channel(b, SRC(2), 0),
-                                           nir_imm_int(b, 0),
-                                           nir_imm_int(b, 0),
-                                           nir_imm_int(b, 0))
-                                : uav_image_coord(ctx, SRC(2), image_dim,
-                                                  is_array);
+            nir_def *coord =
+               typed_buffer
+                  ? nir_vec4(
+                       b, buffer_native_coord(ctx, nir_channel(b, SRC(2), 0)),
+                       nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0))
+                  : uav_image_coord(ctx, SRC(2), image_dim, is_array);
             enum pipe_format format =
                op == nir_atomic_op_imin || op == nir_atomic_op_imax
                   ? PIPE_FORMAT_R32_SINT
@@ -5162,7 +5486,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          if (!rooted_texture) {
             texture_slot = srv_binding_slot(ctx, tex_operand);
             if (!texture_slot) {
-               if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+               if (d12_debug()->validate_bindings) {
                   mesa_logi("DXBC texture operand: reg=%u indices=%u "
                             "idx0=%u idx1=%u rel0=%u rel1=%u "
                             "range-valid=%u lower=%u upper=%u space=%u",
@@ -5213,12 +5537,17 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          nir_def *tex_handle;
          if (rooted_texture) {
             nir_def *index = rooted_native_index(ctx, rooted_texture);
+            if (is_buffer)
+               index = buffer_native_slot(ctx, index, buffer_coord, true);
             tex_handle = nir_bindless_image_agx(
                b, nir_imul_imm(b, index,
                                ctx->native_layout.texture_stride_B),
                .desc_set = D12_UNIFORM_HEAP_TEXTURES);
          } else {
-            nir_def *native_slot = texture_slot;
+            nir_def *native_slot =
+               is_buffer
+                  ? buffer_native_slot(ctx, texture_slot, buffer_coord, false)
+                  : texture_slot;
             nir_def *native_offset =
                is_buffer ? nir_imul_imm(
                               b, native_slot,
@@ -5227,7 +5556,9 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             if (!native_offset)
                return;
             tex_handle = nir_bindless_image_agx(
-               b, native_offset, .desc_set = D12_UNIFORM_TEXTURES);
+               b, native_offset, .desc_set = !is_buffer && tex_operand->num_indices == 2 &&
+                           tex_operand->index_is_relative[1]
+                  ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
          }
 
          /* Public Extended Opcode SAMPLE_CONTROLS packs signed 4-bit U/V/W
@@ -5293,6 +5624,11 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             }
          }
 
+         if (instruction_min_lod)
+            view_min_lod = view_min_lod
+                              ? nir_fmax(b, view_min_lod, instruction_min_lod)
+                              : instruction_min_lod;
+
          bool implicit_min_lod = view_min_lod && !is_ld && !has_lod &&
                                  !has_grad && !has_bias && !gather;
 
@@ -5324,6 +5660,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                                                : sampler_dim;
          tex->is_array = !is_buffer && is_array;
          tex->is_shadow = compare;
+         tex->is_sparse = sparse && !is_buffer;
          tex->dest_type = nir_type_float32;
          tex->coord_components = is_buffer          ? 1
                                  : physical_1d_load ? (is_array ? 3 : 2)
@@ -5361,7 +5698,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
              * (0, 0) for every nonzero location. */
             nir_def *icoord = coord4;
             nir_def *load_coord =
-               is_buffer ? buffer_coord
+               is_buffer ? buffer_native_coord(ctx, buffer_coord)
                : physical_1d_load
                   ? (is_array
                         ? nir_vec3(b, nir_channel(b, icoord, 0),
@@ -5463,7 +5800,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             }
          }
 
-         nir_def_init(&tex->instr, &tex->def, 4, 32);
+         nir_def_init(&tex->instr, &tex->def, tex->is_sparse ? 5 : 4, 32);
          nir_builder_instr_insert(b, &tex->instr);
 
          /* The RESOURCE operand's swizzle reorders the result. */
@@ -5482,6 +5819,22 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             result = nir_bcsel(b, view_min_lod_oob,
                                nir_imm_vec4(b, 0, 0, 0, 0), result);
          DST(result);
+         if (sparse) {
+            nir_def *code;
+            if (is_buffer) {
+               nir_def *count, *stride;
+               buffer_view_info(ctx, tex_operand, &count, &stride);
+               code = buffer_feedback_code(
+                  ctx, tex_operand,
+                  nir_imul(b, nir_u2u64(b, buffer_coord), nir_u2u64(b, stride)),
+                  stride, NULL);
+               if (ctx->error || !code)
+                  return;
+            } else {
+               code = nir_channel(b, &tex->def, 4);
+            }
+            write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
+         }
          break;
       }
 
@@ -5531,7 +5884,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
           * from translating is the only thing that predicts what a fix
           * is worth -- the score moves when a shader completes, not when
           * an opcode is added. */
-         if (getenv("D3D12AGX_DXBC_SURVEY")) {
+         if (d12_debug()->dxbc_survey) {
             fprintf(stderr, "dxbc-missing: %u operands:", opcode);
             for (unsigned k = 0; k < nops; k++)
                fprintf(stderr, " file%u/idx%u", o[k].file, o[k].index[0]);
@@ -5599,12 +5952,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
 /*
  * Translate a DXBC container to NIR.
  *
- * STATUS: the token decoder and the scalar/vector ALU set are in place
- * and verified against real fxc output. Control flow (if/else/loop/
- * break), resource access (sample/ld/store) and the structured
- * declarations are NOT yet translated -- those opcodes fail the shader
- * rather than being skipped, because a silently skipped instruction
- * yields a shader that runs and is wrong.
+ * Unsupported opcode/operand combinations fail translation by name.
+ * See docs/shader-gaps.md for the measured coverage and remaining gaps.
  */
 nir_shader *
 d12_dxbc_to_nir(const void *data, size_t size_B, mesa_shader_stage stage,

@@ -878,12 +878,11 @@ test_g17p_background_clear(void)
 static nir_shader *build_fs_alpha_discard_word(void);
 static nir_shader *build_fs_kill_then_alpha_discard_word(void);
 
-/* AGX_G17P_DISCARD_WORD: at one sample both non-constant coverage sources
+/* At one sample both non-constant coverage sources
  * are reduced to bit 0 (FLAGS = 3); at four samples the whole masks are kept
  * (FLAGS = 0). The first, no-tests update of the kill-then-discard shape
  * keeps its constant live source, so only its target is reduced (FLAGS = 1).
- * With AGX_G17P_DISCARD_WORD=0 every FLAGS stays 0. The binaries' coverage
- * protocol is checked by the fs-*-discard-word cases. */
+ * The binaries' coverage protocol is checked by the fs-*-discard-word cases. */
 static bool
 g17p_discard_word_case(nir_shader *(*build)(void), unsigned nr_samples,
                        const unsigned *expected_flags, unsigned count)
@@ -896,8 +895,6 @@ g17p_discard_word_case(nir_shader *(*build)(void), unsigned nr_samples,
    };
    struct agx_shader_part part = {0};
    bool ok = agx_compile_shader_nir(nir, &key, &part);
-   const bool on =
-      agx_get_codegen_flags() & AGX_CODEGEN_G17P_DISCARD_WORD;
 
    unsigned seen = 0;
    nir_foreach_function_impl(impl, nir) {
@@ -909,8 +906,7 @@ g17p_discard_word_case(nir_shader *(*build)(void), unsigned nr_samples,
             if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
                continue;
             const unsigned want =
-               (on && seen < count && nr_samples <= 1) ? expected_flags[seen]
-                                                       : 0;
+               (seen < count && nr_samples <= 1) ? expected_flags[seen] : 0;
             ok &= nir_intrinsic_flags(intr) == want;
             ++seen;
          }
@@ -919,9 +915,8 @@ g17p_discard_word_case(nir_shader *(*build)(void), unsigned nr_samples,
    ok &= seen == count;
 
    if (!ok)
-      fprintf(stderr, "AGX3b discard word mismatch (%ux, option %s, %u "
-                      "updates)\n",
-              MAX2(nr_samples, 1), on ? "on" : "off", seen);
+      fprintf(stderr, "AGX3b discard word mismatch (%ux, %u updates)\n",
+              MAX2(nr_samples, 1), seen);
    free(part.binary);
    ralloc_free(nir);
    return ok;
@@ -7633,7 +7628,8 @@ build_fs_vkcube_fragment_main(void)
 /* Strict compiler oracle for the complete stock-vkcube instruction family.
  * The sampler group inside this 506-byte main is the fixed-bank
  * sequence pinned independently by Implicit2DRebasesMaterializedCoordinates;
- * the rest prevents its derivative, rsqrt, transcendental, select, and export
+ * f27 discards this publication at its single last consumer.
+ * The rest prevents its derivative, rsqrt, transcendental, select, and export
  * neighbourhood from silently changing around that transaction. */
 static const uint8_t g17p_vkcube_fragment_main[] = {
    0x2f, 0x05, 0x54, 0x00, 0x03, 0x00, 0x04, 0x02, 0x10, 0x00, 0xaf, 0x00,
@@ -7660,7 +7656,7 @@ static const uint8_t g17p_vkcube_fragment_main[] = {
    0x1e, 0x05, 0x80, 0x02, 0x09, 0x01, 0x1e, 0x01, 0x80, 0x02, 0xaf, 0x01,
    0x54, 0x00, 0x03, 0x00, 0xb0, 0x40, 0x00, 0x00, 0x09, 0x01, 0x19, 0x07,
    0x0b, 0x08, 0x29, 0x04, 0x1b, 0x0a, 0x29, 0x04, 0x87, 0x02, 0x54, 0x00,
-   0x06, 0x00, 0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x00, 0x00, 0x01, 0x00,
+   0x06, 0x00, 0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x00, 0x00, 0x01, 0x00,
    0x10, 0x00, 0x01, 0x00, 0x02, 0x01, 0x2a, 0x81, 0x00, 0x02, 0x19, 0x81,
    0x15, 0x09, 0x00, 0x20, 0x29, 0x81, 0x11, 0x0b, 0x39, 0x81, 0x11, 0x0d,
    0x79, 0x01, 0x19, 0x0f, 0x0c, 0xae, 0x02, 0xbc, 0x1e, 0x00, 0x0a, 0x0b,
@@ -8252,13 +8248,12 @@ g17p_sample_group_protocol(const struct agx_shader_part *part)
                incorrectly_terminated_first |=
                   binary_contains(part, candidate, length);
 
-               /* The second in-flight sample stages into sampler-private
-                * group 8, as Apple's own consecutive samples do (see the
-                * staging-group note in agx3_pack_binary.c); it must not
-                * restage bank 0 while the first SMP still reads it. */
+               /* Both samples consume the same published coordinates.
+                * The packer shares that immutable publication in bank 0;
+                * no second staging write needs an independent bank. */
                d.texture = 1;
                d.sampler = 1;
-               d.coord = 8;
+               d.coord = 0;
                d.final = true;
                d.sample_group_end = true;
                if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
@@ -8270,6 +8265,9 @@ g17p_sample_group_protocol(const struct agx_shader_part *part)
       }
    }
 
+   if (!first || !final || incorrectly_terminated_first)
+      fprintf(stderr, "SMP group: first=%u final=%u premature=%u\n",
+              first, final, incorrectly_terminated_first);
    return first && final && !incorrectly_terminated_first;
 }
 

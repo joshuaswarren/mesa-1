@@ -92,9 +92,6 @@ struct hk_agx3_g17p_graphics_program_desc {
    bool preloaded_root;
    struct agx_ioto_constant_program constant_program;
    const struct agx3_cprog_inputs *cprog_inputs;
-   /* v51x HK_G17P_IOTO_IMMEDIATE: CPU source copies parallel to
-    * uniform_ranges, or NULL. */
-   const void *const *uniform_range_cpu;
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u

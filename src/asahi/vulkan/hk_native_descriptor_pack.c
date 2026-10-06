@@ -359,18 +359,21 @@ hk_pack_null_native_texture(unsigned generation,
  * sampled-image descriptor write starts from it (three planes each), so pack
  * it once per generation.  A refused generation is not cached: it takes the
  * packer, and its exact output, every time. */
+struct hk_native_texture_descriptor
+   hk_null_native_texture_packed[HK_NULL_NATIVE_TEXTURE_GENERATIONS];
+uint32_t hk_null_native_texture_state[HK_NULL_NATIVE_TEXTURE_GENERATIONS];
+
 bool
-hk_set_null_native_texture(unsigned generation,
-                           struct hk_native_texture_descriptor *out)
+hk_set_null_native_texture_slow(unsigned generation,
+                                struct hk_native_texture_descriptor *out)
 {
-   static struct hk_native_texture_descriptor packed[16];
-   /* 0: not packed yet, 1: being published, 2: packed[] valid. */
-   static uint32_t state[16];
+   struct hk_native_texture_descriptor *packed = hk_null_native_texture_packed;
+   uint32_t *state = hk_null_native_texture_state;
 
    if (!out)
       return false;
 
-   if (generation < ARRAY_SIZE(state) &&
+   if (generation < HK_NULL_NATIVE_TEXTURE_GENERATIONS &&
        p_atomic_read(&state[generation]) == 2) {
       *out = packed[generation];
       return true;
@@ -379,7 +382,7 @@ hk_set_null_native_texture(unsigned generation,
    if (!hk_pack_null_native_texture(generation, out))
       return false;
 
-   if (generation < ARRAY_SIZE(state) &&
+   if (generation < HK_NULL_NATIVE_TEXTURE_GENERATIONS &&
        p_atomic_cmpxchg(&state[generation], 0, 1) == 0) {
       packed[generation] = *out;
       p_atomic_set(&state[generation], 2);

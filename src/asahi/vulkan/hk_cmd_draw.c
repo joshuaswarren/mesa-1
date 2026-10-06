@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: MIT
  */
 #include <assert.h>
-#include <sys/resource.h>
 #include "agx_abi.h"
 #include "agx_bg_eot.h"
 #include "agx_bo.h"
@@ -29,7 +28,6 @@
 #include "agx_vdm_barrier_core.h"
 #include "agx_vdm_hal200_bind_tail_core.h"
 #include "agx_vdm_hal200_direct_draw_core.h"
-#include "agx_vdm_tessellate_core.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set_layout.h"
@@ -37,6 +35,7 @@
 #include "hk_entrypoints.h"
 #include "hk_image.h"
 #include "hk_image_view.h"
+#include "hk_pass_profile.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "hk_g17p_ppp_indices.h"
 #include "hk_g17p_full_frame_scissor.h"
@@ -90,41 +89,7 @@
 /* Diagnostic controls are immutable for a process. Keep environment parsing
  * out of the per-draw path; all controls remain opt-in and retain their exact
  * existing behavior. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_interdraw_barrier,
-                           "HK_G17P_INTERDRAW_BARRIER", false)
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_nonpoint_no_psiz,
-                           "HK_G17P_NONPOINT_NO_PSIZ", false)
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_hal200_about_flags1,
-                           "HK_G17P_HAL200_ABOUT_FLAGS1", false)
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_force_tri_merge_disable,
-                           "HK_G17P_FORCE_TRI_MERGE_DISABLE", false)
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_dirty_bisect,
-                           "HK_G17P_DIRTY_BISECT", 0)
-/* v46 execution-efficiency A/B (neo-gpu-exec-mesa-v46), default off.
- * HK_G17P_FS_COMPLEXITY=<1..15> writes that value into the low nibble of the
- * HAL200 FragmentProgram record's final word for every fragment draw. Metal
- * copies the low nibble of the compile reply's ShaderInfo field 32
- * (`shader_complexity`) into this word (see the About diagnostic below);
- * Honeykrisp always writes 0. Apple's compile reply for the throughput
- * benchmark's exact fragment shader carries shader_complexity = 3
- * (neo-throughput-apple-compiler/apple-runtime/metadata-saved-schema.json,
- * record 2), the Minecraft terrain fragment carries 1. The hardware meaning of
- * the nibble is not decoded: this is a matched-workload parity probe, not a
- * general policy. Values outside 1..15 are ignored. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_fs_complexity,
-                          "HK_G17P_FS_COMPLEXITY", 0)
 
-static uint32_t
-hk_g17p_fs_complexity_override(void)
-{
-   const int64_t value = debug_get_option_hk_g17p_fs_complexity();
-   return value >= 1 && value <= 15 ? (uint32_t)value : 0;
-}
-/* Failure-isolation only.  The production default keeps prepared-state
- * consumption enabled; this forces the authoritative builder so the two
- * paths can be compared on identical hardware and workloads. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prepared_dynamic_disable,
-                           "HK_G17P_PREPARED_DYNAMIC_DISABLE", false)
 #define IS_DIRTY(bit) BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_##bit)
 
 #define IS_SHADER_DIRTY(bit)                                                   \
@@ -133,379 +98,12 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prepared_dynamic_disable,
 #define IS_LINKED_DIRTY(bit)                                                   \
    (cmd->state.gfx.linked_dirty & BITFIELD_BIT(MESA_SHADER_##bit))
 
-enum hk_shader_perf_detail_phase {
-   HK_PERF_DETAIL_FLUSH,
-   HK_PERF_DETAIL_CCS,
-   HK_PERF_DETAIL_TESS,
-   HK_PERF_DETAIL_GEOM,
-   HK_PERF_DETAIL_TESS_SETUP,
-   HK_PERF_DETAIL_TESS_VS,
-   HK_PERF_DETAIL_TESS_TCS,
-   HK_PERF_DETAIL_TESS_FACTORS,
-   HK_PERF_DETAIL_STREAM,
-   HK_PERF_DETAIL_PREPROCESS,
-   HK_PERF_DETAIL_SHADERS,
-   HK_PERF_DETAIL_BOOKKEEPING,
-   HK_PERF_DETAIL_DYNAMIC,
-   HK_PERF_DETAIL_PRELINK_VS,
-   HK_PERF_DETAIL_PRELINK_FS,
-   HK_PERF_DETAIL_UPLOAD_PARAMS,
-   HK_PERF_DETAIL_UPLOAD_VARYINGS,
-   HK_PERF_DETAIL_UPLOAD_ROOT,
-   HK_PERF_DETAIL_PUBLISH_PROGRAM,
-   HK_PERF_DETAIL_PUBLISH_VDM,
-   HK_PERF_DETAIL_PUBLISH_TAIL,
-   HK_PERF_DETAIL_SW_TESS_SETUP,
-   HK_PERF_DETAIL_SW_TESS_RESERVE,
-   HK_PERF_DETAIL_SW_TESS_SHADERS,
-   HK_PERF_DETAIL_SW_TESS_COUNT,
-   HK_PERF_DETAIL_SW_TESS_PREFIX,
-   HK_PERF_DETAIL_SW_TESS_FINAL,
-   HK_PERF_DETAIL_COUNT,
-};
-
-static const char *const hk_shader_perf_detail_names[] = {
-   "flush",       "ccs",            "tess",        "geom",
-   "tess_setup",  "tess_vs",        "tess_tcs",    "tess_factors",
-   "stream",      "preprocess",     "shaders",     "bookkeeping",
-   "dynamic",     "prelink_vs",     "prelink_fs",  "upload_params",
-   "upload_vary", "upload_root",    "publish_prog", "publish_vdm",
-   "publish_tail", "sw_tess_setup", "sw_tess_reserve", "sw_tess_shaders",
-   "sw_tess_count", "sw_tess_prefix", "sw_tess_final",
-};
-
-static_assert(ARRAY_SIZE(hk_shader_perf_detail_names) ==
-                 HK_PERF_DETAIL_COUNT,
-              "shader performance phase names");
-
-static _Thread_local uint64_t
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_COUNT];
-
-struct hk_shader_perf_draw_group {
-   const void *shader;
-   uint64_t total_ns;
-   uint64_t min_ns;
-   uint64_t max_ns;
-   uint64_t first_ns;
-   uint64_t first_flush_ns;
-   uint64_t max_flush_ns;
-   uint64_t first_ccs_ns;
-   uint64_t first_tess_ns;
-   uint64_t first_geom_ns;
-   uint64_t first_tess_setup_ns;
-   uint64_t first_tess_vs_ns;
-   uint64_t first_tess_tcs_ns;
-   uint64_t first_tess_factors_ns;
-   uint64_t first_bo_alloc_ns;
-   uint64_t max_bo_alloc_ns;
-   uint32_t count;
-   uint32_t max_index;
-   uint32_t first_bo_allocs;
-   uint32_t first_bo_creates;
-   uint32_t max_bo_allocs;
-   uint32_t max_bo_creates;
-   long first_minor_faults;
-   long first_major_faults;
-   uint64_t first_detail[HK_PERF_DETAIL_COUNT];
-   uint64_t total_detail[HK_PERF_DETAIL_COUNT];
-   uint64_t max_detail[HK_PERF_DETAIL_COUNT];
-};
-
-static struct {
-   bool initialized;
-   bool enabled;
-   struct hk_shader_perf_draw_group groups[32];
-} hk_shader_perf_draw_trace;
-
-static void
-hk_shader_perf_draw_dump(void)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      const struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->count)
-         continue;
-      fprintf(stderr,
-              "HK_SHADER_PERF draw-group=%u shader=%p count=%u total_ns=%" PRIu64
-              " min_ns=%" PRIu64 " max_ns=%" PRIu64
-              " first_ns=%" PRIu64 " max_index=%u first_flush_ns=%" PRIu64
-              " max_flush_ns=%" PRIu64 " first_ccs_ns=%" PRIu64
-              " first_tess_ns=%" PRIu64 " first_geom_ns=%" PRIu64
-              " first_tess_setup_ns=%" PRIu64
-              " first_tess_vs_ns=%" PRIu64
-              " first_tess_tcs_ns=%" PRIu64
-              " first_tess_factors_ns=%" PRIu64 "\n",
-              i, g->shader, g->count, g->total_ns, g->min_ns, g->max_ns,
-              g->first_ns, g->max_index, g->first_flush_ns,
-              g->max_flush_ns, g->first_ccs_ns, g->first_tess_ns,
-              g->first_geom_ns, g->first_tess_setup_ns, g->first_tess_vs_ns,
-              g->first_tess_tcs_ns, g->first_tess_factors_ns);
-      fprintf(stderr,
-              "HK_SHADER_PERF draw-bo-group=%u first_allocs=%u first_creates=%u "
-              "first_alloc_ns=%" PRIu64 " max_allocs=%u max_creates=%u "
-              "max_alloc_ns=%" PRIu64 "\n",
-              i, g->first_bo_allocs, g->first_bo_creates,
-              g->first_bo_alloc_ns, g->max_bo_allocs, g->max_bo_creates,
-              g->max_bo_alloc_ns);
-      fprintf(stderr,
-              "HK_SHADER_PERF draw-fault-group=%u minor=%ld major=%ld\n", i,
-              g->first_minor_faults, g->first_major_faults);
-      for (unsigned p = 0; p < HK_PERF_DETAIL_COUNT; ++p) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF draw-phase-group=%u phase=%s first_ns=%" PRIu64
-                 " total_ns=%" PRIu64 " count=%u max_ns=%" PRIu64 "\n",
-                 i, hk_shader_perf_detail_names[p], g->first_detail[p],
-                 g->total_detail[p], g->count, g->max_detail[p]);
-      }
-   }
-}
-
-static inline bool
-hk_shader_perf_draw_enabled(const struct hk_device *dev)
-{
-   static bool dump_registered;
-   const bool enabled = dev->g17p_shader_perf.trace ||
-                        dev->g17p_shader_perf.aggregate;
-   if (unlikely(enabled && !dump_registered)) {
-      atexit(hk_shader_perf_draw_dump);
-      dump_registered = true;
-   }
-   return enabled;
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_stack(void)
-{
-   volatile uint8_t pages[64 * 1024];
-   for (size_t i = 0; i < sizeof(pages); i += 4096)
-      pages[i] = 0;
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_driver(void)
-{
-   FILE *maps = fopen("/proc/self/maps", "r");
-   if (!maps)
-      return;
-
-   char line[1024];
-   while (fgets(line, sizeof(line), maps)) {
-      unsigned long start, end;
-      char perms[5] = {0};
-      if (!strstr(line, "libvulkan_asahi.so") ||
-          sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3 ||
-          perms[0] != 'r')
-         continue;
-
-      for (unsigned long p = start; p < end; p += 4096)
-         (void)*(const volatile uint8_t *)p;
-   }
-   fclose(maps);
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_main_upload(struct hk_cmd_buffer *cmd)
-{
-   struct hk_uploader *uploader = &cmd->uploader.main;
-   if (!uploader->map)
-      return;
-
-   const size_t first = uploader->offset & ~(size_t)4095;
-   for (size_t off = first; off < HK_CMD_BO_SIZE; off += 4096) {
-      volatile uint8_t *p = uploader->map + off;
-      const uint8_t value = *p;
-      *p = value;
-   }
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_ioto(struct hk_cmd_buffer *cmd)
-{
-   struct hk_ioto_arena *arena = &cmd->ioto;
-   if (!arena->map)
-      return;
-
-   const size_t first = arena->cursor & ~(size_t)4095;
-   for (size_t off = first; off < arena->capacity; off += 4096) {
-      volatile uint8_t *p = arena->map + off;
-      const uint8_t value = *p;
-      *p = value;
-   }
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_stream(struct hk_cs *cs)
-{
-   if (!cs || !cs->current || !cs->end)
-      return;
-
-   uintptr_t first = (uintptr_t)cs->current & ~(uintptr_t)4095;
-   for (uintptr_t addr = first; addr < (uintptr_t)cs->end; addr += 4096) {
-      volatile uint8_t *p = (volatile uint8_t *)addr;
-      const uint8_t value = *p;
-      *p = value;
-   }
-}
-
-/* The recorders below write a _Thread_local array. In a shared object its
- * address is a __tls_get_addr call, which the compiler may hoist into the
- * caller when inlined; keep every access out of line so the per-draw
- * functions that call them only under a trace flag never pay it. */
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_detail_reset(void)
-{
-   memset(hk_shader_perf_current_detail, 0,
-          sizeof(hk_shader_perf_current_detail));
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_draw_record(const void *shader, uint64_t elapsed_ns,
-                           uint32_t bo_allocs, uint32_t bo_creates,
-                           uint64_t bo_alloc_ns, long minor_faults,
-                           long major_faults)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->shader || g->shader == shader) {
-         if (!g->shader)
-            g->shader = shader;
-         if (!g->count) {
-            g->min_ns = UINT64_MAX;
-            g->first_ns = elapsed_ns;
-            g->first_bo_allocs = bo_allocs;
-            g->first_bo_creates = bo_creates;
-            g->first_bo_alloc_ns = bo_alloc_ns;
-            g->first_minor_faults = minor_faults;
-            g->first_major_faults = major_faults;
-            memcpy(g->first_detail, hk_shader_perf_current_detail,
-                   sizeof(g->first_detail));
-         }
-         g->count++;
-         g->total_ns += elapsed_ns;
-         for (unsigned p = 0; p < HK_PERF_DETAIL_COUNT; ++p)
-            g->total_detail[p] += hk_shader_perf_current_detail[p];
-         g->min_ns = MIN2(g->min_ns, elapsed_ns);
-         if (elapsed_ns > g->max_ns) {
-            g->max_ns = elapsed_ns;
-            g->max_index = g->count;
-            g->max_bo_allocs = bo_allocs;
-            g->max_bo_creates = bo_creates;
-            g->max_bo_alloc_ns = bo_alloc_ns;
-            memcpy(g->max_detail, hk_shader_perf_current_detail,
-                   sizeof(g->max_detail));
-         }
-         return;
-      }
-   }
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_flush_record(const void *shader, uint64_t elapsed_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_FLUSH] = elapsed_ns;
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->shader || g->shader == shader) {
-         if (!g->shader)
-            g->shader = shader;
-         if (!g->first_flush_ns)
-            g->first_flush_ns = elapsed_ns;
-         g->max_flush_ns = MAX2(g->max_flush_ns, elapsed_ns);
-         return;
-      }
-   }
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_phase_record(const void *shader, unsigned phase,
-                            uint64_t elapsed_ns)
-{
-   assert(phase <= HK_PERF_DETAIL_TESS_FACTORS - HK_PERF_DETAIL_CCS);
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_CCS + phase] = elapsed_ns;
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->shader || g->shader == shader) {
-         if (!g->shader)
-            g->shader = shader;
-         if (g->count == 0) {
-            if (phase == 0)
-               g->first_ccs_ns = elapsed_ns;
-            else if (phase == 1)
-               g->first_tess_ns = elapsed_ns;
-            else if (phase == 2)
-               g->first_geom_ns = elapsed_ns;
-            else if (phase == 3)
-               g->first_tess_setup_ns = elapsed_ns;
-            else if (phase == 4)
-               g->first_tess_vs_ns = elapsed_ns;
-            else if (phase == 5)
-               g->first_tess_tcs_ns = elapsed_ns;
-            else if (phase == 6)
-               g->first_tess_factors_ns = elapsed_ns;
-         }
-         return;
-      }
-   }
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_flush_detail_record(uint64_t stream_ns, uint64_t preprocess_ns,
-                                   uint64_t shaders_ns,
-                                   uint64_t bookkeeping_ns,
-                                   uint64_t dynamic_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_STREAM] = stream_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PREPROCESS] = preprocess_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SHADERS] = shaders_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_BOOKKEEPING] = bookkeeping_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_DYNAMIC] = dynamic_ns;
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_dynamic_detail_record(
-   uint64_t prelink_vs_ns, uint64_t prelink_fs_ns, uint64_t upload_params_ns,
-   uint64_t upload_varyings_ns, uint64_t upload_root_ns,
-   uint64_t publish_program_ns, uint64_t publish_vdm_ns,
-   uint64_t publish_tail_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PRELINK_VS] = prelink_vs_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PRELINK_FS] = prelink_fs_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_UPLOAD_PARAMS] =
-      upload_params_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_UPLOAD_VARYINGS] =
-      upload_varyings_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_UPLOAD_ROOT] = upload_root_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PUBLISH_PROGRAM] =
-      publish_program_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PUBLISH_VDM] = publish_vdm_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PUBLISH_TAIL] = publish_tail_ns;
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_sw_tess_detail_record(
-   uint64_t setup_ns, uint64_t reserve_ns, uint64_t shaders_ns,
-   uint64_t count_ns, uint64_t prefix_ns, uint64_t final_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_SETUP] = setup_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_RESERVE] = reserve_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_SHADERS] = shaders_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_COUNT] = count_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_PREFIX] = prefix_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_FINAL] = final_ns;
-}
-
 static void
 hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
                     enum agx_index_size index_size, bool restart,
                     bool vertex_only);
 static void hk_flush_shaders(struct hk_cmd_buffer *cmd);
-static bool hk_g17p_tess_is_native(const struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs(struct hk_cmd_buffer *cmd);
-static struct hk_shader *hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure);
-static void hk_select_ordinary_vs(struct hk_cmd_buffer *cmd);
 static uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 static enum mesa_prim hk_gs_in_prim(struct hk_cmd_buffer *cmd);
 
@@ -524,17 +122,6 @@ hk_sw_tess_program(enum tess_primitive_mode prim, enum poly_tess_mode mode)
    }
 }
 
-static const char *
-hk_g17p_tg_probe_option(void)
-{
-   static const char *probe;
-   static bool initialized;
-   if (unlikely(!initialized)) {
-      probe = getenv("HK_G17P_TG_PROBE");
-      initialized = true;
-   }
-   return probe;
-}
 
 static void hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd);
 static bool hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd);
@@ -547,44 +134,11 @@ static void hk_flush_dynamic_state(
    struct agx_draw draw, bool ordinary_draw_path,
    bool *g17p_native_bind_tail_emitted_out, bool prepare_only);
 
-/* v57d: HK_G17P_SLOW_DRAW_US=N prints every vkCmdDraw* and bind-time
- * preparation taking longer than N us on the CPU, with what it did. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_slow_draw_us, "HK_G17P_SLOW_DRAW_US", 0)
-
-static_assert(HK_ORDINARY_REASON_COUNT <=
-                 ARRAY_SIZE(((struct hk_api_shader *)0)->g17p_trace_reason_draws),
-              "per-reason draw counters");
-
-static __thread struct {
-   uint32_t prolog_epilog_compiles, fast_links, lazy_waits;
-   uint64_t prolog_epilog_ns, fast_link_ns, lazy_wait_ns;
-} hk_slow_tl;
-
-static inline bool
-hk_slow_draw_enabled(void)
-{
-   return debug_get_option_hk_g17p_slow_draw_us() != 0;
-}
-
 static void hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd);
-static void hk_slow_report(struct hk_cmd_buffer *cmd, const char *what,
-                           uint64_t start_ns);
 
-/* v57d: bind-time preparation runs with gfx->g17p_bind_prepare set, so the
- * ordinary selection predicts instead of proving stale descriptors. */
 void
 hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
 {
-   const bool slow = hk_slow_draw_enabled();
-   uint64_t start = 0;
-   if (slow) {
-      memset(&hk_slow_tl, 0, sizeof(hk_slow_tl));
-      start = os_time_get_nano();
-      cmd->shader_perf_draw_bo_allocs = 0;
-      cmd->shader_perf_draw_bo_creates = 0;
-      cmd->shader_perf_draw_bo_alloc_ns = 0;
-      cmd->shader_perf_draw_active = true;
-   }
    /* Bind-time preparation is speculative. It runs from cmd_bind_shaders(),
     * which vk_graphics_pipeline_cmd_bind() calls before the pipeline's static
     * dynamic state is applied, and the application may still change dynamic
@@ -611,15 +165,9 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
       hk_cmd_buffer_flush_push_descriptors(cmd, gfx_desc);
 
    const VkResult prior_result = cmd->vk.record_result;
-   cmd->state.gfx.g17p_bind_prepare = true;
    hk_cmd_prepare_bound_graphics_impl(cmd);
-   cmd->state.gfx.g17p_bind_prepare = false;
    if (prior_result == VK_SUCCESS)
       cmd->vk.record_result = VK_SUCCESS;
-   if (slow) {
-      hk_slow_report(cmd, "bind", start);
-      cmd->shader_perf_draw_active = false;
-   }
 }
 
 /* Bind-time preparation points the root's parameter-block fields at the
@@ -697,33 +245,19 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        vk_command_buffer_has_error(&cmd->vk))
       return;
 
-   /* v96: predict the ordinary vertex variant before preparing its link. */
-   hk_select_ordinary_vs(cmd);
-
-   /* v56e: if the fragment program this state would select is a deferred
-    * generic variant (typically because the draw's descriptors are not bound
-    * yet), leave preparation to the authoritative draw path rather than
-    * compiling it here. */
-   struct hk_shader *bind_fs = hk_bound_fs_select(cmd, false);
-   if (!hk_shader_is_compiled(bind_fs))
-      return;
-
-   /* v57d: a combined-sampler fragment program publishes texture and
-    * sampler state read from the draw's descriptors at record time. Before
-    * those are pushed the bound descriptor state belongs to an earlier draw
-    * (or is absent), and building its launch here would refuse the command
-    * buffer. Leave it to the draw. */
-   if (gfx->ordinary_fs.valid && gfx->ordinary_fs.reason == HK_ORDINARY_PREDICTED &&
-       bind_fs->info.agx3_combined_sampler_valid)
-      return;
-
-   /* Diagnostic HK_G17P_APPLE_FS: leave all preparation to the
-    * authoritative draw path (CPU-side only). */
-   hk_foreach_variant(gfx->shaders[MESA_SHADER_FRAGMENT], variant) {
-      /* A deferred variant is never an Apple-FS diagnostic (those stay eager). */
-      if (hk_shader_is_compiled(variant) && variant->info.g17p_apple_fs)
-         return;
-   }
+   /* Pipeline binding prepares shaders before the pipeline's static state is
+    * applied. Rendering/subpass changes can likewise retain the previous
+    * rasterization state. Do not combine a known attachment layout with a
+    * different sample count while preparing a speculative epilog: its spill
+    * decision and rebuilt tilebuffer layout would describe different draws.
+    * HK does not expose mixed-sample rendering. Unknown/attachmentless sample
+    * counts keep the existing path; the authoritative draw handles them.
+    */
+   const unsigned samples =
+      cmd->vk.dynamic_graphics_state.ms.rasterization_samples;
+   const unsigned render_samples = gfx->render.tilebuffer.nr_samples;
+   const bool samples_incomplete = dev->dev.chip == AGX_CHIP_G17P && samples &&
+                                   render_samples && samples != render_samples;
 
    /* Shaders, dynamic state and attachment formats are now all known. Build
     * the exact non-indexed immutable variants outside vkCmdDraw*. An indexed
@@ -731,7 +265,14 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
     * the draw path still performs the authoritative lookup. */
    hk_prelink_graphics(cmd, false, AGX_INDEX_SIZE_U16,
                        cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable,
-                       false);
+                       samples_incomplete);
+
+   /* The vertex link is independent of framebuffer sample state. Preserve
+    * that useful preparation, but wait for coherent state before preparing
+    * the fragment link or any combined shader/root state.
+    */
+   if (samples_incomplete)
+      return;
 
    /* Preparation must consume the same complete shader/root state as the
     * authoritative draw path.  In particular, transformed pipelines use the
@@ -834,7 +375,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
     * The record is still filled by the tessellator and is unreachable until
     * the matching draw publishes its launches. */
    if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-       !hk_g17p_tess_is_native(cmd) &&
        !gfx->prepared_tess_out_draws.gpu) {
       gfx->prepared_tess_out_draws =
          hk_pool_alloc(cmd, 5 * sizeof(uint32_t), 4);
@@ -991,7 +531,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        * libagx argument identity now, but publish nothing until the actual
        * draw exact-matches it. Any state change takes the ordinary fallback. */
       if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-          !hk_g17p_tess_is_native(cmd) &&
           gfx->prepared_tess_out_draws.gpu) {
          const uint64_t heap = hk_heap(cmd);
          const struct agx_draw prepared_draw = agx_draw_indexed_indirect(
@@ -1019,21 +558,12 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    }
 
    hk_g17p_prewarm_indirect_helpers(cmd);
-   (void)hk_g17p_strong_dispatch_flush_enabled();
-   (void)hk_g17p_tg_probe_option();
 
-   if (dev->g17p_shader_perf.trace)
-      fprintf(stderr,
-              "HK_SHADER_PERF prepare-bound tess=%u native=%u gs=%u state=%" PRIx64 "\n",
-              gfx->shaders[MESA_SHADER_TESS_EVAL] != NULL,
-              hk_g17p_tess_is_native(cmd), gs != NULL,
-              gfx->descriptors.root.draw.tess_params);
 
    /* Software tessellation's three libagx launches have immutable argument
     * bytes once rendering state is fixed. Publish those exact command-local
     * loaders now; the first draw then only appends their launch records. */
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-       !hk_g17p_tess_is_native(cmd)) {
+   if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
       const uint64_t state = gfx->descriptors.root.draw.tess_params;
       const enum libagx_program count_program = hk_sw_tess_program(
          gfx->tess.info.mode, POLY_TESS_MODE_COUNT);
@@ -1108,123 +638,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
 
    }
 
-}
-
-/* G17P batches draws in one graphics stream. Explicit split policies and
- * depth caps are diagnostic controls only. The historical depth experiments
- * and their intermittent faults are retained in commit fb8fd6b881d; they do
- * not establish a hardware limit of one draw or publication per stream.
- */
-enum hk_g17p_draw_split {
-   /* Every draw after the first starts a new stream. */
-   HK_G17P_DRAW_SPLIT_EVERY,
-   /* Only a draw that republishes render state starts a new stream. */
-   HK_G17P_DRAW_SPLIT_REPUBLISH,
-   /* Batch draws until a real render dependency or capacity boundary. */
-   HK_G17P_DRAW_SPLIT_NEVER,
-};
-
-static enum hk_g17p_draw_split
-hk_g17p_draw_split_policy(const struct hk_device *dev)
-{
-   static int policy = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return HK_G17P_DRAW_SPLIT_NEVER;
-
-   if (policy < 0) {
-      const char *spelled = getenv("HK_G17P_DRAW_SPLIT");
-
-      if (spelled && !strcmp(spelled, "every"))
-         policy = HK_G17P_DRAW_SPLIT_EVERY;
-      else if (spelled && !strcmp(spelled, "republish"))
-         policy = HK_G17P_DRAW_SPLIT_REPUBLISH;
-      else if (spelled && !strcmp(spelled, "never"))
-         policy = HK_G17P_DRAW_SPLIT_NEVER;
-      else if (HK_ENV_BOOL_ONCE("HK_G17P_CONCAT_DRAWS", false))
-         policy = HK_G17P_DRAW_SPLIT_NEVER;
-      else
-         policy = HK_G17P_DRAW_SPLIT_NEVER;
-
-      /* The old opt-in spelling, kept working so existing A/B scripts that
-       * asked for the unconditional split still get it. */
-      if (HK_ENV_BOOL_ONCE("HK_G17P_SPLIT_DIRECT_DRAWS", false))
-         policy = HK_G17P_DRAW_SPLIT_EVERY;
-   }
-
-   return (enum hk_g17p_draw_split)policy;
-}
-
-/*
- * How many render-state publications one stream may carry.
- *
- * Diagnostic limit on state publications, independently of draw bodies.
- * Zero is the default and means no artificial cap.
- */
-static unsigned
-hk_g17p_state_publications_per_stream(const struct hk_device *dev)
-{
-   static int cap = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return 0;
-
-   if (cap < 0)
-      cap = HK_ENV_NUM_ONCE("HK_G17P_STATE_PUBLICATIONS_PER_STREAM", 0);
-
-   return cap > 0 ? (unsigned)cap : 0;
-}
-
-/*
- * Hard cap on draw *bodies* per graphics control stream, independent of the
- * publication cap above. Zero means no artificial cap. Historical depth
- * experiments are documented in fb8fd6b881d, including intermittent faults.
- */
-static unsigned
-hk_g17p_draws_per_stream(const struct hk_device *dev)
-{
-   static int cap = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return 0;
-
-   if (cap < 0)
-      cap = HK_ENV_NUM_ONCE("HK_G17P_DRAWS_PER_STREAM", 0);
-
-   return cap > 0 ? (unsigned)cap : 0;
-}
-
-/*
- * Number of VDM state contexts to rotate a stream's state publications
- * through.  1 (the default) pins every publication to context 0, which is what
- * m1n1's single-draw witness recorded and all this driver has ever emitted.
- * The hardware field is three bits, so 8 is the ceiling.
- */
-static unsigned
-hk_g17p_vdm_contexts(const struct hk_device *dev)
-{
-   static int contexts = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return 1;
-
-   if (contexts < 0) {
-      contexts = HK_ENV_NUM_ONCE("HK_G17P_VDM_CONTEXTS", 0);
-
-      /* The original boolean spelling asked for the full rotation. */
-      if (contexts <= 0)
-         contexts = HK_ENV_BOOL_ONCE("HK_G17P_CYCLE_VDM_CONTEXT", false)
-                        ? 8
-                        : 1;
-   }
-
-   return CLAMP(contexts, 1, 8);
-}
-
-static bool
-hk_g17p_cycle_vdm_context_enabled(const struct hk_device *dev)
-{
-   return hk_g17p_vdm_contexts(dev) > 1;
 }
 
 /* CTS coverage of indirect draws is pretty bad, so it's helpful to be able to
@@ -1756,30 +1169,11 @@ hk_g17p_bg_eot_ops_uniform(const struct agx_bg_eot_key *key)
    return true;
 }
 
-/* v51x FRG-floor diagnostics (default off).
- *
- * HK_G17P_IOTO_IMMEDIATE=1: per-launch setup (Ioto) programs publish
- * uniforms whose source memory is CPU-known and immutable for the command
- * buffer -- clear values, the root table, shader rodata -- with LDIMM instead
- * of LDDEV, so the background and fragment launches issue no memory loads.
- *
- * HK_G17P_BG_RSRC_LOW=<n>: replace the BG resource-spec low field (bits
- * 3..20, register 15369) with n << 3. Linux uses 8 (0x40); native captures
- * show 8 on QID16 and 0 on QID18 for the same light pass (render-register
- * audit FINDINGS.md). */
-/* HK_G17P_PACKED_CLEAR (default on; =0 restores the FLTNORM clear): a
- * single-sample R8G8B8A8_UNORM RT0 clear is packed on the CPU and the
- * background program stores the word directly (COPY + LSTCOL instead of two
- * FLTNORMs + LSTCOL per pixel). Apple's background clear converts per pixel
- * (fltnorm, fltnorm, lstcol); this is one instruction per pixel cheaper. */
-static bool
-hk_g17p_packed_clear_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_PACKED_CLEAR", true);
-   return enabled;
-}
+/* Packed clear: a single-sample R8G8B8A8_UNORM RT0 clear is packed on the
+ * CPU and the background program stores the word directly (COPY + LSTCOL
+ * instead of two FLTNORMs + LSTCOL per pixel). Apple's background clear
+ * converts per pixel (fltnorm, fltnorm, lstcol); this is one instruction per
+ * pixel cheaper. */
 
 /* The Vulkan float-to-UNORM conversion (round to nearest even, clamp, NaN to
  * zero) of one clear component. */
@@ -1789,35 +1183,7 @@ hk_g17p_unorm8(float x)
    return x == x ? (uint32_t)_mesa_float_to_unorm(x, 8) : 0;
 }
 
-static bool
-hk_g17p_ioto_immediate_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_IOTO_IMMEDIATE", false);
-   return enabled;
-}
-
-static void
-hk_g17p_bg_resource_override(uint64_t *resource_spec)
-{
-   static int64_t low = -2;
-   if (low == -2) {
-      const char *v = getenv("HK_G17P_BG_RSRC_LOW");
-      low = v && *v ? strtoll(v, NULL, 0) : -1;
-      if (low > (1 << 18) - 1)
-         low = -1;
-      if (low >= 0)
-         mesa_logi_once("HK_G17P_BG_RSRC_LOW: BG resource field %" PRId64,
-                        low);
-   }
-   if (low < 0 || !resource_spec)
-      return;
-   const uint64_t field = ((UINT64_C(1) << 18) - 1) << 3;
-   *resource_spec = (*resource_spec & ~field) | ((uint64_t)low << 3);
-}
-
-/* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE (default on).
+/* frg-codegen v4 BG/EOT device cache.
  *
  * The per-recording cache above dies with every vkResetCommandBuffer, so an
  * application that re-records each frame (the depth-2 benchmark, most games)
@@ -1879,20 +1245,12 @@ struct hk_g17p_bg_eot_dev_cache {
    struct hk_g17p_bg_eot_dev_entry entries[HK_G17P_BG_EOT_DEV_ENTRIES];
 };
 
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache,
-                           "HK_G17P_BG_EOT_DEVICE_CACHE", true)
-/* Diagnostic: print every device-cache program and argument block in the
- * launch-trace line format ("dev-" prefixed) so they can be compared with the
- * per-recording builder's HK_G17P_LAUNCH_TRACE output. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache_trace,
-                           "HK_G17P_BG_EOT_DEVICE_CACHE_TRACE", false)
 
 void
 hk_g17p_bg_eot_dev_cache_init(struct hk_device *dev)
 {
    dev->g17p_bg_eot_dev_cache = NULL;
-   if (dev->dev.chip != AGX_CHIP_G17P ||
-       !debug_get_option_hk_g17p_bg_eot_device_cache())
+   if (dev->dev.chip != AGX_CHIP_G17P)
       return;
    struct hk_g17p_bg_eot_dev_cache *dc = calloc(1, sizeof(*dc));
    if (!dc)
@@ -1969,8 +1327,6 @@ hk_g17p_bg_eot_upload(struct hk_cmd_buffer *cmd,
       return hk_pool_upload(cmd, data, size, alignment);
    struct agx_ptr T = hk_g17p_bg_eot_arena_take(&dc->data, size, alignment);
    memcpy(T.cpu, data, size);
-   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
-      hk_g17p_trace_line("dev-argument", T.gpu, data, size);
    return T.gpu;
 }
 
@@ -2002,8 +1358,6 @@ hk_g17p_bg_eot_publish(struct hk_cmd_buffer *cmd,
    a->cursor = (uint32_t)(offset + length);
    if (agx_bo_sync_for_device(a->bo, offset, length))
       return 0;
-   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
-      hk_g17p_trace_line("dev-program", r->va, r->map, length);
    return r->va;
 }
 
@@ -2281,7 +1635,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
    key->g17p_packed_clear =
       !store && op == AGX_BG_CLEAR && !dual_mrt_active && !multi_mrt_active &&
-      hk_g17p_packed_clear_enabled() && agx_g17p_packed_clear_ok(&key->tib);
+      agx_g17p_packed_clear_ok(&key->tib);
    if (!store && op == AGX_BG_CLEAR)
       key->reserved_preamble =
          multi_mrt_active ? 4 + 8 * attachment_count
@@ -2407,14 +1761,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
           (dual_mrt_active &&
            (!iview1 || !target1_pbe_valid ||
             info->pColorAttachments[1].imageView == VK_NULL_HANDLE))) {
-         if (HK_ENV_BOOL_ONCE("HK_DEBUG_RECORD", false))
-            mesa_loge("EOT target mismatch: partial=%u active=%u samples=%u "
-                      "target_samples=%u direct=%u ms_store=%u pbe=%u "
-                      "store_op=%u resolve_mode=%u",
-                      partial_render, active_count, key->tib.nr_samples,
-                      target ? target->vk.image->samples : 0,
-                      direct_resolve, multisample_store, target_pbe_valid,
-                      att->storeOp, att->resolveMode);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
       }
@@ -2622,12 +1968,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             hk_g17p_bg_eot_upload(cmd, dc, clear_values, clear_size, 16);
          if (!desc.clear_value_va)
             return (struct hk_bg_eot){0};
-         /* v51x HK_G17P_IOTO_IMMEDIATE: LDIMM the (immutable, record-time)
-          * clear values into the uniforms instead of loading the same 16..128
-          * bytes from memory at every background launch. The upload above is
-          * kept so the program shape outside the body is unchanged. */
-         if (hk_g17p_ioto_immediate_enabled())
-            desc.clear_value_cpu = clear_values;
       } else {
          /* Native texture-table entries occupy aligned 32-byte slots. RT1 is
           * native texture index2, so the exact MRT table retains index1 as a
@@ -2679,7 +2019,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
-      hk_g17p_bg_resource_override(&resource_spec);
    }
 
    const uint64_t published =
@@ -2810,7 +2149,7 @@ hk_g17p_bg_eot_cache_get(struct hk_cmd_buffer *cmd,
    cached->dev_entry = NULL;
    cached->valid = true;
 
-   /* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE: one value lookup per new
+   /* frg-codegen v4 BG/EOT device cache: one value lookup per new
     * pass. A hit fills every variant this recording will ask for; a miss
     * attaches a fresh device entry that hk_build_bg_eot() fills. */
    struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
@@ -3095,7 +2434,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
       /* frg-codegen v4: build this variant into the device-lifetime entry
        * hk_g17p_bg_eot_cache_get() attached, so every later recording of the
-       * same pass reuses it (HK_G17P_BG_EOT_DEVICE_CACHE). */
+       * same pass reuses it (BG/EOT device cache). */
       struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
       struct hk_g17p_bg_eot_dev_entry *de = cache ? cache->dev_entry : NULL;
       struct hk_bg_eot program = {0};
@@ -3355,14 +2694,14 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
-/* HK_ZLS_PRECISE_DEPTH_STORE (v50, default off).
+/* HK_ZLS_PRECISE_DEPTH_STORE (v50; default on for G17P, off elsewhere).
  *
  * hk_pack_zls_control() forces the depth store on ("|| true") because a pass
  * split across several of Honeykrisp's own control streams needs every stream
  * but the last to store depth for the next one to reload. That costs one
- * full depth write per tile even for storeOp DONT_CARE, and on G17P depth is
- * never compressed (hk_can_compress refuses AGX3), so it is 4 B/px of DRAM
- * writes per pass for D32. Only the stream that ends the pass may drop it:
+ * full depth write per tile even for storeOp DONT_CARE: up to 4 B/px of
+ * DRAM writes per pass for D32 (less where G17P compresses the depth plane,
+ * hk_g17p_compression.h). Only the stream that ends the pass may drop it:
  * the first stream keeps the forced word, middle streams keep the partial
  * word, and EndRendering installs one of these two:
  *
@@ -3371,14 +2710,15 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
  *  - last: a later stream: loads forced (the earlier stream stored), depth
  *    stores per storeOp/resolve.
  *
+ * Suspending passes keep the forced store (a later command buffer reloads).
  * Firmware partial renders (TVB overflow) are unaffected: the G17 kernel
  * derives their ZLS word with both load and store forced
  * (g17_uapi.rs partial_depth_flags). Stencil keeps its forced store: the
  * existing TODO documents a CTS failure without it. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_zls_precise_depth_store,
-                           "HK_ZLS_PRECISE_DEPTH_STORE", false)
+DEBUG_GET_ONCE_OPTION(hk_zls_precise_depth_store,
+                      "HK_ZLS_PRECISE_DEPTH_STORE", NULL)
 
-/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED=1 (opt-in).
+/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED (default on; =0 disables).
  *
  * Minecraft opens every full-screen pass with loadOp LOAD / storeOp STORE on
  * its D32 attachment, including passes whose pipelines neither test nor
@@ -3396,14 +2736,40 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_zls_precise_depth_store,
  * pass cannot see the dropped tile contents, but G17P does not expose
  * dynamicRenderingLocalReadDepthStencilAttachments, and a separate subpass
  * reads the (unchanged) image from memory. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_zls_elide_untouched,
-                           "HK_G17P_ZLS_ELIDE_UNTOUCHED", false)
+DEBUG_GET_ONCE_OPTION(hk_g17p_zls_elide_untouched,
+                      "HK_G17P_ZLS_ELIDE_UNTOUCHED", NULL)
+
+/* Both ZLS knobs are on by default on G17P: the ZLS slice of the Vulkan CTS
+ * (renderpasses.dynamic_rendering, renderpasses.renderpass2 and
+ * pipeline.monolithic.depth) and the D32S8 slices give the same results
+ * with and without them (t-1199). Either variable still forces its path on
+ * (1) or off (0). */
+static bool
+hk_zls_knob(const char *value, bool default_on)
+{
+   return value ? debug_parse_bool_option(value, default_on) : default_on;
+}
 
 static bool
 hk_g17p_zls_attachment_elidable(const VkRenderingAttachmentInfo *att)
 {
    return !att || !att->imageView ||
           (att->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
+           att->resolveMode == VK_RESOLVE_MODE_NONE);
+}
+
+/* A NONE/NONE attachment that no draw touches must retain its memory
+ * contents. In particular, a full-area pass must not run the forced ZLS
+ * store with an uninitialized tile. Drop such an attachment after recording
+ * the pass, including all of its split streams and firmware partial renders.
+ * Secondary queues are replayed into the primary by hk_CmdExecuteCommands(),
+ * so the same draw/clear tracking observes their depth/stencil use. */
+static bool
+hk_g17p_zls_attachment_none(const VkRenderingAttachmentInfo *att)
+{
+   return !att || !att->imageView ||
+          (att->loadOp == VK_ATTACHMENT_LOAD_OP_NONE &&
+           att->storeOp == VK_ATTACHMENT_STORE_OP_NONE &&
            att->resolveMode == VK_RESOLVE_MODE_NONE);
 }
 
@@ -3446,11 +2812,6 @@ hk_g17p_zls_elide(struct hk_cmd_buffer *cmd)
       memset(&cs->cr.stencil, 0, sizeof(cs->cr.stencil));
       memset(&cs->cr.zls_control, 0, sizeof(cs->cr.zls_control));
    }
-   if (HK_ENV_BOOL_ONCE("HK_G17P_ZLS_ELIDE_TRACE", false))
-      fprintf(stderr, "G17P ZLS elided: %ux%u depth=%p stencil=%p\n",
-              render->cr.width, render->cr.height,
-              (void *)render->depth_att.iview,
-              (void *)render->stencil_att.iview);
    return true;
 }
 
@@ -3486,13 +2847,10 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (dev->g17p_shader_perf.prefault_stack)
-      hk_shader_perf_prefault_stack();
-   if (dev->g17p_shader_perf.prefault_driver)
-      hk_shader_perf_prefault_driver();
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
+   cmd->state.gfx.g17p_index_prepared.valid = false;
 
    hk_sync_begin_rendering(
       cmd, pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT);
@@ -3622,46 +2980,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       max_sample_size_B,
       native_tile_limits ? 32768 : 0, native_tile_limits ? 2048 : 0);
 
-   /* HK_G17P_TILE (v51 diagnostic, default unset): cap the tilebuffer
-    * (USC/utile) tile at 32x16 or 16x16 for a tile-size A/B. Only the three
-    * witnessed encodings exist end to end (Mesa SPECLM seeds, USC layout,
-    * kernel UTILE_CONFIG (w/16)<<12|(h/16)<<14 and its (32,32)/(32,16)/(16,16)
-    * geometry check); the 32x32 binning tile is fixed. Larger requests are
-    * refused, and a cap the BG/EOT gates do not admit falls back to the
-    * default layout. Attachmentless passes (samples unknown) are untouched. */
-   if (dev->dev.chip == AGX_CHIP_G17P && render->tilebuffer.nr_samples) {
-      static int forced_px = -1;
-      if (forced_px < 0) {
-         const char *t = getenv("HK_G17P_TILE");
-         forced_px = 0;
-         if (t && !strcmp(t, "32x16"))
-            forced_px = 32 * 16;
-         else if (t && !strcmp(t, "16x16"))
-            forced_px = 16 * 16;
-         else if (t && strcmp(t, "32x32"))
-            mesa_loge("HK_G17P_TILE=%s refused: G17P encodes only 32x32, "
-                      "32x16 and 16x16 tilebuffer tiles", t);
-      }
-      if (forced_px && forced_px < render->tilebuffer.tile_size) {
-         const unsigned cap = forced_px * render->tilebuffer.nr_samples;
-         struct agx_tilebuffer_layout forced =
-            agx_build_tilebuffer_layout_with_limits(
-               formats, render->color_att_count,
-               render->tilebuffer.nr_samples, layered, max_sample_size_B,
-               32768, MIN2(cap, 2048));
-         if (forced.tile_size == (unsigned)forced_px &&
-             hk_agx3_g17p_rt0_tile_layout_supported(&forced)) {
-            render->tilebuffer = forced;
-            mesa_logi_once("HK_G17P_TILE: tilebuffer tile capped at %u px",
-                           forced_px);
-         } else {
-            mesa_logi_once("HK_G17P_TILE: %u px not admitted for this "
-                           "layout; keeping %u px", forced_px,
-                           render->tilebuffer.tile_size);
-         }
-      }
-   }
-
    if (dev->dev.chip == AGX_CHIP_G17P)
       render->g17p_rt0_layout_supported =
          hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer);
@@ -3710,6 +3028,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
               render->tilebuffer.nr_samples,
               render->view_mask ? " multiview" : "",
               incomplete_render_area ? " incomplete" : "");
+
+   if (unlikely(dev->pass_profile))
+      hk_pass_profile_describe(render, pRenderingInfo, incomplete_render_area);
 
    struct hk_g17p_bg_eot_cache_entry *bg_eot_cache =
       hk_g17p_bg_eot_cache_get(cmd, pRenderingInfo,
@@ -3871,16 +3192,21 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    hk_pack_zls_control(&render->cr.zls_control_partial, z_layout, s_layout,
                        attach_z, attach_s, incomplete_render_area, true);
 
-   render->zls_precise = debug_get_option_hk_zls_precise_depth_store() &&
-                         z_layout != NULL;
+   render->zls_precise =
+      hk_zls_knob(debug_get_option_hk_zls_precise_depth_store(),
+                  dev->dev.chip == AGX_CHIP_G17P) &&
+      z_layout != NULL;
    render->g17p_depth_touched = false;
+   const bool preserve_none = hk_g17p_zls_attachment_none(attach_z) &&
+                              hk_g17p_zls_attachment_none(attach_s);
    render->g17p_zls_elide_ok =
       dev->dev.chip == AGX_CHIP_G17P &&
-      debug_get_option_hk_g17p_zls_elide_untouched() &&
+      (preserve_none ||
+       (hk_zls_knob(debug_get_option_hk_g17p_zls_elide_untouched(), true) &&
+        !(render->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT))) &&
       (z_layout != NULL || s_layout != NULL) &&
       !(render->flags & (VK_RENDERING_SUSPENDING_BIT |
-                         VK_RENDERING_RESUMING_BIT |
-                         VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) &&
+                         VK_RENDERING_RESUMING_BIT)) &&
       hk_g17p_zls_attachment_elidable(attach_z) &&
       hk_g17p_zls_attachment_elidable(attach_s);
    if (render->zls_precise) {
@@ -4108,15 +3434,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    hk_cmd_prepare_bound_graphics(cmd);
 
-   if (dev->g17p_shader_perf.prefault_main)
-      hk_shader_perf_prefault_main_upload(cmd);
-   if (dev->g17p_shader_perf.prefault_ioto)
-      hk_shader_perf_prefault_ioto(cmd);
-   if (dev->g17p_shader_perf.prefault_streams) {
-      hk_shader_perf_prefault_stream(cmd->current_cs.gfx);
-      hk_shader_perf_prefault_stream(cmd->current_cs.pre_gfx);
-      hk_shader_perf_prefault_stream(cmd->current_cs.post_gfx);
-   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -4133,7 +3450,7 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
       cs->cr.eot.main = render->cr.eot.main;
       const bool zls_elided = hk_g17p_zls_elide(cmd);
 
-      /* HK_ZLS_PRECISE_DEPTH_STORE: see hk_pack_zls_control_final(). A
+      /* Precise depth store: see hk_pack_zls_control_final(). A
        * suspended pass continues in a later command buffer, which reloads
        * depth, so it keeps the forced store. An elided pass has no
        * depth/stencil to store. */
@@ -4440,330 +3757,11 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    }
 }
 
-/* v57d: HK_G17P_ORDINARY_VARIANT_TRACE
- *   1: one line per selection change, naming the site (bind-time prediction
- *      or the draw's authoritative proof), the proof outcome and the shader;
- *   2: also count every draw per fragment shader and print a summary per
- *      shader at most every 5 s while it draws, and when it is destroyed.
- * The v56e line printed bind-time peeks (taken before the draw's descriptors
- * are pushed) and draw-time selections alike, so it cannot say which variant
- * draws actually ran. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_ordinary_variant_trace,
-                          "HK_G17P_ORDINARY_VARIANT_TRACE", 0)
-/* v57d: HK_G17P_ORDINARY_BIND_PREDICT=0 restores the v57c bind-time peek
- * (A/B control). Default on; the draw's proof stays authoritative. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_bind_predict,
-                           "HK_G17P_ORDINARY_BIND_PREDICT", true)
-uint32_t
-hk_ordinary_trace_id(struct hk_api_shader *obj)
-{
-   uint32_t id = p_atomic_read(&obj->g17p_trace_id);
-   if (id)
-      return id;
-   /* FNV-1a over the ordinary (always eager) program: stable for one build
-    * and flag set, so a replay can map it to the SPIR-V module. */
-   const unsigned n = hk_api_num_variants(obj);
-   const struct hk_shader *s = &obj->variants[n - 1];
-   id = 2166136261u;
-   const uint8_t *b = s->b.binary;
-   for (size_t i = 0; b && i < s->b.info.binary_size; ++i)
-      id = (id ^ b[i]) * 16777619u;
-   id |= 1;
-   p_atomic_set(&obj->g17p_trace_id, id);
-   return id;
-}
-
-static void
-hk_ordinary_trace_summary(struct hk_api_shader *obj, const char *when)
-{
-   char reasons[512];
-   unsigned o = 0;
-   reasons[0] = 0;
-   for (unsigned r = 0; r < HK_ORDINARY_REASON_COUNT && o < sizeof(reasons) - 40; ++r) {
-      uint64_t c = p_atomic_read(&obj->g17p_trace_reason_draws[r]);
-      if (c)
-         o += snprintf(reasons + o, sizeof(reasons) - o, "%s%s:%" PRIu64,
-                       o ? "," : "", hk_ordinary_reason_name(r), c);
-   }
-   const unsigned n = hk_api_num_variants(obj);
-   fprintf(stderr,
-           "G17P ordinary summary: when=%s fs=%08x draws_ordinary=%" PRIu64
-           " draws_generic=%" PRIu64 " reasons=%s generic_main=%u"
-           " ordinary_main=%u lazy_wait_us=%.1f\n",
-           when, hk_ordinary_trace_id(obj),
-           p_atomic_read(&obj->g17p_trace_draws[1]),
-           p_atomic_read(&obj->g17p_trace_draws[0]), o ? reasons : "-",
-           hk_shader_is_compiled(&obj->variants[0])
-              ? obj->variants[0].b.info.main_size : 0,
-           obj->variants[n - 1].b.info.main_size,
-           p_atomic_read(&obj->g17p_trace_wait_ns) / 1000.0);
-}
-
-void
-hk_ordinary_trace_final(struct hk_api_shader *obj)
-{
-   if (debug_get_option_hk_g17p_ordinary_variant_trace() >= 2 &&
-       obj->g17p_ordinary_variants &&
-       (obj->g17p_trace_draws[0] || obj->g17p_trace_draws[1]))
-      hk_ordinary_trace_summary(obj, "destroy");
-}
-
-static uint32_t
-hk_trace_code_id(const struct hk_api_shader *obj)
-{
-   if (!obj)
-      return 0;
-   const unsigned n = hk_api_num_variants(obj);
-   for (unsigned i = 0; i < n; ++i) {
-      const struct hk_shader *v = &obj->variants[i];
-      if (v->lazy || !v->b.binary || !v->b.info.binary_size)
-         continue;
-      uint32_t id = 2166136261u;
-      const uint8_t *b = v->b.binary;
-      for (size_t k = 0; k < v->b.info.binary_size; ++k)
-         id = (id ^ b[k]) * 16777619u;
-      return id | 1;
-   }
-   return 0;
-}
-
-/* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3: one line per draw naming the vertex
- * and fragment programs, the fragment variant and its proof, and the arm a
- * runtime region guard (ordinary vertex region) should take, evaluated on the
- * CPU over the same descriptor state the GPU guard reads. */
-static void
-hk_ordinary_trace_draw_line(struct hk_cmd_buffer *cmd)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
-   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
-   const char *vs_guard = "none";
-   if (vs && vs->g17p_guard_requirements) {
-      enum hk_ordinary_reason r = hk_ordinary_descriptor_reason(
-         vs->g17p_guard_requirements, gfx->descriptors.sets,
-         gfx->descriptors.root.sets, gfx->descriptors.push,
-         gfx->descriptors.push_active, HK_MAX_SETS, NULL);
-      vs_guard = r == HK_ORDINARY_OK ? "fast" : hk_ordinary_reason_name(r);
-   }
-   const struct hk_ordinary_fs_selection *c = &gfx->ordinary_fs;
-   const bool fs_sel = fs && fs->g17p_ordinary_variants && c->valid && c->api == fs;
-   fprintf(stderr,
-           "G17P draw: cb=%p n=%u vs=%08x vs_guard=%s fs=%08x fs_variant=%d"
-           " fs_reason=%s generation=%" PRIu64 " prev_set0=%" PRIx64
-           " push_active=%#x rt0=%p depth=%p area=%ux%u\n",
-           (void *)cmd, cmd->g17p_trace_draws++, hk_trace_code_id(vs),
-           vs_guard, hk_trace_code_id(fs),
-           fs_sel ? (int)(c->selected - fs->variants) : -1,
-           fs_sel ? hk_ordinary_reason_name(c->reason) : "-",
-           gfx->descriptors.generation, gfx->descriptors.root.sets[0],
-           gfx->descriptors.push_active,
-           (void *)gfx->render.color_att[0].iview,
-           (void *)gfx->render.depth_att.iview, gfx->render.area.extent.width,
-           gfx->render.area.extent.height);
-}
-
-/* Called once per draw after hk_flush_shaders(): the selection is then the
- * draw's authoritative one. */
-static void
-hk_ordinary_trace_draw(struct hk_cmd_buffer *cmd)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   if (debug_get_option_hk_g17p_ordinary_variant_trace() >= 3)
-      hk_ordinary_trace_draw_line(cmd);
-   struct hk_api_shader *obj = gfx->shaders[MESA_SHADER_FRAGMENT];
-   if (!obj || !obj->g17p_ordinary_variants || !gfx->ordinary_fs.valid ||
-       gfx->ordinary_fs.api != obj)
-      return;
-   const unsigned first_ordinary = obj->g17p_sample_variants ? 3 : 1;
-   const bool ordinary =
-      (unsigned)(gfx->ordinary_fs.selected - obj->variants) >= first_ordinary;
-   p_atomic_inc(&obj->g17p_trace_draws[ordinary]);
-   unsigned reason = MIN2(gfx->ordinary_fs.reason, HK_ORDINARY_REASON_COUNT - 1);
-   p_atomic_inc(&obj->g17p_trace_reason_draws[reason]);
-   const uint64_t now = os_time_get_nano();
-   const uint64_t last = p_atomic_read(&obj->g17p_trace_last_print_ns);
-   if (now - last > 5000000000ull &&
-       p_atomic_cmpxchg(&obj->g17p_trace_last_print_ns, last, now) == last)
-      hk_ordinary_trace_summary(obj, "periodic");
-}
-
-static struct hk_shader *
-hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure);
-
 static struct hk_shader *
 hk_bound_fs(struct hk_cmd_buffer *cmd)
 {
-   return hk_bound_fs_select(cmd, true);
-}
-
-/* v96 HK_G17P_ORDINARY_VS_VARIANTS: choose the hardware vertex program of a
- * vertex object with an ordinary variant for the current descriptors, before
- * anything reads hk_bound_hw_vs() for the draw. The proof is the fragment
- * one (hk_ordinary_descriptor_reason()) over the vertex requirements; it is
- * re-evaluated whenever the descriptor generation or the object changes. At
- * bind time the descriptors still belong to an earlier draw, so the choice
- * is predicted (the object's last choice, else ordinary) and recorded with
- * an impossible generation so the draw always re-proves it. A changed choice
- * dirties the vertex stage, which relinks and republishes it. */
-static void
-hk_select_ordinary_vs(struct hk_cmd_buffer *cmd)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
-   if (!vs || !vs->g17p_ordinary_variants)
-      return;
-
-   __typeof__(gfx->ordinary_vs) *c = &gfx->ordinary_vs;
-   uint64_t generation = gfx->descriptors.generation;
-   if (c->valid && c->api == vs && c->generation == generation)
-      return;
-
-   bool ordinary;
-   enum hk_ordinary_reason reason = HK_ORDINARY_PREDICTED;
-   if (gfx->g17p_bind_prepare) {
-      if (c->valid && c->api == vs)
-         return; /* keep the current choice until the draw re-proves it */
-      ordinary = !hk_g17p_ordinary_force_generic();
-      generation = UINT64_MAX;
-   } else {
-      reason = hk_g17p_ordinary_force_generic()
-         ? HK_ORDINARY_FORCED_GENERIC
-         : hk_ordinary_descriptor_reason(
-              hk_api_ordinary_requirements(vs), gfx->descriptors.sets,
-              gfx->descriptors.root.sets, gfx->descriptors.push,
-              gfx->descriptors.push_active, HK_MAX_SETS, NULL);
-      ordinary = reason == HK_ORDINARY_OK;
-   }
-
-   const bool changed = !c->valid || c->api != vs || c->ordinary != ordinary;
-   c->api = vs;
-   c->generation = generation;
-   c->valid = true;
-   c->ordinary = ordinary;
-   if (changed) {
-      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_VERTEX);
-      if (debug_get_option_hk_g17p_ordinary_variant_trace())
-         fprintf(stderr,
-                 "G17P ordinary vertex variant: site=%s variant=%s reason=%s"
-                 " vs=%08x generation=%" PRIu64 "\n",
-                 gfx->g17p_bind_prepare ? "bind" : "draw",
-                 ordinary ? "ordinary" : "generic",
-                 hk_ordinary_reason_name(reason), hk_ordinary_trace_id(vs),
-                 gfx->descriptors.generation);
-   }
-}
-
-/* v57d: the variant bind-time preparation should build. The draw's
- * descriptors are normally pushed or bound after the pipeline, so the proof
- * over the current state describes the previous draw; v57c's peek therefore
- * selected (and prepared) the generic variant at nearly every pipeline
- * switch and the draw threw that preparation away. Predict the variant this
- * shader's last draw used, ordinary before its first draw. The prediction is
- * recorded with an impossible descriptor generation, so the draw always
- * re-proves; a wrong prediction costs what the v57c peek always cost. */
-static struct hk_shader *
-hk_ordinary_bind_prediction(struct hk_cmd_buffer *cmd, struct hk_api_shader *obj,
-                            unsigned samples)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_ordinary_fs_selection *c = &gfx->ordinary_fs;
-   if (c->valid && c->api == obj && c->samples == samples &&
-       c->descriptor_generation == gfx->descriptors.generation)
-      return c->selected; /* already proven for the current descriptors */
-
-   unsigned sample_index = obj->g17p_sample_variants && samples > 1
-      ? util_logbase2(samples) : 0;
-   unsigned ordinary_offset = obj->g17p_sample_variants ? 3 : 1;
-   const unsigned last = p_atomic_read(&obj->g17p_last_draw_ordinary);
-   const bool ordinary = !hk_g17p_ordinary_force_generic() && last != 1;
-   struct hk_shader *pred =
-      &obj->variants[sample_index + (ordinary ? ordinary_offset : 0)];
-   const bool changed = !c->valid || c->selected != pred;
-   *c = (struct hk_ordinary_fs_selection){
-      .api = obj, .selected = pred, .descriptor_generation = UINT64_MAX,
-      .samples = samples, .valid = true, .reason = HK_ORDINARY_PREDICTED,
-   };
-   if (changed) {
-      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
-      if (debug_get_option_hk_g17p_ordinary_variant_trace())
-         fprintf(stderr,
-                 "G17P ordinary variant: site=bind selected=%u variant=%s"
-                 " reason=predicted fs=%08x generation=%" PRIu64 " main=%u\n",
-                 (unsigned)(pred - obj->variants),
-                 ordinary ? "ordinary" : "generic", hk_ordinary_trace_id(obj),
-                 gfx->descriptors.generation,
-                 hk_shader_is_compiled(pred) ? pred->b.info.main_size : 0);
-   }
-   return pred;
-}
-
-/* v56e: `ensure` compiles a deferred generic variant when it is selected.
- * Bind-time preparation peeks without it (v57d: it uses the prediction
- * above), so a draw is the only place a generic variant is compiled. */
-static struct hk_shader *
-hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *obj = gfx->shaders[MESA_SHADER_FRAGMENT];
-   unsigned samples = cmd->vk.dynamic_graphics_state.ms.rasterization_samples;
-   if (!obj || !obj->g17p_ordinary_variants)
-      return hk_fs_variant(obj, samples);
-
-   if (gfx->g17p_bind_prepare && debug_get_option_hk_g17p_ordinary_bind_predict())
-      return hk_ordinary_bind_prediction(cmd, obj, samples);
-
-   bool changed;
-   struct hk_shader *selected = hk_ordinary_descriptor_select_push(
-      &gfx->ordinary_fs, obj, gfx->descriptors.sets, gfx->descriptors.root.sets,
-      gfx->descriptors.push, gfx->descriptors.push_active,
-      HK_MAX_SETS, gfx->descriptors.generation, samples, &changed);
-   const unsigned first_ordinary = obj->g17p_sample_variants ? 3 : 1;
-   const bool ordinary = (unsigned)(selected - obj->variants) >= first_ordinary;
-   if (!gfx->g17p_bind_prepare) {
-      /* 2 = ordinary, 1 = generic; read by the next bind's prediction. */
-      const unsigned v = ordinary ? 2 : 1;
-      if (p_atomic_read(&obj->g17p_last_draw_ordinary) != v)
-         p_atomic_set(&obj->g17p_last_draw_ordinary, v);
-   }
-   /* v56e: a deferred generic variant is compiled (or its background compile
-    * awaited) the first time a draw selects it. */
-   double wait_us = 0;
-   if (ensure) {
-      const bool was_compiled = hk_shader_is_compiled(selected);
-      const uint64_t t0 = was_compiled ? 0 : os_time_get_nano();
-      VkResult lazy_result =
-         hk_shader_ensure_compiled(hk_cmd_buffer_device(cmd), selected);
-      if (lazy_result != VK_SUCCESS)
-         vk_command_buffer_set_error(&cmd->vk, lazy_result);
-      if (!was_compiled) {
-         const uint64_t ns = os_time_get_nano() - t0;
-         wait_us = ns / 1000.0;
-         p_atomic_add(&obj->g17p_trace_wait_ns, ns);
-         hk_slow_tl.lazy_waits++;
-         hk_slow_tl.lazy_wait_ns += ns;
-      }
-   }
-   if (changed)
-      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
-   if ((changed || wait_us) && debug_get_option_hk_g17p_ordinary_variant_trace()) {
-      const struct hk_ordinary_fs_selection *c = &gfx->ordinary_fs;
-      fprintf(stderr,
-              "G17P ordinary variant: site=%s selected=%u variant=%s reason=%s"
-              " fs=%08x generation=%" PRIu64 " main=%u wait_us=%.1f",
-              gfx->g17p_bind_prepare ? "bind-peek" : "draw",
-              (unsigned)(selected - obj->variants),
-              ordinary ? "ordinary" : "generic",
-              hk_ordinary_reason_name(c->reason), hk_ordinary_trace_id(obj),
-              gfx->descriptors.generation,
-              hk_shader_is_compiled(selected) ? selected->b.info.main_size : 0,
-              wait_us);
-      if (c->reason == HK_ORDINARY_SCALED_FORMAT ||
-          c->reason == HK_ORDINARY_CUSTOM_BORDER)
-         fprintf(stderr, " binding=%u scaled=%#x border=%d",
-                 c->detail_binding, c->detail_scaled, c->detail_border);
-      fprintf(stderr, "\n");
-   }
-   return selected;
+   return hk_fs_variant(cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT],
+                        cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
 }
 
 static uint64_t
@@ -5281,264 +4279,6 @@ gs_result:
    }
 }
 
-/*
- * G17P tessellates in hardware. The vertex and tessellation control shaders
- * still run as compute kernels, writing the control points and levels, and a
- * kernel turns each patch's levels into the factor record the tessellator
- * reads. The draw itself is then a native Tessellate command that runs the
- * evaluation shader as the post-tessellation vertex program.
- *
- * The tessellator draws every instance's patches as one run, in the order the
- * TCS dispatch unrolled them, so that the evaluation shader addresses the TCS
- * output directly by the tessellator's patch index. An indirect draw only
- * learns its patch count on the GPU: a setup kernel places its buffers in the
- * heap and writes the launch grids and the patch draw the native indirect
- * Tessellate command reads.
- */
-static void
-hk_launch_tess_g17p(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                    struct agx_draw draw)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-   struct hk_shader *vs = hk_bound_sw_vs(gfx);
-   struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-   const uint64_t params = gfx->descriptors.root.draw.tess_params;
-   const bool quads = gfx->tess.info.mode == TESS_PRIMITIVE_QUADS;
-   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
-   struct agx_grid grid_vs, grid_tcs, grid_factors;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   const void *perf_shader = gfx->shaders[MESA_SHADER_VERTEX];
-   static uint32_t perf_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_calls) : 0;
-   uint64_t setup_ns = 0, vs_ns = 0, tcs_ns = 0, factors_ns = 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-
-   /* An evaluation shader declaring isolines or point mode never reaches
-    * here: hk_g17p_tess_is_native() sent it to the software tessellator and
-    * its bound variant was lowered for that path. What can still reach here
-    * is a *control* shader that introduces point mode for an evaluation
-    * shader that did not declare it, which Vulkan permits and which the
-    * evaluation shader's own lowering could not anticipate. */
-   if (!gfx->tess.params || gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
-       gfx->tess.info.points) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return;
-   }
-
-   uint64_t tcs_stat = hk_pipeline_stat_addr(
-      cmd, VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT);
-
-   if (agx_is_indirect(draw.b)) {
-      struct agx_ptr patch_draw = hk_pool_alloc(cmd, 4 * sizeof(uint32_t), 4);
-      if (!patch_draw.gpu) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
-      }
-
-      struct libagx_tess_setup_indirect_hw_args args = {
-         .p = params,
-         .grids = gfx->tess.grids,
-         .vp = gfx->descriptors.root.draw.vertex_params,
-         .indirect = draw.b.ptr,
-         .patch_draw = patch_draw.gpu,
-         .vertex_outputs = vs->b.info.outputs,
-         .factor_record_B = record_B,
-         .tcs_statistic = tcs_stat,
-      };
-
-      if (draw.indexed) {
-         args.in_index_buffer = draw.index_buffer;
-         args.in_index_size_B = agx_index_size_to_B(draw.index_size);
-         args.in_index_buffer_range_el = agx_draw_index_range_el(draw);
-      }
-
-      libagx_tess_setup_indirect_hw_struct(cmd, agx_1d(1),
-                                           AGX_BARRIER_ALL | AGX_PREGFX, args);
-
-      const uint32_t grid_stride = 6 * sizeof(uint32_t);
-      grid_vs = agx_grid_indirect_local(gfx->tess.grids);
-      grid_tcs = agx_grid_indirect_local(gfx->tess.grids + grid_stride);
-      grid_factors =
-         agx_grid_indirect_local(gfx->tess.grids + 2 * grid_stride);
-
-      /* The records are somewhere in the heap, which the tessellator reads
-       * as the factor buffer from the draw's patch start. */
-      gfx->tess.factor_buffer = dev->heap->va->addr;
-      gfx->tess.factor_buffer_size_B = dev->heap->size;
-      gfx->tess.patch_draw = patch_draw.gpu;
-      gfx->tess.patches = 0;
-   } else {
-      const uint32_t patches = draw.b.count[0] / dyn->ts.patch_control_points;
-      const uint32_t unrolled = patches * draw.b.count[1];
-
-      if (hk_stat_enabled(tcs_stat)) {
-         libagx_increment_statistic(cmd, agx_1d(1),
-                                    AGX_BARRIER_ALL | AGX_PREGFX, tcs_stat,
-                                    patches);
-      }
-
-      grid_vs = grid_tcs = draw.b;
-      grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
-      grid_factors = agx_1d(unrolled);
-
-      struct agx_ptr factors = hk_pool_alloc(cmd, unrolled * record_B, 4);
-      if (!factors.cpu) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
-      }
-
-      gfx->tess.factor_buffer = factors.gpu;
-      gfx->tess.factor_buffer_size_B = unrolled * record_B;
-      gfx->tess.patch_draw = 0;
-      gfx->tess.patches = unrolled;
-
-      if (hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr,
-                 "G17P tess draw: verts=%u instances=%u cps=%u patches=%u "
-                 "unrolled=%u record_B=%u factors=%" PRIx64 " size=%u "
-                 "vs_grid=%u/%u/%u tcs_grid=%u/%u/%u\n",
-                 draw.b.count[0], draw.b.count[1],
-                 dyn->ts.patch_control_points, patches, unrolled, record_B,
-                 (uint64_t)factors.gpu, unrolled * record_B, grid_vs.count[0],
-                 grid_vs.count[1], grid_vs.count[2], grid_tcs.count[0],
-                 grid_tcs.count[1], grid_tcs.count[2]);
-      }
-   }
-
-   if (perf_trace) {
-      setup_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_phase_record(perf_shader, 3,
-                                  setup_ns);
-      phase_start = os_time_get_nano();
-   }
-
-   hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, agx_workgroup(64, 1, 1));
-   if (perf_trace) {
-      vs_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_phase_record(perf_shader, 4,
-                                  vs_ns);
-      phase_start = os_time_get_nano();
-   }
-   hk_dispatch_with_local_size(
-      cmd, cs, tcs, grid_tcs,
-      agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
-
-   if (perf_trace) {
-      tcs_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_phase_record(perf_shader, 5,
-                                  tcs_ns);
-      phase_start = os_time_get_nano();
-   }
-
-   libagx_tess_factors_half(cmd, grid_factors, AGX_BARRIER_ALL | AGX_PREGFX,
-                            params, gfx->tess.factor_buffer, quads);
-   if (perf_trace) {
-      factors_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_phase_record(perf_shader, 6,
-                                  factors_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 2) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF tess-call=%u shader=%p setup_ns=%" PRIu64
-                 " vs_ns=%" PRIu64 " tcs_ns=%" PRIu64
-                 " factors_ns=%" PRIu64 "\n",
-                 perf_call, perf_shader, setup_ns, vs_ns, tcs_ns, factors_ns);
-      }
-   }
-}
-
-/*
- * Draw the patches the pre-pass prepared: the draw-state selector when the
- * render state was just published, the tessellator's state record, and a
- * native Tessellate command over the factor records.
- */
-static bool
-hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                        uint8_t *out, uint32_t draw_state_offset,
-                        bool render_state_emitted)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-   const struct hk_tess_info info = gfx->tess.info;
-
-   /* The tessellator orders its output in a lower-left domain: a clockwise
-    * triangle there is counter-clockwise in Vulkan's default upper-left
-    * domain, so only a lower-left pipeline keeps the shader's winding. */
-   const bool ccw =
-      info.ccw ==
-      (dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT);
-   const struct agx_vdm_tessellation_state_info state = {
-      .partition = info.spacing == TESS_SPACING_EQUAL
-                      ? AGX_VDM_TESSELLATION_PARTITION_INTEGER
-                   : info.spacing == TESS_SPACING_FRACTIONAL_ODD
-                      ? AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD
-                      : AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN,
-      .counterclockwise = ccw,
-      .max_factor = 64,
-      .quads = info.mode == TESS_PRIMITIVE_QUADS,
-      .float_factors = false,
-      .step = AGX_VDM_TESSELLATION_STEP_PER_PATCH,
-      .scale_half = 0x3c00,
-   };
-   const uint32_t factor_words_minus_one =
-      DIV_ROUND_UP(gfx->tess.factor_buffer_size_B, 4) - 1;
-
-   uint8_t state_bytes[AGX_VDM_TESSELLATION_STATE_LENGTH];
-   uint8_t draw_bytes[MAX2(AGX_VDM_TESSELLATE_DIRECT_LENGTH,
-                           AGX_VDM_TESSELLATE_INDIRECT_LENGTH)];
-   size_t draw_B;
-   bool packed;
-   if (gfx->tess.patch_draw) {
-      const struct agx_vdm_tessellate_indirect_info indirect = {
-         .factor_buffer = gfx->tess.factor_buffer,
-         .indirect_buffer = gfx->tess.patch_draw,
-         .factor_buffer_size_minus_one = factor_words_minus_one,
-      };
-      struct agx_vdm_tessellate_indirect encoded;
-      packed = agx_vdm_tessellate_indirect_pack(dev->dev.chip, &indirect,
-                                                &encoded);
-      memcpy(draw_bytes, encoded.bytes, encoded.length);
-      draw_B = encoded.length;
-   } else {
-      const struct agx_vdm_tessellate_direct_info direct = {
-         .factor_buffer = gfx->tess.factor_buffer,
-         .patch_count = gfx->tess.patches,
-         .instance_count = 1,
-         .factor_buffer_size_minus_one = factor_words_minus_one,
-      };
-      struct agx_vdm_tessellate_direct encoded;
-      packed = agx_vdm_tessellate_direct_pack(dev->dev.chip, &direct,
-                                              &encoded) &&
-               gfx->tess.patches;
-      memcpy(draw_bytes, encoded.bytes, encoded.length);
-      draw_B = encoded.length;
-   }
-
-   const size_t selector_B = render_state_emitted ? sizeof(uint32_t) : 0;
-   const size_t total_B = selector_B + sizeof(state_bytes) + draw_B;
-   if (!gfx->tess.factor_buffer || !packed ||
-       !agx_vdm_tessellation_state_pack(dev->dev.chip, &state, state_bytes) ||
-       (size_t)((uint8_t *)cs->end - out) < total_B) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return false;
-   }
-
-   uint8_t *cursor = out;
-   if (render_state_emitted) {
-      memcpy(cursor, &draw_state_offset, sizeof(draw_state_offset));
-      cursor += sizeof(draw_state_offset);
-   }
-   memcpy(cursor, state_bytes, sizeof(state_bytes));
-   cursor += sizeof(state_bytes);
-   memcpy(cursor, draw_bytes, draw_B);
-   cursor += draw_B;
-   cs->current = cursor;
-   return true;
-}
-
 static inline void
 hk_g17p_materialize_prepared_indirect(
    struct hk_g17p_prepared_dispatch *prepared, uint64_t grid,
@@ -5656,8 +4396,7 @@ hk_g17p_emit_prepared_sw_tess_batch(
       agx_workgroup(64, 1, 1),
       agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1),
    };
-   const uint8_t graphics_barrier =
-      hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t graphics_barrier = 0;
    for (unsigned launch = 0;
         launch < HK_G17P_SW_TESS_BATCH_LAUNCHES; ++launch) {
       uint8_t *record =
@@ -5719,7 +4458,6 @@ hk_g17p_launch_prepared_sw_tess_gs(struct hk_cmd_buffer *cmd,
 
    if (dev->dev.chip != AGX_CHIP_G17P || agx_is_indirect(draw.b) || !gs ||
        !gfx->shaders[MESA_SHADER_TESS_EVAL] ||
-       hk_g17p_tess_is_native(cmd) ||
        !gfx->g17p_sw_tess_batch.valid ||
        !gfx->g17p_sw_tess_batch.includes_gs)
       return (struct agx_draw){0};
@@ -5770,13 +4508,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t input_patch_size = dyn->ts.patch_control_points;
    uint64_t state = gfx->descriptors.root.draw.tess_params;
    struct hk_tess_info info = gfx->tess.info;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   static uint32_t perf_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_calls) : 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t setup_ns = 0, reserve_ns = 0, shader_dispatch_ns = 0;
-   uint64_t count_ns = 0, prefix_ns = 0, final_ns = 0;
    bool prepared_vs = false, prepared_tcs = false;
 
    perf_debug(cmd, "Tessellation");
@@ -5836,15 +4567,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   if (perf_trace) {
-      setup_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
-   if (perf_trace) {
-      reserve_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    const enum libagx_program count_program =
       hk_sw_tess_program(info.mode, POLY_TESS_MODE_COUNT);
@@ -5885,10 +4608,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
    }
 
-   if (perf_trace) {
-      shader_dispatch_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    if (!hk_dispatch_prepared_precomp_g17p(
@@ -5898,32 +4617,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         info.mode, POLY_TESS_MODE_COUNT, state);
    }
 
-   if (perf_trace) {
-      count_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
-   /* HK_G17P_TG_PROBE=local|sg runs one threadgroup-memory probe in this
-    * dispatch stream, with the same internal precompiled record, immediately
-    * before the scan. Inert unless the variable is set; it is how the quarter-
-    * sized threadgroup window on this path was measured. */
-   {
-      const char *probe = hk_g17p_tg_probe_option();
-      if (unlikely(probe != NULL)) {
-         struct agx_ptr report = hk_pool_alloc(cmd, 8192, 4);
-         if (report.gpu) {
-            if (probe[0] == 's') {
-               libagx_g17p_local_sg_probe(cmd, agx_1d(1024),
-                                          AGX_BARRIER_ALL | AGX_PREGFX,
-                                          report.gpu);
-            } else {
-               libagx_g17p_local_probe(cmd, agx_1d(1024),
-                                       AGX_BARRIER_ALL | AGX_PREGFX,
-                                       report.gpu);
-            }
-         }
-      }
-   }
 
    const struct libagx_prefix_sum_tess_args prefix = {
       .p = state,
@@ -5939,10 +4633,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              AGX_BARRIER_ALL | AGX_PREGFX, state, c_prims,
                              c_inv, c_prims || c_inv);
 
-   if (perf_trace) {
-      prefix_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    if (!hk_dispatch_prepared_precomp_g17p(
           cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, final_program, &state,
@@ -5951,21 +4641,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         info.mode, POLY_TESS_MODE_WITH_COUNTS, state);
    }
 
-   if (perf_trace) {
-      final_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_sw_tess_detail_record(setup_ns, reserve_ns,
-                                            shader_dispatch_ns, count_ns,
-                                            prefix_ns, final_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 2) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF sw-tess-call=%u setup_ns=%" PRIu64
-                 " reserve_ns=%" PRIu64 " shader_dispatch_ns=%" PRIu64
-                 " count_ns=%" PRIu64 " prefix_ns=%" PRIu64
-                 " final_ns=%" PRIu64 " prepared_vs=%u prepared_tcs=%u\n",
-                 perf_call, setup_ns, reserve_ns, shader_dispatch_ns, count_ns,
-                 prefix_ns, final_ns, prepared_vs, prepared_tcs);
-      }
-   }
 
    return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
                                     dev->heap->size, AGX_INDEX_SIZE_U32, false);
@@ -6001,10 +4676,8 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
    cmd->state.gfx.shaders[stage] = shader;
    cmd->state.gfx.shaders_dirty |= BITFIELD_BIT(stage);
 
-   if (stage == MESA_SHADER_FRAGMENT) {
-      cmd->state.gfx.ordinary_fs.valid = false;
+   if (stage == MESA_SHADER_FRAGMENT)
       BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
-   }
 }
 
 static uint64_t
@@ -6026,11 +4699,6 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
    struct hk_api_shader *fs_obj =
        cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
-   /* Selection may dirty FS before the ordinary early-out below. */
-   if (fs_obj->g17p_ordinary_variants)
-      hk_bound_fs(cmd);
-   /* v96: and the vertex ordinary-variant choice may dirty the VS. */
-   hk_select_ordinary_vs(cmd);
    const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                   MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
@@ -6062,6 +4730,7 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    /* A new VS/FS pair or sample-count variant may change interpolation. This
     * assignment does not depend on the fast linked shaders.
     */
+   gfx->g17p_smooth_memo.valid = false;
    agx_assign_uvs(&gfx->linked_varyings, &hw_vs->info.uvs,
                   fs->info.fs.interp.flat,
                   fs->info.fs.interp.linear);
@@ -6086,13 +4755,8 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
     * immutable data address actually changes.  In particular, equivalent
     * shader objects must not clone the root and invalidate both native IOTO
     * programs merely because their API handles differ. */
-   /* v96: an ordinary vertex variant has its own constant data. */
-   struct hk_api_shader *vs_api = gfx->shaders[MESA_SHADER_VERTEX];
    const uint64_t vs_constant_data_addr = hk_upload_constant_data(
-      cmd, vs_api && vs_api->g17p_ordinary_variants &&
-              !gfx->shaders[MESA_SHADER_GEOMETRY] &&
-              !gfx->shaders[MESA_SHADER_TESS_EVAL]
-         ? hk_bound_hw_vs(gfx) : hk_any_variant(vs_api));
+      cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
    const uint64_t fs_constant_data_addr =
       hk_upload_constant_data(cmd, fs);
    if (desc->root.draw.vs_constant_data_addr != vs_constant_data_addr) {
@@ -6114,10 +4778,7 @@ static void build_fs_prolog(nir_builder *b, const void *key);
  * MC corpus: ~87 compiles even with a warm pipeline cache). The disk key
  * names the builder by a stable id and covers every input of the compile
  * below; the cache identity already carries the build, the GPU and the
- * codegen flags/environment. HK_G17P_PROLOG_DISK_CACHE=0 is the A/B
- * off-switch. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prolog_disk_cache,
-                           "HK_G17P_PROLOG_DISK_CACHE", true)
+ * codegen flags/environment. */
 
 static uint8_t
 hk_prolog_epilog_builder_id(hk_internal_builder_t builder)
@@ -6143,7 +4804,7 @@ hk_prolog_epilog_disk_key(struct hk_device *dev, const struct hk_internal_key *k
 {
    struct disk_cache *cache = dev->vk.physical->disk_cache;
    const uint8_t builder = hk_prolog_epilog_builder_id(key->builder);
-   if (!cache || !builder || !debug_get_option_hk_g17p_prolog_disk_cache())
+   if (!cache || !builder)
       return false;
 
    const struct agx_device_key dk = agx_gather_device_key(&dev->dev);
@@ -6236,15 +4897,14 @@ hk_prolog_epilog_insert(struct hk_device *dev, const struct hk_internal_key *key
 }
 
 static unsigned
-hk_g17p_count_zs_writes(nir_shader *shader)
+hk_g17p_count_intrinsics(nir_shader *shader, nir_intrinsic_op op)
 {
    unsigned count = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
             if (instr->type == nir_instr_type_intrinsic &&
-                nir_instr_as_intrinsic(instr)->intrinsic ==
-                   nir_intrinsic_store_zs_agx)
+                nir_instr_as_intrinsic(instr)->intrinsic == op)
                count++;
          }
       }
@@ -6268,20 +4928,15 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    const bool disk =
       hk_prolog_epilog_disk_key(dev, key, preprocess_nir, stop, cf_base,
                                 g17p_tile_partitions, nr_samples, disk_key);
-   /* HK_G17P_PROLOG_DISK_CACHE_VERIFY=1 (gate): compile every part even on a
-    * disk hit and compare the stored bytes with the fresh compile. */
-   const bool verify = disk && HK_ENV_BOOL_ONCE("HK_G17P_PROLOG_DISK_CACHE_VERIFY", false);
    struct agx_shader_part *cached =
       disk ? hk_prolog_epilog_disk_get(dev, disk_key) : NULL;
-   if (cached && !verify) {
+   if (cached) {
       if (hk_prolog_epilog_insert(dev, key, cached))
          return cached;
       free(cached->binary);
       ralloc_free(cached);
       return NULL;
    }
-
-   hk_slow_tl.prolog_epilog_compiles++;
 
    nir_builder b = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
    builder(&b, key->key);
@@ -6296,13 +4951,16 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
     * around it, a shape the G17P pixel protocol cannot express, and the
     * epilog fails to compile (any 2x/4x draw that blends and writes
     * FragDepth or FragStencilRef: VK_ERROR_FEATURE_NOT_PRESENT at
-    * vkEndCommandBuffer). The sample-shaded epilog hoists its per-sample
-    * writes into the one leading class-1 transaction; do the same here. Only
-    * an epilog left with several Z/S writes is touched, so every shape that
-    * compiled before is unchanged. */
+    * vkEndCommandBuffer). The same unrolling clones an API sample mask's
+    * coverage update into every sample, and each clone takes class 1 again
+    * after the colour classes are held, which hangs the 3D pipeline under
+    * concurrency (agx_nir_hoist_g17p_zs_writes). The sample-shaded epilog
+    * hoists its per-sample writes and kills into the one leading class-1
+    * transaction; do the same here for every epilog left with several. */
    if (builder == build_g17p_fs_epilog &&
        !((const struct agx_fs_epilog_key *)key->key)->link.sample_shading &&
-       hk_g17p_count_zs_writes(b.shader) > 1)
+       (hk_g17p_count_intrinsics(b.shader, nir_intrinsic_store_zs_agx) > 1 ||
+        hk_g17p_count_intrinsics(b.shader, nir_intrinsic_sample_mask_agx) > 1))
       NIR_PASS(_, b.shader, agx_nir_hoist_g17p_zs_writes);
 
    struct agx_shader_key backend_key = {
@@ -6368,19 +5026,6 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   if (cached) {
-      /* Verify mode: the stored part must be the fresh compile, byte for
-       * byte (info and binary). */
-      const bool same =
-         !memcmp(&cached->info, &part->info, sizeof(part->info)) &&
-         !memcmp(cached->binary, part->binary, part->info.binary_size);
-      fprintf(stderr, "G17P prolog/epilog disk cache verify: builder=%u size=%u %s\n",
-              hk_prolog_epilog_builder_id(builder), part->info.binary_size,
-              same ? "MATCH" : "MISMATCH");
-      free(cached->binary);
-      ralloc_free(cached);
-   }
-
    /* ..and cache it before we return. */
    if (!hk_prolog_epilog_insert(dev, key, part)) {
       free(part->binary);
@@ -6388,7 +5033,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   if (disk && !cached)
+   if (disk)
       hk_prolog_epilog_disk_put(dev, disk_key, part);
    return part;
 }
@@ -6412,8 +5057,6 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
    if (data_size)
       memcpy(key->key, data, data_size);
 
-   const uint32_t compiles = hk_slow_tl.prolog_epilog_compiles;
-   const uint64_t t0 = os_time_get_nano();
    simple_mtx_lock(&dev->prolog_epilog.lock);
 
    struct agx_shader_part *part =
@@ -6421,8 +5064,6 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
                                   cf_base, g17p_tile_partitions, nr_samples);
 
    simple_mtx_unlock(&dev->prolog_epilog.lock);
-   if (hk_slow_tl.prolog_epilog_compiles != compiles)
-      hk_slow_tl.prolog_epilog_ns += os_time_get_nano() - t0;
    return part;
 }
 
@@ -6525,7 +5166,7 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
 }
 
 /*
- * v54 AGX_G17P_INLINE_BLEND: one fragment program with the colour epilog
+ * Inline blend: one fragment program with the colour epilog
  * compiled into it, as Apple's compiler blends inline (native throughput
  * fragment 0x10c..0x174: LLDCOL, normflt, f32add, fltnorm, LSTCOL in the
  * main program; no export copies, no separate epilog).
@@ -6680,77 +5321,12 @@ hk_g17p_mono_resolve_exports(nir_shader *nir)
    return true;
 }
 
-/* v54 AGX_G17P_DISCARD_NO_RESTORE: a top-level sample_mask_agx whose target
- * is every sample (a constant, or `x | c` with the low sample bits of c set)
- * and whose live set is constant zero kills the fragment. Every later tile
- * store then has no covered sample; drop them (the unwritten-target
- * preserve among them), and let DCE remove their loads. */
-static bool
-hk_g17p_mono_drop_dead_tile_stores(nir_shader *nir, unsigned nr_samples)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   const unsigned all = BITFIELD_MASK(MAX2(nr_samples, 1));
-   bool killed = false, progress = false;
-   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
-      if (node->type != nir_cf_node_block) {
-         if (killed)
-            return false; /* keep it simple: straight-line tail only */
-         continue;
-      }
-      nir_block *block = nir_cf_node_as_block(node);
-      nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
-            continue;
-         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (!killed && intr->intrinsic == nir_intrinsic_sample_mask_agx) {
-            bool target_all = false;
-            if (nir_src_is_const(intr->src[0])) {
-               target_all = (nir_src_as_uint(intr->src[0]) & all) == all;
-            } else {
-               nir_scalar t = nir_scalar_chase_movs(
-                  nir_get_scalar(intr->src[0].ssa, 0));
-               if (nir_scalar_is_alu(t) && nir_scalar_alu_op(t) == nir_op_ior) {
-                  for (unsigned i = 0; i < 2; ++i) {
-                     nir_scalar c = nir_scalar_chase_movs(
-                        nir_scalar_chase_alu_src(t, i));
-                     if (nir_scalar_is_const(c) &&
-                         (nir_scalar_as_uint(c) & all) == all)
-                        target_all = true;
-                  }
-               }
-            }
-            killed = target_all && nir_src_is_const(intr->src[1]) &&
-                     nir_src_as_uint(intr->src[1]) == 0;
-         } else if (killed &&
-                    intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
-            nir_instr_remove(instr);
-            progress = true;
-         } else if (killed &&
-                    (intr->intrinsic == nir_intrinsic_sample_mask_agx ||
-                     intr->intrinsic == nir_intrinsic_store_zs_agx)) {
-            return false;
-         }
-      }
-   }
-   if (progress)
-      nir_progress(true, impl, nir_metadata_control_flow);
-   return progress;
-}
-
 static struct agx_shader_part *
 hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
                            const struct agx_fs_epilog_key *ekey,
                            const BITSET_WORD *partitions)
 {
-   static bool logged;
-#define HK_MONO_REFUSE(why)                                                    \
-   do {                                                                        \
-      if (!logged) {                                                           \
-         logged = true;                                                        \
-         mesa_logi("AGX_G17P_INLINE_BLEND: split link kept (%s)", why);        \
-      }                                                                        \
-      goto fail;                                                               \
-   } while (0)
+#define HK_MONO_REFUSE(why) goto fail
 
    void *mem = ralloc_context(NULL);
    struct agx_shader_part *part = NULL;
@@ -6771,8 +5347,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
       HK_MONO_REFUSE("nir");
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   if (HK_ENV_NUM_ONCE("AGX_G17P_INLINE_BLEND_TRACE", 0) > 1)
-      nir_print_shader(nir, stderr);
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (instr->type == nir_instr_type_intrinsic &&
@@ -6831,14 +5405,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
    NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_opt_dce);
 
-   if (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_DISCARD_NO_RESTORE) {
-      NIR_PASS(_, nir, hk_g17p_mono_drop_dead_tile_stores, ekey->nr_samples);
-      NIR_PASS(_, nir, nir_opt_dce);
-   }
-
-   if (HK_ENV_NUM_ONCE("AGX_G17P_INLINE_BLEND_TRACE", 0) > 2)
-      nir_print_shader(nir, stderr);
-
    struct agx_shader_key key = shader->g17p_mono_key;
    key.no_stop = false;
    key.secondary = false;
@@ -6878,22 +5444,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
    }
 
    const char *why = hk_g17p_mono_layout_mismatch(&shader->b, part);
-   if (why && HK_ENV_PRESENT_ONCE("AGX_G17P_INLINE_BLEND_TRACE"))
-      fprintf(stderr,
-              "AGX_G17P_INLINE_BLEND: %s main push=%u rodata=%u@%u dma=%u/%u/%u/%u "
-              "mono push=%u rodata=%u@%u dma=%u/%u/%u/%u\n",
-              why, shader->b.info.push_count, shader->b.info.rodata.size_16,
-              shader->b.info.rodata.base_uniform,
-              shader->b.info.agx3_uniform_dma_valid,
-              shader->b.info.agx3_uniform_dma_pointer,
-              shader->b.info.agx3_uniform_dma_dest,
-              shader->b.info.agx3_uniform_dma_halfs,
-              part->info.push_count, part->info.rodata.size_16,
-              part->info.rodata.base_uniform,
-              part->info.agx3_uniform_dma_valid,
-              part->info.agx3_uniform_dma_pointer,
-              part->info.agx3_uniform_dma_dest,
-              part->info.agx3_uniform_dma_halfs);
    if (why)
       HK_MONO_REFUSE(why);
 
@@ -6917,7 +5467,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
                              struct hk_fast_link_key_fs *key)
 {
    /* TODO: prolog without fs needs to work too... */
-   bool needs_prolog = key->prolog.statistics ||
+   bool needs_prolog = key->prolog.statistics || key->prolog.run_zs_tests ||
                        key->prolog.cull_distance_size ||
                        key->prolog.api_sample_mask != 0xff;
 
@@ -6963,12 +5513,11 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
          BITSET_ZERO(g17p_tile_partitions);
    }
 
-   /* v54 AGX_G17P_INLINE_BLEND: try one monolithic fragment program first;
+   /* Inline blend: try one monolithic fragment program first;
     * any refusal falls through to the split link below, unchanged. */
    if (dev->dev.chip == AGX_CHIP_G17P &&
        (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND) &&
-       !prolog && key->nr_samples_shaded == 0 && shader->g17p_mono_nir &&
-       !shader->info.g17p_apple_fs) {
+       !prolog && key->nr_samples_shaded == 0 && shader->g17p_mono_nir) {
       struct agx_shader_part *mono = hk_g17p_inline_epilog_part(
          dev, shader, &key->epilog, g17p_tile_partitions);
       if (mono) {
@@ -7006,11 +5555,11 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
       uint32_t link = 0;
       memcpy(&link, &key->epilog.link, sizeof(link));
       mesa_loge("fragment epilog compilation failed: link=%#010x samples=%u "
-                "shaded=%u stop=%u small=%u preserve-zero=%u srgb=%u "
+                "shaded=%u stop=%u small=%u preserve-zero=%u g17p-tile=%u "
                 "formats=%x/%x/%x/%x remap=%d/%d/%d/%d",
                 link, key->epilog.nr_samples, key->nr_samples_shaded,
                 epilog_stop, key->epilog.force_small_tile,
-                key->epilog.preserve_zero_mask, key->epilog.lower_srgb,
+                key->epilog.preserve_zero_mask, key->epilog.g17p_tile_formats,
                 key->epilog.rt_formats[0], key->epilog.rt_formats[1],
                 key->epilog.rt_formats[2], key->epilog.rt_formats[3],
                 key->epilog.remap[0], key->epilog.remap[1],
@@ -7063,19 +5612,15 @@ hk_get_fast_linked(struct hk_device *dev, struct hk_shader *shader, void *key)
 
    struct hash_entry *ent = _mesa_hash_table_search(shader->linked.ht, key);
 
-   uint64_t t0 = 0;
    if (ent) {
       linked = ent->data;
    } else {
-      t0 = os_time_get_nano();
       if (shader->info.stage == MESA_SHADER_VERTEX)
          linked = hk_get_fast_linked_locked_vs(dev, shader, key);
       else if (shader->info.stage == MESA_SHADER_FRAGMENT)
          linked = hk_get_fast_linked_locked_fs(dev, shader, key);
       else
          UNREACHABLE("invalid stage");
-      hk_slow_tl.fast_links++;
-      hk_slow_tl.fast_link_ns += os_time_get_nano() - t0;
    }
 
    simple_mtx_unlock(&shader->linked.lock);
@@ -7647,24 +6192,6 @@ hk_g17p_bind_tail_refused(unsigned line)
 }
 
 static bool
-hk_g17p_nonpoint_no_psiz_diagnostic(bool enabled,
-                                    const struct hk_graphics_state *gfx,
-                                    const struct hk_shader *vs)
-{
-   if (!vs || !enabled ||
-       gfx->topology == AGX_PRIMITIVE_POINTS)
-      return false;
-
-   /* A terminal point-size word can be removed without shifting any later
-    * layer/viewport or clip output. */
-   return vs->info.uvs.group_offs[UVS_PSIZ] + 1 ==
-             vs->info.uvs.group_offs[UVS_LAYER_VIEWPORT] &&
-          vs->info.uvs.group_offs[UVS_LAYER_VIEWPORT] ==
-             vs->info.uvs.group_offs[UVS_CLIP_DIST] &&
-          vs->info.uvs.group_offs[UVS_CLIP_DIST] == vs->info.uvs.size;
-}
-
-static bool
 hk_g17p_bind_tail_state_matches(
    const struct hk_cmd_buffer *cmd,
    const struct hk_g17p_prepared_bind_tail *prepared);
@@ -7822,55 +6349,17 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if (!vs)
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   /* Native EXP-O2A changes both point-size enable and the output count with
-    * the draw primitive: triangles do not consume the terminal point-size
-    * word. Dynamic-topology pipelines currently retain the default
-    * gl_PointSize write in their one HW variant, so provide an exact,
-    * default-off A/B for that missing variant selection. Restrict it to a
-    * terminal point-size word with no layer/viewport or clip outputs; changing
-    * a middle UVS word would require rewriting the remaining output layout. */
-   const bool nonpoint_no_psiz =
-      hk_g17p_nonpoint_no_psiz_diagnostic(
-         dev->g17p_diagnostics.nonpoint_no_psiz, gfx, vs);
-   const uint32_t active_output_size =
-      vs->info.uvs.size - (nonpoint_no_psiz ? 1 : 0);
-   const uint32_t active_output_select =
-      vs->info.uvs.osel.opaque[0] &
-      ~(nonpoint_no_psiz ? BITFIELD_BIT(18) : 0);
-
    uint32_t output_size;
-   if (!agx_ppp_hal200_output_size_pack(
-          active_output_size, 0, &output_size))
+   if (!agx_ppp_hal200_output_size_pack(vs->info.uvs.size, 0, &output_size))
       return hk_g17p_bind_tail_refused(__LINE__);
 
    uint32_t output_select;
    if (!agx_ppp_hal200_output_select_pack(
-          dev->dev.chip, active_output_select,
+          dev->dev.chip, vs->info.uvs.osel.opaque[0],
           linked_fs->b.cf.nr_bindings != 0, linked_fs->b.cf.reads_z,
           &output_select))
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   if (nonpoint_no_psiz)
-      mesa_logi_once("G17P non-point terminal PointSize A/B active");
-
-   /* Trace-only falsifier for the deterministic Omarchy About VF_CPF fault.
-    * The retained faulting trace has exactly this sampled-fragment contract:
-    * two coefficient bindings, position + smooth float2 + point size (size 7,
-    * selector 0x50000), and a zero final FragmentProgram record word.  Metal
-    * copies the low nibble of compiler metadata field 32 into this word;
-    * retained tex2/vary3 records carry 1.  Mesa has no demonstrated semantic
-    * equivalent for that compiler-profile class, so keep this opt-in and
-    * shape-specific. */
-   const bool about_flags1_diagnostic =
-      dev->g17p_diagnostics.hal200_about_flags1 &&
-      fs->b.info.g17p_sampled_fragment &&
-      linked_fs->b.cf.nr_bindings == 2 && !linked_fs->b.cf.reads_z &&
-      output_size == 7 && output_select == UINT32_C(0x00050000);
-   if (about_flags1_diagnostic)
-      mesa_loge_once("G17P HAL200 About flags=1 diagnostic active");
-   if (hk_g17p_fs_complexity_override())
-      mesa_logi_once("G17P FragmentProgram complexity nibble %u A/B active",
-                     hk_g17p_fs_complexity_override());
 
    struct agx_ppp_hal200_graphics_core fs_record;
    struct agx_ppp_hal200_fragment_fields fs_fields = {
@@ -7881,8 +6370,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       .unknown_0c = 0,
       .stage_program = fragment_program,
       .stage_program_template = 0,
-      .flags = (about_flags1_diagnostic ? BITFIELD_BIT(0) : 0) |
-               hk_g17p_fs_complexity_override(),
+      .flags = 0,
    };
    if (fs->b.info.has_preamble &&
        (!fs->b.info.agx3_preamble_staging_known ||
@@ -8201,8 +6689,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       .shader_tri_merge_disable =
          fs->b.info.needs_quad_derivatives ||
          (render->tilebuffer.nr_samples > 1 &&
-          fs->info.fs.epilog_key.write_z) ||
-         dev->g17p_diagnostics.force_tri_merge_disable,
+          fs->info.fs.epilog_key.write_z),
 
       /* Native forces bit26 for type2 and conditionally for type3 from the
        * draw-buffer state. Keep the already-qualified conservative type3
@@ -8460,80 +6947,6 @@ hk_g17p_prepared_bind_tail_matches(
           hk_g17p_bind_tail_state_matches(cmd, prepared);
 }
 
-static void __attribute__((cold, noinline))
-hk_g17p_trace_prepared_bind_tail_miss(
-   const struct hk_cmd_buffer *cmd,
-   const struct hk_g17p_prepared_bind_tail *prepared)
-{
-   static uint32_t reported;
-   const uint32_t report = p_atomic_inc_return(&reported);
-   if (report > 8)
-      return;
-
-   const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct vk_dynamic_graphics_state *dyn =
-      &cmd->vk.dynamic_graphics_state;
-   const struct hk_rendering_state *render = &gfx->render;
-   uint32_t mismatch = 0;
-
-   mismatch |= !prepared->valid ? BITFIELD_BIT(0) : 0;
-   mismatch |= prepared->dynamic_generation != dyn->generation
-                  ? BITFIELD_BIT(1) : 0;
-   mismatch |= prepared->descriptor_generation != gfx->descriptors.generation
-                  ? BITFIELD_BIT(2) : 0;
-   mismatch |= prepared->root != gfx->root ? BITFIELD_BIT(3) : 0;
-   mismatch |= prepared->render_color0 !=
-                  (render->color_att_count == 1
-                      ? render->color_att[0].iview : NULL) ||
-               prepared->render_depth != render->depth_att.iview ||
-               prepared->render_stencil != render->stencil_att.iview ||
-               memcmp(&prepared->render_area, &render->area,
-                      sizeof(prepared->render_area)) != 0 ||
-               prepared->render_depth_format != render->depth_att.vk_format ||
-               prepared->render_width != render->cr.width ||
-               prepared->render_height != render->cr.height ||
-               prepared->render_layer_count != render->layer_count ||
-               prepared->render_view_mask != render->view_mask ||
-               prepared->render_color_count != render->color_att_count ||
-               prepared->render_samples != render->tilebuffer.nr_samples
-                  ? BITFIELD_BIT(4) : 0;
-   mismatch |= memcmp(prepared->shaders, gfx->shaders,
-                      sizeof(prepared->shaders)) != 0
-                  ? BITFIELD_BIT(5) : 0;
-   mismatch |= prepared->linked_vs != gfx->linked[MESA_SHADER_VERTEX] ||
-               prepared->linked_fs != gfx->linked[MESA_SHADER_FRAGMENT]
-                  ? BITFIELD_BIT(6) : 0;
-   mismatch |= prepared->varyings != gfx->varyings ? BITFIELD_BIT(7) : 0;
-   mismatch |= prepared->varying_counts_32 !=
-                  gfx->linked_varyings.counts_32.opaque[0] ||
-               prepared->varying_counts_16 !=
-                  gfx->linked_varyings.counts_16.opaque[0]
-                  ? BITFIELD_BIT(8) : 0;
-   mismatch |= prepared->occlusion_index != gfx->occlusion.index ||
-               prepared->occlusion_mode != gfx->occlusion.mode
-                  ? BITFIELD_BIT(9) : 0;
-   mismatch |= prepared->topology != gfx->topology ||
-               prepared->object_type != gfx->object_type ||
-               prepared->provoking != gfx->provoking
-                  ? BITFIELD_BIT(10) : 0;
-   mismatch |= prepared->generate_primitive_id !=
-                  gfx->generate_primitive_id ||
-               prepared->force_never_in_shader !=
-                  gfx->descriptors.root.draw.force_never_in_shader ||
-               prepared->in_meta != cmd->in_meta
-                  ? BITFIELD_BIT(11) : 0;
-
-   fprintf(stderr,
-           "HK_SHADER_PERF bind-tail-miss=%08x valid=%u dyn=%" PRIu64
-           "/%" PRIu64 " desc=%" PRIu64 "/%" PRIu64
-           " root=%" PRIx64 "/%" PRIx64 " varyings=%" PRIx64
-           "/%" PRIx64 "\n",
-           mismatch, prepared->valid, prepared->dynamic_generation,
-           dyn->generation, prepared->descriptor_generation,
-           gfx->descriptors.generation, prepared->root, gfx->root,
-           prepared->varyings, gfx->varyings);
-}
-
 static bool
 hk_g17p_publish_native_bind_tail(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out,
@@ -8562,9 +6975,7 @@ hk_g17p_publish_native_bind_tail(
     * the 16-bit selector index overflowed (>65k such draws in one stream made
     * agx_g17p_upload_draw_indices() refuse the draw and the command buffer
     * fail with VK_ERROR_FEATURE_NOT_PRESENT). */
-   /* Opt-in (HK_G17P_PPP_DEDUPE=1) while it is hardware-qualified; the
-    * index-overflow split in hk_flush_gfx_state() is the default guard. */
-   const bool same_tail = HK_ENV_BOOL_ONCE("HK_G17P_PPP_DEDUPE", false) &&
+   const bool same_tail =
       cs->scissor.size >= scissor_bytes &&
       cs->depth_bias.size >= depth_bias_bytes &&
       !memcmp((const uint8_t *)cs->scissor.data + cs->scissor.size -
@@ -8604,6 +7015,25 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    return hk_g17p_build_native_bind_tail(cmd, prepared) &&
           hk_g17p_publish_native_bind_tail(cmd, cs, out, prepared);
+}
+
+/* The hardware provoking-vertex selector for a topology. A point has one
+ * vertex, so its first and last vertex are the same; use the selector the
+ * native point pipelines carry (0) whatever the API convention is. GL's
+ * last-vertex convention through Zink otherwise selected 2 for points, which
+ * hk_g17p_smooth_varyings_supported() rightly does not admit for flat
+ * inputs, and dEQP's fragment-shader executor draws one point per value. */
+static unsigned
+hk_provoking_selector(const struct vk_dynamic_graphics_state *dyn,
+                      unsigned topology)
+{
+   if (topology == AGX_PRIMITIVE_POINTS)
+      return 0;
+   if (dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
+      return 2;
+   if (topology == AGX_PRIMITIVE_TRIANGLE_FAN)
+      return 1;
+   return 0;
 }
 
 /* Resolve the draw-independent inputs needed by the first HAL200 state update
@@ -8647,13 +7077,7 @@ hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd)
                            : HK_G17P_NO_HW_TOPOLOGY;
    gfx->object_type = translate_object_type(prim);
 
-   unsigned provoking;
-   if (dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
-      provoking = 2;
-   else if (gfx->topology == AGX_PRIMITIVE_TRIANGLE_FAN)
-      provoking = 1;
-   else
-      provoking = 0;
+   unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
 
    if (provoking != gfx->provoking) {
       gfx->provoking = provoking;
@@ -8734,7 +7158,6 @@ hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd)
        !gfx->prepared_fast_link_vs.valid ||
        gfx->prepared_fast_link_vs.indexed ||
        gfx->prepared_fast_link_vs.restart ||
-       hk_g17p_cycle_vdm_context_enabled(dev) ||
        !cs->agx3_active_context_selector_valid)
       return false;
 
@@ -8768,11 +7191,6 @@ hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd)
       gfx->generate_primitive_id;
    info.template_info.raw_active_context_selector =
       cs->agx3_raw_active_context_selector;
-   if (hk_g17p_nonpoint_no_psiz_diagnostic(
-          dev->g17p_diagnostics.nonpoint_no_psiz, gfx, hw_vs)) {
-      assert(info.template_info.raw_vs_output_count_0 > 0);
-      --info.template_info.raw_vs_output_count_0;
-   }
 
    gfx->prepared_vdm_state_update_valid =
       hk_agx3_encode_vdm_state_update_draw(
@@ -9055,64 +7473,6 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
    if (dev->dev.chip != AGX_CHIP_G17P)
       dirty.fragment_shader &= !linked_fs->b.no_op;
 
-   /* The first G17P hardware fault is introduced by this aggregate dirty PPP
-    * update. Keep a diagnostic-only selector that emits one independently
-    * consumable legacy group at a time so the bad HAL200 block can be
-    * identified without changing any of its dynamic values.
-    *
-    * 1: fragment control and non-stencil faces
-    * 2: cull words
-    * 3: fragment shader words
-    * 4: output selection, varying counts, and output size
-    * 5: occlusion query and output size
-    */
-   if (dev->dev.chip == AGX_CHIP_G17P) {
-      static int g17p_dirty_bisect = -1;
-      if (g17p_dirty_bisect < 0)
-         g17p_dirty_bisect =
-            debug_get_option_hk_g17p_dirty_bisect();
-
-      if (g17p_dirty_bisect > 0) {
-         const struct AGX_PPP_HEADER all = dirty;
-         dirty = (struct AGX_PPP_HEADER){.viewport_count = 1};
-
-         switch (g17p_dirty_bisect) {
-         case 1:
-            dirty.fragment_control = all.fragment_control;
-            dirty.fragment_control_2 = all.fragment_control_2;
-            dirty.fragment_front_face = all.fragment_front_face;
-            dirty.fragment_front_face_2 = all.fragment_front_face_2;
-            dirty.fragment_back_face = all.fragment_back_face;
-            dirty.fragment_back_face_2 = all.fragment_back_face_2;
-            break;
-         case 2:
-            dirty.cull = all.cull;
-            dirty.cull_2 = all.cull_2;
-            break;
-         case 3:
-            dirty.fragment_shader = all.fragment_shader;
-            break;
-         case 4:
-            dirty.output_select = all.output_select;
-            dirty.varying_counts_32 = all.varying_counts_32;
-            dirty.varying_counts_16 = all.varying_counts_16;
-            dirty.output_size = all.output_size;
-            break;
-         case 5:
-            dirty.occlusion_query = all.occlusion_query;
-            dirty.output_size = all.output_size;
-            break;
-         default:
-            mesa_loge("HK_G17P_DIRTY_BISECT=%d is outside 1..5",
-                      g17p_dirty_bisect);
-            dirty = all;
-            break;
-         }
-
-         fprintf(stderr, "G17P dirty PPP bisect: group=%d\n",
-                 g17p_dirty_bisect);
-      }
-   }
 
    /* Calculate the update size. If it equals the header, there is nothing to
     * update so early-exit.
@@ -9387,11 +7747,46 @@ hk_g17p_relocated_blend_constant_base(const struct hk_shader *fs,
    return true;
 }
 
+static bool
+hk_g17p_read_only_early_reject(struct hk_cmd_buffer *cmd,
+                               const struct hk_shader *fs, unsigned samples,
+                               bool prolog_discards, bool statistics)
+{
+   const struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct hk_rendering_state *render = &gfx->render;
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+
+   /* Keep this first recovery deliberately narrow.  Moving a test ahead of a
+    * discard is unobservable only when neither the test nor the skipped
+    * fragment has a side effect.  The all-live prolog also must not inherit an
+    * API-mask or cull-distance kill: that would recreate the pre-loop coverage
+    * transition this path exists to avoid. */
+   return dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
+          !fs->b.info.early_fragment_tests && !fs->info.fs.writes_memory &&
+          !fs->info.fs.epilog_key.write_z && !fs->info.fs.epilog_key.write_s &&
+          samples == 1 && render->depth_att.vk_format != VK_FORMAT_UNDEFINED &&
+          dyn->ds.depth.test_enable && !dyn->ds.depth.write_enable &&
+          dyn->ds.depth.compare_op != VK_COMPARE_OP_ALWAYS &&
+          !dyn->ds.depth.bounds_test.enable && !hk_stencil_test_enabled(cmd) &&
+          gfx->occlusion.mode == AGX_VISIBILITY_MODE_NONE && !statistics &&
+          !prolog_discards;
+}
+
 void
 agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                     uint64_t attribs_read, struct agx_velem_key *keys)
 {
    u_foreach_bit(a, vi->attributes_valid) {
+      /* An attribute the shader does not read has no slot. Its "slot" below
+       * would be the count of read attributes beneath it, which for an
+       * attribute above every read one is the total count -- one past the
+       * key when the shader reads the maximum.
+       */
+      if (!(attribs_read & BITFIELD64_BIT(a)))
+         continue;
+
       struct vk_vertex_attribute_state attr = vi->attributes[a];
 
       assert(vi->bindings_valid & BITFIELD_BIT(attr.binding));
@@ -9400,7 +7795,8 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
       /* nir_assign_io_var_locations compacts vertex inputs, eliminating
        * unused inputs. We need to do the same here to match the locations.
        */
-      unsigned slot = util_bitcount64(attribs_read & BITFIELD_MASK(a));
+      unsigned slot = util_bitcount64(attribs_read & BITFIELD64_MASK(a));
+      assert(slot < AGX_MAX_ATTRIBS);
 
       keys[slot] = (struct agx_velem_key){
          .format = hk_format_to_pipe_format(attr.format),
@@ -9464,8 +7860,11 @@ hk_fill_fast_link_key_vs(struct hk_cmd_buffer *cmd, struct hk_shader *sw_vs,
                           key->prolog.attribs);
 
       u_foreach_bit(a, dyn->vi->attributes_valid) {
-         unsigned slot =
-            util_bitcount64(sw_vs->info.vs.attribs_read & BITFIELD_MASK(a));
+         if (!(sw_vs->info.vs.attribs_read & BITFIELD64_BIT(a)))
+            continue;
+
+         unsigned slot = util_bitcount64(sw_vs->info.vs.attribs_read &
+                                         BITFIELD64_MASK(a));
          key->prolog.attribs[slot].stride =
             dyn->vi_binding_strides[dyn->vi->attributes[a].binding];
       }
@@ -9561,6 +7960,11 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
       .defer_api_sample_mask = defer_api_sample_mask,
       .api_sample_mask = api_sample_mask,
    };
+   if (hk_g17p_read_only_early_reject(
+          cmd, fs, samples, prolog_discards, key->prolog.statistics)) {
+      key->prolog.run_zs_tests = true;
+      key->epilog.link.already_ran_zs = true;
+   }
    agx_fs_epilog_apply_device_policy(dev->dev.chip, &key->epilog);
 
    key->epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
@@ -9769,21 +8173,11 @@ hk_g17p_flush_prepared_dynamic_state(
        (sw_vs->b.info.uses_draw_id && !gfx->prepared_draw_id.gpu))
       return false;
 
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t upload_params_ns = 0, publish_program_ns = 0;
-   uint64_t publish_vdm_ns = 0, publish_tail_ns = 0;
 
    *g17p_native_bind_tail_emitted_out = false;
    cs->g17p_state_publications++;
    uint8_t *out = cs->current;
 
-   struct agx_vdm_barrier_core interdraw_barrier;
-   if (cs->stats.cmds > 0 && debug_get_option_hk_g17p_interdraw_barrier() &&
-       agx_vdm_barrier_core_pack(dev->dev.chip, &interdraw_barrier)) {
-      memcpy(out, interdraw_barrier.bytes, interdraw_barrier.length);
-      out += interdraw_barrier.length;
-   }
 
    if (linked_vs->b.uses_base_param) {
       if (agx_is_indirect(draw.b)) {
@@ -9857,7 +8251,6 @@ hk_g17p_flush_prepared_dynamic_state(
       tess_args = gfx->prepared_tess_params;
       gfx->prepared_tess_params = (struct agx_ptr){0};
       hk_upload_tess_params(cmd, tess_args.cpu, draw);
-      gfx->tess.params = tess_args.cpu;
    }
 
    if (gfx->shaders[MESA_SHADER_GEOMETRY]) {
@@ -9879,10 +8272,6 @@ hk_g17p_flush_prepared_dynamic_state(
       }
    }
 
-   if (perf_trace) {
-      upload_params_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    assert(!desc->root_dirty);
    hk_reserve_scratch(cmd, cs, hw_vs);
@@ -9931,20 +8320,12 @@ hk_g17p_flush_prepared_dynamic_state(
    gfx->prepared_vertex_usc = 0;
    gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
-   if (perf_trace) {
-      publish_program_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    memcpy(out, gfx->prepared_vdm_state_update.bytes,
           gfx->prepared_vdm_state_update.length);
    out += gfx->prepared_vdm_state_update.length;
    gfx->prepared_vdm_state_update_valid = false;
 
-   if (perf_trace) {
-      publish_vdm_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    /* The exact predicate above already validated the full tail identity.
     * Publish it directly instead of walking the large snapshot a second time
@@ -9958,12 +8339,6 @@ hk_g17p_flush_prepared_dynamic_state(
    *g17p_native_bind_tail_emitted_out = true;
    cs->current = out;
 
-   if (perf_trace) {
-      publish_tail_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_dynamic_detail_record(
-         0, 0, upload_params_ns, 0, 0, publish_program_ns,
-         publish_vdm_ns, publish_tail_ns);
-   }
 
    vk_dynamic_graphics_state_clear_dirty(dyn);
    gfx->shaders_dirty = 0;
@@ -10072,9 +8447,7 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              uint8_t **out_p, struct hk_shader *hw_vs,
                              uint64_t pipeline_program, struct agx_draw draw,
                              bool ordinary_draw_path, bool tail_known_match,
-                             bool *tail_emitted, bool perf_trace,
-                             uint64_t *phase_start, uint64_t *publish_vdm_ns,
-                             uint64_t *publish_tail_ns)
+                             bool *tail_emitted)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -10124,21 +8497,8 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    info.template_info.raw_vs_output_flag_6 = gfx->generate_primitive_id;
    info.template_info.raw_vs_output_count_1_extra =
       gfx->generate_primitive_id;
-   if (hk_g17p_cycle_vdm_context_enabled(dev) &&
-       cs->agx3_raw_active_context_selector == UINT32_MAX)
-      cs->agx3_raw_active_context_selector = 1;
    info.template_info.raw_active_context_selector =
       cs->agx3_raw_active_context_selector;
-
-   /* Keep VertexProgramVariant's UVS footprint coupled to the HAL200
-    * output state selected below. Native non-point draws omit the
-    * terminal PointSize word from both records. */
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       hk_g17p_nonpoint_no_psiz_diagnostic(
-          dev->g17p_diagnostics.nonpoint_no_psiz, gfx, hw_vs)) {
-      assert(info.template_info.raw_vs_output_count_0 > 0);
-      --info.template_info.raw_vs_output_count_0;
-   }
 
    struct agx_vdm_state_update encoded;
    if (!hk_g17p_encode_vdm_state_update(cmd, dev->dev.chip, &info,
@@ -10196,21 +8556,7 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_g17p_trace_line("vdm-state-update", pipeline_program,
                          encoded.bytes, encoded.length);
 
-   if (perf_trace) {
-      *publish_vdm_ns = os_time_get_nano() - *phase_start;
-      *phase_start = os_time_get_nano();
-   }
 
-   if (hk_g17p_cycle_vdm_context_enabled(dev)) {
-      const unsigned contexts = hk_g17p_vdm_contexts(dev);
-
-      assert(cs->agx3_raw_active_context_selector >= 1 &&
-             cs->agx3_raw_active_context_selector <= contexts);
-      cs->agx3_raw_active_context_selector =
-         cs->agx3_raw_active_context_selector >= contexts
-            ? 1
-            : cs->agx3_raw_active_context_selector + 1;
-   }
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       if (!hk_g17p_emit_native_bind_tail(cmd, cs, &out,
@@ -10224,10 +8570,6 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
       *tail_emitted = true;
 
-      if (perf_trace) {
-         *publish_tail_ns = os_time_get_nano() - *phase_start;
-         *phase_start = os_time_get_nano();
-      }
    }
 
    *out_p = out;
@@ -10246,16 +8588,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   static uint32_t perf_dynamic_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_dynamic_calls) : 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t prelink_vs_ns = 0, prelink_fs_ns = 0, upload_ns = 0;
-   uint64_t publish_ns = 0;
-   uint64_t upload_params_ns = 0, upload_varyings_ns = 0;
-   uint64_t upload_root_ns = 0, publish_program_ns = 0;
-   uint64_t publish_vdm_ns = 0, publish_tail_ns = 0;
 
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
    struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
@@ -10280,8 +8612,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Past this point the draw installs a fresh vertex-program template, a
     * fresh HAL200 bind tail and a fresh draw-state selector, all into the
-    * stream's one render-state context. Count it: that depth, not the draw
-    * count, is what hk_g17p_state_publications_per_stream() bounds. */
+    * stream's one render-state context. Count it for fault traces. */
    if (!prepare_only)
       cs->g17p_state_publications++;
 
@@ -10289,16 +8620,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    assert(cs->current + 0x1000 < cs->end && "already ensured space");
    uint8_t *out = cs->current;
-   /* Native captures concatenate state publications without this cache
-    * invalidation. Retain the old barrier only as a diagnostic control;
-    * immutable per-draw state does not require a per-draw cache flush. */
-   struct agx_vdm_barrier_core interdraw_barrier;
-   if (!prepare_only && cs->stats.cmds > 0 &&
-       debug_get_option_hk_g17p_interdraw_barrier() &&
-       agx_vdm_barrier_core_pack(dev->dev.chip, &interdraw_barrier)) {
-      memcpy(out, interdraw_barrier.bytes, interdraw_barrier.length);
-      out += interdraw_barrier.length;
-   }
 
    struct hk_shader *fs = hk_bound_fs(cmd);
    bool gt_dirty = IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL) ||
@@ -10320,7 +8641,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * Any intervening state, descriptor, shader, root, or indexed-form change
     * misses this predicate and takes the complete path below. */
    const bool g17p_prepared_exact =
-      !debug_get_option_hk_g17p_prepared_dynamic_disable() &&
       dev->dev.chip == AGX_CHIP_G17P && !prepare_only &&
       !desc->root_dirty && gfx->prepared_vertex_usc && prepared_linked_vs &&
       prepared_linked_fs &&
@@ -10376,7 +8696,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   /* The main shader must not run tests if the epilog will. */
+   /* The main shader must not run tests if another linked part will. */
    bool nontrivial_force_early =
       fs && (fs->b.info.early_fragment_tests &&
              (fs->b.info.writes_sample_mask || fs->info.fs.writes_memory));
@@ -10385,8 +8705,34 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       fs ? &fs->info.fs.epilog_key : NULL,
       dyn->ms.alpha_to_coverage_enable, nontrivial_force_early);
 
-   if (fs_dirty || IS_DIRTY(MS_ALPHA_TO_COVERAGE_ENABLE)) {
-      const uint16_t no_epilog_discard = !epilog_discards ? UINT16_MAX : 0;
+   const unsigned early_reject_samples =
+      MAX2(dyn->ms.rasterization_samples, 1);
+   const unsigned early_reject_full_mask =
+      BITFIELD_MASK(dyn->ms.rasterization_samples);
+   const bool early_reject_has_api_mask =
+      (dyn->ms.sample_mask & early_reject_full_mask) != early_reject_full_mask;
+   const bool early_reject_defer_api_mask =
+      dev->dev.chip == AGX_CHIP_G17P && early_reject_has_api_mask &&
+      !nontrivial_force_early;
+   const bool early_reject_prolog_discards =
+      (early_reject_has_api_mask && !early_reject_defer_api_mask) ||
+      hw_vs->info.cull_distance_array_size;
+   const bool early_reject_statistics = hk_stat_enabled(hk_pipeline_stat_addr(
+      cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT));
+   const bool read_only_early_reject =
+      fs && hk_g17p_read_only_early_reject(
+               cmd, fs, early_reject_samples, early_reject_prolog_discards,
+               early_reject_statistics);
+
+   if (fs_dirty || IS_DIRTY(MS_ALPHA_TO_COVERAGE_ENABLE) ||
+       IS_DIRTY(MS_RASTERIZATION_SAMPLES) || IS_DIRTY(MS_SAMPLE_MASK) ||
+       IS_DIRTY(DS_DEPTH_TEST_ENABLE) || IS_DIRTY(DS_DEPTH_WRITE_ENABLE) ||
+       IS_DIRTY(DS_DEPTH_COMPARE_OP) ||
+       IS_DIRTY(DS_DEPTH_BOUNDS_TEST_ENABLE) ||
+       IS_DIRTY(DS_STENCIL_TEST_ENABLE) ||
+       (gfx->dirty & HK_DIRTY_OCCLUSION) || desc->root_dirty) {
+      const uint16_t no_epilog_discard =
+         !epilog_discards && !read_only_early_reject ? UINT16_MAX : 0;
       const uint16_t alpha_to_coverage = dyn->ms.alpha_to_coverage_enable;
       if (desc->root.draw.no_epilog_discard != no_epilog_discard ||
           desc->root.draw.alpha_to_coverage != alpha_to_coverage) {
@@ -10411,10 +8757,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    }
 
-   if (perf_trace) {
-      prelink_vs_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    if (IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) ||
        IS_DIRTY(VI_BINDING_STRIDES) || vgt_dirty ||
@@ -10473,8 +8815,20 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        IS_DIRTY(CB_COLOR_WRITE_ENABLES) || IS_DIRTY(CB_ATTACHMENT_COUNT) ||
        IS_DIRTY(CB_BLEND_ENABLES) || IS_DIRTY(CB_BLEND_EQUATIONS) ||
        IS_DIRTY(CB_BLEND_CONSTANTS) || IS_DIRTY(CB_BLEND_ADVANCED) ||
+       IS_DIRTY(DS_DEPTH_TEST_ENABLE) || IS_DIRTY(DS_DEPTH_WRITE_ENABLE) ||
+       IS_DIRTY(DS_DEPTH_COMPARE_OP) ||
+       IS_DIRTY(DS_DEPTH_BOUNDS_TEST_ENABLE) ||
+       IS_DIRTY(DS_STENCIL_TEST_ENABLE) ||
+       (gfx->dirty & HK_DIRTY_OCCLUSION) ||
        IS_DIRTY(COLOR_ATTACHMENT_MAP) ||
-       desc->root_dirty /* for pipeline stats */ ||
+       /* The only root-derived input of the fragment key is whether the
+        * fragment-invocation statistic is enabled. Other root changes (a
+        * descriptor bind, push constants, vertex buffers) leave the key and
+        * so the linked fragment program unchanged; rebuilding it for every
+        * such draw dominated root-only state changes. */
+       hk_stat_enabled(hk_pipeline_stat_addr(
+          cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)) !=
+          gfx->fast_link_fs.key.prolog.statistics ||
        !gfx->fast_link_fs.valid) {
 
       unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
@@ -10589,6 +8943,12 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .defer_api_sample_mask = defer_api_sample_mask,
          .api_sample_mask = api_sample_mask,
       };
+      if (hk_g17p_read_only_early_reject(
+             cmd, fs, MAX2(dyn->ms.rasterization_samples, 1),
+             prolog_discards, key.prolog.statistics)) {
+         key.prolog.run_zs_tests = true;
+         key.epilog.link.already_ran_zs = true;
+      }
       agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
 
       key.epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
@@ -10715,10 +9075,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   if (perf_trace) {
-      prelink_fs_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
 g17p_draw_parameters:
    /* If the vertex shader uses draw parameters, vertex uniforms are dirty every
@@ -10789,14 +9145,7 @@ g17p_draw_parameters:
       }
 
       if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || IS_DIRTY(RS_PROVOKING_VERTEX)) {
-         unsigned provoking;
-         if (dyn->rs.provoking_vertex ==
-             VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
-            provoking = 2;
-         else if (gfx->topology == AGX_PRIMITIVE_TRIANGLE_FAN)
-            provoking = 1;
-         else
-            provoking = 0;
+         unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
 
          if (provoking != gfx->provoking) {
             gfx->provoking = provoking;
@@ -10864,10 +9213,6 @@ g17p_draw_parameters:
       }
    }
 
-   if (perf_trace) {
-      upload_params_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    /* Link varyings before uploading tessellation state, becuase the
     * gfx->generate_primitive_id boolean needs to be plumbed.
@@ -10887,8 +9232,6 @@ g17p_draw_parameters:
     * false), so the emission reuses this answer while the root is unchanged
     * instead of comparing the whole snapshot again. */
    const uint64_t prepared_varyings_root = gfx->root;
-   if (unlikely(dev->g17p_shader_perf.trace && !prepared_varyings))
-      hk_g17p_trace_prepared_bind_tail_miss(cmd, &gfx->g17p_bind_tail);
 
    if (!prepared_varyings &&
        ((gfx->dirty & HK_DIRTY_PROVOKING) || vgt_dirty || linked_fs_dirty)) {
@@ -10920,10 +9263,6 @@ g17p_draw_parameters:
       gfx->dirty |= HK_DIRTY_VARYINGS;
    }
 
-   if (perf_trace) {
-      upload_varyings_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    if (!prepare_only &&
        (gfx->shaders[MESA_SHADER_TESS_EVAL] ||
@@ -10976,7 +9315,6 @@ g17p_draw_parameters:
    if (tess_args.cpu) {
       assert(gfx->root);
       hk_upload_tess_params(cmd, tess_args.cpu, draw);
-      gfx->tess.params = tess_args.cpu;
    }
 
    if (prepare_only) {
@@ -10989,11 +9327,6 @@ g17p_draw_parameters:
       return;
    }
 
-   if (perf_trace) {
-      upload_root_ns = os_time_get_nano() - phase_start;
-      upload_ns = upload_params_ns + upload_varyings_ns + upload_root_ns;
-      phase_start = os_time_get_nano();
-   }
 
    /* Hardware dynamic state must be deferred until after the root and fast
     * linking, since it will use the root address and the linked shaders.
@@ -11041,10 +9374,6 @@ g17p_draw_parameters:
       gfx->prepared_vertex_usc = 0;
       gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
-      if (perf_trace) {
-         publish_program_ns = os_time_get_nano() - phase_start;
-         phase_start = os_time_get_nano();
-      }
 
       switch (agx_chip_command_stream_generation(dev->dev.chip)) {
       case AGX_CS_GENERATION_AGX2:
@@ -11089,8 +9418,7 @@ g17p_draw_parameters:
                 cmd, cs, &out, hw_vs, pipeline_program, draw,
                 ordinary_draw_path,
                 prepared_varyings && gfx->root == prepared_varyings_root,
-                &tail_emitted, perf_trace, &phase_start, &publish_vdm_ns,
-                &publish_tail_ns))
+                &tail_emitted))
             return;
          if (tail_emitted) {
             g17p_native_bind_tail_emitted = true;
@@ -11197,28 +9525,6 @@ g17p_draw_parameters:
    gfx->dirty = 0;
    gfx->descriptors.root_dirty = false;
 
-   if (perf_trace) {
-      publish_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_dynamic_detail_record(
-         prelink_vs_ns, prelink_fs_ns, upload_params_ns, upload_varyings_ns,
-         upload_root_ns, publish_program_ns, publish_vdm_ns,
-         publish_tail_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 3) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF dynamic-call=%u prelink_vs_ns=%" PRIu64
-                 " prelink_fs_ns=%" PRIu64 " upload_ns=%" PRIu64
-                 " publish_ns=%" PRIu64 " upload_params_ns=%" PRIu64
-                 " upload_varyings_ns=%" PRIu64
-                 " upload_root_ns=%" PRIu64
-                 " publish_program_ns=%" PRIu64
-                 " publish_vdm_ns=%" PRIu64
-                 " publish_tail_ns=%" PRIu64 "\n",
-                 perf_call, prelink_vs_ns, prelink_fs_ns, upload_ns,
-                 publish_ns, upload_params_ns, upload_varyings_ns,
-                 upload_root_ns, publish_program_ns, publish_vdm_ns,
-                 publish_tail_ns);
-      }
-   }
 }
 
 static __attribute__((hot)) void
@@ -11228,16 +9534,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                        bool *g17p_native_bind_tail_emitted_out,
                        bool prepare_only)
 {
-   if (unlikely(debug_get_option_hk_g17p_prepared_dynamic_disable())) {
-      static bool reported;
-      if (!reported) {
-         fprintf(stderr, "G17P diagnostic: prepared dynamic consumption disabled\n");
-         reported = true;
-      }
-   }
-
    if (!prepare_only &&
-       !debug_get_option_hk_g17p_prepared_dynamic_disable() &&
        hk_g17p_flush_prepared_dynamic_state(
           cmd, cs, draw_id, draw, ordinary_draw_path,
           g17p_native_bind_tail_emitted_out))
@@ -11359,13 +9656,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   static uint32_t perf_flush_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_flush_calls) : 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t stream_ns = 0, preprocess_ns = 0, shaders_ns = 0;
-   uint64_t bookkeeping_ns = 0, dynamic_ns = 0;
 
    /* Every stage hk_flush_shaders() reads has to actually be bound.  Binding
     * VK_NULL_HANDLE for a stage is how CmdBindShadersEXT *unbinds* it, and it
@@ -11393,26 +9683,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       return NULL;
    }
 
-   /* Policies that do not depend on what this draw will publish are decided
-    * here, before the stream is chosen, so the whole of the per-stream setup
-    * below runs on the stream the draw is actually recorded into.  Ending the
-    * stream reuses the established retained-render transition, so the
-    * continuation loads the tilebuffer through the partial BG program exactly
-    * as a mid-render-pass split already did. */
-   const enum hk_g17p_draw_split split_policy = hk_g17p_draw_split_policy(dev);
-   const unsigned draws_per_stream = hk_g17p_draws_per_stream(dev);
-
-   if (cmd->current_cs.gfx && cmd->current_cs.gfx->stats.cmds > 0) {
-      const unsigned recorded = cmd->current_cs.gfx->stats.cmds;
-
-      if (split_policy == HK_G17P_DRAW_SPLIT_EVERY) {
-         hk_g17p_note_gfx_split(cmd, "one-draw-per-stream", recorded, 0);
-         hk_cmd_buffer_end_graphics(cmd);
-      } else if (draws_per_stream && recorded >= draws_per_stream) {
-         hk_g17p_note_gfx_split(cmd, "draws-per-stream", recorded, 0);
-         hk_cmd_buffer_end_graphics(cmd);
-      }
-   }
 
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
    const struct vk_dynamic_graphics_state *dyn =
@@ -11449,8 +9719,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (!succ) {
          perf_debug(cmd, "Splitting control stream due to depth bias");
 
-         hk_g17p_note_gfx_split(cmd, "depth-bias-representation",
-                                cs->stats.cmds, cs->end - cs->current);
          hk_cmd_buffer_end_graphics(cmd);
          cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
          if (!cs)
@@ -11465,10 +9733,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (vk_command_buffer_has_error(&cmd->vk))
       return NULL;
 
-   if (perf_trace) {
-      stream_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
 #ifndef NDEBUG
    if (unlikely(dev->dev.debug & AGX_DBG_DIRTY)) {
@@ -11504,19 +9768,9 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (vk_command_buffer_has_error(&cmd->vk))
       return NULL;
 
-   if (perf_trace) {
-      preprocess_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    hk_flush_shaders(cmd);
-   if (unlikely(debug_get_option_hk_g17p_ordinary_variant_trace() >= 2))
-      hk_ordinary_trace_draw(cmd);
 
-   if (perf_trace) {
-      shaders_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    const bool geom = gfx->shaders[MESA_SHADER_GEOMETRY];
    const bool tess = gfx->shaders[MESA_SHADER_TESS_EVAL];
@@ -11573,25 +9827,17 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * and a split has to happen before the record it protects. */
    const bool republishes = hk_gfx_republishes_render_state(cmd);
 
-   const unsigned publication_cap = hk_g17p_state_publications_per_stream(dev);
    /* v56g/v57e: the HAL200 draw-state selector holds 16-bit scissor and
     * depth-bias indices. A stream whose arrays are about to exceed that
     * (only reachable with >65k distinct scissor/depth-bias states) is ended
-    * like the publication-depth split instead of failing the draw. */
+    * before the republication instead of failing the draw. */
    const unsigned ppp_margin = AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS + 1;
    const bool ppp_index_limit =
       dev->dev.chip == AGX_CHIP_G17P &&
       (cs->scissor.size / AGX_SCISSOR_LENGTH + ppp_margin > UINT16_MAX ||
        cs->depth_bias.size / AGX_DEPTH_BIAS_LENGTH + ppp_margin > UINT16_MAX);
-   const bool publication_depth_reached =
-      (publication_cap && cs->g17p_state_publications >= publication_cap) ||
-      ppp_index_limit;
 
-   if (republishes && cs->stats.cmds > 0 &&
-       (split_policy == HK_G17P_DRAW_SPLIT_REPUBLISH ||
-        publication_depth_reached)) {
-      hk_g17p_note_gfx_split(cmd, "state-publication-depth", cs->stats.cmds,
-                             cs->end - cs->current);
+   if (republishes && cs->stats.cmds > 0 && ppp_index_limit) {
       hk_cmd_buffer_end_graphics(cmd);
       cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
       if (!cs)
@@ -11605,27 +9851,10 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
    }
 
-   if (perf_trace) {
-      bookkeeping_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
                           ordinary_draw_path || g17p_transformed_path,
                           g17p_native_bind_tail_emitted, false);
-   if (perf_trace) {
-      dynamic_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_flush_detail_record(stream_ns, preprocess_ns, shaders_ns,
-                                         bookkeeping_ns, dynamic_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 3) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF flush-call=%u stream_ns=%" PRIu64
-                 " preprocess_ns=%" PRIu64 " shaders_ns=%" PRIu64
-                 " bookkeeping_ns=%" PRIu64 " dynamic_ns=%" PRIu64 "\n",
-                 perf_call, stream_ns, preprocess_ns, shaders_ns,
-                 bookkeeping_ns, dynamic_ns);
-      }
-   }
    return cs;
 }
 
@@ -11651,9 +9880,28 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
     * bounded cache warm-up only when a render is active; it emits no GPU
     * state and never clears Vulkan dirtiness. */
    if (cmd->current_cs.gfx) {
-      hk_prelink_graphics(
-         cmd, true, cmd->state.gfx.index.size,
-         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable, true);
+      struct hk_graphics_state *gfx = &cmd->state.gfx;
+      const bool restart =
+         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+
+      /* D3D translation layers rebind the index buffer before nearly every
+       * draw, usually with the same width, and then rebind descriptors, which
+       * invalidates anything prepared here. When this render pass already
+       * prepared this exact index key and the bind tail still matches the
+       * current state, the prelink and tail below would recompute exactly
+       * what exists; skip them. The draw path still verifies and rebuilds
+       * whatever later binds invalidate. */
+      const bool same_index_key =
+         gfx->g17p_index_prepared.valid &&
+         gfx->g17p_index_prepared.size == gfx->index.size &&
+         gfx->g17p_index_prepared.restart == restart &&
+         hk_g17p_prepared_bind_tail_matches(cmd, &gfx->g17p_bind_tail);
+      gfx->g17p_index_prepared.valid = true;
+      gfx->g17p_index_prepared.size = gfx->index.size;
+      gfx->g17p_index_prepared.restart = restart;
+
+      if (!same_index_key)
+         hk_prelink_graphics(cmd, true, gfx->index.size, restart, true);
 
       /* Software tessellation/geometry runs the API vertex stage as compute
        * before rasterization.  The index width is part of that stage's exact
@@ -11663,7 +9911,6 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
        * already establishing indexed state, instead of falling back to the
        * general encoder inside the first indexed draw. */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
-      struct hk_graphics_state *gfx = &cmd->state.gfx;
       /* Index buffers may be bound before shaders (or after unbinding
        * them). Linked shader cache entries can still refer to the previous
        * draw, so they do not prove that warm-up has live API shaders. */
@@ -11673,8 +9920,31 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
           !vk_command_buffer_has_error(&cmd->vk)) {
          /* The indexed fast link also changes the vertex identity captured by
           * the immutable HAL200 tail.  Refresh it alongside the dispatch so
-          * varying linkage and tail construction stay out of the first draw. */
-         hk_g17p_prepare_native_bind_tail(cmd);
+          * varying linkage and tail construction stay out of the first draw.
+          *
+          * Index binding prelinks only the vertex stage. Fragment selection
+          * or render state may have changed since the last complete binding,
+          * leaving a valid cache entry for a different fragment transaction.
+          * In particular, a sampled colour draw followed by a depth-only draw
+          * must not pair the old linked code with the new shader's metadata.
+          * Only refresh the tail when the complete fragment key is current;
+          * the draw resolves any incomplete binding before publishing it.
+          */
+         if (!same_index_key) {
+            struct hk_shader *fs = hk_bound_fs(cmd);
+            struct hk_fast_link_key_fs fs_key;
+            const bool fragment_exact =
+               gfx->fast_link_fs.valid &&
+               gfx->fast_link_fs.shader == fs &&
+               gfx->linked[MESA_SHADER_FRAGMENT] &&
+               hk_fill_fast_link_key_fs(cmd, fs, hk_bound_hw_vs(gfx),
+                                        &fs_key, false) &&
+               memcmp(&gfx->fast_link_fs.key, &fs_key, sizeof(fs_key)) == 0;
+            if (fragment_exact)
+               hk_g17p_prepare_native_bind_tail(cmd);
+            else
+               gfx->g17p_bind_tail.valid = false;
+         }
 
          if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
             struct hk_shader *vs = hk_bound_sw_vs(gfx);
@@ -11703,6 +9973,12 @@ void
 hk_cmd_bind_vertex_buffer(struct hk_cmd_buffer *cmd, uint32_t vb_idx,
                           struct hk_addr_range addr_range)
 {
+   /* An identical rebind leaves every consumer's input unchanged. Dirtiness
+    * already pending (e.g. after state invalidation) is kept as it is. */
+   if (cmd->state.gfx.vb[vb_idx].addr == addr_range.addr &&
+       cmd->state.gfx.vb[vb_idx].range == addr_range.range)
+      return;
+
    cmd->state.gfx.vb[vb_idx] = addr_range;
    cmd->state.gfx.dirty |= HK_DIRTY_VB;
    cmd->state.gfx.vertex_buffer_generation++;
@@ -11815,35 +10091,15 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    }
 }
 
-/*
- * Whether this draw's tessellation runs on the G17P hardware tessellator.
- *
- * The decision is per pipeline, not per device: Apple's state record has no
- * isoline and no point-mode encoding, so an evaluation shader declaring
- * either keeps the software tessellator even with HK_G17P_NATIVE_TESS=1, and
- * hk_compile_nir() compiled it that way. Keeping the two in one predicate is
- * what makes the fallback safe -- the bound evaluation variant and the draw
- * path always agree on which tessellator produced the coordinates.
- */
-static bool
-hk_g17p_tess_is_native(const struct hk_cmd_buffer *cmd)
-{
-   const struct hk_device *dev = hk_cmd_buffer_device((struct hk_cmd_buffer *)cmd);
-   struct hk_api_shader *tes = cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
-
-   return dev->g17p_native_tess && tes &&
-          hk_any_variant(tes)->info.tess.g17p_native_domain;
-}
-
 /* The G17P draw record after any state publication: the context-relative
- * draw-state selector record, then the HAL200 draw body (indirect, indexed,
- * direct or tessellated).  Shared by hk_draw_impl() and
+ * draw-state selector record, then the HAL200 draw body (indirect, indexed
+ * or direct).  Shared by hk_draw_impl() and
  * hk_g17p_emit_indirect_record().  Returns false with the command buffer
  * error set when the draw cannot be encoded. */
 static bool
 hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
                   struct agx_draw draw, enum agx_primitive topology,
-                  bool native_tess, bool tail_emitted)
+                  bool tail_emitted)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
@@ -11864,11 +10120,7 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
                                   VK_ERROR_FEATURE_NOT_PRESENT);
       return false;
    }
-   if (native_tess) {
-      if (!hk_g17p_emit_tessellate(cmd, cs, out, draw_state_offset,
-                                   tail_emitted))
-         return false;
-   } else if (agx_is_indirect(draw.b)) {
+   if (agx_is_indirect(draw.b)) {
       const struct agx_vdm_hal200_indirect_draw_fields fields = {
          .draw_state_context_offset = draw_state_offset,
          .primitive = (uint8_t)topology,
@@ -12029,18 +10281,10 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       return;
 
    hk_g17p_note_depth_use(cmd);
-   hk_select_ordinary_vs(cmd);
 
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
-   /* A tessellated draw with fewer vertices than one patch draws nothing.
-    * The hardware tessellator takes whole patches, so filter it with the
-    * other trivial draws before any state is published. */
-   if (hk_g17p_tess_is_native(cmd) && !agx_is_indirect(draw_.b) &&
-       draw_.b.count[0] < dyn->ts.patch_control_points)
-      return;
 
    /* Null index bindings execute the requested vertices, all with index zero.
     * Normalize before native admission and conditional draw lowering, as the
@@ -12119,8 +10363,7 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
     * which fetches indices robustly like on every other generation. */
    const bool software_index_fetch =
       cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
-      (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
-       !hk_g17p_tess_is_native(cmd));
+      cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
    if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed &&
        !software_index_fetch) {
       uint64_t address;
@@ -12163,17 +10406,10 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       struct agx_draw draw = draw_;
       bool needs_idx_robust = false;
       bool g17p_native_bind_tail_emitted = false;
-      const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-      const uint64_t flush_start = perf_trace ? os_time_get_nano() : 0;
       struct hk_cs *cs =
          hk_flush_gfx_state(cmd, draw_id, &draw, &needs_idx_robust,
                             &g17p_native_bind_tail_emitted,
                             conditional_direct_indexed ? &api_draw : NULL);
-      if (perf_trace) {
-         hk_shader_perf_flush_record(
-            cmd->state.gfx.shaders[MESA_SHADER_VERTEX],
-            os_time_get_nano() - flush_start);
-      }
       /* If we failed to allocate a control stream, we've already lost the
        * device. Just drop the draw so we don't crash.
        */
@@ -12200,14 +10436,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       cs->stats.calls++;
 
       if (geom || tess) {
-         const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          ccs =
             hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
-         if (perf_trace) {
-            hk_shader_perf_phase_record(
-               cmd->state.gfx.shaders[MESA_SHADER_VERTEX], 0,
-               os_time_get_nano() - phase_start);
-         }
          if (!ccs)
             return;
       }
@@ -12226,20 +10456,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          draw = prepared_tess_gs;
 
       if (tess && !prepared_tess_gs_emitted) {
-         const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-         if (hk_g17p_tess_is_native(cmd)) {
-            hk_launch_tess_g17p(cmd, ccs, draw);
-            if (vk_command_buffer_has_error(&cmd->vk))
-               return;
-         } else {
-            draw = hk_launch_tess(cmd, ccs, draw, geom ? 0 : stat_c_prims,
-                                  geom ? 0 : stat_c_inv);
-         }
-         if (perf_trace) {
-            hk_shader_perf_phase_record(
-               cmd->state.gfx.shaders[MESA_SHADER_VERTEX], 1,
-               os_time_get_nano() - phase_start);
-         }
+         draw = hk_launch_tess(cmd, ccs, draw, geom ? 0 : stat_c_prims,
+                               geom ? 0 : stat_c_inv);
       }
 
       /* The prepared tessellation batch returns the tessellator's indexed
@@ -12251,13 +10469,7 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
        * rasterized the tessellator's index buffer through the GS rast
        * program, so only part of patch 0 was drawn. */
       if (geom) {
-         const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
-         if (perf_trace) {
-            hk_shader_perf_phase_record(
-               cmd->state.gfx.shaders[MESA_SHADER_VERTEX], 2,
-               os_time_get_nano() - phase_start);
-         }
       }
 
       if (adj) {
@@ -12404,32 +10616,9 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       }
 
       enum agx_primitive topology = cmd->state.gfx.topology;
-      const bool native_tess = tess && hk_g17p_tess_is_native(cmd);
-      if (!native_tess &&
-          !agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
+      if (!agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
-      }
-
-      if (hk_g17p_draw_trace_enabled() && dev->dev.chip == AGX_CHIP_G17P) {
-         cs->g17p_draw_trace.draw_id = draw_id;
-         cs->g17p_draw_trace.topology = topology;
-         cs->g17p_draw_trace.api_indexed = api_draw.indexed;
-         cs->g17p_draw_trace.api_indirect = agx_is_indirect(api_draw.b);
-         cs->g17p_draw_trace.api_count =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.b.count[0];
-         cs->g17p_draw_trace.api_instances =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.b.count[1];
-         cs->g17p_draw_trace.api_first =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.start;
-         cs->g17p_draw_trace.api_base_vertex =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.index_bias;
-         cs->g17p_draw_trace.api_first_instance =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.start_instance;
-         cs->g17p_draw_trace.emitted_indexed = draw.indexed;
-         cs->g17p_draw_trace.emitted_indirect = agx_is_indirect(draw.b);
-         cs->g17p_draw_trace.emitted_indirect_buffer =
-            agx_is_indirect(draw.b) ? draw.b.ptr : 0;
       }
 
       if (needs_idx_robust) {
@@ -12442,12 +10631,6 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          if (!agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
             return;
-         }
-         if (hk_g17p_draw_trace_enabled() &&
-             dev->dev.chip == AGX_CHIP_G17P) {
-            cs->g17p_draw_trace.emitted_indexed = draw.indexed;
-            cs->g17p_draw_trace.emitted_indirect = true;
-            cs->g17p_draw_trace.emitted_indirect_buffer = draw.b.ptr;
          }
 
          uint32_t draw_state_offset = 0;
@@ -12492,7 +10675,7 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {
-            if (!hk_g17p_emit_draw(cmd, cs, out, draw, topology, native_tess,
+            if (!hk_g17p_emit_draw(cmd, cs, out, draw, topology,
                                    g17p_native_bind_tail_emitted))
                return;
          } else {
@@ -12506,93 +10689,10 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    }
 }
 
-static void
-hk_slow_report(struct hk_cmd_buffer *cmd, const char *what, uint64_t start_ns)
-{
-   const uint64_t ns = os_time_get_nano() - start_ns;
-   if (ns / 1000 < (uint64_t)debug_get_option_hk_g17p_slow_draw_us())
-      return;
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
-   const bool bo = cmd->shader_perf_draw_active;
-   fprintf(stderr,
-           "G17P slow %s: us=%.1f fs=%08x variant=%s prolog_epilog_compiles=%u"
-           " prolog_epilog_us=%.1f fast_links=%u fast_link_us=%.1f"
-           " lazy_waits=%u lazy_wait_us=%.1f bo_allocs=%u bo_creates=%u"
-           " bo_alloc_us=%.1f\n",
-           what, ns / 1000.0,
-           fs && fs->g17p_ordinary_variants ? hk_ordinary_trace_id(fs) : 0,
-           fs && fs->g17p_ordinary_variants && gfx->ordinary_fs.valid
-              ? hk_ordinary_reason_name(gfx->ordinary_fs.reason) : "-",
-           hk_slow_tl.prolog_epilog_compiles, hk_slow_tl.prolog_epilog_ns / 1000.0,
-           hk_slow_tl.fast_links, hk_slow_tl.fast_link_ns / 1000.0,
-           hk_slow_tl.lazy_waits, hk_slow_tl.lazy_wait_ns / 1000.0,
-           bo ? cmd->shader_perf_draw_bo_allocs : 0,
-           bo ? cmd->shader_perf_draw_bo_creates : 0,
-           bo ? cmd->shader_perf_draw_bo_alloc_ns / 1000.0 : 0.0);
-}
-
 static __attribute__((hot)) void
 hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw)
 {
-   static uint32_t trace_draws;
-   static bool trace_snapshot_dumped;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   const bool trace = hk_shader_perf_draw_enabled(dev);
-   const bool detail = dev->g17p_shader_perf.trace;
-   const uint64_t start = trace ? os_time_get_nano() : 0;
-   const void *shader = cmd->state.gfx.shaders[MESA_SHADER_VERTEX];
-   struct rusage usage_start = {0}, usage_end = {0};
-
-   if (trace)
-      hk_shader_perf_detail_reset();
-
-   if (trace) {
-      cmd->shader_perf_draw_bo_allocs = 0;
-      cmd->shader_perf_draw_bo_creates = 0;
-      cmd->shader_perf_draw_bo_alloc_ns = 0;
-      cmd->shader_perf_draw_active = true;
-   }
-   if (detail) {
-      getrusage(RUSAGE_SELF, &usage_start);
-   }
-
-   const bool slow = hk_slow_draw_enabled();
-   uint64_t slow_start = 0;
-   if (slow) {
-      memset(&hk_slow_tl, 0, sizeof(hk_slow_tl));
-      slow_start = os_time_get_nano();
-      cmd->shader_perf_draw_bo_allocs = 0;
-      cmd->shader_perf_draw_bo_creates = 0;
-      cmd->shader_perf_draw_bo_alloc_ns = 0;
-      cmd->shader_perf_draw_active = true;
-   }
-
    hk_draw_impl(cmd, draw_id, draw);
-
-   if (slow) {
-      hk_slow_report(cmd, "draw", slow_start);
-      if (!trace)
-         cmd->shader_perf_draw_active = false;
-   }
-
-   if (trace) {
-      if (detail) {
-         getrusage(RUSAGE_SELF, &usage_end);
-      }
-      cmd->shader_perf_draw_active = false;
-      hk_shader_perf_draw_record(shader, os_time_get_nano() - start,
-                                 cmd->shader_perf_draw_bo_allocs,
-                                 cmd->shader_perf_draw_bo_creates,
-                                 cmd->shader_perf_draw_bo_alloc_ns,
-                                 detail ? usage_end.ru_minflt - usage_start.ru_minflt : 0,
-                                 detail ? usage_end.ru_majflt - usage_start.ru_majflt : 0);
-      if (detail && !trace_snapshot_dumped && ++trace_draws == 16384) {
-         trace_snapshot_dumped = true;
-         fprintf(stderr, "HK_SHADER_PERF snapshot_draws=%u\n", trace_draws);
-         hk_shader_perf_draw_dump();
-      }
-   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -12740,11 +10840,6 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
 
    assert(agx_is_indirect(draw->b));
 
-   if (dev->dev.chip != AGX_CHIP_G17P || !cmd->current_cs.gfx ||
-       vk_command_buffer_has_error(&cmd->vk) ||
-       hk_shader_perf_draw_enabled(dev) || dev->g17p_shader_perf.trace ||
-       hk_g17p_draw_trace_enabled() || (dev->dev.debug & AGX_DBG_DIRTY))
-      return false;
 
    /* Nothing dirty: every state-derivation block of the general path is
     * then a no-op, and hk_flush_shaders() returns before doing anything. */
@@ -12766,21 +10861,6 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
           vk_topology_to_mesa(dyn->ia.primitive_topology)))
       return false;
 
-   /* v96: likewise the vertex ordinary-variant choice must already be
-    * proven for these descriptors (hk_select_ordinary_vs()). */
-   struct hk_api_shader *vs_obj = gfx->shaders[MESA_SHADER_VERTEX];
-   if (vs_obj->g17p_ordinary_variants &&
-       !(gfx->ordinary_vs.valid && gfx->ordinary_vs.api == vs_obj &&
-         gfx->ordinary_vs.generation == desc->generation))
-      return false;
-
-   /* hk_bound_fs() must answer from its cache without dirtying the FS. */
-   if (fs_obj->g17p_ordinary_variants &&
-       !(gfx->ordinary_fs.valid && gfx->ordinary_fs.api == fs_obj &&
-         gfx->ordinary_fs.descriptor_generation == desc->generation &&
-         gfx->ordinary_fs.samples == dyn->ms.rasterization_samples))
-      return false;
-
    if (hk_conditional_render_is_active(&cmd->state.conditional, cmd->in_meta,
                                        cmd->conditional_meta) ||
        (desc->root.draw.pipeline_stats_flags &
@@ -12793,11 +10873,6 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
        (dyn->ms.rasterization_samples && !gfx->render.tilebuffer.nr_samples))
       return false;
 
-   if (hk_g17p_draw_split_policy(dev) != HK_G17P_DRAW_SPLIT_NEVER ||
-       hk_g17p_draws_per_stream(dev) ||
-       hk_g17p_state_publications_per_stream(dev) ||
-       debug_get_option_hk_g17p_interdraw_barrier())
-      return false;
 
    /* hk_draw_impl()'s index validation, and the general path's refusals. */
    if (draw->indexed) {
@@ -12825,7 +10900,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
 
    /* An eligible multi-draw may emit even its first record here, so this
     * direct path must record depth/stencil use exactly as hk_draw_impl()
-    * does for HK_G17P_ZLS_ELIDE_UNTOUCHED. */
+    * does for ZLS elision. */
    hk_g17p_note_depth_use(cmd);
 
    /* The general path from here on, with its no-op branches removed. */
@@ -12876,20 +10951,19 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       hk_reserve_scratch(cmd, cs, hw_vs);
       struct hk_linked_shader *linked_hw_vs =
          (hw_vs == sw_vs) ? linked_vs : hw_vs->only_linked;
-      /* HK_G17P_MDI_ONE_LEVEL: publish this record's vertex setup as the
-       * one-level template (hk_g17p_publish_one_level_record()). */
-      gfx->g17p_vs_one_level = hk_g17p_mdi_one_level_enabled();
+      /* Publish this record's vertex setup as the one-level template
+       * (hk_g17p_publish_one_level_record()). */
+      gfx->g17p_vs_one_level = true;
       const uint64_t pipeline_program =
          hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
       gfx->g17p_vs_one_level = false;
       gfx->prepared_vertex_usc = 0;
       gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
-      uint64_t unused_ns = 0;
       if (!hk_agx3_publish_vertex_state(
              cmd, cs, &out, hw_vs, pipeline_program, draw, true,
              prepared_varyings && gfx->root == prepared_varyings_root,
-             &tail_emitted, false, &unused_ns, &unused_ns, &unused_ns))
+             &tail_emitted))
          return;
 
       cs->current = out;
@@ -12907,7 +10981,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       return;
 
    cs->stats.calls++;
-   if (!hk_g17p_emit_draw(cmd, cs, cs->current, draw, gfx->topology, false,
+   if (!hk_g17p_emit_draw(cmd, cs, cs->current, draw, gfx->topology,
                           tail_emitted))
       return;
    hk_g17p_note_layer_zero_draw(cmd, cs);

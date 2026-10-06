@@ -105,7 +105,7 @@ check_format(enum pipe_format format, unsigned components, unsigned count)
    agx_preprocess_nir(b.shader);
    unsigned bindless_base = 0;
    NIR_PASS(_, b.shader, agx_nir_lower_tilebuffer, &tib, NULL, &bindless_base,
-            NULL, NULL, false, true, false);
+            NULL, NULL, false, false, false, true);
    NIR_PASS(_, b.shader, agx_nir_lower_monolithic_msaa, tib.nr_samples);
    NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
    NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, tib.nr_samples);

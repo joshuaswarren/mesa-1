@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image_view.h"
+#include "util/half_float.h"
 #include "util/format/u_format.h"
 #include "vulkan/vulkan_core.h"
 
@@ -664,6 +665,20 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
 
    vk_image_view_init(&dev->vk, &view->vk, pCreateInfo);
 
+   const float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
+   view->sampled_min_lod_fp16 = _mesa_float_to_half(min_lod);
+   view->sampled_min_lod_uint16 = min_lod;
+
+   {
+      const enum pipe_format logical = hk_format_to_pipe_format(view->vk.format);
+      const enum pipe_format integer = hk_scaled_texture_format(logical);
+      view->g17p_scaled_conversion =
+         integer == PIPE_FORMAT_NONE ? 0
+         : util_format_is_pure_sint(integer) ? 1 : 2;
+      view->g17p_uscaled_normalized =
+         hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE;
+   }
+
    /* First, figure out which image planes we need. For depth/stencil, we only
     * have one aspect viewed at a time.
     */
@@ -686,10 +701,6 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             hk_image_aspects_to_plane(image, 1u << aspect_bit);
       }
    }
-
-   /* Diagnostic descriptor dump (sampled texture and EOT PBE bytes). */
-   const bool dump_desc =
-      dev->dev.chip == AGX_CHIP_G17P && HK_ENV_PRESENT_ONCE("HK_DUMP_TEXDESC");
 
    /* Fill in each view plane separately */
    for (unsigned p = 0; p < view->plane_count; p++) {
@@ -715,18 +726,6 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             &view->planes[p].sampled_heap_index);
          if (result != VK_SUCCESS)
             return result;
-         if (dump_desc) {
-            const uint8_t *d = (const uint8_t *)&view->planes[p].sampled;
-            fprintf(stderr, "HKTEXDESC viewtype=%u fmt=%u w=%u h=%u d=%u "
-                    "layers=%u levels=%u heap=%u bytes=",
-                    view->vk.view_type, view->vk.format,
-                    image->vk.extent.width, image->vk.extent.height,
-                    image->vk.extent.depth, view->vk.layer_count,
-                    view->vk.level_count, view->planes[p].sampled_heap_index);
-            for (unsigned i = 0; i < 32; ++i)
-               fprintf(stderr, "%02x", d[i]);
-            fprintf(stderr, "\n");
-         }
          view->planes[p].filterable_valid =
             hk_uscaled_normalized_format(hk_padded_image_format(
                hk_format_to_pipe_format(view->vk.format))) != PIPE_FORMAT_NONE &&
@@ -789,15 +788,6 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       view->planes[p].layered_eot_pbe_valid =
          pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
                   &view->planes[p].layered_eot, NULL);
-      if (dump_desc && view->planes[p].eot_pbe_valid) {
-         const uint8_t *d = (const uint8_t *)&view->planes[p].eot;
-         fprintf(stderr, "HKPBEDESC fmt=%u w=%u h=%u level=%u bytes=",
-                 view->vk.format, image->vk.extent.width,
-                 image->vk.extent.height, view->vk.base_mip_level);
-         for (unsigned i = 0; i < 32; ++i)
-            fprintf(stderr, "%02x", d[i]);
-         fprintf(stderr, "\n");
-      }
    }
 
    return VK_SUCCESS;

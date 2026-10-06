@@ -348,43 +348,8 @@ TEST_F(Optimizer, G17PFoldsBothHalvesOfATiedConstantFmax)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
-TEST_F(Optimizer, G17PVertexAbsMaxQualification)
+TEST_F(Optimizer, G17PVertexConstantWidth)
 {
-   const bool enabled = debug_get_bool_option("AGX_G17P_VERTEX_ABS_MAX", false);
-   /* Valid, fragment, preamble, fmin, saturate, negate, half, broken tie. */
-   for (unsigned mode = 0; mode < 8; ++mode) {
-      agx_builder *b = agx_test_builder(mem_ctx);
-      struct agx_shader_key key = {};
-      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
-      b->shader->key = &key;
-      b->shader->stage = mode == 1 ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
-      b->shader->is_preamble = mode == 2;
-      const agx_index input = mode == 6 ? hx : wx;
-      agx_index modified = agx_abs(input);
-      modified.neg = mode == 5;
-      agx_index value = agx_temp(b->shader, modified.size);
-      agx_fmov_to(b, value, modified)->saturate = mode == 4;
-      agx_index out = agx_temp(b->shader, AGX_SIZE_32);
-      agx_fcmpsel_to(b, out, wy, value, wy, mode == 7 ? wx : value,
-                    mode == 3 ? AGX_FCOND_LTN : AGX_FCOND_GTN);
-      agx_unit_test(b, out);
-      agx_optimizer_forward(b->shader);
-      unsigned folded = 0;
-      agx_foreach_instr_global(b->shader, I) {
-         if (I->op == AGX_OPCODE_FCMPSEL) {
-            folded += I->src[1].abs && I->src[3].abs &&
-                      agx_is_equiv(I->src[1], input) &&
-                      agx_is_equiv(I->src[3], input);
-         }
-      }
-      EXPECT_EQ(folded, enabled && mode == 0 ? 1u : 0u) << mode;
-   }
-}
-
-TEST_F(Optimizer, G17PVertexConstantWidthQualification)
-{
-   const bool enabled =
-      debug_get_bool_option("AGX_G17P_VERTEX_FULL_CONSTANTS", false);
    for (unsigned mode = 0; mode < 4; ++mode) {
       agx_builder *b = agx_test_builder(mem_ctx);
       struct agx_shader_key key = {};
@@ -399,11 +364,9 @@ TEST_F(Optimizer, G17PVertexConstantWidthQualification)
       agx_opt_compact_constants(b->shader);
       agx_foreach_instr_global(b->shader, I) {
          if (I->op == AGX_OPCODE_FFMA)
-            EXPECT_EQ(I->src[1].size,
-                      enabled && mode == 0 ? AGX_SIZE_32 : AGX_SIZE_16);
+            EXPECT_EQ(I->src[1].size, AGX_SIZE_16);
          if (I->op == AGX_OPCODE_MOV_IMM)
-            EXPECT_EQ(I->imm, enabled && mode == 0 ? fui(1.0f / 1024.0f)
-                                                  : 0x1400u);
+            EXPECT_EQ(I->imm, 0x1400u);
       }
    }
 }
@@ -1002,4 +965,59 @@ TEST_F(Optimizer, IfInvertedCondition)
          agx_xor(b, agx_fcmp(b, hx, hy, AGX_FCOND_LT, false), agx_immediate(1)),
          agx_zero(), 1, AGX_ICOND_UEQ, true, NULL),
       agx_if_fcmp(b, hx, hy, 1, AGX_FCOND_LT, true, NULL));
+}
+
+TEST_F(Optimizer, G17PTileSampleConstantsStayInRegisters)
+{
+   /* The packer's existing G17PMultisampleTileSampleOperandIsARegister
+    * regression accepts registers and rejects these raw mask immediates.
+    * Optimizing a valid MOV+store must not recreate a refused operand.
+    */
+   for (unsigned mask : {0u, 1u, 3u, 15u, 32u, 64u}) {
+      SCOPED_TRACE(mask);
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+      agx_index coverage = agx_mov_imm(b, 16, mask);
+      agx_instr *store = agx_st_tile(b, hx, coverage, agx_null(),
+                                    AGX_FORMAT_I16, 1, 0, false, 0);
+      agx_optimize_and_dce(b->shader);
+      EXPECT_EQ(store->src[1].type, AGX_INDEX_NORMAL);
+      EXPECT_EQ(store->src[1].size, AGX_SIZE_16);
+      EXPECT_EQ(store->src[1].value, coverage.value);
+      unsigned moves = 0;
+      agx_foreach_instr_global(b->shader, I) {
+         if (I->op == AGX_OPCODE_MOV_IMM) {
+            EXPECT_EQ(I->imm, mask);
+            EXPECT_EQ(I->dest[0].value, coverage.value);
+            moves++;
+         }
+      }
+      EXPECT_EQ(moves, 1u);
+   }
+}
+
+TEST_F(Optimizer, TileSampleImmediateControls)
+{
+   for (enum agx_isa_encoding enc : {AGX_ISA_ENCODING_AGX2,
+                                      AGX_ISA_ENCODING_AGX3B,
+                                      AGX_ISA_ENCODING_AGX3C}) {
+      for (unsigned mask : {0u, 255u}) {
+         if (enc == AGX_ISA_ENCODING_AGX3B && mask == 0)
+            continue;
+         SCOPED_TRACE(unsigned(enc));
+         SCOPED_TRACE(mask);
+         agx_builder *b = agx_test_builder(mem_ctx);
+         struct agx_shader_key key = {};
+         key.dev.encoding = enc;
+         b->shader->key = &key;
+         agx_instr *store = agx_st_tile(
+            b, hx, agx_mov_imm(b, 16, mask), agx_null(),
+            AGX_FORMAT_I16, 1, 0, false, 0);
+         agx_optimize_and_dce(b->shader);
+         EXPECT_EQ(store->src[1].type, AGX_INDEX_IMMEDIATE);
+         EXPECT_EQ(store->src[1].value, mask);
+      }
+   }
 }

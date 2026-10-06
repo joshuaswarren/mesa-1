@@ -96,8 +96,15 @@ libasahi_lib_files = files(
   'pool.c',
 )
 
-asahi_lib_is_windows = host_machine.system() == 'windows'
-asahi_lib_has_virtio = not asahi_lib_is_windows and with_vdrm
+asahi_lib_is_wine = host_machine.system() == 'windows' and asahi_d3d12_platform == 'wine'
+asahi_lib_is_windows = host_machine.system() == 'windows' and not asahi_lib_is_wine
+asahi_lib_has_virtio = host_machine.system() != 'windows' and with_vdrm
+# Wine PE build: the Linux DRM device body over the unixlib shims in
+# src/asahi/d3d12/wine/include (xf86drm.h, sys/ioccom.h, os_mmap).
+asahi_lib_wine_args = []
+if asahi_lib_is_wine
+  asahi_lib_wine_args = ['-DHAVE_LIBDRM', '-DAGX_NO_VIRTIO', '-DAGX_WINE_UNIXLIB']
+endif
 asahi_d3d12_strict_args = []
 if asahi_lib_is_windows and with_asahi_d3d12
   asahi_d3d12_strict_args = cc.get_supported_arguments(
@@ -203,6 +210,13 @@ if asahi_lib_is_windows
   libasahi_lib_deps = [
     dep_valgrind, idep_nir, idep_mesautil, idep_libagx, idep_libpoly,
   ]
+elif asahi_lib_is_wine
+  libasahi_lib_files += files('decode_stub.c')
+  libasahi_lib_includes = [inc_asahi, inc_asahi_d3d12_wine]
+  libasahi_lib_links = [libpoly_nir]
+  libasahi_lib_deps = [
+    dep_valgrind, idep_nir, idep_mesautil, idep_libagx, idep_libpoly,
+  ]
 elif asahi_lib_has_virtio
   libasahi_lib_includes = [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm]
   libasahi_lib_links = [libasahi_decode, libvdrm, libpoly_nir]
@@ -222,10 +236,6 @@ libagx_shaders = custom_target(
   input : libagx_spv,
   output : ['libagx_shaders.h', 'libagx_shaders.c'],
   command : [prog_asahi_clc, libagx_spv, '@OUTPUT0@', '@OUTPUT1@'],
-  # v53-c2: the precompiled internal kernels keep the v53-pre code generation.
-  # The C2 loop defaults are qualified for runtime-compiled shaders first; a
-  # runtime AGX_G17P_C2_DEFAULTS=0 cannot reach these build-time binaries.
-  env : ['AGX_G17P_C2_DEFAULTS=0'],
 )
 
 idep_libagx_shaders_h = declare_dependency(
@@ -241,6 +251,7 @@ libasahi_lib = static_library(
     no_override_init_args,
     '-Wno-c2x-extensions',
     asahi_d3d12_strict_args,
+    asahi_lib_wine_args,
   ],
   gnu_symbol_visibility : 'hidden',
   link_with: libasahi_lib_links,
@@ -346,6 +357,43 @@ if with_tests
     executable(
       'asahi-g17p-early-demote-epilog',
       files('tests/test-agx-g17p-early-demote-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-conditional-exports',
+    executable(
+      'asahi-g17p-conditional-exports',
+      files('tests/test-agx-g17p-conditional-exports.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-zs-emit-control-flow',
+    executable(
+      'asahi-zs-emit-control-flow',
+      files('tests/test-agx-zs-emit-control-flow.c'),
+
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-helper-samples',
+    executable(
+      'asahi-g17p-helper-samples',
+      files('tests/test-agx-g17p-helper-samples.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],

@@ -574,11 +574,85 @@ check_indirect_bridge(void)
    return 0;
 }
 
+static uint32_t
+native_word(const struct d12_agx3_native_direct_draw *draw, unsigned word)
+{
+   const uint8_t *p = draw->bytes + word * 4;
+   return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+          ((uint32_t)p[3] << 24);
+}
+
+static int
+check_native_api_draws(void)
+{
+   /* G11's first-index 3 selects a half-dword-aligned U16 range. The API
+    * base vertex 3 biases fetched vertices, independently of index start. */
+   struct d12_agx3_native_direct_draw_info info = {
+      .draw_state_context_offset = 0x48000, .primitive = 6, .indexed = true,
+      .index_size_B = 2, .index_buffer = UINT64_C(0x10000001000),
+      .index_buffer_range_B = 12, .first_index = 3, .first_vertex = 3,
+      .count = 3, .instances = 1,
+   };
+   struct d12_agx3_native_direct_draw draw;
+   CHECK(d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, &draw));
+   const uint32_t expected[] = {
+      0x48000, 0x40000001, 0, 0x61f20600, 0x1006, 3, 1, 3, 1, 1,
+   };
+   CHECK(draw.length == sizeof(expected));
+   for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i)
+      CHECK(native_word(&draw, i) == expected[i]);
+
+   const int32_t biases[] = {3, -3, INT32_MIN, INT32_MAX};
+   for (unsigned width = 2; width <= 4; width *= 2) {
+      info.index_size_B = width;
+      info.index_buffer_range_B = 8 * width;
+      info.count = 5;
+      info.instances = 17;
+      for (unsigned b = 0; b < sizeof(biases) / sizeof(biases[0]); ++b) {
+         info.first_vertex = (uint32_t)biases[b];
+         CHECK(d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, &draw));
+         CHECK(native_word(&draw, 4) == 0x1000 + 3 * width);
+         CHECK(native_word(&draw, 5) == 5 && native_word(&draw, 6) == 17);
+         CHECK(native_word(&draw, 7) == (uint32_t)biases[b]);
+         CHECK(native_word(&draw, 8) == (5 * width + 3) / 4 - 1);
+      }
+   }
+   /* Reject range overflow transactionally, never clamp a real draw count. */
+   info.first_index = UINT32_MAX;
+   memset(&draw, 0xff, sizeof(draw));
+   CHECK(!d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, &draw));
+   CHECK(draw.length == 0);
+   for (unsigned i = 0; i < sizeof(draw.bytes); ++i)
+      CHECK(draw.bytes[i] == 0);
+
+   info.index_buffer = 0;
+   info.first_vertex = (uint32_t)-7;
+   info.count = 4097;
+   CHECK(d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, &draw));
+   CHECK(native_word(&draw, 4) == 0 && native_word(&draw, 9) == 0);
+   CHECK(native_word(&draw, 5) == 4097 && native_word(&draw, 6) == 17);
+   CHECK(native_word(&draw, 7) == 0 && native_word(&draw, 8) == 0);
+   info.indexed = false;
+   info.first_vertex = 5;
+   info.count = 6;
+   CHECK(d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, &draw));
+   CHECK(draw.length == 20);
+   CHECK(native_word(&draw, 2) == 6 && native_word(&draw, 3) == 17);
+   CHECK(native_word(&draw, 4) == 5);
+   CHECK(!d12_agx3_encode_native_direct_draw(AGX_CHIP_G14G, &info, &draw));
+   info.instances = 0;
+   CHECK(!d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, &draw));
+   CHECK(!d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, NULL, &draw));
+   CHECK(!d12_agx3_encode_native_direct_draw(AGX_CHIP_G17P, &info, NULL));
+   return 0;
+}
+
 int
 main(void)
 {
    if (check_witnesses_and_shared_equality() || check_domains() ||
-       check_corruptions_and_rejections() || check_indirect_bridge())
+       check_corruptions_and_rejections() || check_indirect_bridge() ||
+       check_native_api_draws())
       return 1;
 
    printf("d12_agx3_index_list_core: %u checks passed\n", checks);

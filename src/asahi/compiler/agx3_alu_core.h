@@ -1196,13 +1196,24 @@ bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
  *   o[i] = sqrt(a[i])          2f 01 56 04 03 00 92 40 00 00
  *   o[i] = sqrt(fabs(a[i]))    2f 01 56 04 03 00 92 c0 00 00   f30
  *
- * NEG is deliberately not exposed here: sqrt of a negative is NaN, no Apple
- * witness exercises it, and an unwitnessed bit is worse than a refusal.
+ * Source-negate is exposed by the modifier helper below. This ABS-only
+ * wrapper preserves the existing call interface.
  */
 bool agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t src, enum agx3_alu_hint hint,
                             bool dest_cache, uint16_t wait_mask, bool src_abs,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Apple metal32023.850, applegpu_g17p, fresh 2026-10-05 kernels:
+ * sqrt(x)        2f015604030092400000
+ * sqrt(-x)       2f015604030092400100 (f31)
+ * sqrt(-fabs(x)) 2f015604030092c00100 (f30 and f31)
+ * The following multiply retains the same original source modifiers.
+ */
+bool agx3_alu_sqrt_step_source_modifiers(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+   bool src_abs, bool src_neg, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native square-root step with a scalar half source and float32 temporary. */
 bool agx3_alu_sqrt_step_half(enum agx_isa_encoding enc, uint16_t dest,

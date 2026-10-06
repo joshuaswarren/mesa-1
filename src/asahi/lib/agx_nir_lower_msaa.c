@@ -222,6 +222,71 @@ specialize_g17p_sample_copy(nir_cf_list *copy,
    }
 }
 
+/* Make each output an SSA value at the end of the sample body before cloning
+ * it. Conditional depth/stencil writes need phis here: moving their exports
+ * directly to the end would move uses outside the defining branch.
+ */
+static void
+lower_sample_exports_to_end(nir_shader *shader)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_block *end = nir_cursor_current_block(nir_after_impl(impl));
+   bool needs_lowering = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_export_agx &&
+             block != end)
+            needs_lowering = true;
+      }
+   }
+   if (!needs_lowering)
+      return;
+
+   struct sample_export {
+      unsigned base;
+      nir_variable *var;
+   };
+   struct util_dynarray outputs;
+   util_dynarray_init(&outputs, NULL);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_export_agx)
+            continue;
+
+         unsigned base = nir_intrinsic_base(intr);
+         nir_def *value = intr->src[0].ssa;
+         const struct glsl_type *type =
+            glsl_vector_type(glsl_get_base_type(glsl_uintN_t_type(value->bit_size)),
+                             value->num_components);
+         nir_variable *var = NULL;
+         util_dynarray_foreach(&outputs, struct sample_export, output) {
+            if (output->base == base) {
+               var = output->var;
+               assert(var->type == type);
+               break;
+            }
+         }
+         if (!var) {
+            var = nir_local_variable_create(impl, type, "sample_export");
+            util_dynarray_append(&outputs, ((struct sample_export){base, var}));
+         }
+         nir_builder b = nir_builder_at(nir_before_instr(instr));
+         nir_store_var(&b, var, value, BITFIELD_MASK(value->num_components));
+         nir_instr_remove(instr);
+      }
+   }
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   util_dynarray_foreach(&outputs, struct sample_export, output)
+      nir_export_agx(&b, nir_load_var(&b, output->var), .base = output->base);
+   util_dynarray_fini(&outputs);
+   nir_progress(true, impl, nir_metadata_control_flow);
+   nir_lower_vars_to_ssa(shader);
+}
+
 /*
  * G17P has no external sample loop around linked fragment parts. Apple's
  * applegpu_g17p fragments that read [[sample_id]] instead repeat the shader
@@ -266,6 +331,8 @@ agx_nir_unroll_g17p_samples_layout(nir_shader *shader, unsigned nr_samples,
             break;
       }
    }
+
+   lower_sample_exports_to_end(shader);
 
    nir_cf_list body;
    nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
@@ -434,13 +501,30 @@ move_zs_source(nir_src *src, void *data)
    return true;
 }
 
+/* A block the function executes exactly once: directly in the function body,
+ * outside any if or loop. The unrolled per-sample copies of an epilog with
+ * per-sample control flow (spilled render targets) start in such blocks. */
+static bool
+agx_block_runs_once(nir_function_impl *impl, nir_block *block)
+{
+   return block->cf_node.parent == &impl->cf_node;
+}
+
 /*
- * An unrolled epilog writes each sample's depth or stencil in its own copy,
- * between the colour stores of the samples around it. Apple's per-sample
- * depth writes all share one class-1 transaction, which a colour transaction
- * cannot interrupt, so move every such write, with the constant and exported
- * values it reads, to the start of the epilog. Pure exported-mask kills can
- * move with them, but must all precede the depth transaction.
+ * An unrolled epilog writes each sample's depth or stencil, and applies each
+ * sample's share of the API sample mask, in its own copy, between the colour
+ * stores of the samples around it. Apple's fragments take class 1 once: one
+ * testing coverage update (MOVMSK), any depth writes with it, all before the
+ * first colour wait, and never again after releasing it. Move every such
+ * write and kill, with the constant and exported values it reads, to the
+ * start of the epilog, where the kills combine into one update that precedes
+ * the depth transaction.
+ *
+ * Re-acquiring class 1 per sample, after the pixel's colour classes are held,
+ * is a shape no native fragment has. On G17P it hangs the 3D pipeline once
+ * several processes' fragment passes share the hardware (4x, two spilled
+ * RGBA32 targets and a gl_SampleMask write: stamp-blamed recovery within a
+ * second at six processes).
  */
 bool
 agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
@@ -466,7 +550,7 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
              * epilogs may instead test their targeted samples here; admit
              * those only for provably disjoint target sets, checked below. */
             if (kill_count == ARRAY_SIZE(kills) ||
-                block != nir_start_block(impl) ||
+                !agx_block_runs_once(impl, block) ||
                 !movable_zs_source(intr->src[0].ssa) ||
                 !movable_zs_source(intr->src[1].ssa))
                return false;
@@ -489,7 +573,7 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
             continue;
          }
 
-         if (count == ARRAY_SIZE(writes) || block != nir_start_block(impl))
+         if (count == ARRAY_SIZE(writes) || !agx_block_runs_once(impl, block))
             return false;
 
          for (unsigned i = 0; i < 3; ++i) {

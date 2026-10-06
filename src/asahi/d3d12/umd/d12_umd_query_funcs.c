@@ -286,6 +286,8 @@ d12_umd_begin_query(D3D12DDI_HCOMMANDLIST list_handle,
 
    if (!list || !list->device || !list->backend || !heap ||
        d12_query_core_is_timestamp_heap((uint32_t)heap->type) ||
+       !d12_query_core_command_compatible(
+          (uint32_t)heap->type, (uint32_t)list->type) ||
        !list->device->renderer_ops ||
        !list->device->renderer_ops->begin_query) {
       d12_umd_query_error(list, E_INVALIDARG);
@@ -306,7 +308,7 @@ d12_umd_end_query(D3D12DDI_HCOMMANDLIST list_handle,
       d12_umd_command_query_heap(list, heap_handle, type, index);
 
    if (!list || !list->device || !list->backend || !heap ||
-       !d12_query_core_timestamp_command_compatible(
+       !d12_query_core_command_compatible(
           (uint32_t)heap->type, (uint32_t)list->type) ||
        !list->device->renderer_ops ||
        !list->device->renderer_ops->end_query) {
@@ -334,8 +336,9 @@ d12_umd_resolve_query_data(D3D12DDI_HCOMMANDLIST list_handle,
        heap->device != list->device ||
        !heap->backend || !count || first >= heap->count ||
        count > heap->count - first ||
+       (destination_offset & 7) ||
        !d12_umd_query_type_matches(heap->type, type) ||
-       !d12_query_core_timestamp_command_compatible(
+       !d12_query_core_command_compatible(
           (uint32_t)heap->type, (uint32_t)list->type) ||
        !destination ||
        destination->signature != D12_UMD_RESOURCE_SIGNATURE ||

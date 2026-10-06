@@ -11,11 +11,8 @@
 
 TEST(AGX3UniformALU, VertexTextureUniformQualification)
 {
-   /* Run in separate processes with AGX_G17P_VERTEX_TEX_UNIFORMS=0 and 1.
-    * Keep the older all-stage AGX_G17P_TEX_UNIFORM_OPERANDS option disabled.
-    */
-   const bool enabled =
-      debug_get_bool_option("AGX_G17P_VERTEX_TEX_UNIFORMS", false);
+   /* Both operands name the same aligned uniform, a witnessed
+    * uniform/uniform pair, so every stage keeps them in the uniform file. */
    for (auto encoding : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
       for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT}) {
          for (bool preamble : {false, true}) {
@@ -39,9 +36,8 @@ TEST(AGX3UniformALU, VertexTextureUniformQualification)
                      false, false, false, AGX_GATHER_NONE, false);
                   agx_optimizer_forward(b->shader);
                   agx_lower_uniform_sources(b->shader);
-                  const bool keep = enabled &&
+                  const bool keep =
                      encoding == AGX_ISA_ENCODING_AGX3B &&
-                     stage == MESA_SHADER_VERTEX && !preamble &&
                      value <= 252 && !(value & 3) && size != AGX_SIZE_16;
                   EXPECT_EQ(I->src[3].type == AGX_INDEX_UNIFORM, keep);
                   EXPECT_EQ(I->src[4].type == AGX_INDEX_UNIFORM, keep);
@@ -51,6 +47,87 @@ TEST(AGX3UniformALU, VertexTextureUniformQualification)
             }
          }
       }
+   }
+}
+
+TEST(AGX3UniformALU, TextureUniformOperandPairs)
+{
+   /* Only the descriptor-kind pairs native G17P code uses stay in the
+    * uniform file: uniform/uniform, and (outside cube sampling) a uniform
+    * texture with an immediate sampler. A uniform beside a register, or a
+    * cube uniform beside an immediate, is materialized so the sample keeps
+    * its register form. */
+   enum other { OTHER_UNIFORM, OTHER_IMMEDIATE, OTHER_REGISTER };
+   for (auto dim : {AGX_DIM_2D, AGX_DIM_CUBE, AGX_DIM_CUBE_ARRAY}) {
+      for (auto other : {OTHER_UNIFORM, OTHER_IMMEDIATE, OTHER_REGISTER}) {
+         void *mem = ralloc_context(NULL);
+         agx_shader_key key = {};
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->key = &key;
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         agx_index texture = agx_mov(b, agx_uniform(12, AGX_SIZE_64));
+         agx_index sampler =
+            other == OTHER_UNIFORM ? agx_mov(b, agx_uniform(16, AGX_SIZE_64))
+            : other == OTHER_IMMEDIATE ? agx_immediate(3)
+                                       : agx_register(4, AGX_SIZE_64);
+         agx_instr *I = agx_texture_sample_to(
+            b, agx_temp(b->shader, AGX_SIZE_32), agx_register(0, AGX_SIZE_32),
+            agx_uniform(8, AGX_SIZE_32), agx_uniform(0, AGX_SIZE_64),
+            texture, sampler, agx_null(), dim, AGX_LOD_MODE_LOD_MIN, 0,
+            false, false, false, AGX_GATHER_NONE, false);
+         agx_optimizer_forward(b->shader);
+         agx_lower_uniform_sources(b->shader);
+         const bool cube = dim != AGX_DIM_2D;
+         const bool keep = other == OTHER_UNIFORM ||
+                           (other == OTHER_IMMEDIATE && !cube);
+         EXPECT_EQ(I->src[3].type == AGX_INDEX_UNIFORM, keep)
+            << "dim " << dim << " other " << other;
+         EXPECT_EQ(I->src[4].type == AGX_INDEX_UNIFORM,
+                   other == OTHER_UNIFORM)
+            << "dim " << dim << " other " << other;
+         ralloc_free(mem);
+      }
+   }
+}
+
+/* ICMPSEL keeps an aligned 32-bit uniform only in the native ISEL shapes
+ * (agx3_isel_core.c witnesses): as a select, or as one comparand beside a
+ * 32-bit register; never beside an immediate, never in a constant program. */
+TEST(AGX3UniformALU, IselUniformOperands)
+{
+   enum shape { SEL, CMP0_REG, CMP1_REG, CMP0_IMM, CMP_SEL, PREAMBLE, ODD };
+   for (unsigned shape = SEL; shape <= ODD; ++shape) {
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->is_preamble = shape == PREAMBLE;
+      agx_index r0 = agx_temp(b->shader, AGX_SIZE_32);
+      agx_index r1 = agx_temp(b->shader, AGX_SIZE_32);
+      agx_index u = agx_uniform(shape == ODD ? 9 : 8, AGX_SIZE_32);
+      agx_index src[4] = {r0, r1, r0, r1};
+      unsigned kept = ~0u;
+      switch (shape) {
+      case SEL: case PREAMBLE: case ODD: src[2] = u; kept = 2; break;
+      case CMP0_REG: src[0] = u; kept = 0; break;
+      case CMP1_REG: src[1] = u; kept = 1; break;
+      case CMP0_IMM: src[0] = u; src[1] = agx_immediate(0); break;
+      case CMP_SEL: src[0] = u; src[3] = u; kept = 3; break;
+      }
+      if (shape == PREAMBLE || shape == ODD)
+         kept = ~0u;
+      agx_instr *I = agx_icmpsel_to(b, agx_temp(b->shader, AGX_SIZE_32),
+                                    src[0], src[1], src[2], src[3],
+                                    AGX_ICOND_ULT);
+      agx_lower_uniform_sources(b->shader);
+      for (unsigned s = 0; s < 4; ++s) {
+         EXPECT_EQ(I->src[s].type == AGX_INDEX_UNIFORM, s == kept)
+            << "shape " << shape << " src " << s;
+      }
+      ralloc_free(mem);
    }
 }
 

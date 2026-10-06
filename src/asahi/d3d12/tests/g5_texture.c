@@ -56,6 +56,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "d12_test_contract.h"
 
 static int failures = 0;
 
@@ -148,8 +149,9 @@ main(int argc, char **argv)
    ID3D12Device *dev = NULL;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev);
+   TEST_OBJECT(hr, dev, "checked D3D12CreateDevice dev");
    CHECK(hr == S_OK && dev, "D3D12CreateDevice");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    /* ---- Root signature: a TABLE for t0, a root descriptor for u0 ----
@@ -189,8 +191,9 @@ main(int argc, char **argv)
    ID3DBlob *rs_blob = NULL;
    hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1_0,
                                     &rs_blob, NULL);
+   TEST_OBJECT(hr, rs_blob, "checked D3D12SerializeRootSignature rs_blob");
    CHECK(hr == S_OK && rs_blob, "serialize a root signature: SRV table + UAV");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12RootSignature *root_sig = NULL;
@@ -198,14 +201,15 @@ main(int argc, char **argv)
       dev, 0, ID3D10Blob_GetBufferPointer(rs_blob),
       ID3D10Blob_GetBufferSize(rs_blob), &IID_ID3D12RootSignature,
       (void **)&root_sig);
+   TEST_OBJECT(hr, root_sig, "checked ID3D12Device_CreateRootSignature root_sig");
    CHECK(hr == S_OK && root_sig, "parse it back (round trip)");
    ID3D10Blob_Release(rs_blob);
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    /* ---- The texture ---- */
 
-   D3D12_HEAP_PROPERTIES tex_heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
+   D3D12_HEAP_PROPERTIES tex_heap = D12_TEST_UMA_HEAP;
    D3D12_RESOURCE_DESC td = {
       .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
       .Width = W,
@@ -214,6 +218,8 @@ main(int argc, char **argv)
       .MipLevels = 1,
       .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
       .SampleDesc = {.Count = 1},
+      .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
       /* No ALLOW_RENDER_TARGET: this texture is only ever read, and a
        * sampled-only texture is the case that matters here.
        */
@@ -224,15 +230,14 @@ main(int argc, char **argv)
                                              D3D12_RESOURCE_STATE_COMMON, NULL,
                                              &IID_ID3D12Resource,
                                              (void **)&tex);
+   TEST_OBJECT(hr, tex, "checked ID3D12Device_CreateCommittedResource tex");
    CHECK(hr == S_OK && tex, "create a 16x16 RGBA8 texture (sampled only)");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
-   uint8_t *tex_map = NULL;
-   hr = ID3D12Resource_Map(tex, 0, NULL, (void **)&tex_map);
-   CHECK(hr == S_OK && tex_map, "map it (UMA linear)");
-   if (FAILED(hr) || !tex_map)
-      return 1;
+   uint8_t *tex_map = malloc(STRIDE * H);
+   CHECK(tex_map != NULL, "CPU input storage for opaque texture");
+   if (!tex_map) return 1;
 
    /* Fill through the 64-byte-aligned stride, not width*4. Indexing by
     * width would put row y at the wrong address for any width whose byte
@@ -244,6 +249,12 @@ main(int argc, char **argv)
          texel(x, y, tex_map + y * STRIDE + x * 4);
    }
 
+   TEST_CALL(ID3D12Resource_Map(tex, 0, NULL, NULL), "map opaque texture without exposing pointer");
+   hr = ID3D12Resource_WriteToSubresource(tex, 0, NULL, tex_map, STRIDE, STRIDE * H);
+   ID3D12Resource_Unmap(tex, 0, NULL);
+   TEST_CALL(hr, "publish exact input texels through legal opaque CPU API");
+   free(tex_map);tex_map = NULL;
+
    /* ---- The SRV, in a shader-visible heap ---- */
 
    D3D12_DESCRIPTOR_HEAP_DESC hd = {
@@ -254,8 +265,9 @@ main(int argc, char **argv)
    ID3D12DescriptorHeap *heap = NULL;
    hr = ID3D12Device_CreateDescriptorHeap(dev, &hd, &IID_ID3D12DescriptorHeap,
                                           (void **)&heap);
+   TEST_OBJECT(hr, heap, "checked ID3D12Device_CreateDescriptorHeap heap");
    CHECK(hr == S_OK && heap, "create a shader-visible CBV/SRV/UAV heap");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    D3D12_CPU_DESCRIPTOR_HANDLE cpu =
@@ -263,6 +275,7 @@ main(int argc, char **argv)
    D3D12_GPU_DESCRIPTOR_HANDLE gpu =
       d12_test_descriptor_heap_get_gpu_start(heap);
    CHECK(cpu.ptr && gpu.ptr, "heap start handles are usable");
+   if (!cpu.ptr || !gpu.ptr) return 1;
 
    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {
       .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -283,11 +296,12 @@ main(int argc, char **argv)
       for (unsigned i = 0; i < 32; i++)
          wrote |= slot[i] != 0;
       CHECK(wrote, "the texture SRV was recorded, not silently dropped");
+      if (!wrote) return 1;
    }
 
    /* ---- The output buffer ---- */
 
-   D3D12_HEAP_PROPERTIES buf_heap = {.Type = D3D12_HEAP_TYPE_UPLOAD};
+   D3D12_HEAP_PROPERTIES buf_heap = D12_TEST_UMA_HEAP;
    D3D12_RESOURCE_DESC bd = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
       .Width = sizeof(uint32_t) * N,
@@ -296,6 +310,7 @@ main(int argc, char **argv)
       .MipLevels = 1,
       .SampleDesc = {.Count = 1},
       .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
    };
    ID3D12Resource *out = NULL;
    hr = ID3D12Device_CreateCommittedResource(dev, &buf_heap,
@@ -303,12 +318,13 @@ main(int argc, char **argv)
                                              D3D12_RESOURCE_STATE_COMMON, NULL,
                                              &IID_ID3D12Resource,
                                              (void **)&out);
+   TEST_OBJECT(hr, out, "checked ID3D12Device_CreateCommittedResource out");
    CHECK(hr == S_OK && out, "create the 256-uint output buffer");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    uint32_t *out_map = NULL;
-   ID3D12Resource_Map(out, 0, NULL, (void **)&out_map);
+   TEST_CALL(d12_test_map(out, false, (void **)&out_map), "checked CPU initialization map out");
 
    /* Poison, so that "the dispatch never ran" and "the dispatch ran and
     * read the wrong texels" are different observations rather than both
@@ -326,19 +342,20 @@ main(int argc, char **argv)
    hr = ID3D12Device_CreateComputePipelineState(dev, &pd,
                                                 &IID_ID3D12PipelineState,
                                                 (void **)&pso);
+   TEST_OBJECT(hr, pso, "checked ID3D12Device_CreateComputePipelineState pso");
    CHECK(hr == S_OK && pso, "compile a shader using Texture2D.Load");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12CommandAllocator *alloc = NULL;
    ID3D12GraphicsCommandList *list = NULL;
-   ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+   TEST_OBJECT(ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                        &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
-   ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                       (void **)&alloc), alloc, "checked ID3D12Device_CreateCommandAllocator alloc");
+   TEST_OBJECT(ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                   alloc, NULL,
                                   &IID_ID3D12GraphicsCommandList,
-                                  (void **)&list);
+                                  (void **)&list), list, "checked ID3D12Device_CreateCommandList list");
 
    ID3D12GraphicsCommandList_SetDescriptorHeaps(list, 1, &heap);
    ID3D12GraphicsCommandList_SetComputeRootSignature(list, root_sig);
@@ -346,25 +363,28 @@ main(int argc, char **argv)
    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(
       list, 1, ID3D12Resource_GetGPUVirtualAddress(out));
    ID3D12GraphicsCommandList_SetPipelineState(list, pso);
+   ID3D12Resource_Unmap(out, 0, NULL);out_map = NULL;
+   d12_test_transition(list, out, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   d12_test_transition(list, tex, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
    ID3D12GraphicsCommandList_Dispatch(list, N / 64, 1, 1);
+   d12_test_transition(list, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+   d12_test_transition(list, tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
    hr = ID3D12GraphicsCommandList_Close(list);
    CHECK(hr == S_OK, "record the dispatch");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12CommandQueue *queue = NULL;
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE};
-   ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
+   TEST_OBJECT(ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
+                                   (void **)&queue), queue, "checked ID3D12Device_CreateCommandQueue queue");
    ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
+   TEST_OBJECT(ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                            (void **)&fence), fence, "checked ID3D12Device_CreateFence fence");
 
-   ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
-   ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
-   ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1, "GPU dispatch complete");
+   TEST_CALL(d12_test_submit_closed(dev, list, queue, fence, 1), "GPU dispatch complete");
+   TEST_CALL(d12_test_map(out, true, (void **)&out_map), "map actual fenced out bytes");
+
 
    /* ---- Grade every texel against the CPU ---- */
 
@@ -518,8 +538,8 @@ main(int argc, char **argv)
    printf("       raw: [0]=0x%08X [1]=0x%08X [16]=0x%08X [255]=0x%08X\n",
           out_map[0], out_map[1], out_map[16], out_map[255]);
 
-   ID3D12Resource_Unmap(out, 0, NULL);
-   ID3D12Resource_Unmap(tex, 0, NULL);
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(out, 0, &empty); }
+
    ID3D12Fence_Release(fence);
    ID3D12CommandQueue_Release(queue);
    ID3D12GraphicsCommandList_Release(list);

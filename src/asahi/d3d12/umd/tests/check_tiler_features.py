@@ -12,7 +12,7 @@ from pathlib import Path
 d12 = Path(__file__).resolve().parents[2]
 caps = (d12 / "d12_core_caps.c").read_text()
 caps_h = (d12 / "d12_core_caps.h").read_text()
-device = (d12 / "d12_device.c").read_text()
+device = (d12 / "d12_device.c").read_text() + (d12 / "d12_core_caps_query.c").read_text()
 adapter = (d12 / "umd/d12_umd_adapter.c").read_text()
 command = (d12 / "d12_cmd.c").read_text()
 queue = (d12 / "d12_queue.c").read_text()
@@ -28,7 +28,7 @@ umd_backend = (d12 / "umd/d12_umd_backend.c").read_text()
 # ---------------------------------------------------------------- render pass
 # The per-attachment access types have to reach the tile programs, or the
 # feature is a table the driver fills in and then ignores.
-assert ".render_passes_tier = 1," in caps
+assert "caps->render_passes_tier = legacy ? 1 : 0;" in caps
 assert "opts->RenderPassesTier =" in device
 assert "D3D12DDI_RENDER_PASS_TIER_NOT_SUPPORTED" not in adapter
 assert "caps->render_passes_tier" in adapter
@@ -71,7 +71,7 @@ assert "D3D12DDI_RENDER_PASS_FUNCS_0053" in umd_rc
 assert "ENDING_ACCESS_RESOLVE" in command
 
 # ----------------------------------------------------- programmable positions
-assert ".programmable_sample_positions_tier = 1," in caps
+assert "caps->programmable_sample_positions_tier = 0;" in caps
 assert "caps->programmable_sample_positions_tier" in device
 # The command-list table only gained pfnSetSamplePositions in DDI 0032, so a
 # WDDM 2.0/2.1 build must report the tier the ABI can actually carry rather
@@ -110,7 +110,7 @@ assert ".GetCustomHeapProperties = d12_device_GetCustomHeapProperties," in devic
 assert "D3D12_HEAP_TYPE_GPU_UPLOAD:" in device
 
 # ------------------------------------------------------- resource heap tier 2
-assert ".resource_heap_tier = 2," in caps
+assert "caps->resource_heap_tier = 2;" in caps
 # Tier 2 does not mean the DENY flags stop being honoured: an application that
 # asks for a restriction still gets it.
 assert "D3D12_HEAP_FLAG_DENY_BUFFERS" in resource
@@ -125,6 +125,6 @@ assert "sample_positions_set" in private
 
 print(
     "tiler-features: PASS "
-    "(render passes + programmable sample positions + GPU upload heaps "
+    "(render passes + unadvertised sample-position path + GPU upload heaps "
     "+ resource heap tier 2)"
 )

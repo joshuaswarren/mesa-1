@@ -71,15 +71,12 @@ hk_files = files(
   'hk_image_layout_core.c',
   'hk_image_layout_core.h',
   'hk_image_view.c',
-  'hk_g17p_apple_override.c',
-  'hk_g17p_apple_override.h',
   'hk_image_view.h',
   'hk_instance.c',
   'hk_instance.h',
   'hk_nir_forward_image_stores.c',
   'hk_nir_forward_image_stores.h',
   'hk_nir_lower_descriptors.c',
-  'hk_ordinary_descriptor.c',
   'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
   'hk_nir_lower_robust_image.h',
@@ -106,11 +103,13 @@ hk_files = files(
   'hk_query_pool.h',
   'hk_drm_render_core.c',
   'hk_drm_render_core.h',
+  'hk_pass_profile.c',
   'hk_queue.c',
   'hk_queue.h',
   'hk_sampler.c',
   'hk_sampler.h',
   'hk_shader.c',
+  'hk_nir_lower_image_view_min_lod.c',
   'hk_shader.h',
   'hk_sync.c',
   'hk_sync.h',
@@ -119,6 +118,35 @@ hk_files = files(
 )
 
 if with_tests
+  # Unused recording functions require section garbage collection so the
+  # test can link the production resolver without the rest of the driver.
+  if ld_args_gc_sections.length() > 0
+    # Exercise the real resolver; unused command-recording entry points in
+    # hk_sync.c need no device implementation in this CPU-only executable.
+    test(
+      'hk_sync_prior',
+      executable(
+        'hk_sync_prior_test',
+        files('tests/test-hk-sync-prior.c', 'hk_sync.c'),
+        include_directories : [
+          include_directories('.'),
+          inc_gallium, inc_gallium_aux, inc_include, inc_src, inc_asahi,
+          inc_virtio_gpu, inc_virtio_vdrm,
+        ],
+        dependencies : [
+          idep_nir_headers, idep_mesautil, idep_libagx,
+          idep_libagx_shaders_h, idep_agx_pack,
+          idep_vulkan_runtime_headers, idep_vulkan_util_headers,
+        ],
+        c_args : [c_msvc_compat_args, '-Wno-error=pointer-arith'],
+        link_args : [ld_args_gc_sections],
+        gnu_symbol_visibility : 'hidden',
+      ),
+      suite : ['asahi'],
+    )
+
+  endif
+
   test(
     'hk_g17p_compression',
     executable(
@@ -144,7 +172,7 @@ if with_tests
     'hk_shader_variants',
     executable(
       'hk_shader_variants_test',
-      files('tests/test-hk-shader-variants.c', 'hk_ordinary_descriptor.c',
+      files('tests/test-hk-shader-variants.c',
             'hk_descriptor_set_layout_hash.c'),
       include_directories : [
         include_directories('.', '../libagx', '../../gallium/include',
@@ -241,6 +269,20 @@ if with_tests
   )
 
 
+
+  test(
+    'hk_nir_image_view_min_lod',
+    executable(
+      'hk_nir_image_view_min_lod_test',
+      files('tests/test-hk-nir-image-view-min-lod.c',
+            'hk_nir_lower_image_view_min_lod.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
 
   test(
     'hk_nir_robust_image',
@@ -404,25 +446,6 @@ if with_tests
   )
 
   test(
-    'hk_ordinary_guard',
-    executable(
-      'hk_ordinary_guard_test',
-      files('tests/test-hk-ordinary-guard.c', 'hk_nir_lower_descriptors.c'),
-      include_directories : [
-        include_directories('.', '../libagx', '../../gallium/include',
-                            '../../gallium/auxiliary', '../../vulkan/runtime',
-                            '../../vulkan/util', '../../vulkan/wsi',
-                            '../../compiler/spirv', '../../virtio/virtio-gpu',
-                            '../../virtio/vdrm'),
-        inc_include, inc_src, inc_asahi,
-      ],
-      dependencies : [idep_nir, idep_mesautil, idep_libagx, idep_libagx_shaders_h],
-      gnu_symbol_visibility : 'hidden',
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'hk_printf_root',
     executable(
       'hk_printf_root_test',
@@ -526,6 +549,14 @@ if with_tests
 
   test('hk_vbo_raw', executable('hk_vbo_raw_test',
     files('tests/test-hk-vbo-raw.c'),
+    include_directories : [include_directories('.'), inc_include, inc_src, inc_asahi],
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_lib, libasahi_layout, libasahi_compiler],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden'), suite : ['asahi'])
+
+  test('hk_vertex_attribs', executable('hk_vertex_attribs_test',
+    files('tests/test-hk-vertex-attribs.c'),
     include_directories : [include_directories('.'), inc_include, inc_src, inc_asahi],
     dependencies : [idep_nir, idep_mesautil],
     link_with : [libasahi_lib, libasahi_layout, libasahi_compiler],
@@ -1365,6 +1396,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    foreach mode, op : {'1': 'tex', '2': 'txb', '3': 'txl', '4': 'txd',
+                        '5': 'txf0', '6': 'txf1'}
+      executable(
+        'g17p-vulkan-min-lod-' + op,
+        files('tests/g17p_offscreen_triangle.c'),
+        include_directories : [inc_include],
+        dependencies : [dep_dl],
+        c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_MIN_LOD=' + mode],
+        gnu_symbol_visibility : 'hidden',
+      )
+    endforeach
+
     executable(
       'g17p-vulkan-texel-fetch-lod',
       files('tests/g17p_offscreen_triangle.c'),
@@ -1792,6 +1835,17 @@ if with_tests
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
       gnu_symbol_visibility : 'hidden',
+    )
+
+    # Explicit hardware regression; do not register it with meson test.
+    executable(
+      'g17p-vulkan-none-preserve',
+      files('tests/g17p_vulkan_none_preserve.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+      build_by_default : false,
     )
 
     # Multisample depth attachment: per-sample depth testing, and the ZLS

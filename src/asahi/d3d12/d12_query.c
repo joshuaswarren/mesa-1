@@ -79,6 +79,9 @@ d12_query_heap_Release(ID3D12QueryHeap *iface)
    uint32_t refs = p_atomic_dec_return(&heap->refcount);
 
    if (refs == 0) {
+      if (heap->timestamp_handle)
+         heap->device->dev.ops.bo_unbind_object(&heap->device->dev,
+                                               heap->timestamp_handle);
       if (heap->bo)
          agx_bo_unreference(&heap->device->dev, heap->bo);
       d12_private_data_store_destroy(&heap->private_data);
@@ -161,13 +164,20 @@ d12_query_heap_create_flags(struct d12_device *device,
    if (!heap)
       return E_OUTOFMEMORY;
 
-   heap->iface.lpVtbl = (ID3D12QueryHeapVtbl *)&d12_query_heap_vtbl;
+   heap->iface.lpVtbl = (ID3D12QueryHeapVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_QUERY_HEAP, &d12_query_heap_vtbl);
    heap->refcount = 1;
    heap->desc = *desc;
    heap->flags = flags;
    heap->stride = stride;
 
    size_t result_size = (size_t)stride * desc->Count;
+   const bool timestamp = d12_query_core_is_timestamp_heap(desc->Type);
+   /* Firmware timestamp offsets are 32-bit, including for copy queues. */
+   if (timestamp && (uint64_t)result_size > (uint64_t)UINT32_MAX + 1) {
+      free(heap);
+      return E_OUTOFMEMORY;
+   }
    size_t allocation_size = result_size;
    if (desc->Type == D3D12_QUERY_HEAP_TYPE_OCCLUSION) {
       /* Final results stay contiguous at the front for ResolveQueryData;
@@ -179,8 +189,12 @@ d12_query_heap_create_flags(struct d12_device *device,
 
    /* Zeroed, so a query that is resolved without ever being written
     * reads as "nothing happened" rather than as stale memory. */
-   heap->bo = agx_bo_create(&device->dev, allocation_size, 0,
-                            AGX_BO_WRITEBACK, "d3d12 query heap");
+   enum agx_bo_flags bo_flags = AGX_BO_WRITEBACK;
+   /* Like Honeykrisp, firmware-written timestamp storage must be shared. */
+   if (timestamp)
+      bo_flags |= AGX_BO_SHARED;
+   heap->bo = agx_bo_create(&device->dev, allocation_size, 0, bo_flags,
+                            "d3d12 query heap");
    if (!heap->bo) {
       free(heap);
       return E_OUTOFMEMORY;
@@ -195,6 +209,13 @@ d12_query_heap_create_flags(struct d12_device *device,
       return E_OUTOFMEMORY;
    }
    memset(mapping, 0, allocation_size);
+
+   if (timestamp &&
+       agx_bind_timestamps(&device->dev, heap->bo, &heap->timestamp_handle)) {
+      agx_bo_unreference(&device->dev, heap->bo);
+      free(heap);
+      return E_OUTOFMEMORY;
+   }
 
    heap->device = device;
    d12_private_data_store_init(&heap->private_data, (IUnknown *)&heap->iface);

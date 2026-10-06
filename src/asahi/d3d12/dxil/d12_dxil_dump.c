@@ -165,22 +165,24 @@ main(int argc, char **argv)
    printf("OK: %u blocks, %u records\n", st.blocks, st.records);
 
    /* Module decode (G4b) */
-   struct d12_module mod;
-   if (!d12_dxil_module_parse(&mod, bc, bc_size)) {
+   struct d12_module *mod = d12_dxil_module_alloc();
+   if (!mod)
+      return 1;
+   if (!d12_dxil_module_parse(mod, bc, bc_size)) {
       fprintf(stderr, "MODULE PARSE FAILED: %s\n",
-              mod.error ? mod.error : "unknown");
-      d12_dxil_module_finish(&mod);
+              mod->error ? mod->error : "unknown");
+      d12_dxil_module_free(mod);
       return 1;
    }
 
    printf("module: %u types, %u values, %u functions, %u metadata, "
           "%u named\n",
-          mod.num_types, mod.num_values, mod.num_functions,
-          mod.num_metadata, mod.num_named_md);
+          mod->num_types, mod->num_values, mod->num_functions,
+          mod->num_metadata, mod->num_named_md);
 
    unsigned defs = 0;
-   for (unsigned i = 0; i < mod.num_functions; i++) {
-      const struct d12_function *f = &mod.functions[i];
+   for (unsigned i = 0; i < mod->num_functions; i++) {
+      const struct d12_function *f = &mod->functions[i];
       if (f->is_declaration)
          continue;
       defs++;
@@ -190,8 +192,8 @@ main(int argc, char **argv)
 
    /* dx.op intrinsics used, by declaration name */
    unsigned dxops = 0;
-   for (unsigned i = 0; i < mod.num_functions; i++) {
-      const struct d12_function *f = &mod.functions[i];
+   for (unsigned i = 0; i < mod->num_functions; i++) {
+      const struct d12_function *f = &mod->functions[i];
       if (!f->is_declaration || !f->name)
          continue;
       if (strncmp(f->name, "dx.op.", 6))
@@ -210,14 +212,14 @@ main(int argc, char **argv)
     * constant lookup table -- the recorded type is the same shape for both
     * -- and it is not visible anywhere else without a debugger.
     */
-   for (unsigned i = 0; i < mod.num_values; i++) {
-      const struct d12_value *v = &mod.values[i];
+   for (unsigned i = 0; i < mod->num_values; i++) {
+      const struct d12_value *v = &mod->values[i];
       if (v->kind != D12_VALUE_GLOBAL)
          continue;
 
       printf("  global @%u %s: type %u (%s) addrspace(%u)%s\n", i,
              v->name ? v->name : "(unnamed)", v->type,
-             v->type < mod.num_types ? type_kind_name(mod.types[v->type].kind)
+             v->type < mod->num_types ? type_kind_name(mod->types[v->type].kind)
                                      : "?",
              v->addr_space,
              v->addr_space == D12_ADDR_SPACE_GROUPSHARED ? " groupshared"
@@ -226,8 +228,8 @@ main(int argc, char **argv)
 
    static const char *const class_name[] = {"SRV t", "UAV u", "CBV b",
                                             "SMP s"};
-   for (unsigned i = 0; i < mod.num_resources; i++) {
-      const struct d12_resource_binding *rb = &mod.resources[i];
+   for (unsigned i = 0; i < mod->num_resources; i++) {
+      const struct d12_resource_binding *rb = &mod->resources[i];
       printf("  resource %s%u", rb->klass < 4 ? class_name[rb->klass] : "? ",
              rb->lower_bound);
       if (rb->range_size != 1)
@@ -240,8 +242,8 @@ main(int argc, char **argv)
       printf("\n");
    }
 
-   for (unsigned i = 0; i < mod.num_named_md; i++) {
-      const struct d12_named_md *nmd = &mod.named_md[i];
+   for (unsigned i = 0; i < mod->num_named_md; i++) {
+      const struct d12_named_md *nmd = &mod->named_md[i];
       printf("  named md %s:", nmd->name ? nmd->name : "(?)");
       for (unsigned n = 0; n < nmd->num_nodes; n++)
          printf(" !%llu", (unsigned long long)nmd->nodes[n]);
@@ -250,8 +252,8 @@ main(int argc, char **argv)
 
    if (verbose) {
       printf("  metadata table:\n");
-      for (unsigned i = 0; i < mod.num_metadata; i++) {
-         const struct d12_metadata *md = &mod.metadata[i];
+      for (unsigned i = 0; i < mod->num_metadata; i++) {
+         const struct d12_metadata *md = &mod->metadata[i];
          printf("    !%u ", i);
          switch (md->kind) {
          case D12_MD_STRING:
@@ -263,8 +265,8 @@ main(int argc, char **argv)
             /* Resolve integer constants inline: resource metadata is a
              * tree of these, and reading it as bare value ids is useless.
              */
-            if (md->value_id < mod.num_values) {
-               const struct d12_value *v = &mod.values[md->value_id];
+            if (md->value_id < mod->num_values) {
+               const struct d12_value *v = &mod->values[md->value_id];
                if (v->kind == D12_VALUE_CONSTANT) {
                   printf("  = %llu",
                          (unsigned long long)(v->is_null ? 0 : v->const_int));
@@ -292,7 +294,7 @@ main(int argc, char **argv)
    printf("MODULE OK: %u function definition(s), %u dx.op intrinsic(s)\n",
           defs, dxops);
 
-   d12_dxil_module_finish(&mod);
+   d12_dxil_module_free(mod);
    free(data);
    return 0;
 }

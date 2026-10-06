@@ -26,6 +26,7 @@
 #include "hk_sampler.h"
 #include "asahi/compiler/agx_nir.h"
 
+#include "util/cache_ops.h"
 #include "util/u_debug.h"
 
 #include <inttypes.h>
@@ -96,6 +97,16 @@ write_accel_struct_desc(struct hk_descriptor_set *set,
    write_desc(set, binding, elem, &addr, sizeof(addr));
 }
 
+/* Make a CPU write to descriptor-set memory visible to the GPU (see
+ * hk_descriptor_pool::cpu_cached); the fence is queue submission's. */
+static inline void
+hk_descriptor_set_publish(const struct hk_descriptor_set *set, void *data,
+                          size_t size)
+{
+   if (set->cpu_cached)
+      util_flush_range_no_fence(data, size);
+}
+
 static void
 write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
            const void *desc_data, size_t desc_size)
@@ -104,6 +115,91 @@ write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
    void *dst = desc_ubo_data(set, binding, elem, &dst_size);
    assert(desc_size <= dst_size);
    memcpy(dst, desc_data, desc_size);
+   hk_descriptor_set_publish(set, dst, desc_size);
+}
+
+/* The G17P descriptor of a single-plane view, optionally with a single-plane
+ * sampler without a custom border: exactly the bytes the general path below
+ * writes for that case, built directly instead of through its three-plane
+ * staging.  Returns false for every other case. */
+static inline bool
+write_sampled_image_view_desc_g17p_single(struct hk_descriptor_set *set,
+                                          const VkDescriptorImageInfo *info,
+                                          uint32_t binding, uint32_t elem,
+                                          VkDescriptorType descriptor_type)
+{
+   static_assert(sizeof(struct hk_sampled_image_descriptor) ==
+                    HK_TEXTURE_DESCRIPTOR_AGX3_SIZE +
+                       sizeof(struct hk_sampled_image_descriptor_sw),
+                 "G17P sampled descriptor is texture then software words");
+
+   if (set->layout->descriptor_generation != 9 || !info)
+      return false;
+
+   if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[binding];
+      const struct hk_sampler *sampler =
+         binding_layout->immutable_samplers
+            ? binding_layout->immutable_samplers[elem]
+            : hk_sampler_from_handle(info->sampler);
+      if (sampler->has_border || sampler->plane_count != 1)
+         return false;
+      assert(sampler->planes[0].hw->index < (1 << 12));
+
+      struct hk_sampled_image_descriptor desc = {
+         .sw = {
+            .sampler = sampler->planes[0].hw->key,
+            .sampler_index = sampler->planes[0].hw->index + 28,
+            .clamp_0_sampler_index_or_negative = -1,
+            .lod_bias_fp16 = sampler->lod_bias_fp16,
+         },
+      };
+      if (!hk_set_null_native_texture(9, &desc.tex))
+         return false;
+      write_desc(set, binding, elem, &desc, sizeof(desc));
+      return true;
+   }
+
+   if (info->imageView == VK_NULL_HANDLE)
+      return false;
+
+   VK_FROM_HANDLE(hk_image_view, view, info->imageView);
+   if (view->plane_count != 1 || view->g17p_uscaled_normalized)
+      return false;
+
+   const struct hk_sampler *sampler = NULL;
+   if (descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[binding];
+      sampler = binding_layout->immutable_samplers
+                   ? binding_layout->immutable_samplers[elem]
+                   : hk_sampler_from_handle(info->sampler);
+      if (sampler->has_border || sampler->plane_count != 1)
+         return false;
+      assert(sampler->planes[0].hw->index < (1 << 12));
+   }
+
+   const bool ia = descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+   struct hk_sampled_image_descriptor desc = {
+      .tex = ia ? view->planes[0].ia : view->planes[0].sampled,
+      .sw = {
+         .sampler_index = sampler ? sampler->planes[0].hw->index + 28
+                                  : HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX,
+         .clamp_0_sampler_index_or_negative = -1,
+         .lod_bias_fp16 = sampler ? sampler->lod_bias_fp16 : 0,
+         .min_lod_fp16 = view->sampled_min_lod_fp16,
+         .min_lod_uint16 = view->sampled_min_lod_uint16,
+         .scaled_conversion = view->g17p_scaled_conversion,
+         .sampled_heap_index = ia ? view->planes[0].input_heap_index
+                                  : view->planes[0].sampled_heap_index,
+      },
+   };
+   if (sampler)
+      desc.sw.sampler = sampler->planes[0].hw->key;
+
+   write_desc(set, binding, elem, &desc, sizeof(desc));
+   return true;
 }
 
 static void
@@ -112,6 +208,10 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
                               uint32_t binding, uint32_t elem,
                               VkDescriptorType descriptor_type)
 {
+   if (write_sampled_image_view_desc_g17p_single(set, info, binding, elem,
+                                                 descriptor_type))
+      return;
+
    struct hk_sampled_image_descriptor desc[3] = {};
    const unsigned generation = set->layout->descriptor_generation;
    const struct hk_sampled_image_descriptor_layout native =
@@ -150,10 +250,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
             view->planes[plane].input_heap_index :
             view->planes[plane].sampled_heap_index;
 
-         float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
-
-         desc[plane].sw.min_lod_fp16 = _mesa_float_to_half(min_lod);
-         desc[plane].sw.min_lod_uint16 = min_lod;
+         desc[plane].sw.min_lod_fp16 = view->sampled_min_lod_fp16;
+         desc[plane].sw.min_lod_uint16 = view->sampled_min_lod_uint16;
          const enum pipe_format logical = hk_format_to_pipe_format(view->vk.format);
          const enum pipe_format integer = hk_scaled_texture_format(logical);
          if (generation == 9 && integer != PIPE_FORMAT_NONE)
@@ -248,6 +346,20 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
 
    for (unsigned plane = view_planes; plane < plane_count; ++plane)
       hk_set_null_native_texture(generation, &desc[plane].tex);
+
+   /* When the semantic struct already matches the native layout, publish it
+    * with one bulk copy. This avoids the intermediate packed array while
+    * preserving the existing whole-descriptor destination copy. In particular,
+    * do not split mapped descriptor BO writes into separate texture/tail copies.
+    */
+   static_assert(sizeof(desc[0]) == sizeof(desc[0].tex) + sizeof(desc[0].sw),
+                 "sampled descriptor has no holes");
+   if (native.texture == offsetof(struct hk_sampled_image_descriptor, tex) &&
+       native.sampler == offsetof(struct hk_sampled_image_descriptor, sw) &&
+       native.stride == sizeof(desc[0])) {
+      write_desc(set, binding, elem, desc, native.stride * plane_count);
+      return;
+   }
 
    /* Only the written planes are read, so only they need zeroing. */
    uint8_t packed[3 * HK_MAX_DESCRIPTOR_SIZE];
@@ -593,6 +705,7 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                MIN2(dst_binding_layout->stride, src_binding_layout->stride);
             assert(copy_size <= dst_max_size && copy_size <= src_max_size);
             memcpy(dst_map, src_map, copy_size);
+            hk_descriptor_set_publish(dst, dst_map, copy_size);
          }
       }
 
@@ -786,8 +899,16 @@ hk_CreateDescriptorPool(VkDevice _device,
        * owner (a command slab, an upload pool, a geometry heap) left behind,
        * which is exactly the shape of a wild descriptor address.
        */
+      /* G17P: write descriptors through the CPU cache and clean what is
+       * written (hk_descriptor_set_publish()); write-combined stores of
+       * every descriptor and of the per-allocation zeroing above stalled
+       * the recording core. */
+      pool->cpu_cached = dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops();
       const enum agx_bo_flags pool_flags =
-         dev->dev.chip == AGX_CHIP_G17P ? AGX_BO_ZERO_ON_REUSE : 0;
+         dev->dev.chip == AGX_CHIP_G17P
+            ? AGX_BO_ZERO_ON_REUSE |
+                 (pool->cpu_cached ? AGX_BO_WRITEBACK : 0)
+            : 0;
       pool->bo =
          agx_bo_create(&dev->dev, bo_size, 0, pool_flags, "Descriptor pool");
       if (!pool->bo) {
@@ -888,8 +1009,11 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
        * object that has since been destroyed.  All-zero reads as the reserved
        * null texture / heap index 0, which is bound and safe.
        */
-      if (dev->dev.chip == AGX_CHIP_G17P)
+      set->cpu_cached = pool->cpu_cached;
+      if (dev->dev.chip == AGX_CHIP_G17P) {
          memset(set->mapped_ptr, 0, set->size);
+         hk_descriptor_set_publish(set, set->mapped_ptr, set->size);
+      }
    }
 
    vk_descriptor_set_layout_ref(&layout->vk);

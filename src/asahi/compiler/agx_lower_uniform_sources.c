@@ -7,17 +7,6 @@
 #include "agx_debug.h"
 #include "agx3_uniform_integer_instr.h"
 
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_tex_uniforms,
-                          "AGX_G17P_VERTEX_TEX_UNIFORMS", false)
-
-bool
-agx_vertex_tex_uniforms(const agx_context *ctx)
-{
-   return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          ctx->stage == MESA_SHADER_VERTEX && !ctx->is_preamble &&
-          debug_get_option_agx_g17p_vertex_tex_uniforms();
-}
-
 /*
  * Not all instructions can take uniforms. Memory instructions can take
  * uniforms, but only for their base (first) source and only in the
@@ -78,12 +67,11 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
              (src_index == 2 ||
               (encoding == AGX_ISA_ENCODING_AGX2 && src_index == 1));
    case AGX_OPCODE_TEXTURE_SAMPLE:
-      /* v57 AGX_G17P_TEX_UNIFORM_OPERANDS: the texture (3) and sampler (4)
+      /* The texture (3) and sampler (4)
        * index operands read the uniform file directly, as Apple's G17P
        * argument-buffer fragments do (kind 3, u12/u16). Keep Apple's
        * four-half alignment and the encoder's low-file range. */
       if (encoding == AGX_ISA_ENCODING_AGX3B &&
-          (agx_get_v57_flags() & AGX_V57_TEX_UNIFORM_OPERANDS) &&
           (src_index == 3 || src_index == 4))
          return !high && !(value & 3) && value <= 252 &&
                 (size == AGX_SIZE_64 || size == AGX_SIZE_32);
@@ -148,13 +136,12 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    case AGX_OPCODE_IF_ICMP:
    case AGX_OPCODE_WHILE_ICMP:
    case AGX_OPCODE_BREAK_IF_ICMP:
-      /* AGX_G17P_UNIFORM_COMPARE (v52b, default off): Apple's G17P loop
+      /* Apple's G17P loop
        * test compares a GPR with an aligned 32-bit uniform in one icmp
        * (fs-apple.bin +0xbc 0a832307060007020000: f18 = u6, f24 = 3), so
        * keep the uniform as the second operand instead of copying it into
        * a GPR on every iteration. */
       return encoding == AGX_ISA_ENCODING_AGX3B &&
-             (agx_get_alu_flags() & AGX_ALU_G17P_UNIFORM_COMPARE) &&
              src_index == 1 && size == AGX_SIZE_32 && !(value & 1) &&
              value < 256;
    case AGX_OPCODE_PHI:
@@ -168,6 +155,50 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
 
       return !is_64;
    }
+}
+
+/*
+ * SMP texture/sampler descriptor operands kept in the uniform file
+ * (AGX_G17P_TEX_UNIFORM_OPERANDS, or the vertex-only qualification) are
+ * restricted to the operand-kind pairs Apple's G17P compiler emits:
+ * uniform/uniform and, outside cube sampling, a uniform texture with an
+ * immediate sampler (native corpus: f103/f132 = 3/3 and 3/1 only, never a
+ * register beside a uniform). Cube pairs are grounded only as same-kind pairs
+ * (agx3_tex_core.c). Returns true when `texture`/`sampler`, as they would be
+ * encoded, contain a retained uniform in any other pairing.
+ */
+static bool
+agx_tex_uniform_stays(const agx_context *ctx, agx_index src, unsigned s)
+{
+   return src.type == AGX_INDEX_UNIFORM &&
+          agx_instr_accepts_uniform(ctx->key->dev.encoding,
+                                    AGX_OPCODE_TEXTURE_SAMPLE, s, src.value,
+                                    src.size);
+}
+
+bool
+agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx, const agx_instr *I,
+                                  agx_index texture, agx_index sampler)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       I->op != AGX_OPCODE_TEXTURE_SAMPLE)
+      return false;
+   const agx_index src[2] = {texture, sampler};
+   enum agx_index_type kind[2];
+   bool any_uniform = false;
+   for (unsigned j = 0; j < 2; ++j) {
+      const bool stays = agx_tex_uniform_stays(ctx, src[j], 3 + j);
+      kind[j] = stays ? AGX_INDEX_UNIFORM :
+                src[j].type == AGX_INDEX_IMMEDIATE ? AGX_INDEX_IMMEDIATE :
+                                                     AGX_INDEX_NORMAL;
+      any_uniform |= stays;
+   }
+   const bool cube = I->dim == AGX_DIM_CUBE || I->dim == AGX_DIM_CUBE_ARRAY;
+   const bool witnessed =
+      kind[0] == kind[1] ||
+      (!cube && kind[0] == AGX_INDEX_UNIFORM &&
+       kind[1] == AGX_INDEX_IMMEDIATE);
+   return any_uniform && !witnessed;
 }
 
 static void
@@ -219,6 +250,46 @@ agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
             first_uniform = UINT_MAX;
       }
 
+      /* G17P ISEL reads an aligned 32-bit uniform directly as one comparand
+       * beside a 32-bit register (f36/f42 = 3, f51/f57 = 3) or as either
+       * select (f66/f72 = 3, f83/f89 = 3), 32-bit result (agx3_isel_core.c
+       * witnesses). Keep those uniforms instead of copying each one into a
+       * GPR per use; prefer the selects when both kinds are present, since
+       * a uniform comparand is only witnessed beside register selects. */
+      bool keep_isel_uniform[4] = {false};
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          !ctx->is_preamble &&
+          I->op == AGX_OPCODE_ICMPSEL && I->nr_dests == 1 &&
+          I->nr_srcs == 4 && I->dest[0].size == AGX_SIZE_32 &&
+          agx_channels(I->dest[0]) == 1 &&
+          I->src[0].size == AGX_SIZE_32 && I->src[1].size == AGX_SIZE_32) {
+         bool uniform_ok[4], reg32[4];
+         for (unsigned j = 0; j < 4; ++j) {
+            const agx_index x = I->src[j];
+            uniform_ok[j] = x.type == AGX_INDEX_UNIFORM &&
+                            x.size == AGX_SIZE_32 && !(x.value & 1) &&
+                            x.value + 2 <= 256 && !x.abs && !x.neg &&
+                            !x.memory;
+            reg32[j] = x.type == AGX_INDEX_NORMAL &&
+                       x.size == AGX_SIZE_32 && !x.abs && !x.neg &&
+                       agx_channels(x) == 1;
+         }
+         if (uniform_ok[2] || uniform_ok[3]) {
+            keep_isel_uniform[2] = uniform_ok[2];
+            keep_isel_uniform[3] = uniform_ok[3];
+         } else if (uniform_ok[0] && reg32[1]) {
+            keep_isel_uniform[0] = true;
+         } else if (uniform_ok[1] && reg32[0]) {
+            keep_isel_uniform[1] = true;
+         }
+      }
+
+      /* An unwitnessed descriptor pair (agx3_tex_uniform_pair_unwitnessed)
+       * materializes its uniform operand, keeping the register form. */
+      const bool copy_tex_uniform =
+         I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+         agx3_tex_uniform_pair_unwitnessed(ctx, I, I->src[3], I->src[4]);
+
       /* Exports end the block and admit no instruction between them; place
        * their materialized sources before the first export of the run. */
       if (I->op == AGX_OPCODE_EXPORT) {
@@ -258,14 +329,13 @@ agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
          const bool is_int_compare =
             I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_WHILE_ICMP ||
             I->op == AGX_OPCODE_BREAK_IF_ICMP;
-         /* AGX_G17P_UNIFORM_IMM_COMPARE (default on): an aligned 32-bit
+         /* An aligned 32-bit
           * uniform against an 8-bit immediate is one native icmp (Apple's
           * G17P loop guard, fs-apple.bin +0x0c: u6 == 0). Keep the uniform
           * in place instead of copying it into a GPR first; the packer
           * emits agx3_cf_icmp_uniform_imm() for either operand order. */
          const bool uniform_imm_compare =
             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-            (agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE) &&
             is_int_compare && I->nr_srcs == 2 &&
             I->src[s].type == AGX_INDEX_UNIFORM &&
             I->src[s].size == AGX_SIZE_32 && !(I->src[s].value & 1) &&
@@ -278,20 +348,12 @@ agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
             (I->src[0].type != AGX_INDEX_NORMAL ||
              I->src[0].size != AGX_SIZE_32 || I->src[0].abs ||
              I->src[0].neg);
-         /* Qualify the native vertex sampler operands independently of the
-          * older option that also changes fragment sampling. The saved native
-          * terrain shader reads aligned texture/sampler indices directly from
-          * the low uniform file. Coordinate and LOD legalization is unchanged.
-          */
-         const bool vertex_tex_uniform =
-            agx_vertex_tex_uniforms(ctx) &&
-            I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
-            I->src[s].value <= 252 && !(I->src[s].value & 3) &&
-            (I->src[s].size == AGX_SIZE_32 || I->src[s].size == AGX_SIZE_64);
+         const bool copy_tex = copy_tex_uniform && (s == 3 || s == 4);
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
-              copy_compare_uniform ||
-              !(native_integer || vertex_tex_uniform || uniform_imm_compare ||
+              copy_compare_uniform || copy_tex ||
+              !(native_integer || uniform_imm_compare ||
+                (s < 4 && keep_isel_uniform[s]) ||
                 agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];

@@ -100,12 +100,18 @@ struct d12_blockinfo {
    unsigned count;
 };
 
-/* A decoded record. Operand storage is caller-owned scratch. */
-#define D12_MAX_RECORD_OPS 1024
+/*
+ * A decoded record. The operand storage belongs to the bitstream walker,
+ * which grows it on demand: a CST_DATA lookup table or a long MD_STRING
+ * (source paths, embedded HLSL) can carry far more operands than any
+ * fixed scratch would allow. Records are transient -- a visitor must copy
+ * what it keeps before returning.
+ */
+#define D12_LIMIT_RECORD_OPS (1u << 26)
 
 struct d12_record {
    uint32_t code;
-   uint64_t ops[D12_MAX_RECORD_OPS];
+   uint64_t *ops;
    unsigned num_ops;
 
    /* BLOB payload, if the abbreviation ended in one */
@@ -119,6 +125,11 @@ struct d12_bitstream {
 
    /* Absolute bit position */
    uint64_t pos_bits;
+
+   /* Record operand scratch, owned by the walk and reused by every record
+    * it decodes. Grown by record_push. */
+   uint64_t *record_ops;
+   unsigned record_ops_capacity;
 
    bool error;
    const char *error_msg;
@@ -285,11 +296,11 @@ struct d12_type {
       } seq;
       struct {                   /* FUNCTION */
          uint32_t ret;
-         uint32_t params[16];
+         uint32_t *params;      /* module arena */
          unsigned num_params;
       } func;
       struct {                   /* STRUCT_ANON / STRUCT_NAMED */
-         uint32_t members[16];
+         uint32_t *members;     /* module arena */
          unsigned num_members;
       } strct;
    };
@@ -364,25 +375,36 @@ struct d12_value {
    uint32_t func_index; /* index into module->functions, for FUNCTION */
 };
 
-/* One decoded instruction, operands kept as value indices where resolved */
-#define D12_MAX_INST_OPS 16
+/*
+ * Hard ceilings on dynamically grown tables. These are sanity bounds on
+ * malformed input, not capacities: every table starts small and doubles.
+ * Real uber-shaders run to tens of thousands of instructions and values,
+ * which the old fixed arrays (4096 instructions, 8192 values) rejected
+ * outright at PSO creation.
+ */
+#define D12_LIMIT_TYPES     (1u << 20)
+#define D12_LIMIT_VALUES    (1u << 24)
+#define D12_LIMIT_FUNCTIONS (1u << 20)
+#define D12_LIMIT_METADATA  (1u << 24)
+#define D12_LIMIT_INSTS     (1u << 24)
+#define D12_LIMIT_BLOCKS    (1u << 20)
 
 /* A phi's incoming edge: which value arrives from which basic block. */
-#define D12_MAX_PHI_SOURCES 8
-
-/* Basic blocks per function. Real HLSL is far below this. */
-#define D12_MAX_BLOCKS 256
 
 struct d12_phi_src {
    uint32_t value; /* ~0u when it could not be resolved */
    uint32_t block;
 };
 
+/* One decoded instruction, operands kept as value indices where resolved.
+ * The operand and phi-source arrays live in the module arena, sized from
+ * the record: a dx.op.traceRay call carries 17 operands, a phi merging a
+ * wide switch has one source per case. */
 struct d12_inst {
    enum d12_func_code code;
    uint32_t result_type;              /* type index, or ~0 if void */
    uint32_t result_value;             /* value index it defines, or ~0 */
-   uint32_t ops[D12_MAX_INST_OPS];    /* value indices */
+   uint32_t *ops;                     /* value indices (module arena) */
    unsigned num_ops;
    uint64_t extra[4];                 /* opcode-specific immediates */
    unsigned num_extra;
@@ -393,7 +415,7 @@ struct d12_inst {
    uint32_t block;
 
    /* PHI only */
-   struct d12_phi_src phi_srcs[D12_MAX_PHI_SOURCES];
+   struct d12_phi_src *phi_srcs;      /* module arena */
    unsigned num_phi_srcs;
 };
 
@@ -412,24 +434,23 @@ d12_inst_is_terminator(const struct d12_inst *inst)
    }
 }
 
-#define D12_MAX_INSTS 4096
-
 struct d12_function {
    const char *name;
    uint32_t type;        /* function type index */
    bool is_declaration;  /* proto only (dx.op intrinsics are declarations) */
    uint32_t value_index; /* its slot in the module value list */
 
-   /* Body (definitions only) */
+   /* Body (definitions only), grown as records arrive */
    struct d12_inst *insts;
    unsigned num_insts;
+   unsigned inst_capacity;
    unsigned num_blocks;
    unsigned first_value; /* value index of this function's first argument */
 };
 
 struct d12_md_node {
-   uint64_t ops[64]; /* metadata ids (already un-biased), 0 = null */
-   bool op_is_null[64];
+   uint64_t *ops;     /* metadata ids (already un-biased), module arena */
+   bool *op_is_null;  /* module arena */
    unsigned num_ops;
 };
 
@@ -443,7 +464,7 @@ struct d12_metadata {
 
 struct d12_named_md {
    const char *name;
-   uint64_t nodes[16];
+   uint64_t *nodes;   /* module arena */
    unsigned num_nodes;
 };
 
@@ -471,10 +492,6 @@ struct d12_sig_element {
 
 #define D12_MAX_SIG_ELEMENTS 32
 
-#define D12_MAX_TYPES     512
-#define D12_MAX_VALUES    8192
-#define D12_MAX_FUNCTIONS 256
-#define D12_MAX_METADATA  4096
 #define D12_MAX_NAMED_MD  32
 
 /*
@@ -502,8 +519,13 @@ enum d12_resource_class {
 enum d12_resource_kind {
    D12_RES_KIND_TEXTURE_1D = 1,
    D12_RES_KIND_TEXTURE_2D = 2,
+   D12_RES_KIND_TEXTURE_2DMS = 3,
+   D12_RES_KIND_TEXTURE_3D = 4,
+   D12_RES_KIND_TEXTURE_CUBE = 5,
    D12_RES_KIND_TEXTURE_1D_ARRAY = 6,
    D12_RES_KIND_TEXTURE_2D_ARRAY = 7,
+   D12_RES_KIND_TEXTURE_2DMS_ARRAY = 8,
+   D12_RES_KIND_TEXTURE_CUBE_ARRAY = 9,
    D12_RES_KIND_TYPED_BUFFER = 10,
    D12_RES_KIND_RAW_BUFFER = 11,
    D12_RES_KIND_STRUCTURED_BUFFER = 12,
@@ -575,39 +597,47 @@ struct d12_resource_binding {
    uint32_t global_value; /* ~0u when unresolved */
 };
 
-/* One never-moved block of interned strings. */
-struct d12_str_chunk {
-   struct d12_str_chunk *next;
+/* One never-moved block of the module arena. */
+struct d12_arena_chunk {
+   struct d12_arena_chunk *next;
    char data[];
 };
 
 struct d12_module {
-   struct d12_type types[D12_MAX_TYPES];
-   unsigned num_types;
+   /*
+    * The element tables are grown by doubling as records arrive, up to
+    * the D12_LIMIT_* ceilings. They MOVE when they grow: nothing may hold
+    * a pointer to an element across a push into the same table. Consumers
+    * index by number, which is what the bitcode does anyway.
+    */
+   struct d12_type *types;
+   unsigned num_types, type_capacity;
 
-   struct d12_value values[D12_MAX_VALUES];
-   unsigned num_values;
+   struct d12_value *values;
+   unsigned num_values, value_capacity;
 
-   struct d12_function functions[D12_MAX_FUNCTIONS];
-   unsigned num_functions;
+   struct d12_function *functions;
+   unsigned num_functions, function_capacity;
 
-   struct d12_metadata metadata[D12_MAX_METADATA];
-   unsigned num_metadata;
+   struct d12_metadata *metadata;
+   unsigned num_metadata, metadata_capacity;
 
    struct d12_named_md named_md[D12_MAX_NAMED_MD];
    unsigned num_named_md;
 
    /*
-    * String arena for names parsed out of the bitstream.
+    * Arena for names and the small per-element arrays parsed out of the
+    * bitstream: struct members, function parameters, metadata node
+    * operands, instruction operands and phi sources.
     *
-    * CHUNKED, and it has to be: every name we hand out is a bare pointer
+    * CHUNKED, and it has to be: everything handed out is a bare pointer
     * into this storage, held by types, values and functions for the life
     * of the module. A single realloc'd buffer moves, and every one of
     * those pointers silently starts reading whatever now occupies the old
     * allocation -- a use-after-free that produces plausible-looking
     * garbage rather than a crash. Chunks are never moved or resized.
     */
-   struct d12_str_chunk *strings;
+   struct d12_arena_chunk *arena;
    size_t chunk_used, chunk_size;
 
    /* Entry-point signatures, resolved from dx.entryPoints */
@@ -678,6 +708,9 @@ const struct d12_sig_element *d12_dxil_find_sig(const struct d12_sig_element *si
  * Parse a complete module. Returns false with mod->error set on failure.
  * The module owns heap allocations; free with d12_dxil_module_finish.
  */
+struct d12_module *d12_dxil_module_alloc(void);
+void d12_dxil_module_free(struct d12_module *mod);
+void *d12_dxil_module_arena_alloc(struct d12_module *mod, size_t size);
 bool d12_dxil_module_parse(struct d12_module *mod, const uint8_t *bitcode,
                            size_t size_B);
 void d12_dxil_module_finish(struct d12_module *mod);
@@ -829,13 +862,18 @@ struct nir_shader;
  *    +48  u64  draw        the indirect draw descriptor ms_setup fills
  *    +56  u64  grid        6-word indirect-local grid for the mesh
  *                          dispatch, filled by as_setup
+ *    +64  u64  group_dims  { u32 x, y, z } mesh workgroup counts
+ *    +72  u64  group_map   per-mesh-group {local x,y,z, AS group}
+ *    +80  u64  as_dims     original amplification workgroup counts
  *
- * The last two are driver-side only -- the translator never reads them.
- * They are separate slots because an AMPLIFICATION shader writes the
- * dispatch grid at +40 itself, so the draw descriptor cannot share it.
+ * The draw and grid slots are driver-side only -- the translator never reads
+ * them. group_dims is separate from the dispatch slot because a direct or
+ * indirect mesh dispatch already has its dimensions elsewhere, while an
+ * amplification shader writes its DispatchMesh dimensions at +40.
  */
 #define D12_UNIFORM_MESH_PARAMS     40
 #define D12_UNIFORM_MESH_REGS       4
+
 
 #define D12_MESH_OFF_COUNTS         0
 #define D12_MESH_OFF_VERTICES       8
@@ -845,6 +883,10 @@ struct nir_shader;
 #define D12_MESH_OFF_DISPATCH       40
 #define D12_MESH_OFF_DRAW           48
 #define D12_MESH_OFF_GRID           56
+#define D12_MESH_OFF_GROUP_DIMS     64
+#define D12_MESH_OFF_GROUP_MAP      72
+#define D12_MESH_OFF_AS_DIMS        80
+#define D12_MESH_OFF_CAPACITY       88
 
 /* One 16-byte vec4 per signature slot, indexed by slot then component. */
 #define D12_MESH_SLOT_STRIDE        16
@@ -855,7 +897,11 @@ struct nir_shader;
  * before it is known. Exceeding this overruns them, so the mesh shader
  * is dispatched indirectly but the ALLOCATION is bounded here.
  */
-#define D12_MESH_MAX_AMP_GROUPS     32
+#define D12_MESH_MAX_AMP_GROUPS 256
+#define D12_MESH_MAX_AS_GROUPS  64
+#define D12_MESH_MAX_TOTAL_GROUPS                                              \
+   (D12_MESH_MAX_AMP_GROUPS * D12_MESH_MAX_AS_GROUPS)
+#define D12_MESH_PAYLOAD_STRIDE (16 * 1024)
 
 /*
  * Work-graph node parameter block. SM 6.8 work graphs are GPU-scheduled:
@@ -995,6 +1041,13 @@ struct d12_binding_map {
    /* Set when a binding could not be assigned a dense slot.  The map is then
     * incomplete and must not be used to compile or bind a pipeline. */
    bool overflow;
+   /* Logical sampler slots bound by a root-signature static sampler whose
+    * properties the device's native sampler word carries completely (no
+    * MINIMUM/MAXIMUM reduction, native border colour, native LOD bias), so
+    * a shader using only that slot needs none of the side-table emulation.
+    * Set by the device at root-signature creation; part of the stage cache
+    * key through the map hash. */
+   uint16_t plain_static_samplers;
    /* UINT32_MAX for bind-time/root-range lookup, otherwise the stage whose
     * shader is being translated. */
    uint32_t visibility_filter;
@@ -1251,6 +1304,9 @@ d12_range_count(const struct d12_resource_binding *rb)
  * Translate a parsed module's entry point to NIR for the AGX backend.
  * Returns NULL with *error set on failure. Caller owns the shader.
  */
+void d12_dxil_bound_mesh_workgroups(struct nir_shader *nir, bool task);
+bool d12_dxil_lower_compute_quad_derivatives(struct nir_shader *nir);
+
 struct nir_shader *d12_dxil_to_nir(const struct d12_module *mod,
                                    mesa_shader_stage stage,
                                    const struct d12_binding_map *map,
@@ -1314,6 +1370,7 @@ struct d12_input_sig_elem {
    uint32_t component_type;
    uint32_t min_precision;
    uint32_t system_value;
+   uint32_t interpolation;
 };
 
 unsigned d12_dxbc_input_signature(const void *data, size_t size_B,
@@ -1322,6 +1379,14 @@ unsigned d12_dxbc_input_signature(const void *data, size_t size_B,
 unsigned d12_dxil_input_signature(const void *dxil, size_t size_B,
                                   struct d12_input_sig_elem *out,
                                   unsigned max);
+
+/* The signature cache may answer from the disk cache of a live device, so
+ * a fresh process does not parse the bitcode of a stage it already holds
+ * compiled. Registered by the device's shader cache; unregistering a disk
+ * the cache still points at clears the pointer. */
+struct disk_cache;
+void d12_dxil_signature_register_disk(struct disk_cache *disk);
+void d12_dxil_signature_unregister_disk(struct disk_cache *disk);
 unsigned d12_dxbc_output_signature(const void *data, size_t size_B,
                                    struct d12_input_sig_elem *out,
                                    unsigned max);

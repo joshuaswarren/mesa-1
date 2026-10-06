@@ -11,9 +11,6 @@
 #include "agx_debug.h"
 #include "agx_opcodes.h"
 
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_abs_max,
-                          "AGX_G17P_VERTEX_ABS_MAX", false)
-
 /* AGX peephole optimizer responsible for instruction combining. It operates in
  * a forward direction and a backward direction, in each case traversing in
  * source order. SSA means the forward pass satisfies the invariant:
@@ -137,33 +134,6 @@ agx_g17p_tied_minmax(agx_context *ctx, const agx_instr *I)
 static void
 agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
 {
-   /* Only the native full-width fmax(a, fabs(b)) form is qualified here.
-    * Update comparison AND selection together: a half-fold would change
-    * negative inputs and break the NaN-aware min/max tie.
-    */
-   if (debug_get_option_agx_g17p_vertex_abs_max() &&
-       ctx->stage == MESA_SHADER_VERTEX && !ctx->is_preamble &&
-       agx_g17p_tied_minmax(ctx, ins) && ins->fcond == AGX_FCOND_GTN &&
-       ins->dest[0].size == AGX_SIZE_32 && agx_channels(ins->dest[0]) == 1 &&
-       ins->src[0].size == AGX_SIZE_32 &&
-       agx_channels(ins->src[0]) == 1 && agx_channels(ins->src[1]) == 1 &&
-       (ins->src[0].type == AGX_INDEX_NORMAL ||
-        ins->src[0].type == AGX_INDEX_REGISTER) &&
-       !ins->src[0].abs && !ins->src[0].neg && !ins->src[0].memory &&
-       ins->src[1].type == AGX_INDEX_NORMAL &&
-       ins->src[1].size == AGX_SIZE_32 &&
-       !ins->src[1].abs && !ins->src[1].neg && !ins->src[1].memory) {
-      agx_instr *def = defs[ins->src[1].value];
-      if (def && agx_is_fmov(def) && !def->saturate &&
-          def->src[0].size == AGX_SIZE_32 && agx_channels(def->src[0]) == 1 &&
-          def->src[0].abs &&
-          !def->src[0].neg && !def->src[0].memory &&
-          (def->src[0].type == AGX_INDEX_NORMAL ||
-           def->src[0].type == AGX_INDEX_REGISTER)) {
-         ins->src[1] = ins->src[3] = def->src[0];
-      }
-   }
-
    agx_foreach_ssa_src(ins, s) {
       agx_index src = ins->src[s];
       if (agx_preserve_g17p_tied_fcmpsel(ctx, ins, s))
@@ -211,6 +181,14 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
            ins->op == AGX_OPCODE_PACK_RGB10A2_AGX3) &&
           src.size == AGX_SIZE_32 &&
           def->src[0].size == AGX_SIZE_16)
+         continue;
+
+      /* G17P's grounded f32 multiply into a half destination takes plain
+       * registers only. Keep |x| or -x as its own move in front of such a
+       * multiply rather than inventing an unencodable modified form. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          ins->op == AGX_OPCODE_FMUL && ins->dest[0].size == AGX_SIZE_16 &&
+          src.size == AGX_SIZE_32 && (def->src[0].abs || def->src[0].neg))
          continue;
 
       ins->src[s] = agx_compose_float_src(src, def->src[0]);
@@ -309,6 +287,13 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
            I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS));
 
       if (I->op == AGX_OPCODE_ST_TILE && s == 0)
+         continue;
+      /* G17P tile stores only encode the whole-pixel 0xff mask as an
+       * immediate. Keep all other masks, including zero coverage, in the
+       * 16-bit register already produced by instruction selection.
+       */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_ST_TILE && s == 1 && def->imm != 0xff)
          continue;
       if (I->op == AGX_OPCODE_ZS_EMIT && s != 0)
          continue;
@@ -448,6 +433,15 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
        I->op != AGX_OPCODE_FMUL)
       return false;
 
+   /* ...and that narrowing FMUL takes plain registers only: a multiply that
+    * already carries |x| or -x on a source keeps its explicit f32-to-f16
+    * move (Skia's conic/quad edge shaders narrow abs(f) * rsqrt(g)). */
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->op == AGX_OPCODE_FMUL && I->dest[0].size == AGX_SIZE_32 &&
+       use->dest[0].size == AGX_SIZE_16 &&
+       (I->src[0].abs || I->src[0].neg || I->src[1].abs || I->src[1].neg))
+      return false;
+
    /* saturate(saturate(x)) = saturate(x) */
    I->saturate |= use->saturate;
    I->dest[0] = use->dest[0];
@@ -572,8 +566,8 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (def->src[0].type == AGX_INDEX_IMMEDIATE)
          continue;
 
-      /* ALU instructions cannot take 64-bit. v57 AGX_G17P_TEX_UNIFORM_OPERANDS:
-       * SMP's texture/sampler index operands can (agx_lower_uniform_sources
+      /* ALU instructions cannot take 64-bit. G17P SMP's texture/sampler index
+       * operands can (agx_lower_uniform_sources
        * copies back any placement the native form cannot encode). */
       if (def->src[0].size == AGX_SIZE_64 &&
           !(I->op == AGX_OPCODE_DEVICE_LOAD && s == 0) &&
@@ -581,10 +575,27 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
           !(I->op == AGX_OPCODE_ATOMIC && s == 1) &&
           !(I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
             ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-            def->src[0].type == AGX_INDEX_UNIFORM &&
-            ((agx_get_v57_flags() & AGX_V57_TEX_UNIFORM_OPERANDS) ||
-             agx_vertex_tex_uniforms(ctx))))
+            def->src[0].type == AGX_INDEX_UNIFORM))
          continue;
+
+      /* Forward a descriptor uniform into SMP only when the pair it forms is
+       * a native one. Otherwise agx_lower_uniform_sources would copy it back
+       * per instruction, where the shared SSA move serves every sample. */
+      if (I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
+          def->src[0].type == AGX_INDEX_UNIFORM) {
+         agx_index pair[2] = {I->src[3], I->src[4]};
+         pair[s - 3] = def->src[0];
+         agx_index *other = &pair[4 - s];
+         if (other->type == AGX_INDEX_NORMAL) {
+            agx_instr *odef = defs[other->value];
+            if (odef && odef->op == AGX_OPCODE_MOV &&
+                odef->src[0].type == AGX_INDEX_UNIFORM &&
+                odef->src[0].size == other->size)
+               *other = odef->src[0];
+         }
+         if (agx3_tex_uniform_pair_unwitnessed(ctx, I, pair[0], pair[1]))
+            continue;
+      }
 
       agx_replace_src(I, s, def->src[0]);
 
@@ -985,11 +996,7 @@ agx_optimizer_forward(agx_context *ctx)
           I->op != AGX_OPCODE_TEXTURE_LOAD &&
           I->op != AGX_OPCODE_TEX_STATE_STORE &&
           I->op != AGX_OPCODE_SAMPLER_STATE_STORE &&
-          I->op != AGX_OPCODE_UNIFORM_STORE && I->op != AGX_OPCODE_EXPORT &&
-          /* v52 AGX_G17P_DISCARD_FOLD materialises a constant MOVMSK target
-           * with mov_imm; the native form stages it in a register. */
-          !(I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 &&
-            (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_DISCARD_FOLD)))
+          I->op != AGX_OPCODE_UNIFORM_STORE && I->op != AGX_OPCODE_EXPORT)
          agx_optimizer_inline_imm(ctx, defs, I);
 
       /* Inlining a constant into fmov can leave two minifloat operands.

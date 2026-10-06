@@ -100,12 +100,6 @@ struct poly_tess_params {
     * dynamically in the TES.
     */
    uint32_t ccw;
-
-   /* The patch index a hardware tessellator gives the first patch it draws.
-    * It names each factor record by patch index, so an indirect draw whose
-    * records are placed at run time starts drawing at the first of them.
-    */
-   uint32_t patch_start;
 } PACKED;
-static_assert(sizeof(struct poly_tess_params) == 35 * 4,
-              "struct poly_tess_params must be 35 words");
+static_assert(sizeof(struct poly_tess_params) == 34 * 4,
+              "struct poly_tess_params must be 34 words");

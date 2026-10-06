@@ -59,7 +59,7 @@ check_formats(void)
       CHECK(ELIGIBLE(i) == (c || d));
    }
    CHECK(color == 46);
-   CHECK(depth == 2);
+   CHECK(depth == 3);
 
    /* No 16-byte texels (tilebuffer spill), no packed/padded RGB, no stencil
     * or combined depth/stencil, no block-compressed or YCbCr formats. */
@@ -70,8 +70,8 @@ check_formats(void)
       VK_FORMAT_B10G11R11_UFLOAT_PACK32,
       VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, VK_FORMAT_R4G4B4A4_UNORM_PACK16,
       VK_FORMAT_A1R5G5B5_UNORM_PACK16, VK_FORMAT_S8_UINT,
-      VK_FORMAT_D24_UNORM_S8_UINT,   VK_FORMAT_D32_SFLOAT_S8_UINT,
-      VK_FORMAT_D16_UNORM_S8_UINT,   VK_FORMAT_X8_D24_UNORM_PACK32,
+      VK_FORMAT_D24_UNORM_S8_UINT,   VK_FORMAT_D16_UNORM_S8_UINT,
+      VK_FORMAT_X8_D24_UNORM_PACK32,
       VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,
       VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, VK_FORMAT_G8B8G8R8_422_UNORM,
       VK_FORMAT_R64_UINT,
@@ -101,12 +101,14 @@ check_shape(VkFormat format, bool is_depth)
    CHECK(!hk_g17p_compression_eligible(AGX_CHIP_G17P, 0, NULL));
 
    /* Usage: only texture/PBE/ZLS usages are admitted. */
-   const VkImageUsageFlags allowed =
+   VkImageUsageFlags allowed =
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+   if (is_depth)
+      allowed |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
    for (unsigned bit = 0; bit < 32; ++bit) {
       VkImageCreateInfo i = base;
       i.usage |= 1u << bit;
@@ -128,16 +130,19 @@ check_shape(VkFormat format, bool is_depth)
    for (unsigned r = 0; r < sizeof(refused) / sizeof(refused[0]); ++r) {
       VkImageCreateInfo i = base;
       i.usage |= refused[r];
-      CHECK(!ELIGIBLE(i));
+      CHECK(ELIGIBLE(i) == (is_depth && refused[r] ==
+                           VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT));
    }
 
-   /* Create flags: only mutable format and extended usage are admitted. */
+   /* Sample-location tracking is also admitted for single-sample depth. */
    for (unsigned bit = 0; bit < 32; ++bit) {
       VkImageCreateInfo i = base;
       i.flags = 1u << bit;
       CHECK(ELIGIBLE(i) ==
             ((1u << bit) == VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT ||
-             (1u << bit) == VK_IMAGE_CREATE_EXTENDED_USAGE_BIT));
+             (1u << bit) == VK_IMAGE_CREATE_EXTENDED_USAGE_BIT ||
+             (is_depth && (1u << bit) ==
+                          VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT)));
    }
 
    /* Geometry. */
@@ -247,6 +252,53 @@ check_minecraft(void)
    CHECK(!ELIGIBLE(i));
 }
 
+static void
+check_zink(void)
+{
+   /* Portal 2 under zink (t-1079): GL render targets declare
+    * feedback-loop usage and keep the uncompressed layout. The GL Z24S8
+    * depth buffer is D32S8 on Honeykrisp; its depth plane compresses and
+    * its stencil plane stays plain. */
+   const VkImageUsageFlags rt = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+   const VkImageUsageFlags ds = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+   VkImageCreateInfo color = image(VK_FORMAT_R8G8B8A8_SRGB, 2408, 1506, 1, rt);
+   color.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   const VkFormat views[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB};
+   VkImageFormatListCreateInfo list = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+      .viewFormatCount = 2,
+      .pViewFormats = views,
+   };
+   color.pNext = &list;
+   CHECK(!ELIGIBLE(color));
+   VkImageCreateInfo depth =
+      image(VK_FORMAT_D32_SFLOAT_S8_UINT, 2408, 1506, 1, ds);
+   depth.flags = VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+   CHECK(ELIGIBLE(depth));
+   CHECK(!hk_g17p_compression_eligible(AGX_CHIP_G17P, 1, &depth));
+   /* This is Portal's actual shape. A device-copy performance query must
+    * find its compressed layout when host transfer is removed; otherwise
+    * zink retains HOST_TRANSFER and never uses depth compression. */
+   depth.usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+   CHECK(!ELIGIBLE(depth));
+   depth.usage &= ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+   CHECK(ELIGIBLE(depth));
+   depth.samples = VK_SAMPLE_COUNT_4_BIT;
+   CHECK(!ELIGIBLE(depth));
+   const VkImageCreateInfo d32 = image(VK_FORMAT_D32_SFLOAT, 2408, 1506, 1, ds);
+   CHECK(ELIGIBLE(d32));
+   /* A host-transfer image keeps the plain layout host copies require. */
+   VkImageCreateInfo hic = color;
+   hic.usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+   CHECK(!ELIGIBLE(hic));
+}
+
 int
 main(void)
 {
@@ -257,7 +309,9 @@ main(void)
    check_shape(VK_FORMAT_R8_UNORM, false);
    check_shape(VK_FORMAT_D32_SFLOAT, true);
    check_shape(VK_FORMAT_D16_UNORM, true);
+   check_shape(VK_FORMAT_D32_SFLOAT_S8_UINT, true);
    check_minecraft();
+   check_zink();
    printf("G17P compression policy: %u checks passed\n", checks);
    return 0;
 }

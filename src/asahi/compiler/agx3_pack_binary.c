@@ -42,6 +42,8 @@
 #include "agx3_local_tps_core.h"
 #include "agx3_mem_core.h"
 #include "agx3_pack.h"
+#include "agx3_staging.h"
+#include "agx3_resource_ir.h"
 #include "agx3_pixel_core.h"
 #include "agx3_scs_core.h"
 #include "agx3_select_core.h"
@@ -125,7 +127,7 @@ agx3_index_kind(const agx_index x)
 static void
 agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
 {
-   if (!(agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE)))
+   if (!(agx_compiler_debug & AGX_DBG_SHADERS))
       return;
 
    char shape[512];
@@ -877,6 +879,7 @@ agx3_is_async(const agx_instr *I)
           I->op == AGX_OPCODE_GET_COVERAGE_1X_AGX3 ||
           I->op == AGX_OPCODE_TEXTURE_LOAD || I->op == AGX_OPCODE_IMAGE_LOAD ||
           I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_LD_TILE ||
+          I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3 ||
           I->op == AGX_OPCODE_SCS_LOAD_AGX3 ||
           I->op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 ||
           I->op == AGX_OPCODE_LOAD_CPROG_AGX3 ||
@@ -1402,71 +1405,6 @@ agx3_tex_plain_uniform64(agx_index index)
 /* Staging banks held by asynchronous consumers still in flight: staged reads
  * and image writes. A bank stays held until the slot its consumer signals is
  * synchronised. */
-struct agx3_staging_banks {
-   struct {
-      uint16_t coord, span;
-      uint8_t slot;
-   } live[8];
-   uint16_t end;
-   uint8_t next_write_slot;
-};
-
-static void
-agx3_staging_release(struct agx3_staging_banks *banks, uint16_t outstanding)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (banks->live[i].slot &&
-          !(outstanding & (1u << (banks->live[i].slot - 1))))
-         banks->live[i].slot = 0;
-   }
-}
-
-/* The slots of held banks overlapping [start, start + span). */
-static uint16_t
-agx3_staging_conflicts(const struct agx3_staging_banks *banks, unsigned start,
-                       unsigned span)
-{
-   uint16_t conflict = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (banks->live[i].slot && banks->live[i].coord < start + span &&
-          start < banks->live[i].coord + banks->live[i].span)
-         conflict |= (uint16_t)(1u << (banks->live[i].slot - 1));
-   }
-   return conflict;
-}
-
-/* Every slot holding a bank. */
-static uint16_t
-agx3_staging_held(const struct agx3_staging_banks *banks)
-{
-   return agx3_staging_conflicts(banks, 0, UINT16_MAX);
-}
-
-static void
-agx3_staging_forget(struct agx3_staging_banks *banks, uint16_t slots)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (banks->live[i].slot && (slots & (1u << (banks->live[i].slot - 1))))
-         banks->live[i].slot = 0;
-   }
-}
-
-static bool
-agx3_staging_hold(struct agx3_staging_banks *banks, uint16_t coord,
-                  uint16_t span, uint8_t slot)
-{
-   banks->end = MAX2(banks->end, coord + span);
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (!banks->live[i].slot) {
-         banks->live[i].coord = coord;
-         banks->live[i].span = span;
-         banks->live[i].slot = slot;
-         return true;
-      }
-   }
-   return false;
-}
-
 /* Translate the corpus-grounded texel fetch. Dynamic integer LOD is
  * published into operand bank 6 on staging slot 2, then the fetch returns on
  * result slot 1 while waiting for that independent staging generation. G17P
@@ -1945,7 +1883,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       agx_channels(I->src[3]) == 1 && !(I->src[3].value & 1) &&
       I->src[3].value <= 252 &&
       !(I->src[3].cache && (I->src[3].discard || I->src[3].kill)) &&
-      agx3_tex_plain_uniform64(I->src[2]);
+      (agx3_tex_plain_uniform64(I->src[2]) || agx3_tex_imm(I->src[2], 0));
    /* Apple's lane-indexed image read publishes coordinates and uint LOD on
     * staging slot 2, then issues the texture result on slot 1. Keep those two
     * independent scoreboard domains; reusing slot 1 for both is not a native
@@ -2316,7 +2254,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        (I->src[1].value & 1) || I->src[1].value + 2 * (coords - 1) > 254 ||
        !agx3_tex_imm(I->src[2], 0) ||
        (!immediate_state && !heap_state)) {
-      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+      if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
                  agx_channels(I->src[0]), I->src[1].value, I->src[1].size,
@@ -2440,7 +2378,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                                            bank + 6, slot, 0, false, false,
                                            layer_bytes, &layer_len) ||
          !agx3_append(&staged, layer_bytes, layer_len)))) {
-      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+      if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "G17P imgwci coordinate compose refusal\n");
       goto fail;
    }
@@ -2452,7 +2390,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                                   I->src[0].discard, slot, 0,
                                   bytes, &len) ||
           !agx3_append(&staged, bytes, len)) {
-         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+         if (agx_compiler_debug & AGX_DBG_SHADERS)
             fprintf(stderr, "G17P imgwci data compose refusal: component=%u\n", c);
          goto fail;
       }
@@ -2494,7 +2432,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    }
    if (!encoded || !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
-      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+      if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "G17P imgwci instruction compose refusal\n");
       goto fail;
    }
@@ -3669,7 +3607,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          uint8_t native_coord_slot,
                          const uint16_t cem_scratch[3], bool vertex_stage,
                          bool compute_stage, uint16_t array_scratch,
-                         uint16_t bank_base, uint16_t g17g_lod_relay, bool g18g)
+                         uint16_t bank_base, uint16_t g17g_lod_relay, bool g18g,
+                         bool publication_last)
 {
    if (enc == AGX_ISA_ENCODING_AGX3C)
       return agx3_emit_texture_sample_g17g(emission, enc, I, slot, wait_mask, final,
@@ -3680,6 +3619,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    if (enc != AGX_ISA_ENCODING_AGX3B)
       return false;
 
+   const bool published = agx_texture_resource(I) != 0;
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
    const bool gradient_min = I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN;
@@ -3834,6 +3774,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const unsigned max_coord = enc == AGX_ISA_ENCODING_AGX3B
                                  ? 128 - (2 * agx_channels(I->src[0]))
                                  : 60;
+   const bool published_shape =
+      enc == AGX_ISA_ENCODING_AGX3B && I->dim == AGX_DIM_2D && !query_lod &&
+      !I->src[0].memory && !I->src[0].abs && !I->src[0].neg &&
+      !I->src[0].cache && !I->src[0].discard &&
+      I->src[0].size == AGX_SIZE_32 &&
+      agx_channels(I->src[0]) == (shadow ? 3 : 2) &&
+      (implicit_lod || immediate_lod) &&
+      (agx_is_null(I->src[5]) || (!shadow && immediate_offset)) &&
+      (!offset || immediate_offset);
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -3843,12 +3792,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        agx_channels(I->dest[0]) != (I->sparse ? 8u : 4u) ||
        I->dest[0].value >= 128 ||
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
-       !agx3_tex_plain_reg(I->src[0]) ||
-       I->src[0].size != AGX_SIZE_32 ||
-       agx_channels(I->src[0]) != (query_lod ? (three_d || cube ? 3 : 2) :
+       (published ? !published_shape :
+        (!agx3_tex_plain_reg(I->src[0]) ||
+         I->src[0].size != AGX_SIZE_32 ||
+         agx_channels(I->src[0]) != (query_lod ? (three_d || cube ? 3 : 2) :
                                     cube_array ? 4 :
                                     (array || three_d || cube) ? 3 : 2) ||
-       (I->src[0].value & 3) || I->src[0].value > max_coord ||
+         (I->src[0].value & 3) || I->src[0].value > max_coord)) ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
        (texture_immediate
            ? I->src[3].value > 15
@@ -3864,7 +3814,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               agx_channels(I->src[4]) != 1 || (I->src[4].value & 1))) ||
        I->src[3].memory || I->src[3].abs || I->src[3].neg ||
        I->src[4].memory || I->src[4].abs || I->src[4].neg ||
-       (shadow
+       (!published && (shadow
            ? (register_offset
                  ? false
                  : staged_offset
@@ -3874,7 +3824,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                      agx_channels(I->src[5]) != 1 || I->src[5].value > 126 ||
                      (offset && !immediate_offset)))
            : offset ? (!immediate_offset && !register_offset && !staged_offset)
-                     : !agx_is_null(I->src[5])) ||
+                     : !agx_is_null(I->src[5]))) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
@@ -3974,28 +3924,18 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                  ? native_coord_slot
                                  : (array || cube) && register_operands ? 6
                                                                         : slot;
-   /* Every native G17P witness using AGX3B names coordinate bank 0 in SMP,
-    * including ordinary implicit 2D samples whose materialized coordinates
-    * live in unrelated GPRs.  For example, the attachment-only f_retain_coords
-    * witness copies r4/r5 to staging[0]/[2], reports ShaderInfo D=8, and
-    * samples bank 0.  The staging address is an ABI location, not the source
-    * GPR number.  AGX3c retains its independently decoded coordinate field. */
-   /* Sampler-private staging groups. SMP consumes its staged coordinates
-    * and comparison reference asynchronously, after issue: a later sample
-    * that restages the same bank before the earlier one retires replays the
-    * newest operands into every older sample. Apple's own three-reference
-    * depth2d fragment (native-quick-textures/2d-three-references) therefore
-    * copies consecutive samples' coordinates into banks 0, 8 and 16 and
-    * names that bank in each SMP's f19; the comparison reference follows at
-    * bank + 4. The stream packer chooses the group from the in-flight
-    * samples; only the plain 2D coordinate ABI relocates, every other shape
-    * keeps its witnessed fixed banks (gradients 8..18, PACK_SMPIR bank 6,
-    * CEM scratch). */
+   /* Coordinates occupy a sampler-private range, independently of the
+    * source GPRs. Apple's linked pipelines use four-half groups at 4/8/12/16
+    * and at 84/128/132/140/152. The native witnesses are reproduced by
+    * test_linked_staging_witnesses. Additional operands retain the existing
+    * mode-specific ABI; only the relocatable profile can choose a new base.
+    */
    if (bank_base != 0 &&
        (enc != AGX_ISA_ENCODING_AGX3B || native_staged_coords || array ||
         three_d || cube || gradient_lod || bias_min || gradient_min ||
         query_lod || (explicit_lod && !immediate_lod) || register_bias ||
-        register_offset || (bank_base & 7) || bank_base > 16))
+        register_offset || (bank_base & 3) ||
+        bank_base > AGX3_STAGING_HALFS - 4))
       return agx3_tex_decline(I, __LINE__);
    const uint16_t coord = (enc == AGX_ISA_ENCODING_AGX3B ||
                            native_staged_coords || explicit_lod ||
@@ -4173,7 +4113,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
              !agx3_append(emission, bytes, len))
             return agx3_tex_decline(I, __LINE__);
       }
-   } else if (!native_staged_coords) {
+   } else if (!native_staged_coords && !published) {
       if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot,
                                     wait_mask,
                                     enc == AGX_ISA_ENCODING_AGX3B &&
@@ -4288,7 +4228,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * half 4, three sampler2DShadow samples in one fragment all read
     * whichever reference was written last:
     * KHR-GL30.texture_repeat_mode's depth cases are exactly that shader. */
-   if (shadow && !cube &&
+   if (shadow && !cube && !published &&
        (!agx3_tex_stage_copy_hints(
            enc, coord + 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
            staged_offset ? false : I->src[5].discard, bytes, &len) ||
@@ -4376,13 +4316,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .three_d = three_d,
       .cube = cube,
       .slot = slot,
-      .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
+      .wait_mask = published ? wait_mask
+                             : (uint16_t)(1u << (stage_slot - 1)),
       /* CEM consumes and discards the source XYZ before SMP. Apple's cube
        * and cube-array samples consequently set SMP f27 even though the
        * sampler reads CEM's private coordinate bank rather than the original
        * AGX IR source. Ordinary dimensions retain their existing last-use
        * mapping. */
-      .coord_kill = cube ? true
+      .coord_kill = published ? publication_last
+                      : cube ? true
                          : native_staged_coords
                               ? true
                               : I->src[0].kill,
@@ -4530,8 +4472,6 @@ agx3_g18_msaa4_tile_shader(const agx_context *ctx)
 
 /* Bind the witnessed tile subset: the 1x whole-pixel form and the 2x/4x
  * register-sourced sample mask. Explicit pixel coordinates stay closed. */
-static const char *agx3_trace_shader_name;
-
 static bool
 agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint8_t slot, uint16_t wait_mask,
@@ -4550,12 +4490,6 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const agx_index coords = load ? I->src[1] : I->src[2];
    const int width = agx3_tile_format_width(I->format);
    struct agx3_tile_sample sample_op;
-   if (getenv("AGX_TRACE_TILE_COVERAGE"))
-      fprintf(stderr, "TILE %s sample=%s%u fmt=%u mask=%u shader=%s\n",
-              load ? "load" : "store",
-              sample.type == AGX_INDEX_IMMEDIATE ? "imm " : "reg ",
-              sample.value, I->format, I->mask,
-              agx3_trace_shader_name ? agx3_trace_shader_name : "?");
    if (((I->format == AGX_FORMAT_RGB10A2 ||
          I->format == AGX_FORMAT_RGB9E5) &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
@@ -4635,6 +4569,28 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
  */
 
 /*
+ * The sRGB transfer mode of one `fltnorm`/`normflt` pack. agx_compile.c marks
+ * the encoded lanes of an 8-bit sRGB attachment in the instruction's mask (bit
+ * n = lane n); the alpha lane of RGBA8Unorm_sRGB stays linear. Apple's modes
+ * (agx3_fltnorm_core.h): every lane encoded, or lane 0 encoded with a linear
+ * lane 1. A linear lane 0 under an encoded lane 1 has no mode; refuse it.
+ */
+static bool
+agx3_norm_srgb_mode(const agx_instr *I, bool two_lanes, uint8_t *srgb)
+{
+   const unsigned lanes = I->mask & (two_lanes ? 3 : 1);
+   if (I->mask & ~lanes)
+      return false;
+   if (lanes && I->format != AGX_FORMAT_U8NORM)
+      return false;
+   *srgb = !lanes                       ? AGX3_FLTNORM_SRGB_NONE
+           : lanes == 1 && two_lanes    ? AGX3_FLTNORM_SRGB_LANE0
+           : (lanes & 1)                ? AGX3_FLTNORM_SRGB_BOTH
+                                        : 0xff;
+   return *srgb != 0xff;
+}
+
+/*
  * `fltnorm`: pack two 32-bit floats, clamped and scaled, into the two halves
  * of one 16-bit register. agx_pack_normalized_agx3() in agx_compile.c creates
  * these immediately before an 8-bit normalized tile store, one per channel
@@ -4679,6 +4635,8 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
       .wait_mask = wait_mask,
       .first_instruction = first_instruction,
    };
+   if (!agx3_norm_srgb_mode(I, two_lanes, &d.srgb))
+      return false;
 
    for (unsigned i = 0; i < 2; ++i) {
       if (i == 1 && !d.two_lanes)
@@ -4711,14 +4669,6 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
       }
 
       d.src[i].value = src.value;
-      /* AGX_G17P_FLTNORM_LIVENESS (opt-in diagnostic): agx_opt_register_cache
-       * runs after RA and does mark post-RA register sources (the IR prints
-       * them as ^rN), so pass a proven last use as Apple does
-       * (fs-apple.bin +0x174/+0x198: f27 = f44 = 1). Otherwise keep the
-       * conservative still-live hint. */
-      d.src[i].kill =
-         (agx_get_codegen_flags() & AGX_CODEGEN_G17P_FLTNORM_LIVENESS) &&
-         agx3_src_is_register(src) && src.discard && !src.cache;
    }
 
    uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH];
@@ -4816,7 +4766,7 @@ agx3_emit_normflt(struct util_dynarray *emission, enum agx_isa_encoding enc,
        agx_channels(src) != (norm16 && two_lanes ? 2 : 1))
       return false;
 
-   const struct agx3_normflt_desc d = {
+   struct agx3_normflt_desc d = {
       .dest = dest.value,
       .dest_hint = true,
       .src = src.value,
@@ -4826,6 +4776,8 @@ agx3_emit_normflt(struct util_dynarray *emission, enum agx_isa_encoding enc,
       .is_16bit = norm16,
       .wait_mask = wait_mask,
    };
+   if (!agx3_norm_srgb_mode(I, two_lanes, &d.srgb))
+      return false;
 
    uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH];
    uint8_t len = 0;
@@ -5236,15 +5188,6 @@ agx3_map_atomic_op(enum agx_atomic_opc in, enum agx3_atomic_op *out)
  * 32-bit element index; fold it back into the signed byte-offset field when it
  * fits, matching Apple.  AGX3b returned atomics are physically in-place, so
  * only an RA-coalesced value/result pair is accepted on that encoding. */
-/* AGX_G17P_INT_DEST_CACHE: native G17P sets the f11 destination
- * register-cache hint on every integer add/subtract result, including
- * loop-carried ones; otherwise keep each encoder's existing choice. */
-static inline bool
-agx3_int_dest_cache(bool existing)
-{
-   return (agx_get_codegen_flags() & AGX_CODEGEN_G17P_INT_DEST_CACHE) ||
-          existing;
-}
 
 static bool
 agx3_translate_device_atomic(const agx_instr *I,
@@ -6760,7 +6703,7 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
             (struct agx3_cf_source_hints){source.cache, source.discard}, 0,
             bytes, &len);
       if (!encoded) {
-         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+         if (agx_compiler_debug & AGX_DBG_SHADERS)
             fprintf(stderr,
                     "fcmp immediate refused: src=%u size=%u channels=%u "
                     "kill=%u abs=%u neg=%u cache=%u discard=%u imm=%u "
@@ -6854,13 +6797,12 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
-   /* AGX_G17P_UNIFORM_IMM_COMPARE: an aligned 32-bit uniform against an
+   /* An aligned 32-bit uniform against an
     * 8-bit immediate, in either operand order, kept in place by
     * agx_lower_uniform_sources(). Canonicalize the uniform to the first
     * operand (swapping the relation, as the register/immediate path below
     * does) and emit Apple's loop-guard form (fs-apple.bin +0x0c). */
-   if (!is_float && enc == AGX_ISA_ENCODING_AGX3B &&
-       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE)) {
+   if (!is_float && enc == AGX_ISA_ENCODING_AGX3B) {
       const bool uniform_first = agx3_cf_uniform32(I->src[0]) &&
                                  agx3_cf_imm8(I->src[1]);
       const bool uniform_second = agx3_cf_imm8(I->src[0]) &&
@@ -6878,11 +6820,9 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       }
    }
 
-   /* AGX_G17P_UNIFORM_COMPARE (v52b, default off): a register against an
-    * aligned 32-bit uniform, admitted by agx_instr_accepts_uniform() only
-    * under the same flag, as operand 1. */
+   /* A register against an aligned 32-bit uniform, admitted by
+    * agx_instr_accepts_uniform() as operand 1. */
    if (!is_float && enc == AGX_ISA_ENCODING_AGX3B &&
-       (agx_get_alu_flags() & AGX_ALU_G17P_UNIFORM_COMPARE) &&
        agx3_cf_reg32(I->src[0]) && agx_channels(I->src[0]) == 1 &&
        !I->src[0].kill && I->src[1].type == AGX_INDEX_UNIFORM &&
        I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 1 &&
@@ -7063,131 +7003,28 @@ agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
    return true;
 }
 
-/* Diagnostic (opt-in, AGX_G17P_STAGING_DRAIN=1): a staged sample consumes its
- * sampler-private coordinate/reference banks asynchronously after issue, so a
- * later sample restaging the same bank before the earlier one retires replays
- * the newest operands into the older sample. Shapes that cannot relocate their
- * bank (array, 3D, cube, gradient...) all stage into bank 0, and the only
- * protection is the retire below -- which is keyed on a scoreboard model that
- * tracks registers, not staging banks. This knob forces the full drain so the
- * missed-drain hypothesis can be tested on hardware. It serializes samples and
- * is NOT a production path. */
+/* Allocate the actual operand footprint from the sampler-private register
+ * file. Lifetimes follow the consuming operations' scoreboard slots, shared
+ * with texel fetches and image writes, rather than three fixed sample groups.
+ */
 static bool
-agx3_g17p_force_staging_drain(void)
+agx3_allocate_staging(struct util_dynarray *emission,
+                      enum agx_isa_encoding enc,
+                      struct agx3_staging_banks *banks,
+                      uint16_t *outstanding, uint8_t slot,
+                      unsigned span, uint16_t *base)
 {
-   static int value = -1;
-   if (value < 0) {
-      const char *s = getenv("AGX_G17P_STAGING_DRAIN");
-      value = (s && s[0] && s[0] != '0') ? 1 : 0;
-   }
-   return value == 1;
-}
+   uint16_t waits;
+   if (!agx3_staging_plan(banks, span, 4, AGX3_STAGING_HALFS, base, &waits))
+      return false;
 
-/* Diagnostic (AGX_G17P_DRAIN_TAIL=1): retire every scoreboard generation at
- * the end of a shader part, rather than only the ones the packer's own
- * `outstanding` ledger still believes are live.
- *
- * The production tail drain trusts that ledger. Any place where a slot was
- * marked retired without the wait actually reaching the emitted bytes leaves
- * the ledger clean while the hardware generation is still in flight, and the
- * epilog part then reads the ABI registers early. This knob is blind to the
- * ledger and so cannot share that failure mode: if a mis-tracked generation is
- * the mechanism, this closes it. It costs one instruction per part and is a
- * diagnostic, not a production path. */
-static bool
-agx3_g17p_drain_tail(void)
-{
-   static int value = -1;
-   if (value < 0) {
-      const char *s = getenv("AGX_G17P_DRAIN_TAIL");
-      value = (s && s[0] && s[0] != '0') ? 1 : 0;
-   }
-   return value == 1;
-}
-
-/* Diagnostic (AGX_G17P_SINGLE_WAIT=1): give every instruction at most one
- * scoreboard wait. AGX3 has no wait instruction -- the fence is a field inside
- * each instruction -- and the witnessed encodings carry one generation. */
-static int
-agx3_g17p_single_wait_mode(void)
-{
-   static int value = -1;
-   if (value < 0) {
-      const char *e = getenv("AGX_G17P_SINGLE_WAIT");
-      value = (e && e[0]) ? atoi(e) : 0;
-   }
-   return value;
-}
-
-static bool
-agx3_g17p_single_wait(void)
-{
-   return agx3_g17p_single_wait_mode() == 1;
-}
-
-/* Diagnostic (AGX_G17P_TRACE_SLOTS=1): print the scoreboard slot and wait mask
- * the AGX3 planner assigned to every instruction. agx_insert_waits() is an
- * AGX2-only pass, so this planner is the only thing that orders an async
- * result against its consumers on G17P. */
-static bool
-agx3_g17p_trace_slots(void)
-{
-   static int value = -1;
-   if (value < 0) {
-      const char *e = getenv("AGX_G17P_TRACE_SLOTS");
-      value = (e && e[0] && e[0] != '0') ? 1 : 0;
-   }
-   return value == 1;
-}
-
-/* Diagnostic (AGX_G17P_NO_SAMPLE_GROUP=1): G17P fragment SMPs are emitted as
- * one group -- f156 cleared on every member but the last, which terminates it.
- * The last member of a four-sample array-shadow group is exactly the lookup
- * that returns an uncompared texel, so take the grouping away and give every
- * sample the lone-sample encoding it would get on its own. */
-static bool
-agx3_g17p_no_sample_group(void)
-{
-   static int value = -1;
-   if (value < 0) {
-      const char *e = getenv("AGX_G17P_NO_SAMPLE_GROUP");
-      value = (e && e[0] && e[0] != '0') ? 1 : 0;
-   }
-   return value == 1;
-}
-
-/* Sampler-private staging groups 0/8/16 (see the note in
- * agx3_emit_texture_sample). Take the lowest group whose previous user has
- * retired; when all three still hold in-flight operations, retire group 0's
- * user first. `slot` is the result slot of the operation about to stage into
- * the chosen group, and `outstanding` is updated for any retirement. */
-static bool
-agx3_take_staging_group(struct util_dynarray *emission,
-                        enum agx_isa_encoding enc, uint8_t stage_group_slot[3],
-                        struct agx3_staging_banks *banks,
-                        uint16_t *outstanding, uint16_t outstanding_here,
-                        uint8_t slot, uint16_t *bank_base)
-{
-   uint16_t busy[3];
-   for (unsigned g = 0; g < 3; ++g)
-      busy[g] = (stage_group_slot[g]
-                   ? (uint16_t)(1u << (stage_group_slot[g] - 1))
-                   : 0) | agx3_staging_conflicts(banks, g * 8, 8);
-
-   int chosen = -1;
-   for (unsigned g = 0; g < 3 && chosen < 0; ++g)
-      if (!(outstanding_here & busy[g]))
-         chosen = (int)g;
-   if (chosen < 0) {
-      if (!agx3_retire_slots_noop(emission, enc, busy[0]))
+   if (waits) {
+      if (!agx3_retire_slots_noop(emission, enc, waits))
          return false;
-      *outstanding &= (uint16_t)~busy[0];
+      *outstanding &= (uint16_t)~waits;
       *outstanding |= (uint16_t)(1u << (slot - 1));
-      agx3_staging_forget(banks, busy[0]);
-      chosen = 0;
+      agx3_staging_forget(banks, waits);
    }
-   *bank_base = (uint16_t)(chosen * 8);
-   stage_group_slot[chosen] = slot;
    return true;
 }
 
@@ -7471,7 +7308,7 @@ agx3_try_control_flow(struct util_dynarray *emission,
          return -1;
       if (!agx3_emit_cf_compare(emission, enc, I, is_float, flag_slot,
                                 &invert)) {
-         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+         if (agx_compiler_debug & AGX_DBG_SHADERS)
             fprintf(stderr, "AGX3 control-flow compare refused\n");
          return -1;
       }
@@ -7487,7 +7324,7 @@ agx3_try_control_flow(struct util_dynarray *emission,
          invert = !invert;
       const unsigned levels = is_break_if ? I->nest + 1 : (is_if ? 1 : 2);
       if (!agx3_emit_cnd(emission, enc, I->op, flag_slot, invert, levels)) {
-         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+         if (agx_compiler_debug & AGX_DBG_SHADERS)
             fprintf(stderr, "AGX3 control-flow mask transition refused\n");
          return -1;
       }
@@ -9125,7 +8962,7 @@ static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_refused(unsigned line)
 {
    if (agx_compiler_debug & AGX_DBG_REFUSE)
-      fprintf(stderr, "G17P MRT protocol refused at %u\n", line);
+      fprintf(stderr, "G17P MRT protocol refused at line %u\n", line);
    return (struct agx3_g17p_mrt_protocol){0};
 }
 
@@ -9141,11 +8978,14 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
     * the fixed, unrolled resident sample groups. They do not use the G17P
     * native-spill descriptor ABI. */
    const bool multi_block = ctx->key->g17p_emrt || g18_ms;
+   agx_block *tail = g18 ? NULL : agx_reconverged_mrt_tail(ctx);
    if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
-       (!g18 && !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
-       (!multi_block && list_length(&ctx->blocks) != 1)) {
+       (!g18 && !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
+        (ctx->key->no_stop ||
+         !(agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND))) ||
+       (!multi_block && list_length(&ctx->blocks) != 1 && !tail)) {
       /* Not a refusal by itself -- a single-target shader legitimately has no
        * MRT protocol -- so report only when the key names two or more tile
        * partitions, which is when the protocol is the thing a later tile op
@@ -9183,46 +9023,50 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    }
 
    bool depth_written = false, tile_ops = false, tile_loads = false;
-   agx_foreach_instr_global(ctx, I) {
-      /* A depth export may finish its own class-1 transaction first. */
-      if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
-         depth_written = true;
-      if ((!multi_block && agx3_is_cf_op(I)) ||
-          (I->op == AGX_OPCODE_SIGNAL_PIX &&
-           (!depth_written || I->writeout != 1 ||
-            (tile_ops && !multi_block))))
-         return agx3_g17p_mrt_refused(__LINE__);
-      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+   agx_foreach_block(ctx, block) {
+      if (tail && block != tail)
          continue;
-      if (g18 && !(g18_ms ? (I->format == AGX_FORMAT_I32 &&
-                            (I->mask == 1 || I->mask == 15))
-                         : ((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
-                            (I->format == AGX_FORMAT_I32 && I->mask == 1))))
-         return agx3_g17p_mrt_refused(__LINE__);
-      if (g18_ms) {
-         const unsigned stride = I->mask == 1 ? 4 : 16;
-         if ((p.ms_tile_stride && p.ms_tile_stride != stride) ||
-             (I->pixel_offset % stride))
+      agx_foreach_instr_in_block(block, I) {
+         /* A depth export may finish its own class-1 transaction first. */
+         if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
+            depth_written = true;
+         if ((!multi_block && agx3_is_cf_op(I)) ||
+             (I->op == AGX_OPCODE_SIGNAL_PIX &&
+              (!depth_written || I->writeout != 1 ||
+               (tile_ops && !multi_block))))
             return agx3_g17p_mrt_refused(__LINE__);
-         p.ms_tile_stride = stride;
-      }
-      if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
-         return agx3_g17p_mrt_refused(__LINE__);
+         if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+            continue;
+         if (g18 && !(g18_ms ? (I->format == AGX_FORMAT_I32 &&
+                               (I->mask == 1 || I->mask == 15))
+                            : ((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
+                               (I->format == AGX_FORMAT_I32 && I->mask == 1))))
+            return agx3_g17p_mrt_refused(__LINE__);
+         if (g18_ms) {
+            const unsigned stride = I->mask == 1 ? 4 : 16;
+            if ((p.ms_tile_stride && p.ms_tile_stride != stride) ||
+                (I->pixel_offset % stride))
+               return agx3_g17p_mrt_refused(__LINE__);
+            p.ms_tile_stride = stride;
+         }
+         if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
+            return agx3_g17p_mrt_refused(__LINE__);
 
-      tile_ops = true;
-      tile_loads |= I->op == AGX_OPCODE_LD_TILE;
-      unsigned i;
-      for (i = 0; i < p.count; ++i) {
-         if (p.offsets[i] == I->pixel_offset)
-            break;
-      }
-      if (i == p.count) {
-         if (partitions || p.count == ARRAY_SIZE(p.offsets))
+         tile_ops = true;
+         tile_loads |= I->op == AGX_OPCODE_LD_TILE;
+         unsigned i;
+         for (i = 0; i < p.count; ++i) {
+            if (p.offsets[i] == I->pixel_offset)
+               break;
+         }
+         if (i == p.count) {
+            if (partitions || p.count == ARRAY_SIZE(p.offsets))
+               return agx3_g17p_mrt_refused(__LINE__);
+            p.targets[p.count] = I->colour_target;
+            p.offsets[p.count++] = I->pixel_offset;
+         } else if (!partitions && p.targets[i] != I->colour_target) {
             return agx3_g17p_mrt_refused(__LINE__);
-         p.targets[p.count] = I->colour_target;
-         p.offsets[p.count++] = I->pixel_offset;
-      } else if (!partitions && p.targets[i] != I->colour_target) {
-         return agx3_g17p_mrt_refused(__LINE__);
+         }
       }
    }
    /* A lone attachment that is not attachment zero is still a multi-target
@@ -9345,15 +9189,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (partition < 0 || I->nr_srcs < 2 ||
           !agx3_tile_sample_operand(
              I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1], &sample) ||
-          sample.reg != p.multisample) {
-         if (agx_compiler_debug & AGX_DBG_REFUSE) {
-            agx_index mask = I->src[load ? 0 : 1];
-            fprintf(stderr, "G17P MRT sample: part=%d load=%u offset=%u type=%u value=%u size=%u ms=%u\n",
-                    partition, load, I->pixel_offset, mask.type, mask.value,
-                    mask.size, p.multisample);
-         }
+          sample.reg != p.multisample)
          return agx3_g17p_mrt_refused(__LINE__);
-      }
 
       if (I->op == AGX_OPCODE_LD_TILE) {
          const unsigned max_loads =
@@ -10023,14 +9860,8 @@ agx3_apply_loop_head_hints(agx_context *ctx, struct util_dynarray *emission)
          continue;
       uint8_t *bytes = (uint8_t *)emission->data + block->offset;
       const uint16_t opcode = (uint16_t)(bytes[0] | ((bytes[1] & 0x7) << 8));
-      /* v53-c2: by default only Apple's witnessed form, the 12-byte `sll`
-       * (fs/cs-apple.bin). AGX_G17P_LOOP_HEAD_HINT_ALL=1 admits the rest of
-       * the allowlist, whose use of the fields is unwitnessed. */
-      static int all_forms = -1;
-      if (all_forms < 0)
-         all_forms = debug_get_bool_option("AGX_G17P_LOOP_HEAD_HINT_ALL",
-                                           false);
-      if (!all_forms && opcode != 0x027)
+      /* Only Apple's witnessed form, the 12-byte `sll` (fs/cs-apple.bin). */
+      if (opcode != 0x027)
          continue;
       bool ok = false;
       for (unsigned i = 0; i < ARRAY_SIZE(agx3_loop_head_hint_forms); ++i) {
@@ -10159,14 +9990,13 @@ agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
       unsigned from = t;
       while (from > 0) {
          const struct agx3_instr_span *x = &sp[from - 1];
-         /* AGX_G17P_ENTRY_COMPARE (default on): BEGIN_CF emits no bytes on
+         /* BEGIN_CF emits no bytes on
           * AGX3 (agx3_try_control_flow) and changes neither the exec mask nor
           * any flag slot, so an empty BEGIN_CF span is crossable. Without
           * this the first compare of a shader (e.g. a loop guard) is pinned
           * against its CNDST; Apple hoists it (fs-apple.bin +0x0c icmp, four
           * instructions ahead of the cndst at +0x76). */
          if (x->I->op == AGX_OPCODE_BEGIN_CF &&
-             (agx_get_codegen_flags() & AGX_CODEGEN_G17P_ENTRY_COMPARE) &&
              !x->wait && !x->slot && x->start == sp[from].start) {
             from--;
             continue;
@@ -10179,15 +10009,13 @@ agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
          /* A compare with no register source (uniform against immediate)
           * cannot depend on a crossed instruction's scoreboard wait: that
           * wait orders the crossed instruction's own register reads only.
-          * Under AGX_G17P_ENTRY_COMPARE such a compare may cross a waiting
+          * Such a compare may cross a waiting
           * synchronous ALU instruction; it still never crosses an
           * instruction that starts an asynchronous (slotted) operation. */
          bool reg_free = true;
          agx_foreach_reg_src(T, s)
             reg_free = false;
-         const bool wait_ok = !x->wait ||
-            (reg_free && !writes_uniforms &&
-             (agx_get_codegen_flags() & AGX_CODEGEN_G17P_ENTRY_COMPARE));
+         const bool wait_ok = !x->wait || (reg_free && !writes_uniforms);
          if (writes || !wait_ok || x->slot ||
              !agx3_early_compare_crossable(x->I))
             break;
@@ -10217,10 +10045,6 @@ agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
       const off_t recorded[] = {
          ctx->agx3_colour_link.entry_emitted
             ? (off_t)(initial_size + ctx->agx3_colour_link.entry_offset) : -1,
-         ctx->agx3_colour_link.lldcol_first_valid &&
-               ctx->agx3_colour_link.lldcol_first_offset != UINT32_MAX
-            ? (off_t)(initial_size + ctx->agx3_colour_link.lldcol_first_offset)
-            : -1,
       };
       for (unsigned r = 0; r < ARRAY_SIZE(recorded); ++r)
          ok &= !(recorded[r] >= lo && recorded[r] < c->compare_end);
@@ -10250,8 +10074,6 @@ agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
 bool
 agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 {
-   agx3_trace_shader_name =
-      (ctx && ctx->nir && ctx->nir->info.name) ? ctx->nir->info.name : NULL;
    const enum agx_isa_encoding enc = ctx->key->dev.encoding;
 
    /*
@@ -10321,13 +10143,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       /* Six or more targets exceed agx3_append's 8-bit length. */
       memcpy(util_dynarray_grow_bytes(emission, 1, size), program, size);
       return true;
-   }
-
-   if (array_eot_why &&
-       debug_get_bool_option("AGX_G17P_ARRAY_EOT_TRACE", false)) {
-      fprintf(stderr, "G17P array EOT not matched: %s (key count=%u)\n",
-              array_eot_why, ctx->key->g17p_mrt_eot_count);
-      agx_print_shader(ctx, stderr);
    }
 
    const unsigned multi_eot_count = agx3_g17p_multi_eot_count(ctx);
@@ -10996,12 +10811,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    struct util_dynarray fixups;
    uint16_t outstanding = 0;
-   /* Subset of `outstanding` whose generations belong to texture samples. */
-   uint16_t sample_slots_live = 0;
-   /* Result slot of the sample currently occupying each sampler-private
-    * staging group (half-registers 0, 8 and 16). A group is free once a
-    * wait has retired that slot; see agx3_emit_texture_sample. */
-   uint8_t stage_group_slot[3] = {0, 0, 0};
    uint8_t next_uvs_slot = 1;
    unsigned texture_ops_left = 0;
    bool g18g_low_bank_reads = true;
@@ -11015,6 +10824,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * helpers_outlive_group below. */
    bool g17p_quad_op_after_group = false;
    unsigned sample_group_members_left = 0;
+   /* Whether a quad-derivative or quad-shuffle consumer follows the last
+    * f156 sample-group member in linear order (see the group flags below). */
+   bool quad_consumer_after_last_member = false;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
    bool has_memory_write = false;
@@ -11051,8 +10863,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    assert(enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C);
    util_dynarray_init(&fixups, ctx);
-   const bool early_compare = enc == AGX_ISA_ENCODING_AGX3B &&
-      (agx_get_alu_flags() & AGX_ALU_G17P_EARLY_COMPARE);
+   const bool early_compare = enc == AGX_ISA_ENCODING_AGX3B;
    struct util_dynarray spans, compares;
    util_dynarray_init(&spans, ctx);
    util_dynarray_init(&compares, ctx);
@@ -11167,7 +10978,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN) {
                sample_group_members_left++;
                g17p_quad_op_after_group = false;
+               quad_consumer_after_last_member = false;
             }
+         }
+         switch (scan_I->op) {
+         case AGX_OPCODE_DFDX:
+         case AGX_OPCODE_DFDY:
+         case AGX_OPCODE_QUAD_REDUCE:
+         case AGX_OPCODE_QUAD_PREFIX:
+         case AGX_OPCODE_QUAD_SHUFFLE:
+         case AGX_OPCODE_QUAD_SHUFFLE_XOR:
+         case AGX_OPCODE_QUAD_SHUFFLE_UP:
+         case AGX_OPCODE_QUAD_SHUFFLE_DOWN:
+         case AGX_OPCODE_QUAD_BALLOT:
+         case AGX_OPCODE_FCMP_QUAD_BALLOT:
+         case AGX_OPCODE_ICMP_QUAD_BALLOT:
+            quad_consumer_after_last_member = true;
+            break;
+         default:
+            break;
          }
          if (sample_group_members_left && agx3_reads_quad_lanes(scan_I))
             g17p_quad_op_after_group = true;
@@ -11262,8 +11091,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * every earlier group member and set it only on the final member, including
     * an all-explicit-LEVEL group. Explicit gradients are outside the group.
     * Other stages and AGX3C keep their existing per-op encodings. */
-   const bool g17p_sample_group = !agx3_g17p_no_sample_group() &&
-                                  enc == AGX_ISA_ENCODING_AGX3B &&
+   const bool g17p_sample_group = enc == AGX_ISA_ENCODING_AGX3B &&
                                   ctx->stage == MESA_SHADER_FRAGMENT &&
                                   sample_group_members_left > 1;
    /* G17G fragment witnesses terminate even a lone immediate-level sample:
@@ -11415,22 +11243,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       g17p_final_release = NULL;
    const bool g17p_pixel_protocol =
       g17p_colour_protocol || g17p_blend_protocol || has_coverage_write;
-   /* v54 AGX_G17P_DISCARD_NO_RESTORE: a fully killed inline fragment keeps
-    * its coverage update and no tile access. It still ends the pixel
-    * transaction it opened, with the witnessed empty final release
-    * (070254000200) before END. */
-   bool g17p_kill_only_release = false;
-   if (enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
-       !ctx->key->secondary && !ctx->key->no_stop &&
-       (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_DISCARD_NO_RESTORE) &&
-       has_coverage_write && !has_zs_emit && tile_stores_left == 0 &&
-       tile_loads_left == 0) {
-      g17p_kill_only_release = true;
-      agx_foreach_instr_global(ctx, kill_I) {
-         if (kill_I->op == AGX_OPCODE_SIGNAL_PIX)
-            g17p_kill_only_release = false;
-      }
-   }
    const bool g17p_colourless_fragment =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
       !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 0 &&
@@ -11601,9 +11413,32 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    agx_instr **ordered = rzalloc_array(ctx, agx_instr *, count ? count : 1);
    uint8_t *native_coord_slots =
       rzalloc_array(ctx, uint8_t, count ? count : 1);
+   unsigned resource_capacity = 0, resource_use_capacity = 0;
+   agx_foreach_instr_global(ctx, resource_scan) {
+      resource_capacity += resource_scan->agx3_tex_coord_start ||
+         resource_scan->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3;
+      resource_use_capacity += resource_scan->agx3_tex_coords_staged ||
+         agx_texture_resource(resource_scan);
+   }
+   struct agx3_resource_value *resources =
+      rzalloc_array(ctx, struct agx3_resource_value,
+                    resource_capacity ? resource_capacity : 1);
+   struct agx3_resource_use *resource_uses =
+      rzalloc_array(ctx, struct agx3_resource_use,
+                    resource_use_capacity ? resource_use_capacity : 1);
+   uint16_t *resource_bases =
+      rzalloc_array(ctx, uint16_t, resource_capacity ? resource_capacity : 1);
+   uint32_t *publication_values = rzalloc_array(ctx, uint32_t,
+                                               resource_capacity + 1);
+   uint32_t *resource_last_use = rzalloc_array(ctx, uint32_t,
+                                               resource_capacity + 1);
    if (sl == NULL || res == NULL || ordered == NULL ||
-       native_coord_slots == NULL)
+       native_coord_slots == NULL || !resources || !resource_uses ||
+       !resource_bases || !publication_values || !resource_last_use)
       goto fail;
+
+   unsigned resource_count = 0, resource_use_count = 0;
+   unsigned active_coord_resource = UINT32_MAX;
 
    uint8_t native_coord_preferred_slot = 0;
    agx_foreach_instr_global(ctx, stage_scan) {
@@ -11633,6 +11468,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
+         e->latches_srcs = I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3;
          /* Release ordering includes reads whose results are used after the
           * fence. Register dependencies alone do not order those reads. */
          e->drain = I->op == AGX_OPCODE_SCOPED_BARRIER_AGX3 &&
@@ -11710,7 +11546,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                nd = agx3_expand_regs(I->dest[d], e->dst, nd);
          }
          for (unsigned s = 0; s < I->nr_srcs; ++s) {
-            if (I->agx3_tex_coords_staged && s == 0)
+             if (I->agx3_tex_coords_staged && s == 0)
+               continue;
+            if (agx_texture_resource(I) && (s == 0 || (s == 5 && I->shadow)))
                continue;
             ns = agx3_expand_regs(I->src[s], e->src, ns);
          }
@@ -11719,16 +11557,56 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                goto fail;
             e->src[ns++] = AGX3_SLOT_CPROG_INPUT_TOKEN;
          }
-         if (nd > AGX3_SLOT_MAX_REGS || ns > AGX3_SLOT_MAX_REGS ||
-             (I->agx3_tex_coord_start && nd == AGX3_SLOT_MAX_REGS) ||
-             (I->agx3_tex_coords_staged && ns == AGX3_SLOT_MAX_REGS)) {
+         if (nd > AGX3_SLOT_MAX_REGS || ns > AGX3_SLOT_MAX_REGS) {
             agx3_report_refusal(I, __LINE__);
             goto fail;
          }
-         if (I->agx3_tex_coord_start)
-            e->dst[nd++] = AGX3_SLOT_TEX_COORD_TOKEN;
-         if (I->agx3_tex_coords_staged)
-            e->src[ns++] = AGX3_SLOT_TEX_COORD_TOKEN;
+         if (I->agx3_tex_coord_start) {
+            if (active_coord_resource != UINT32_MAX)
+               goto fail;
+            active_coord_resource = resource_count++;
+            /* Both scalar publications join one native completion event.
+             * Represent their coordinate pair as a real resource value,
+             * independent of the discarded GPR destinations. The existing
+             * arithmetic publication ABI fixes this pair at halves 0..3.
+             */
+            resources[active_coord_resource] = (struct agx3_resource_value){
+               .producer = k - 1, .halves = 4, .alignment = 4, .fixed_base = 0,
+            };
+         }
+         if (I->agx3_tex_coords_staged) {
+            if (active_coord_resource == UINT32_MAX)
+               goto fail;
+            resource_uses[resource_use_count++] = (struct agx3_resource_use){
+               .instruction = k - 1, .value = active_coord_resource,
+               .first = 0, .count = 4, .through_completion = true,
+            };
+            active_coord_resource = UINT32_MAX;
+         }
+         if (I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3) {
+            if (!I->imm || I->imm > resource_capacity ||
+                publication_values[I->imm] || I->nr_srcs != 2)
+               goto fail;
+            const unsigned value = resource_count++;
+            publication_values[I->imm] = value + 1;
+            resources[value] = (struct agx3_resource_value){
+               .producer = k - 1,
+               .halves = agx_is_null(I->src[1]) ? 4 : 6,
+               .alignment = 4, .fixed_base = UINT16_MAX,
+            };
+         }
+         if (agx_texture_resource(I)) {
+            const unsigned id = agx_texture_resource(I);
+            if (I->op != AGX_OPCODE_TEXTURE_SAMPLE || id > resource_capacity ||
+                !publication_values[id])
+               goto fail;
+            const unsigned value = publication_values[id] - 1;
+            resource_uses[resource_use_count++] = (struct agx3_resource_use){
+               .instruction = k - 1, .value = value,
+               .count = agx_index_size_16(I->src[0]), .through_completion = true,
+            };
+            resource_last_use[value] = k - 1;
+         }
 
          /* rld's asynchronous read of the hidden atomic-return words must
           * complete before a later stack access may reuse them. */
@@ -11881,6 +11759,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const struct agx3_slot_entry input_entry = {
       .token = AGX3_SLOT_CPROG_INPUT_TOKEN, .slot = 6,
    };
+   if (active_coord_resource != UINT32_MAX ||
+       (resource_count &&
+        !agx3_resource_lower(resources, resource_count, resource_uses,
+                              resource_use_count, sl, count,
+                              AGX3_SLOT_RESOURCE_HALVES, resource_bases, sl)))
+      goto fail;
    if (!agx3_slot_assign_with_entry(sl, count, nslots, &input_entry,
                                     cprog_imports ? 1 : 0, res))
       goto fail;
@@ -12013,69 +11897,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       fragment_input_started = true;
    }
 
-   /* v52 AGX_G17P_EARLY_COLOUR_GATE. Apple's compiler opens the colour-tile
-    * protocol near the fragment's entry (native throughput fragment 0x30,
-    * after its two pixel-coordinate reads), while a split Honeykrisp epilog
-    * opens it only after the whole main part. For a main part that exports
-    * colour and has no pixel protocol of its own, emit the gate here instead:
-    * after the leading input reads when the part is branch-free, otherwise
-    * before its first instruction, where no branch can reach it. The linker
-    * drops the epilog's gate, or this one when no later part has a gate. */
-   const bool g17p_single_rt = ctx->nir &&
-      /* One colour target only: Apple's witness is a single-RT fragment,
-       * and a multi-target epilog opens its partitions differently. */
-      util_bitcount64(ctx->nir->info.outputs_written &
-                      (BITFIELD64_RANGE(FRAG_RESULT_DATA0, AGX_MAX_RTS) |
-                       BITFIELD64_BIT(FRAG_RESULT_COLOR))) == 1;
-   const bool g17p_early_gate_base =
-      (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_EARLY_COLOUR_GATE) &&
-      enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
-      !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
-      !g17p_colour_open && !g17p_mrt.valid && texture_samples_left == 0 &&
-      g17p_single_rt;
-   /* v54: an inline-blend fragment (AGX_G17P_INLINE_BLEND) owns its colour
-    * protocol; open it at entry as Apple's throughput fragment does (0x30,
-    * before the loop and the LLDCOL at 0x10c). Coverage writers keep their
-    * own entry placement. The gate is mandatory there, never optional. */
-   const bool g17p_early_gate_inline =
-      g17p_early_gate_base &&
-      (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND) &&
-      (g17p_colour_protocol || g17p_blend_protocol) && !has_coverage_write &&
-      tile_stores_left != 0;
-   bool g17p_early_gate_pending = g17p_early_gate_inline ||
-      (g17p_early_gate_base && !g17p_pixel_protocol &&
-       tile_stores_left == 0 && tile_loads_left == 0);
-   /* After the leading inputs when the entry block has another instruction
-    * for the gate to precede: the entry block has no predecessors, so a gate
-    * ahead of its first control-flow instruction is crossed by no branch. */
-   bool g17p_early_gate_after_inputs = false;
-   if (g17p_early_gate_pending) {
-      agx_foreach_instr_in_block(agx_start_block(ctx), gate_I) {
-         if (gate_I->op != AGX_OPCODE_GET_SR && gate_I->op != AGX_OPCODE_LDCF &&
-             gate_I->op != AGX_OPCODE_INTERP_AGX3 &&
-             gate_I->op != AGX_OPCODE_RHW_INTERP_AGX3 &&
-             gate_I->op != AGX_OPCODE_ITRCOORDS_AGX3 &&
-             gate_I->op != AGX_OPCODE_STOP) {
-            g17p_early_gate_after_inputs = true;
-            break;
-         }
-      }
-   }
-   if (g17p_early_gate_pending && !g17p_early_gate_after_inputs) {
-      uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
-      if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
-          !agx3_append(emission, entry, entry_len))
-         goto fail;
-      ctx->agx3_colour_link.entry_emitted = true;
-      ctx->agx3_colour_link.entry_optional = !g17p_early_gate_inline;
-      ctx->agx3_colour_link.entry_offset =
-         emission->size - entry_len - initial_size;
-      g17p_colour_open = true;
-      g17p_early_gate_pending = false;
-      /* As for the memory-side-effect gate above: inputs read after the
-       * gate stay unmarked. */
-      fragment_input_started = true;
-   }
 
    if (g18_ms_mrt_background) {
       uint8_t acquire[AGX3_PIXEL_MAX_LENGTH], acquire_len = 0;
@@ -12112,31 +11933,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             util_dynarray_append(&spans, span);
          }
 
-         if (agx3_g17p_trace_slots())
-            fprintf(stderr, "G17Pslot %-3u %-22s slot=%u wait=0x%02x\n",
-                    instr_index, agx_opcodes_info[I->op].name, slot, wait);
-
-         /* v52 early colour gate, branch-free part: after the leading
-          * fragment-input reads, as Apple places it. */
-         if (g17p_early_gate_pending && I->op != AGX_OPCODE_GET_SR &&
-             I->op != AGX_OPCODE_LDCF && I->op != AGX_OPCODE_INTERP_AGX3 &&
-             I->op != AGX_OPCODE_RHW_INTERP_AGX3 &&
-             I->op != AGX_OPCODE_ITRCOORDS_AGX3) {
-            uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
-            if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
-                !agx3_append(emission, entry, entry_len))
-               AGX3_REFUSE(I);
-            ctx->agx3_colour_link.entry_emitted = true;
-            ctx->agx3_colour_link.entry_optional = !g17p_early_gate_inline;
-            ctx->agx3_colour_link.entry_in_entry_block =
-               block == agx_start_block(ctx);
-            ctx->agx3_colour_link.entry_offset =
-               emission->size - entry_len - initial_size;
-            g17p_colour_open = true;
-            g17p_early_gate_pending = false;
-            /* The instruction after the gate is the block's current last. */
-            block->last_offset = emission->size;
-         }
 
          /* A wait retires its slots before this instruction issues its own. */
          outstanding &= (uint16_t)~wait;
@@ -12146,54 +11942,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* Give every control-flow boundary an empty scoreboard, rather
           * than refusing the shader when something is still in flight. */
-         /* An instruction waiting on two live slot generations is not a
-          * grounded hardware form: the slot planner's own ISEL note records
-          * that it "intermittently consumes one result early", and fixes it
-          * only for the device-load diamond by pinning preferred slots. Do it
-          * generally -- retire every generation but one through the existing
-          * carrier, so the instruction carries the single wait the witnessed
-          * encodings use. Instructions that already lower their own multi-slot
-          * dependencies (textures, atomics, control flow) are left alone. */
-         /* Mode 2: move the wait off a BITOP entirely, onto the existing
-          * band-identity carrier. The XOR register swap that lowers a post-RA
-          * cycle is the only opcode the failing sampler1darrayshadow shader has
-          * and the passing sampler2darrayshadow shader does not, and lookup 3's
-          * result is what comes out of it. Its wait IS planned and IS encoded
-          * (probed: wait 0x08 -> byte[6]=0x20), so this asks the remaining
-          * question: whether the hardware honours a wait field on a BITOP that
-          * reads a texture destination. */
-         /* Modes 5 and 6 split mode 2 by which half of the wait mask is
-          * moved onto the carrier. Probing agx3_alu_bit_reg shows a BITOP
-          * encodes its 6-bit wait in TWO separate places: slots 1-3 land in
-          * byte[5] bits 5..7, slots 4-6 land in byte[7] bits 5..7, and byte[6]
-          * is untouched. If only one of those halves is actually read by the
-          * hardware, moving just that half onto a carrier should recover all
-          * of mode 2's benefit and the other half should be worth nothing.
-          *   5 = move only slots 4-6 (mask 0x38), keep 1-3 inline
-          *   6 = move only slots 1-3 (mask 0x07), keep 4-6 inline */
-         {
-            const int swm = agx3_g17p_single_wait_mode();
-            if ((swm == 2 || swm == 5 || swm == 6) &&
-                I->op == AGX_OPCODE_BITOP && wait != 0) {
-               const uint16_t move = swm == 5   ? (uint16_t)(wait & 0x38)
-                                     : swm == 6 ? (uint16_t)(wait & 0x07)
-                                                : wait;
-               if (move) {
-                  if (!agx3_retire_slots_noop(emission, enc, move))
-                     AGX3_REFUSE(I);
-                  wait &= (uint16_t)~move;
-               }
-            }
-         }
-         if (agx3_g17p_single_wait() && !agx3_is_cf_op(I) &&
-             (wait & (uint16_t)(wait - 1))) {
-            const uint16_t keep = wait & (uint16_t)-wait;
-            if (!agx3_retire_slots_noop(emission, enc,
-                                        (uint16_t)(wait & ~keep)))
-               AGX3_REFUSE(I);
-            wait = keep;
-         }
-
          uint16_t cf_wait = wait;
          uint16_t cf_outstanding = outstanding_here;
          if (agx3_is_cf_op(I)) {
@@ -12301,6 +12049,46 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_NO_VARYINGS) {
             if (ctx->stage != MESA_SHADER_VERTEX)
                AGX3_REFUSE(I);
+            continue;
+         }
+
+         if (I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3) {
+            if (enc != AGX_ISA_ENCODING_AGX3B || !slot || I->nr_srcs != 2 ||
+                !I->imm || I->imm > resource_capacity ||
+                !publication_values[I->imm] || !agx3_tex_plain_reg(I->src[0]) ||
+                I->src[0].size != AGX_SIZE_32 || agx_channels(I->src[0]) != 2 ||
+                (!agx_is_null(I->src[1]) &&
+                 (!agx3_tex_plain_reg(I->src[1]) ||
+                  I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 1)))
+               AGX3_REFUSE(I);
+            const unsigned value = publication_values[I->imm] - 1;
+            const uint16_t base = resource_bases[value];
+            const uint16_t span = resources[value].halves;
+            agx3_staging_release(&staging_banks, outstanding_here);
+            const uint16_t retire = wait |
+               agx3_staging_conflicts(&staging_banks, base, span);
+            /* COPY's wait bit does not enforce the required G17P producer
+             * dependency. Keep that wait on its qualified carrier, while
+             * the publication owns an independent completion event.
+             */
+            if (retire && !agx3_retire_slots_noop(emission, enc, retire))
+               AGX3_REFUSE(I);
+            outstanding &= (uint16_t)~retire;
+            outstanding |= (uint16_t)(1u << (slot - 1));
+            agx3_staging_forget(&staging_banks, retire);
+            for (unsigned c = 0; c < span / 2; ++c) {
+               const agx_index src = I->src[c < 2 ? 0 : 1];
+               const uint16_t reg = src.value + (c == 1 ? 2 : 0);
+               uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+               if (!agx3_tex_stage_copy_hints(enc, base + 2 * c, reg, slot, 0,
+                                             src.cache, src.discard,
+                                             bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+            }
+            if (!agx3_staging_hold(&staging_banks, base, span, slot))
+               AGX3_REFUSE(I);
+            ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, base + span);
             continue;
          }
 
@@ -12422,7 +12210,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_emit_interp(emission, enc, I, interp_wait, first,
                                   ctx->stage == MESA_SHADER_FRAGMENT))
                AGX3_REFUSE(I);
-            ctx->agx3_colour_link.input_marked |= first;
             fragment_input_started = true;
             continue;
          }
@@ -12488,7 +12275,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                !g17p_fragment_helper_protocol;
             if (!agx3_emit_ldcf(emission, enc, I, slot, wait, first))
                AGX3_REFUSE(I);
-            ctx->agx3_colour_link.input_marked |= first;
             fragment_input_started = true;
             continue;
          }
@@ -12674,8 +12460,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * so a later fetch restages halves 0..3 under it and that
              * attachment reloads another target's coordinates. */
             const bool staged_bank_reads = staged;
-            if (slot)
-               sample_slots_live |= (uint16_t)(1u << (slot - 1));
             if (enc == AGX_ISA_ENCODING_AGX3C) {
             if (staged) {
                const unsigned coord_base =
@@ -12759,7 +12543,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                            wait | outstanding_here))
                   AGX3_REFUSE(I);
                outstanding &= (uint16_t)~outstanding_here;
-               sample_slots_live &= (uint16_t)~outstanding_here;
             }
             const uint16_t fetch_wait =
                g18_fixed_fetch_record ? 0 : wait | ((I->dim == AGX_DIM_2D_MS ||
@@ -12811,7 +12594,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!agx3_retire_slots_noop(emission, enc, consumer))
                   AGX3_REFUSE(I);
                outstanding &= (uint16_t)~consumer;
-               sample_slots_live &= (uint16_t)~consumer;
             }
             if (open_pixel_fetch) {
                ctx->agx3_colour_link.entry_emitted = true;
@@ -12886,7 +12668,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                wait &= (uint16_t)~live;
                outstanding &= (uint16_t)~live;
-               sample_slots_live &= (uint16_t)~live;
             }
             /* Diagnostic (AGX_G17P_DRAIN_BEFORE_SAMPLE=1): retire every
              * outstanding scoreboard generation immediately before each
@@ -12902,10 +12683,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * which is exactly what bug #1 does. Draining here serialises
              * that publication. */
             {
-               /* DEFAULT ON. A texture sample's planned scoreboard wait is
-                * retired on a carrier instruction instead of being encoded in
-                * the sample's own staging copies, whose wait field does not
-                * take effect on G17P.
+               /* A texture sample's planned scoreboard wait is retired on a
+                * carrier instruction instead of being encoded in the sample's
+                * own staging copies, whose wait field does not take effect on
+                * G17P. Only this sample's own wait is moved, so unrelated
+                * outstanding work is not serialised.
                 *
                 * Evidence: with the wait left in the copy, the CTS case
                 * dEQP-VK.glsl.opaque_type_indexing.sampler.dynamically_uniform
@@ -12914,29 +12696,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * wait onto a carrier -- two instructions, +20 bytes on a 1792
                 * byte shader -- makes both 0 for 300 and 30/30. The emitted
                 * difference is precisely two copies losing byte[4] bit 0x80,
-                * their wait bit, plus the two carriers.
-                *
-                * Set AGX_G17P_DRAIN_BEFORE_SAMPLE=0 to restore the old
-                * behaviour for A/B; 1 drains everything outstanding, 2 only
-                * previous samples' generations. */
-               static int drain = -1;
-               if (drain < 0) {
-                  const char *v = getenv("AGX_G17P_DRAIN_BEFORE_SAMPLE");
-                  drain = (v && v[0]) ? atoi(v) : 3;
-               }
-               /* 1 = retire everything outstanding (correct but a big hammer).
-                * 2 = retire only the generations held by PREVIOUS TEXTURE
-                *     SAMPLES, which is the minimum the shared-publication
-                *     story requires: sample N must not publish its index
-                *     while sample N-1 is still using the shared state. */
-               /* 3 = retire only this sample's OWN planned wait, on a
-                *     carrier, and clear it. That is the minimal form: the
-                *     sample's staging copies are what would otherwise carry
-                *     the wait in their own encoding, and that field is the
-                *     one that does not take effect. Measured identical to
-                *     mode 1 on the CTS shape (both add exactly the two
-                *     carriers for the two samples whose wait is non-zero)
-                *     without serialising unrelated outstanding work. */
+                * their wait bit, plus the two carriers. */
                /* A LOD query is not a staged sample: it has its own operand
                 * and slot protocol, and retiring its wait here regressed all
                 * 45 dEQP-VK.glsl.texture_functions.query.texturequerylod
@@ -12948,19 +12708,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * carrier would retire it before the sample can consume it.
                 * Only the late COPY publication needs the carrier. */
                const bool staged_sample =
-                  !I->query_lod && !I->agx3_tex_coords_staged;
-               const uint16_t live =
-                  !staged_sample ? 0
-                  : drain == 3 ? wait
-                  : drain == 2 ? (uint16_t)(outstanding_here & sample_slots_live)
-                  : drain == 1 ? (uint16_t)(wait | outstanding_here)
-                               : 0;
+                  !I->query_lod && !I->agx3_tex_coords_staged &&
+                  !agx_texture_resource(I);
+               const uint16_t live = staged_sample ? wait : 0;
                if (live) {
                   if (!agx3_retire_slots_noop(emission, enc, live))
                      AGX3_REFUSE(I);
                   wait &= (uint16_t)~live;
                   outstanding &= (uint16_t)~live;
-                  sample_slots_live &= (uint16_t)~live;
                }
             }
             assert(texture_ops_left > 0);
@@ -12970,24 +12725,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool sample_group_member =
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN;
-            /* f156 on the last group member ends the fragment's helper
-             * invocations: lanes outside the primitive stop after that SMP.
-             * A dFdx/dFdy/fwidth or quad operation later in the program then
-             * reads dead neighbours. WebRender's composite shader computes
-             * its clip anti-aliasing range with fwidth() after sampling the
-             * tile, so every 2x2 quad row straddling two 512-px picture-cache
-             * tiles (content origin at an odd row) came out partly
-             * transparent in Zen. Leave the group open in that case; the
-             * helpers then live to the end of the program. A later
-             * implicit-LOD SMP (which does terminate the group) restores
-             * correct derivatives, confirming the f156 boundary. */
-            const bool helpers_outlive_group =
-               g17p_quad_op_after_group && sample_group_member &&
+            /* A fragment SMP whose f156 group is still open (nonterminal)
+             * keeps the quad's helper lanes for what follows; the terminating
+             * member, or a lone member carrying neither flag, does not
+             * (measured on G17P, 2026-10-05: in
+             * dEQP-VK.glsl.helper_invocations.load_from_texture,
+             * fwidth(texture(...)) after a lone SMP read the helper lanes'
+             * results wrong -- Fail 4/4 -- and passes 2/2 with the lone SMP
+             * nonterminal; marking it terminal still fails). So the last
+             * member stays open when a quad derivative or quad shuffle
+             * follows it. Native's encoding for this shape is not yet
+             * decoded; this is the measured requirement. */
+            const bool keep_quad_open =
                enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT &&
-               sample_group_members_remaining == 1;
-            const bool sample_group_nonterminal =
-               helpers_outlive_group ||
+               ctx->stage == MESA_SHADER_FRAGMENT && sample_group_member &&
+               sample_group_members_remaining == 1 &&
+               (quad_consumer_after_last_member || g17p_quad_op_after_group);
+            const bool sample_group_nonterminal = keep_quad_open ||
                (g17p_sample_group && sample_group_member &&
                 sample_group_members_remaining > 1) ||
                /* G17G's plain 2D fragment samples form the same group: the
@@ -13005,7 +12759,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (sample_group_member) {
                assert(sample_group_members_remaining > 0);
                sample_group_end = --sample_group_members_remaining == 0 &&
-                                  ((g17p_sample_group && !helpers_outlive_group) ||
+                                  ((g17p_sample_group && !keep_quad_open) ||
                                    (g17g_fragment_group &&
                                     I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                                     I->src[1].type == AGX_INDEX_IMMEDIATE &&
@@ -13074,13 +12828,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage == MESA_SHADER_TESS_EVAL) &&
                (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                 I->lod_mode == AGX_LOD_MODE_LOD_GRAD);
-            /* Sampler-private staging groups 0/8/16 (see the note in
-             * agx3_emit_texture_sample). A plain 2D sample takes the lowest
-             * group whose previous sample has retired; when all three still
-             * hold in-flight samples, group 0's is retired first. Every other
-             * G17P sample shape keeps its witnessed fixed banks, so it drains
-             * the in-flight staged samples and then owns every group. */
-            const bool rotatable_staging =
+            /* Relocation is an operand-ABI property. Other forms retain
+             * their fixed operand locations and wait only for overlapping
+             * live ranges before publishing into those locations. */
+            const bool relocatable_coordinates =
                enc == AGX_ISA_ENCODING_AGX3B && slot != 0 &&
                !native_staged_coords && I->dim == AGX_DIM_2D &&
                !I->query_lod && !(I->offset && !I->offset_xyz) &&
@@ -13089,19 +12840,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   I->lod_mode == AGX_LOD_MODE_LOD_MIN) &&
                  I->src[1].type == AGX_INDEX_IMMEDIATE));
             const bool staged_scalar =
-               I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+               (I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+                I->src[1].type != AGX_INDEX_IMMEDIATE) ||
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
                 I->src[1].type != AGX_INDEX_IMMEDIATE);
             const bool staged_compare = I->shadow;
             const bool staged_sample_offset = I->offset && I->offset_xyz == 0;
+            const bool published = agx_texture_resource(I) != 0;
+            const unsigned published_resource = published
+               ? publication_values[agx_texture_resource(I)] - 1 : 0;
             const uint16_t sample_span =
+               published ? agx_index_size_16(I->src[0]) :
                     (gpu1_fixed_gather
                        ? (ctx->key->dev.emit_agx3d && !I->shadow ? 6 : 8)
                     : (I->dim == AGX_DIM_CUBE ||
                      I->dim == AGX_DIM_CUBE_ARRAY) ? 8
                     : native_staged_coords ? 4
-                    : vertex_explicit_lod
+                    : vertex_explicit_lod &&
+                       (I->lod_mode != AGX_LOD_MODE_LOD_MIN ||
+                        I->src[1].type != AGX_INDEX_IMMEDIATE)
                        ? (I->lod_mode == AGX_LOD_MODE_LOD_GRAD
                              ? (I->dim == AGX_DIM_3D ? 40 : 24)
                              : 16)
@@ -13117,41 +12875,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        (enc == AGX_ISA_ENCODING_AGX3C &&
                         agx3_g17g_basic_gather(I))) ? 4
                                                    : I->src[0].value + 4);
-            uint16_t bank_base = 0;
-            if (enc == AGX_ISA_ENCODING_AGX3B) {
+            uint16_t bank_base = published ? resource_bases[published_resource] : 0;
+            if (enc == AGX_ISA_ENCODING_AGX3B && !published) {
                /* Texel fetches and filtered samples publish into the same
                 * sampler-private file. A sample must not overwrite a bank
                 * still consumed by a fetch (and vice versa). */
                agx3_staging_release(&staging_banks, outstanding_here);
-               uint16_t busy[3];
-               for (unsigned g = 0; g < 3; ++g)
-                  busy[g] = stage_group_slot[g]
-                               ? (uint16_t)(1u << (stage_group_slot[g] - 1))
-                               : 0;
-               if (rotatable_staging) {
-                  if (!agx3_take_staging_group(emission, enc,
-                                               stage_group_slot, &staging_banks,
-                                               &outstanding,
-                                               outstanding_here, slot,
-                                               &bank_base))
+               if (relocatable_coordinates) {
+                  if (!agx3_allocate_staging(emission, enc, &staging_banks,
+                                             &outstanding, slot, sample_span,
+                                             &bank_base))
                      AGX3_REFUSE(I);
                } else {
-                  uint16_t retire = 0;
-                  for (unsigned g = 0; g < 3; ++g)
-                     retire |= (uint16_t)(outstanding_here & busy[g]);
-                  retire |= agx3_staging_conflicts(&staging_banks, 0,
-                                                    sample_span);
-                  if (agx3_g17p_force_staging_drain())
-                     retire |= (uint16_t)(busy[0] | busy[1] | busy[2]);
-                  if (agx3_g17p_force_staging_drain())
-                     fprintf(stderr,
-                             "G17Pstage dim=%u shadow=%u slot=%u wait=0x%x "
-                             "outst_here=0x%x grp=[%u,%u,%u] busy=[0x%x,0x%x,0x%x] "
-                             "retire=0x%x bank_base=%u rot=%u\n",
-                             I->dim, I->shadow, slot, wait, outstanding_here,
-                             stage_group_slot[0], stage_group_slot[1],
-                             stage_group_slot[2], busy[0], busy[1], busy[2],
-                             retire, bank_base, rotatable_staging);
+                  const uint16_t retire = agx3_staging_conflicts(
+                     &staging_banks, 0, sample_span);
                   if (retire) {
                      if (!agx3_retire_slots_noop(emission, enc, retire))
                         AGX3_REFUSE(I);
@@ -13160,8 +12897,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                         outstanding |= (uint16_t)(1u << (slot - 1));
                      agx3_staging_forget(&staging_banks, retire);
                   }
-                  for (unsigned g = 0; g < 3; ++g)
-                     stage_group_slot[g] = slot;
                }
             }
             uint16_t sample_wait = wait;
@@ -13206,7 +12941,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * Do not drain unrelated outstanding slots or change allocation.
              * Previously encodable zero/one-wait samples remain unchanged. */
             if (sample_wait & (sample_wait - 1)) {
-               const uint16_t staging_wait = sample_wait & -sample_wait;
+               uint16_t staging_wait = sample_wait & -sample_wait;
+               if (published) {
+                  /* Keep a still-pending publication as SMP's direct
+                   * dependency, and retire independent descriptor producers
+                   * on carriers. Never add a remembered slot to the mask:
+                   * an earlier consumer may already have completed it.
+                   */
+                  const unsigned producer = resources[published_resource].producer;
+                  const uint16_t publication_wait =
+                     1u << (res[producer].slot - 1);
+                  if (sample_wait & publication_wait)
+                     staging_wait = publication_wait;
+               }
                if (!agx3_retire_slots_noop(emission, enc,
                                            sample_wait & ~staging_wait))
                   AGX3_REFUSE(I);
@@ -13239,7 +12986,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                           vertex_sample_stage,
                                           compute_sample_stage,
                                           ms_array_scratch, bank_base, g17g_lod_relay,
-                                          ctx->key->dev.emit_agx3d))
+                                          ctx->key->dev.emit_agx3d,
+                                          published && resource_last_use[
+                                             published_resource] == instr_index))
                AGX3_REFUSE(I);
             /* Keep this fixed sampler block owned until its consumer has
              * retired, so later samples, fetches or image writes cannot
@@ -13249,7 +12998,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!agx3_retire_slots_noop(emission, enc, live))
                   AGX3_REFUSE(I);
                outstanding &= (uint16_t)~live;
-               sample_slots_live &= (uint16_t)~live;
             }
             if (open_pixel) {
                ctx->agx3_colour_link.entry_emitted = true;
@@ -13289,7 +13037,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (enc == AGX_ISA_ENCODING_AGX3B && slot) {
                agx3_staging_release(&staging_banks, outstanding);
                if (!agx3_staging_hold(&staging_banks, bank_base,
-                                      rotatable_staging ? 8 : sample_span,
+                                      sample_span,
                                       slot))
                   AGX3_REFUSE(I);
             }
@@ -13462,19 +13210,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                assert(tile_loads_left > 0);
                first = tile_loads_seen++ == 0;
                last = --tile_loads_left == 0;
-               /* v52 AGX_G17P_INPUT_MARK: one entry marker per fragment. An
-                * input this part already marked keeps the load unmarked;
-                * otherwise record where the marker lands so the linker can
-                * drop it when an earlier part marked an input. */
-               if ((agx_get_fs_structure_flags() &
-                    AGX_FS_STRUCTURE_INPUT_MARK) &&
-                   ctx->agx3_colour_link.input_marked)
-                  first = false;
-               if (first && !ctx->agx3_colour_link.lldcol_first_valid) {
-                  ctx->agx3_colour_link.lldcol_first_valid = true;
-                  ctx->agx3_colour_link.lldcol_first_offset =
-                     UINT32_MAX; /* set after the pixel waits below */
-               }
             } else {
                assert(tile_stores_left > 0);
                last = --tile_stores_left == 0;
@@ -13583,8 +13318,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                                 : g17p_mrt.shared_first);
                const bool release_class =
                   !shared || partition == g17p_mrt.shared_last;
+               /* Do not use the leading-store f13 hint on a live payload:
+                * reusing that payload for a later attachment produces zero
+                * on G17P (eight mixed-format attachment write-mask CTS).
+                * Preserve it until its last use. Unique-payload native MRT
+                * witnesses retain their existing leading-store hint. */
                const bool store_f13 =
-                  !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores;
+                  !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores &&
+                  (I->src[0].kill || I->src[0].discard);
                /* A multisample store keeps its own coverage dependency. */
                const bool store_waits = !acquire_class || g17p_mrt.multisample;
                if ((acquire_class &&
@@ -13630,11 +13371,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             /* Apple's per-sample RGBA32 fragments store from halves 24 and
              * 16 with f13 clear, as the multi-target backgrounds do. */
-            if (first && I->op == AGX_OPCODE_LD_TILE &&
-                ctx->agx3_colour_link.lldcol_first_valid &&
-                ctx->agx3_colour_link.lldcol_first_offset == UINT32_MAX)
-               ctx->agx3_colour_link.lldcol_first_offset =
-                  emission->size - initial_size;
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
                                 g17p_multi_background ||
                                    g17p_sample_colour_stores,
@@ -13717,7 +13453,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * program does: its four uniform writes land on halves 20, 22,
                 * 24 and 26 -- consecutive 32-bit slots two halves apart.
                 */
-               bool ok = wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
+               bool ok = true;
+               if (wait && enc != AGX_ISA_ENCODING_AGX3B) {
+                  ok = agx3_retire_slots_noop(emission, enc, wait);
+               } else if (wait) {
+                  /* This is a partial wait. r0 may still be the destination
+                   * of an unrelated load (for example a UBO sample index).
+                   * Carry the wait on the value being published, whose
+                   * producer is covered by the mask, so retiring another
+                   * uniform cannot overwrite that pending r0 generation. */
+                  uint8_t carrier[AGX3_ALU_MAX_LENGTH], carrier_len = 0;
+                  const bool retired = scalar16
+                     ? agx3_alu_bit_imm(enc, AGX3_ALU_BOR, true, value.value,
+                                        value.value, 0, AGX3_ALU_HINT_NONE, wait,
+                                        carrier, &carrier_len)
+                     : agx3_alu_band_identity_wait(enc, value.value, wait,
+                                                   carrier, &carrier_len);
+                  ok = retired && agx3_append(emission, carrier, carrier_len);
+               }
 
                for (unsigned i = 0; ok && i < copies; ++i) {
                   uint8_t bytes[AGX3_COPY_MAX_LENGTH];
@@ -14072,20 +13825,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 enc == AGX_ISA_ENCODING_AGX3C) &&
                ctx->stage == MESA_SHADER_FRAGMENT &&
                I->sr == AGX_SR_INPUT_SAMPLE_MASK;
-            /* v52 AGX_G17P_INPUT_MARK: a leading pixel-coordinate read is
-             * the fragment's first input in the same sense. */
-            const bool pixel_input = enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT &&
-               (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INPUT_MARK) &&
-               (d.sr == 23 || d.sr == 24) && d.width == AGX3_SR_W32;
-            d.first = (coverage_input || pixel_input) &&
+            d.first = coverage_input &&
                       emission->size == initial_size &&
                       !fragment_input_started &&
                       !g17p_fragment_helper_protocol;
             if (!agx3_sr_encode(enc, &d, bytes, &len))
                AGX3_REFUSE(I);
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);
-            ctx->agx3_colour_link.input_marked |= d.first;
             fragment_input_started |= coverage_input || d.first;
             continue;
          }
@@ -14372,7 +14118,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
             if (g18g_texture_barrier) {
                outstanding &= (uint16_t)~wait;
-               sample_slots_live &= (uint16_t)~wait;
             }
             continue;
          }
@@ -14388,7 +14133,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_vary_reg32(dest) ||
                 !agx3_src_is_register(src) || src.memory ||
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
-                src.neg || src.kill || (src.abs && half) ||
+                (src.neg && half) || src.kill || (src.abs && half) ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -14398,9 +14143,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                               true, wait, bytes, &len)
                     : (src.size == AGX_SIZE_32 && !(src.value & 1) &&
                        src.value < 256 &&
-                       agx3_alu_sqrt_step_mod(enc, dest.value, src.value,
+                       agx3_alu_sqrt_step_source_modifiers(enc, dest.value, src.value,
                                               agx3_post_ra_hint(src),
-                                              dest.cache, wait, src.abs,
+                                              dest.cache, wait, src.abs, src.neg,
                                               bytes, &len));
             if (!ok || !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
@@ -15328,6 +15073,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index compare = I->src[zero_first ? 1 : 0];
             if (zero.type == AGX_INDEX_IMMEDIATE && zero.value == 0 &&
                 compare.type == AGX_INDEX_REGISTER && !compare.memory &&
+                /* A negated f32 compare uses the signed-immediate form below. */
+                !(compare.neg && compare.size == AGX_SIZE_32 &&
+                  agx3_fcond_witnessed_select(I->fcond)) &&
                 agx_channels(compare) == 1 &&
                 (compare.size == AGX_SIZE_16 || compare.size == AGX_SIZE_32)) {
                unsigned condition = I->fcond;
@@ -15641,7 +15389,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->src[0].type == AGX_INDEX_IMMEDIATE))) {
             const bool immediate_first =
                I->src[0].type == AGX_INDEX_IMMEDIATE;
-            const agx_index immediate = I->src[immediate_first ? 0 : 1];
+            agx_index immediate = I->src[immediate_first ? 0 : 1];
             const agx_index compare = I->src[immediate_first ? 1 : 0];
             const unsigned true_src = I->invert_cond ? 3 : 2;
             const unsigned false_src = I->invert_cond ? 2 : 3;
@@ -15650,13 +15398,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                            agx_channels(compare) != 1;
             for (unsigned i = 0; i < 4; ++i)
                invalid |= (I->src[i].abs && i != (immediate_first ? 1 : 0)) ||
-                          I->src[i].neg || I->src[i].kill || I->src[i].memory ||
+                          (I->src[i].neg && i != (immediate_first ? 1 : 0)) ||
+                          I->src[i].kill || I->src[i].memory ||
                           (I->src[i].cache && I->src[i].discard);
             if (invalid)
                AGX3_REFUSE(I);
 
-            const unsigned condition =
+            unsigned condition =
                immediate_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
+            /* -r cmp k is r reverse(cmp) -k for every ordered relation,
+             * including signed zeros and unordered NaN inputs. Preserve ABS
+             * and the chosen values; only the comparison is reversed. */
+            if (compare.neg) {
+               immediate.value ^= 0x80;
+               condition = agx3_fcond_reverse(condition);
+            }
+
             const enum agx3_alu_hint hints[4] = {
                agx3_post_ra_hint(compare), AGX3_ALU_HINT_NONE,
                agx3_post_ra_hint(I->src[true_src]),
@@ -16516,9 +16273,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (I->src[1].cache && I->src[1].discard) ||
                 !agx3_alu_integer_reg_shift_cache(
                    enc, op, I->dest[0].value, src, hints, (uint8_t)I->shift,
-                   enc == AGX_ISA_ENCODING_AGX3B &&
-                   (agx_get_codegen_flags() &
-                    AGX_CODEGEN_G17P_INT_DEST_CACHE) != 0,
+                   enc == AGX_ISA_ENCODING_AGX3B,
                    wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
@@ -16687,7 +16442,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = agx3_int_dest_cache(I->dest[0].cache),
+                  .dest_cache = true,
                   .src_a_is_register = true,
                   .src_a_reg = a.value,
                   .src_a_kill = a.discard,
@@ -16777,7 +16532,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   (reg.abs || reg.neg || signed_half_widen)))) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = agx3_int_dest_cache(signed_half_widen && I->dest[0].cache),
+                  .dest_cache = true,
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
@@ -16850,7 +16605,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                             instr_index, I, &w))
                   AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
-                  .dest_cache = agx3_int_dest_cache(false),
+                  .dest_cache = true,
                   .dest = I->dest[0].value,
                   .src_a_is_register = true,
                   .src_a_reg = a.value,
@@ -16917,7 +16672,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = agx3_int_dest_cache(I->dest[0].cache),
+                  .dest_cache = true,
                   .src_a_is_register = true,
                   .src_a_reg = na.value,
                   .src_a_kill = na.discard,
@@ -17007,7 +16762,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->dest[0].value >= AGX3_COPY_REG16_DEST_HALVES) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = agx3_int_dest_cache(I->dest[0].cache),
+                  .dest_cache = true,
                   .immediate = 0,
                   .src = I->src[0].value,
                   .src_kill = I->src[0].discard,
@@ -17200,14 +16955,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                agx3_src_is_register(dest) && !dest.memory &&
                agx_channels(dest) == 1 &&
                (dest.size == AGX_SIZE_32 || dest.size == AGX_SIZE_16);
-            const bool cmp_ok =
-               agx3_src_is_register(a) && !a.memory && !a.abs && !a.neg &&
-               (a.size == AGX_SIZE_32 || a.size == AGX_SIZE_16) &&
-               agx_channels(a) == 1 && !b.memory && !b.abs && !b.neg &&
-               ((b.type == AGX_INDEX_IMMEDIATE && b.value <= 255) ||
-                (agx3_src_is_register(b) &&
-                 (b.size == a.size || narrow_second) &&
-                 agx_channels(b) == 1));
+            /* One aligned 32-bit uniform comparand is native beside a
+             * 32-bit register (agx3_isel_core.c); agx_lower_uniform_sources
+             * keeps no other uniform compare shape. */
+            const bool a_uniform = a.type == AGX_INDEX_UNIFORM;
+            const bool b_uniform = b.type == AGX_INDEX_UNIFORM;
+            const bool a_reg32 = agx3_src_is_register(a) &&
+                                 a.size == AGX_SIZE_32 &&
+                                 agx_channels(a) == 1;
+            const bool b_reg32 = agx3_src_is_register(b) &&
+                                 b.size == AGX_SIZE_32 &&
+                                 agx_channels(b) == 1;
+            const bool cmp_ok = !a.memory && !a.abs && !a.neg &&
+               !b.memory && !b.abs && !b.neg &&
+               ((a_uniform && a.size == AGX_SIZE_32 && b_reg32) ||
+                (b_uniform && b.size == AGX_SIZE_32 && a_reg32) ||
+                (agx3_src_is_register(a) &&
+                 (a.size == AGX_SIZE_32 || a.size == AGX_SIZE_16) &&
+                 agx_channels(a) == 1 &&
+                 ((b.type == AGX_INDEX_IMMEDIATE && b.value <= 255) ||
+                  (agx3_src_is_register(b) &&
+                   (b.size == a.size || narrow_second) &&
+                   agx_channels(b) == 1))));
 
             if (!dest_ok || !cmp_ok)
                AGX3_REFUSE(I);
@@ -17217,6 +16986,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             d.cmp0 = a.value;
             d.cmp1 = b.value;
             d.cmp1_immediate = b.type == AGX_INDEX_IMMEDIATE;
+            d.cmp0_uniform = a_uniform;
+            d.cmp1_uniform = b_uniform;
             d.cmp_16 = a.size == AGX_SIZE_16;
             d.cmp1_16 = narrow_second;
             d.explicit_hints = true;
@@ -17285,6 +17056,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                           agx_channels(s) == 1) {
                   kind[n] = AGX3_ISEL_REGISTER;
                   value[n] = s.value;
+               } else if (s.type == AGX_INDEX_UNIFORM && !s.memory &&
+                          !s.abs && !s.neg && s.size == AGX_SIZE_32 &&
+                          dest.size == AGX_SIZE_32) {
+                  kind[n] = AGX3_ISEL_UNIFORM;
+                  value[n] = s.value;
                } else {
                   selects_ok = false;
                   break;
@@ -17323,7 +17099,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t len = 0;
             if (!agx3_isel_encode(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len)) {
-               if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+               if (agx_compiler_debug & AGX_DBG_SHADERS)
                   fprintf(stderr,
                           "isel refused: dest=%u/%s cmp=%u,%u cond=%u "
                           "t=%s:%u f=%s:%u wait=%x\n",
@@ -18077,8 +17853,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               I->src[1].type == AGX_INDEX_IMMEDIATE)) {
             const bool immediate_first =
                I->src[0].type == AGX_INDEX_IMMEDIATE;
-            const agx_index imm = I->src[immediate_first ? 0 : 1];
-            const agx_index reg = I->src[immediate_first ? 1 : 0];
+            agx_index imm = I->src[immediate_first ? 0 : 1];
+            agx_index reg = I->src[immediate_first ? 1 : 0];
             uint8_t bytes[AGX3_ALU_MAX_LENGTH];
             uint8_t len = 0;
             const bool multiply = I->op == AGX_OPCODE_FMUL;
@@ -18120,6 +17896,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                continue;
             }
+            /* Use the already-supported signed minifloat encoding for -r * k.
+             * This changes neither the multiplication nor its rounding, and
+             * leaves ABS, widths, cache/discard hints and waits intact. */
+            if (enc == AGX_ISA_ENCODING_AGX3B && multiply && reg.neg &&
+                imm.value <= UINT8_MAX && !imm.memory && !imm.abs && !imm.neg) {
+               imm.value ^= 0x80;
+               reg.neg = false;
+            }
+
             if (!multiply && !I->saturate && reg.abs && !reg.neg && !reg.kill &&
                 imm.value == 0x80 && !imm.memory && !imm.abs && !imm.neg &&
                 agx3_src_is_register(reg) && !reg.memory &&
@@ -18335,8 +18120,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                /* The compact form is grounded for G17P only. G18 also
                 * reaches this dispatch as AGX3C before transcoding. */
                const bool native_forms =
-                  enc == AGX_ISA_ENCODING_AGX3B &&
-                  (agx_get_codegen_flags() & AGX_CODEGEN_G17P_COMPACT_BITOPS);
+                  enc == AGX_ISA_ENCODING_AGX3B;
                const bool encoded = native_forms
                   ? agx3_alu_bit_reg_native(enc, op, I->dest[0].value, src,
                                             hints, I->dest[0].cache, wait,
@@ -19544,7 +19328,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          struct agx3_sel_instr S;
          if (!agx3_translate_instr(I, &S) ||
              !agx3_emit_alu(emission, enc, &S, wait)) {
-            if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+            if (agx_compiler_debug & AGX_DBG_SHADERS)
                fprintf(stderr,
                        "ALUX %s wait=%x shift=%u d{v=%u sz=%u} s0{t=%u v=%u "
                        "sz=%u abs=%u} s1{t=%u v=%u sz=%u abs=%u}\n",
@@ -19568,7 +19352,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    util_dynarray_foreach(&fixups, struct agx3_branch_fixup, fixup) {
       if (!agx3_fixup_branch(emission, enc, *fixup)) {
-         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+         if (agx_compiler_debug & AGX_DBG_SHADERS)
             fprintf(stderr,
                     "AGX3 branch fixup refused: at=%lld target=%lld last=%lld "
                     "skip_end=%u loop_exit=%u bn=%u\n",
@@ -19608,8 +19392,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       goto fail;
    }
 
-   if (enc == AGX_ISA_ENCODING_AGX3B &&
-       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_LOOP_HEAD_HINT)) {
+   if (enc == AGX_ISA_ENCODING_AGX3B) {
       const unsigned hinted = agx3_apply_loop_head_hints(ctx, emission);
       if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "AGX3 loop-head hints: %u\n", hinted);
@@ -19620,23 +19403,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * epilog cannot know that upstream slot, so finish only the still-live
     * async work at this boundary. Constant-colour parts and parts with real
     * in-part consumers add no instructions. */
-   if (agx3_g17p_drain_tail() && !ctx->is_preamble) {
-      if (!agx3_retire_slots_noop(emission, enc, 0x3f))
-         goto fail;
-      outstanding = 0;
-   }
-
    if (ctx->key->no_stop && !ctx->is_preamble && outstanding != 0 &&
        !agx3_retire_slots_noop(emission, enc, outstanding))
       goto fail;
-
-   if (g17p_kill_only_release && !ctx->is_preamble) {
-      uint8_t bytes[AGX3_PIXEL_MAX_LENGTH], len;
-      if (!g17p_colour_open ||
-          !agx3_pixel_release(enc, 0, true, 0, bytes, &len) ||
-          !agx3_append(emission, bytes, len))
-         goto fail;
-   }
 
    if (!ctx->key->no_stop || ctx->is_preamble) {
       const struct agx3_sel_instr end = {.op = AGX3_SEL_OP_END};

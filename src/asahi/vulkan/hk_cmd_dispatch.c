@@ -17,7 +17,6 @@
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
-#include "hk_g17p_apple_override.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "hk_physical_device.h"
@@ -82,96 +81,15 @@ struct hk_g17p_precomp_program {
    struct hk_g17p_compute_program_ref program;
 };
 
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_precomp_lookup_stats,
-                           "HK_G17P_PRECOMP_LOOKUP_STATS", false)
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_precomp_lookup_stats_limit,
-                          "HK_G17P_PRECOMP_LOOKUP_STATS_LIMIT", 512)
-
-static void
-hk_g17p_note_precomp_lookup(struct hk_cmd_buffer *cmd, size_t probes,
-                              size_t comparisons, uint64_t start, bool hit)
-{
-   if (!start)
-      return;
-
-   if (!cmd->g17p_precomp_lookup_stats.first_lookup_ns)
-      cmd->g17p_precomp_lookup_stats.first_lookup_ns = start;
-   cmd->g17p_precomp_lookup_stats.lookup_ns += os_time_get_nano() - start;
-   cmd->g17p_precomp_lookup_stats.comparisons += comparisons;
-   cmd->g17p_precomp_lookup_stats.calls++;
-   cmd->g17p_precomp_lookup_stats.hits += hit;
-   cmd->g17p_precomp_lookup_stats.misses += !hit;
-   cmd->g17p_precomp_lookup_stats.probes += probes;
-   cmd->g17p_precomp_lookup_stats.max_entries = MAX2(
-      cmd->g17p_precomp_lookup_stats.max_entries,
-      util_dynarray_num_elements(&cmd->g17p_precomp_programs,
-                                 struct hk_g17p_precomp_program));
-}
-
-void
-hk_g17p_precomp_lookup_stats_finish(struct hk_cmd_buffer *cmd)
-{
-   static unsigned reports;
-   if (!cmd->g17p_precomp_lookup_stats.calls)
-      return;
-
-   const int limit = debug_get_option_hk_g17p_precomp_lookup_stats_limit();
-   if (limit > 0 && p_atomic_inc_return(&reports) <= (unsigned)limit) {
-      fprintf(stderr,
-              "G17P precomp lookup: cmd=%p calls=%" PRIu64
-              " hits=%" PRIu64 " misses=%" PRIu64 " probes=%" PRIu64
-              " comparisons=%" PRIu64 " max_entries=%" PRIu64
-              " final_entries=%zu lookup_wall_ns=%" PRIu64
-              " record_window_wall_ns=%" PRIu64 " programs=",
-              (void *)cmd, cmd->g17p_precomp_lookup_stats.calls,
-              cmd->g17p_precomp_lookup_stats.hits,
-              cmd->g17p_precomp_lookup_stats.misses,
-              cmd->g17p_precomp_lookup_stats.probes,
-              cmd->g17p_precomp_lookup_stats.comparisons,
-              cmd->g17p_precomp_lookup_stats.max_entries,
-              util_dynarray_num_elements(&cmd->g17p_precomp_programs,
-                                         struct hk_g17p_precomp_program),
-              cmd->g17p_precomp_lookup_stats.lookup_ns,
-              os_time_get_nano() -
-                 cmd->g17p_precomp_lookup_stats.first_lookup_ns);
-      /* At most eight distinct IDs, counted without hot-path histogram work. */
-      unsigned ids[8] = {0}, counts[8] = {0};
-      unsigned slots = 0, other = 0;
-      util_dynarray_foreach(&cmd->g17p_precomp_programs,
-                            struct hk_g17p_precomp_program, cached) {
-         unsigned slot = 0;
-         while (slot < slots && ids[slot] != cached->key.idx)
-            slot++;
-         if (slot == ARRAY_SIZE(ids)) {
-            other++;
-            continue;
-         }
-         if (slot == slots)
-            ids[slots++] = cached->key.idx;
-         counts[slot]++;
-      }
-      for (unsigned i = 0; i < slots; ++i)
-         fprintf(stderr, "%s%u:%u", i ? "," : "", ids[i], counts[i]);
-      fprintf(stderr, " other_entries=%u\n", other);
-   }
-   memset(&cmd->g17p_precomp_lookup_stats, 0,
-          sizeof(cmd->g17p_precomp_lookup_stats));
-}
-
 static __attribute__((hot)) struct hk_g17p_precomp_program *
 hk_g17p_find_precomp_program(struct hk_cmd_buffer *cmd,
                              enum libagx_program idx, const void *data,
                              size_t data_size)
 {
-   const bool trace = debug_get_option_hk_g17p_precomp_lookup_stats();
-   const uint64_t start = trace ? os_time_get_nano() : 0;
    const uint32_t hash = hk_g17p_precomp_cache_hash(idx, data, data_size);
-   size_t probes, comparisons;
    const uint32_t entry = hk_g17p_precomp_cache_search(
       cmd->g17p_precomp_index, util_dynarray_begin(&cmd->g17p_precomp_programs),
-      sizeof(struct hk_g17p_precomp_program), idx, data, data_size, hash,
-      &probes, &comparisons);
-   hk_g17p_note_precomp_lookup(cmd, probes, comparisons, start, entry != 0);
+      sizeof(struct hk_g17p_precomp_program), idx, data, data_size, hash);
    return entry ? util_dynarray_element(&cmd->g17p_precomp_programs,
                                         struct hk_g17p_precomp_program,
                                         entry - 1) : NULL;
@@ -237,19 +155,6 @@ hk_g17p_append_prepared_precomp_direct(
 void
 hk_g17p_compute_program_cache_finish(struct hk_device *dev)
 {
-   if (dev->g17p_compute_program_cache.report_stats &&
-       (dev->g17p_compute_program_cache.hits ||
-        dev->g17p_compute_program_cache.misses)) {
-      fprintf(stderr,
-              "G17P compute program cache: hits=%" PRIu64
-              " misses=%" PRIu64 " hit-rate=%.1f%%\n",
-              dev->g17p_compute_program_cache.hits,
-              dev->g17p_compute_program_cache.misses,
-              100.0 * dev->g17p_compute_program_cache.hits /
-                 (dev->g17p_compute_program_cache.hits +
-                  dev->g17p_compute_program_cache.misses));
-   }
-
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       struct hk_g17p_compute_program_cache_entry *entry =
          p_atomic_read(&dev->g17p_compute_program_cache.templates[i]);
@@ -332,8 +237,6 @@ hk_g17p_compute_program_cache_lookup(
              program_map, program_capacity, &program->length,
              &program->launch)) {
          program->bytes = program_map;
-         if (dev->g17p_compute_program_cache.report_stats)
-            p_atomic_inc(&dev->g17p_compute_program_cache.hits);
          return true;
       }
    }
@@ -388,24 +291,6 @@ hk_g17p_compute_program_cache_store(
    candidate->key = *key;
    candidate->range = desc->uniform_ranges[0];
    candidate->program = *program;
-
-   if (dev->g17p_compute_program_cache.report_stats)
-      p_atomic_inc(&dev->g17p_compute_program_cache.misses);
-   if (dev->g17p_compute_program_cache.report_stats) {
-      fprintf(stderr,
-              "G17P compute program cache miss: program=%u data=%u kind=%u "
-              "range=%u/%u address=%" PRIx64 " program_va=%" PRIx64
-              " shader=%" PRIx64 " binary=%u scratch=%u d=%u tg=%u gprs=%u"
-              " launch=%u/%" PRIu64 "/%u\n",
-              key->libagx_program, key->data_size, (unsigned)key->kind,
-              key->range_start_halfs, key->range_size_halfs,
-              desc->uniform_ranges[0].address, desc->program_va,
-              key->shader_va, key->shader_binary_size, key->scratch_size,
-              key->compiler_d, key->threadgroup_memory_size_B, key->nr_gprs,
-              key->launch_sources.max_total_threads_per_threadgroup,
-              key->launch_sources.extended_texture_write_mask_qword_1,
-              key->launch_sources.ray_traversal_depth_nonzero);
-   }
 
    while (true) {
       struct hk_g17p_compute_program_cache_entry *entry = p_atomic_read(head);
@@ -767,6 +652,11 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
           s->info.set_count <= HK_AGX3_G17P_MAX_ROOT_SETS;
 }
 
+/* Software VS adds an indexing-parameter range to the seven hardware-VS
+ * ranges. Keep its eight-range collectors and exact-program cache together;
+ * the compute composer independently bounds the generated load program. */
+#define HK_G17P_COMPUTE_MAX_RANGES 8u
+
 /* Uniform ABI for compute-emulated vertex work.  Geometry variants use the
  * ordinary root-at-zero compute ABI; the software vertex variant additionally
  * consumes the same VBO, draw-parameter and vertex-parameter ranges that the
@@ -783,7 +673,7 @@ hk_g17p_internal_graphics_uniform_ranges(
    struct hk_linked_shader *linked, uint64_t root_ptr,
    uint64_t texture_pointers,
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
+      ranges[HK_G17P_COMPUTE_MAX_RANGES],
    size_t *range_count)
 {
    /* Uniform DMA (v51a/b) is only enabled for hardware graphics stages;
@@ -795,24 +685,36 @@ hk_g17p_internal_graphics_uniform_ranges(
       return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
                                              ranges, range_count);
 
+   if (!!texture_pointers != s->info.agx3_indexed_sampler_valid)
+      return false;
+   const unsigned uniform_base = s->info.agx3_indexed_sampler_valid
+      ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS : 0;
+
    const unsigned nr_vbos = DIV_ROUND_UP(
       BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
    size_t count = 0;
+   if (texture_pointers) {
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0,
+         .size_halfs = uniform_base,
+         .address = texture_pointers,
+      };
+   }
    if (nr_vbos) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_VBO_BASE(0),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_VBO_BASE(0),
          .size_halfs = 4 * nr_vbos,
          .address = root_ptr + hk_root_descriptor_offset(draw.attrib_base),
       };
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_VBO_CLAMP(nr_vbos, 0),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_VBO_CLAMP(nr_vbos, 0),
          .size_halfs = 2 * nr_vbos,
          .address = root_ptr + hk_root_descriptor_offset(draw.attrib_clamps),
       };
    }
    if (cmd->state.gfx.draw_params) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos),
          .size_halfs = 4,
          .address = cmd->state.gfx.draw_params,
       };
@@ -822,22 +724,23 @@ hk_g17p_internal_graphics_uniform_ranges(
        * rejected outright, so publish the containing dword. See the same
        * range in hk_cmd_buffer.c. */
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_DRAW_ID(nr_vbos),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_DRAW_ID(nr_vbos),
          .size_halfs = 2,
          .address = cmd->state.gfx.draw_id_ptr,
       };
    }
    if (linked->sw_indexing) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos),
          .size_halfs = 4,
          .address = root_ptr + hk_root_descriptor_offset(draw.vertex_params),
       };
    }
 
-   const unsigned root_uniform = AGX_ABI_VUNI_COUNT_VK(nr_vbos);
+   const unsigned root_uniform =
+      uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_vbos);
    if (s->info.agx3_uses_root || s->info.set_count) {
-      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES ||
+      if (count >= HK_G17P_COMPUTE_MAX_RANGES ||
           !hk_agx3_g17p_root_range(root_uniform, s->info.set_count, root_ptr,
                                    &ranges[count]))
          return false;
@@ -846,7 +749,7 @@ hk_g17p_internal_graphics_uniform_ranges(
 
    if (s->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &s->b.info.rodata;
-      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || !s->bo || !s->bo->va ||
+      if (count >= HK_G17P_COMPUTE_MAX_RANGES || !s->bo || !s->bo->va ||
           !hk_agx3_g17p_rodata_range(
              rodata->base_uniform, rodata->size_16, s->bo->va->addr,
              rodata->offset, s->bo->size, &ranges[count]))
@@ -959,8 +862,6 @@ hk_g17p_build_compute_program_raw(
    struct hk_g17p_compute_program_ref *out)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   const bool perf_trace = dev->g17p_shader_perf.trace;
-   const uint64_t trace_start = perf_trace ? os_time_get_nano() : 0;
    if (!shader_va || !shader_binary_size || !nr_gprs || !compiler_d_valid ||
        !launch_sources || !program_va_out || !out ||
        (range_count && !ranges)) {
@@ -974,8 +875,6 @@ hk_g17p_build_compute_program_raw(
                                     "G17P compute Ioto program",
                                     &reservation))
       return false;
-
-   const uint64_t trace_reserved = perf_trace ? os_time_get_nano() : 0;
 
    void *program_map = reservation.map;
    const uint64_t program_va = reservation.va;
@@ -1073,8 +972,6 @@ hk_g17p_build_compute_program_raw(
       }
    }
 
-   const uint64_t trace_built = perf_trace ? os_time_get_nano() : 0;
-
    const uint64_t published =
       hk_cmd_publish_ioto_program(cmd, &reservation, out->length);
    if (!published)
@@ -1088,22 +985,6 @@ hk_g17p_build_compute_program_raw(
       return false;
    }
 
-   if (perf_trace) {
-      static uint32_t trace_calls;
-      const uint32_t call = p_atomic_inc_return(&trace_calls);
-      if (call <= 40) {
-         const uint64_t trace_done = os_time_get_nano();
-         fprintf(stderr,
-                 "HK_SHADER_PERF ioto-call=%u shader=%" PRIx64
-                 " binary=%u ranges=%zu kind=%u cacheable=%u hit=%u"
-                 " reserve_ns=%" PRIu64 " build_ns=%" PRIu64
-                 " publish_ns=%" PRIu64 " total_ns=%" PRIu64 "\n",
-                 call, shader_va, shader_binary_size, range_count,
-                 (unsigned)kind, cacheable, cache_hit,
-                 trace_reserved - trace_start, trace_built - trace_reserved,
-                 trace_done - trace_built, trace_done - trace_start);
-      }
-   }
 
    *program_va_out = published;
    if (trace && hk_g17p_launch_trace_enabled())
@@ -1123,7 +1004,7 @@ struct hk_g17p_exact_compute_program {
    bool internal_graphics;
    size_t range_count;
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      ranges[HK_G17P_COMPUTE_MAX_RANGES];
    uint64_t program_va;
    const uint8_t *program_bytes;
    uint16_t program_length;
@@ -1164,18 +1045,15 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               enum agx_ioto_g17p_compute_ldshdr_f1 kind,
                               const char *trace,
                               struct agx3_ioto_uniform_range
-                                 ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
+                                 ranges[HK_G17P_COMPUTE_MAX_RANGES],
                               size_t *range_count_out,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
 {
-   /* Diagnostic HK_G17P_APPLE_CS: Apple's uniform layout, never cached. */
-   const bool apple_cs = s->info.g17p_apple_cs && !internal_graphics;
    struct hk_g17p_exact_compute_program *cached =
-      apple_cs ? NULL
-               : hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
-                                                    texture_pointers,
-                                                    internal_graphics, kind);
+      hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
+                                         texture_pointers, internal_graphics,
+                                         kind);
    if (cached) {
       memcpy(ranges, cached->ranges,
              cached->range_count * sizeof(cached->ranges[0]));
@@ -1188,10 +1066,7 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    }
 
    size_t range_count;
-   const bool ranges_ok = apple_cs
-      ? hk_g17p_apple_cs_ranges(cmd, s, root_ptr, ranges,
-                                HK_AGX3_G17P_GRAPHICS_MAX_RANGES, &range_count)
-      : internal_graphics
+   const bool ranges_ok = internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
       : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,
@@ -1286,7 +1161,7 @@ hk_g17p_prewarm_linked_compute_program_kind(
       uses_texture_pointers ? dummy_root + 0x2000 : 0;
 
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t range_count;
    const bool vertex_graphics =
       internal_graphics && s->info.stage == MESA_SHADER_VERTEX;
@@ -1396,7 +1271,7 @@ hk_g17p_prewarm_linked_compute_program(struct hk_cmd_buffer *cmd,
       };
       for (unsigned i = 0; i < ARRAY_SIZE(kinds); ++i) {
          struct agx3_ioto_uniform_range
-            ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+            ranges[HK_G17P_COMPUTE_MAX_RANGES];
          size_t range_count;
          uint64_t program_va;
          struct hk_g17p_compute_program_ref program;
@@ -1422,7 +1297,7 @@ hk_g17p_prepare_graphics_dispatch(
        !hk_g17p_compute_shader_supported(s, linked))
       return false;
 
-   struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   struct agx3_ioto_uniform_range ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t range_count;
    uint64_t program_va;
    struct hk_g17p_compute_program_ref program;
@@ -1496,7 +1371,7 @@ hk_g17p_prepare_graphics_dispatch(
    helper_root->cs.grid_helper_sparse_map_addr = 0;
 
    struct agx3_ioto_uniform_range
-      helper_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      helper_ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t helper_range_count;
    uint64_t helper_program_va;
    struct hk_g17p_compute_program_ref helper_program;
@@ -1666,7 +1541,7 @@ hk_g17p_append_indirect_launch(
    memcpy(helper_root_ptr.cpu, &helper_root, sizeof(helper_root));
 
    struct agx3_ioto_uniform_range
-      helper_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      helper_ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t helper_range_count;
    uint64_t helper_program_va;
    struct hk_g17p_compute_program_ref helper_program;
@@ -1932,6 +1807,7 @@ hk_dispatch_prepared_precomp_g17p(
       cs->weak_barrier_end = cs->current;
    }
    cs->stats.cmds++;
+   hk_prof_dispatch(cmd, cs, idx);
    return true;
 }
 
@@ -2088,8 +1964,7 @@ hk_g17p_append_graphics_direct(
       .local_size = {local_size.x, local_size.y, local_size.z},
       .dimensions = dimensions,
    };
-   const uint8_t barrier_flags =
-      hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t barrier_flags = 0;
    if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
           program, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -2124,8 +1999,8 @@ hk_g17p_append_prepared_graphics_direct(
                                           local_size);
 }
 
-__attribute__((hot)) bool
-hk_dispatch_prepared_g17p_native(
+static __attribute__((hot)) bool
+hk_dispatch_prepared_g17p_native_impl(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
    struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
    struct agx_workgroup local_size)
@@ -2194,8 +2069,7 @@ hk_dispatch_prepared_g17p_native(
       agx3_cmdstream_store_le32(out + 16 + axis * 4, grid.count[axis]);
       agx3_cmdstream_store_le32(out + 28 + axis * 4, local[axis]);
    }
-   const uint8_t barrier_flags =
-      hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t barrier_flags = 0;
    agx3_cmdstream_store_le32(
       out + AGX3_CDM_DIRECT_LAUNCH_SIZE,
       agx3_cdm_barrier_word(barrier_flags));
@@ -2207,6 +2081,19 @@ hk_dispatch_prepared_g17p_native(
       cs->weak_barrier_end = cs->current;
    }
    cs->stats.cmds++;
+   return true;
+}
+
+__attribute__((hot)) bool
+hk_dispatch_prepared_g17p_native(
+   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
+   struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
+   struct agx_workgroup local_size)
+{
+   if (!hk_dispatch_prepared_g17p_native_impl(cmd, cs, s, prepared, grid,
+                                              local_size))
+      return false;
+   hk_prof_dispatch(cmd, cs, HK_PROF_STAGE + s->info.stage);
    return true;
 }
 
@@ -2337,14 +2224,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          : &cmd->state.cs.descriptors;
 
       if (s->info.agx3_indexed_sampler_valid) {
-         if (!dev->sampled_images.bo || !dev->sampled_images.bo->va ||
+         if (!dev->sampled_images.base_va ||
              !dev->samplers.table.bo || !dev->samplers.table.bo->va) {
             vk_command_buffer_set_error(&cmd->vk,
                                         VK_ERROR_FEATURE_NOT_PRESENT);
             return;
          }
          uint64_t pointers[4] = {
-            dev->sampled_images.bo->va->addr,
+            dev->sampled_images.base_va,
             dev->samplers.table.bo->va->addr,
          };
          unsigned pointer_count = 2;
@@ -2462,6 +2349,19 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                         VK_ERROR_FEATURE_NOT_PRESENT);
             return;
          }
+         /* See hk_g17p_texture_state_pointer(). */
+         pointers[0] = hk_g17p_texture_state_pointer(
+            cmd, pointers[0],
+            (const uint8_t *)texture_set->mapped_ptr +
+               binding->texture_offset_B,
+            texture_set->size > binding->texture_offset_B
+               ? texture_set->size - binding->texture_offset_B
+               : 0);
+         if (!pointers[0]) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return;
+         }
 
          texture_pointers = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
          if (!texture_pointers) {
@@ -2515,6 +2415,18 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          };
          if (!hk_agx3_g17p_combined_sampler_pointers(&heap, pointers)) {
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+         /* See hk_g17p_texture_state_pointer(). */
+         pointers[0] = hk_g17p_texture_state_pointer(
+            cmd, pointers[0],
+            (const uint8_t *)set->mapped_ptr + binding->texture_offset_B,
+            set->size > binding->texture_offset_B
+               ? set->size - binding->texture_offset_B
+               : 0);
+         if (!pointers[0]) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return;
          }
       } else if (s->info.agx3_storage_image_valid) {
@@ -2580,7 +2492,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t range_count;
    uint64_t program_va;
    struct hk_g17p_compute_program_ref program;
@@ -2705,13 +2617,10 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * adjacent CDM streams at hk_EndCommandBuffer, so independent copies share
     * a stream too.
     *
-    * This is a candidate for the Hyprland GMMU read fault that ZINK_DEBUG=sync
-    * cures, and it is unproven: it cannot be settled host-side, because the
-    * shim executes nothing and both flag values encode. Ship it as a one-boot
-    * probe rather than a default, so it can be A/B'd on hardware without
-    * moving the thirteen stream oracles that currently pin the weak shape.
+    * Whether this weak shape explains the Hyprland GMMU read fault that
+    * ZINK_DEBUG=sync cures is unproven.
     */
-   const uint8_t barrier_flags = hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t barrier_flags = 0;
    if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
           &program.launch, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

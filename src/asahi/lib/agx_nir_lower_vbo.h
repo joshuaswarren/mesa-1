@@ -14,8 +14,22 @@
 extern "C" {
 #endif
 
-#define AGX_MAX_ATTRIBS (16)
-#define AGX_MAX_VBUFS   (16)
+/* Capacity of every per-attribute key, bitmask and root table (vertex
+ * attributes read by a shader, compacted into consecutive slots) and of the
+ * vertex buffer binding tables. This is the Vulkan-visible ceiling: an
+ * attribute slot index must always be below AGX_MAX_ATTRIBS before it indexes
+ * one of these arrays.
+ *
+ * The number of attributes a device actually advertises is smaller when the
+ * vertex prolog register ABI cannot hold them all; see
+ * agx_max_vertex_attribs() in agx_compile.h, which hk uses for
+ * maxVertexInputAttributes. DXVK's D3D9 fixed-function vertex shader reads 18
+ * attributes (dxvk d3d9 BindInputLayout maps every fixed-function input
+ * signature entry to an attribute, binding the unused ones to a null stream),
+ * and other translation layers assume at least 32, so 16 was too small.
+ */
+#define AGX_MAX_ATTRIBS (32)
+#define AGX_MAX_VBUFS   (32)
 
 enum agx_robustness_level {
    /* No robustness */
@@ -39,34 +53,6 @@ struct agx_robustness {
 };
 
 struct agx_velem_key;
-
-struct agx_vbo_binding {
-   uint32_t offset;
-   uint8_t binding;
-   uint8_t pad[3];
-};
-
-/* A contiguous pair of word-sized attributes, read through the first
- * attribute's existing CPU-adjusted base. first/count are in 32-bit words.
- * A zero count keeps the ordinary fetch. */
-struct agx_vbo_group {
-   uint8_t anchor;
-   uint8_t first;
-   uint8_t count;
-};
-
-void agx_vbo_group_32bit(const struct agx_velem_key *attribs,
-                         const struct agx_vbo_binding *bindings, uint16_t valid,
-                         struct agx_vbo_group *groups);
-
-void agx_vbo_group_mixed(const struct agx_velem_key *attribs,
-                         const struct agx_vbo_binding *bindings, uint16_t valid,
-                         struct agx_vbo_group *groups);
-
-bool agx_nir_lower_vbo_raw_grouped(nir_shader *shader,
-                                  const struct agx_velem_key *attribs,
-                                  struct agx_robustness rs, bool dynamic_strides,
-                                  const struct agx_vbo_group *groups);
 
 bool agx_nir_lower_vbo(nir_shader *shader, const struct agx_velem_key *attribs,
                        struct agx_robustness rs, bool dynamic_strides);

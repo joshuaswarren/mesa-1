@@ -9,6 +9,7 @@
 
 #include "d12_dxil.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define MESA_LOG_TAG "d3d12agx"
@@ -439,12 +440,32 @@ read_scalar_op(struct d12_bitstream *bs, const struct d12_abbrev_op *op)
    }
 }
 
+/* Start decoding a record into the walk's shared operand scratch. */
+static void
+record_begin(struct d12_bitstream *bs, struct d12_record *rec)
+{
+   memset(rec, 0, sizeof(*rec));
+   rec->ops = bs->record_ops;
+}
+
 static bool
 record_push(struct d12_bitstream *bs, struct d12_record *rec, uint64_t v)
 {
-   if (rec->num_ops >= D12_MAX_RECORD_OPS) {
-      bitstream_fail(bs, "record has too many operands");
-      return false;
+   if (rec->num_ops >= bs->record_ops_capacity) {
+      if (rec->num_ops >= D12_LIMIT_RECORD_OPS) {
+         bitstream_fail(bs, "record has too many operands");
+         return false;
+      }
+
+      unsigned capacity = MAX2(bs->record_ops_capacity * 2, 1024u);
+      uint64_t *ops = realloc(bs->record_ops, capacity * sizeof(*ops));
+      if (!ops) {
+         bitstream_fail(bs, "out of memory decoding a record");
+         return false;
+      }
+      bs->record_ops = ops;
+      bs->record_ops_capacity = capacity;
+      rec->ops = ops;
    }
    rec->ops[rec->num_ops++] = v;
    return true;
@@ -454,7 +475,7 @@ static bool
 read_abbreviated_record(struct d12_bitstream *bs,
                         const struct d12_abbrev *ab, struct d12_record *rec)
 {
-   memset(rec, 0, sizeof(*rec));
+   record_begin(bs, rec);
 
    for (unsigned i = 0; i < ab->num_ops; i++) {
       const struct d12_abbrev_op *op = &ab->ops[i];
@@ -557,6 +578,15 @@ blockinfo_get_or_add(struct d12_bitstream *bs, struct d12_blockinfo *bi,
    return &bi->entries[bi->count++].abbrevs;
 }
 
+static bool walk_block_impl(struct d12_bitstream *bs, unsigned block_id,
+                            unsigned abbrev_width, unsigned depth,
+                            struct d12_blockinfo *blockinfo,
+                            const struct d12_block_visitor *visitor,
+                            struct d12_abbrev_list *local);
+
+/* The per-block abbreviation list is 66 KiB and blocks nest; a Windows
+ * thread has a 1 MiB stack by default (Wine/Proton and D3DKMT alike), so
+ * keep it off the stack. */
 static bool
 walk_block(struct d12_bitstream *bs, unsigned block_id, unsigned abbrev_width,
            unsigned depth, struct d12_blockinfo *blockinfo,
@@ -567,10 +597,28 @@ walk_block(struct d12_bitstream *bs, unsigned block_id, unsigned abbrev_width,
       return false;
    }
 
+   struct d12_abbrev_list *local = calloc(1, sizeof(*local));
+   if (!local) {
+      bitstream_fail(bs, "out of memory");
+      return false;
+   }
+   bool ok = walk_block_impl(bs, block_id, abbrev_width, depth, blockinfo,
+                             visitor, local);
+   free(local);
+   return ok;
+}
+
+static bool
+walk_block_impl(struct d12_bitstream *bs, unsigned block_id,
+                unsigned abbrev_width, unsigned depth,
+                struct d12_blockinfo *blockinfo,
+                const struct d12_block_visitor *visitor,
+                struct d12_abbrev_list *local)
+{
    /* Abbreviations visible here: those from BLOCKINFO for this block ID,
-    * plus any DEFINE_ABBREVs local to this block instance.
+    * plus any DEFINE_ABBREVs local to this block instance (*local, zeroed
+    * by the caller).
     */
-   struct d12_abbrev_list local = {0};
    const struct d12_abbrev_list *inherited =
       blockinfo_for(blockinfo, block_id);
    unsigned inherited_count = inherited ? inherited->count : 0;
@@ -647,7 +695,8 @@ walk_block(struct d12_bitstream *bs, unsigned block_id, unsigned abbrev_width,
                }
 
                if (bi_id == D12_ABBREV_UNABBREV_RECORD) {
-                  struct d12_record rec = {0};
+                  struct d12_record rec;
+                  record_begin(bs, &rec);
                   rec.code = (uint32_t)d12_bitstream_read_vbr(bs, 6);
                   uint64_t n = d12_bitstream_read_vbr(bs, 6);
                   for (uint64_t i = 0; i < n; i++) {
@@ -683,12 +732,13 @@ walk_block(struct d12_bitstream *bs, unsigned block_id, unsigned abbrev_width,
       }
 
       if (id == D12_ABBREV_DEFINE_ABBREV) {
-         if (!parse_define_abbrev(bs, &local))
+         if (!parse_define_abbrev(bs, local))
             return false;
          continue;
       }
 
-      struct d12_record rec = {0};
+      struct d12_record rec;
+      record_begin(bs, &rec);
 
       if (id == D12_ABBREV_UNABBREV_RECORD) {
          rec.code = (uint32_t)d12_bitstream_read_vbr(bs, 6);
@@ -707,8 +757,8 @@ walk_block(struct d12_bitstream *bs, unsigned block_id, unsigned abbrev_width,
 
          if (index < inherited_count) {
             ab = &inherited->abbrevs[index];
-         } else if (index - inherited_count < local.count) {
-            ab = &local.abbrevs[index - inherited_count];
+         } else if (index - inherited_count < local->count) {
+            ab = &local->abbrevs[index - inherited_count];
          } else {
             bitstream_fail(bs, "reference to undefined abbreviation");
             return false;
@@ -724,6 +774,10 @@ walk_block(struct d12_bitstream *bs, unsigned block_id, unsigned abbrev_width,
    }
 }
 
+static bool walk_top_level(struct d12_bitstream *bs,
+                           struct d12_blockinfo *blockinfo,
+                           const struct d12_block_visitor *visitor);
+
 bool
 d12_dxil_walk(struct d12_bitstream *bs,
               const struct d12_block_visitor *visitor)
@@ -734,9 +788,29 @@ d12_dxil_walk(struct d12_bitstream *bs,
       return false;
    }
 
-   /* Top level: a sequence of ENTER_SUBBLOCK entries at abbrev width 2. */
-   struct d12_blockinfo blockinfo = {0};
+   /* Top level: a sequence of ENTER_SUBBLOCK entries at abbrev width 2.
+    * The BLOCKINFO table is ~1 MiB, more than a default Windows thread
+    * stack; it lives on the heap. */
+   struct d12_blockinfo *blockinfo = calloc(1, sizeof(*blockinfo));
+   if (!blockinfo) {
+      bitstream_fail(bs, "out of memory");
+      return false;
+   }
+   bool ok = walk_top_level(bs, blockinfo, visitor);
+   free(blockinfo);
 
+   /* The record scratch belongs to this walk; a visitor that kept a
+    * record pointer would already be wrong before this free. */
+   free(bs->record_ops);
+   bs->record_ops = NULL;
+   bs->record_ops_capacity = 0;
+   return ok;
+}
+
+static bool
+walk_top_level(struct d12_bitstream *bs, struct d12_blockinfo *blockinfo,
+               const struct d12_block_visitor *visitor)
+{
    while (!d12_bitstream_at_end(bs)) {
       /* Trailing padding is zero bits; stop if fewer than 32 bits remain. */
       if (bs->pos_bits + 32 > (uint64_t)bs->size_B * 8)
@@ -769,7 +843,7 @@ d12_dxil_walk(struct d12_bitstream *bs,
          return false;
       }
 
-      if (!walk_block(bs, block_id, width, 0, &blockinfo, visitor))
+      if (!walk_block(bs, block_id, width, 0, blockinfo, visitor))
          return false;
 
       bs->pos_bits = body_end;

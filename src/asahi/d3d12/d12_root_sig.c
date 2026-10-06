@@ -863,6 +863,32 @@ d12_root_signature_parse(const void *blob, size_t blob_size,
    }
    out->num_static_samplers = nsamplers;
 
+   /* Root descriptors and constants each occupy one shader register. Root
+    * constants share the CBV namespace; overlapping stage visibility cannot
+    * choose between two values for the same register. Disjoint stages may
+    * legitimately reuse it and have separate entries in the binding map. */
+   for (uint32_t i = 0; i < nparams; i++) {
+      const struct d12_root_param *a = &out->params[i];
+      if (a->type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+         continue;
+      unsigned a_type = a->type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                           ? D3D12_ROOT_PARAMETER_TYPE_CBV : a->type;
+      for (uint32_t j = 0; j < i; j++) {
+         const struct d12_root_param *b = &out->params[j];
+         unsigned b_type = b->type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                              ? D3D12_ROOT_PARAMETER_TYPE_CBV : b->type;
+         if (a_type == b_type && a->space == b->space &&
+             a->base_register == b->base_register &&
+             (a->visibility == D3D12_SHADER_VISIBILITY_ALL ||
+              b->visibility == D3D12_SHADER_VISIBILITY_ALL ||
+              a->visibility == b->visibility)) {
+            mesa_loge("root signature aliases shader register in parameters "
+                      "%u and %u with overlapping visibility", j, i);
+            goto invalid;
+         }
+      }
+   }
+
    return true;
 
 truncated:

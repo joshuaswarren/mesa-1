@@ -591,7 +591,6 @@ graphics_program_write_unpublished(
          .preloaded_base_valid = desc->preloaded_root,
          .preloaded_base_half = AGX3_G17P_GRAPHICS_ROOT_BASE_HALF,
          .preloaded_base_address = 0,
-         .range_cpu = desc->preloaded_root ? NULL : desc->uniform_range_cpu,
       };
       const struct agx3_ioto_uniform_program_workspace workspace = {
          .body = body,
@@ -1380,16 +1379,10 @@ agx3_g17p_rt0_bg_program_generate(
    struct agx_ioto_inflight_load loads[64];
    struct agx_ioto_inflight_load sort[64];
    struct agx_ioto_load_cache_entry cache[64];
-   /* v51x: LDIMM clear values only for the plain CLEAR program. */
-   const void *clear_cpu[1] = {desc->clear_value_cpu};
    const struct agx3_ioto_uniform_program_desc load_desc = {
       .program_va = desc->program_va,
       .ranges = ranges,
       .range_count = range_count,
-      .range_cpu = desc->op == AGX3_G17P_RT0_BG_CLEAR && range_count == 1 &&
-                         desc->clear_value_cpu
-                      ? clear_cpu
-                      : NULL,
    };
    const struct agx3_ioto_uniform_program_workspace workspace = {
       .body = body,

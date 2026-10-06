@@ -69,7 +69,7 @@ struct agx_bg_eot_key {
    /* The framebuffer is an AGX_G17P_MRT_MIXED layout. The tile layout keeps
     * only the targets this program touches, at their framebuffer offsets. */
    bool mixed_mrt;
-   /* G17P (HK_G17P_PACKED_CLEAR): the single RT0 R8G8B8A8_UNORM clear value
+   /* G17P packed clear: the single RT0 R8G8B8A8_UNORM clear value
     * arrives already packed in the first 32-bit clear uniform, so the
     * background program stores it as one tile word instead of converting four
     * floats with two FLTNORMs per pixel. Only agx_g17p_packed_clear_ok()

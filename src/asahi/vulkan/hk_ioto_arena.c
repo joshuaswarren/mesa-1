@@ -10,24 +10,17 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_ioto_program_core.h"
 
+#include "util/cache_ops.h"
 #include "util/log.h"
 #include "util/u_dynarray.h"
 
 #include <inttypes.h>
 #include <string.h>
-#include <sys/resource.h>
 
 void
 hk_ioto_arena_finish(struct hk_cmd_buffer *cmd)
 {
    struct hk_ioto_arena *arena = &cmd->ioto;
-
-   if (arena->programs && hk_g17p_verbose_enabled()) {
-      fprintf(stderr,
-              "asahi: G17P Ioto programs: %u published, "
-              "%" PRIu64 " program bytes in %" PRIu64 " bytes of USC window\n",
-              arena->programs, arena->program_bytes, arena->chunk_bytes);
-   }
 
    memset(arena, 0, sizeof(*arena));
 }
@@ -50,7 +43,10 @@ hk_ioto_arena_grow(struct hk_cmd_buffer *cmd, size_t size, const char *label)
 
    struct agx_bo *bo =
       agx_bo_create(&dev->dev, chunk, AGX_IOTO_PROGRAM_ALIGNMENT,
-                    AGX_BO_EXEC | AGX_BO_LOW_VA, "G17P Ioto program arena");
+                    AGX_BO_EXEC | AGX_BO_LOW_VA |
+                       (hk_g17p_cached_cmd_memory(&dev->dev) ? AGX_BO_WRITEBACK
+                                                             : 0),
+                    "G17P Ioto program arena");
    if (!bo)
       return false;
 
@@ -70,20 +66,16 @@ hk_ioto_arena_grow(struct hk_cmd_buffer *cmd, size_t size, const char *label)
    arena->capacity = bo->size > UINT32_MAX ? UINT32_MAX : (uint32_t)bo->size;
    arena->chunk_bytes += bo->size;
 
-   if (hk_g17p_verbose_enabled()) {
-      fprintf(stderr,
-              "asahi: G17P Ioto arena chunk %#llx size %#llx for %s\n",
-              (unsigned long long)arena->base,
-              (unsigned long long)bo->size, label ? label : "(program)");
-   }
-
    return true;
 }
 
+static_assert(HK_IOTO_PROGRAM_ALIGNMENT == AGX_IOTO_PROGRAM_ALIGNMENT,
+              "inline Ioto reservation alignment");
+
 bool
-hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
-                            const char *label,
-                            struct hk_ioto_reservation *reservation)
+hk_cmd_reserve_ioto_program_slow(struct hk_cmd_buffer *cmd, size_t size,
+                                 const char *label,
+                                 struct hk_ioto_reservation *reservation)
 {
    struct hk_ioto_arena *arena = &cmd->ioto;
    struct hk_ioto_arena_span span;
@@ -125,12 +117,7 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
                             const struct hk_ioto_reservation *reservation,
                             size_t length)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_ioto_arena *arena = &cmd->ioto;
-   const bool fault_trace = dev->g17p_shader_perf.fault_trace;
-   struct rusage fault_start = {0}, fault_sync = {0};
-   if (fault_trace)
-      getrusage(RUSAGE_SELF, &fault_start);
 
    if (!reservation || !reservation->map || length == 0 ||
        length > UINT32_MAX) {
@@ -148,21 +135,12 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
     * composer's bound and compose something shorter. */
    arena->cursor = (uint32_t)offset + (uint32_t)length;
 
+   if (hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cmd)->dev))
+      util_flush_range_no_fence(reservation->map, length);
    if (agx_bo_sync_for_device(arena->bo, offset, length)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
       return 0;
    }
-   if (fault_trace)
-      getrusage(RUSAGE_SELF, &fault_sync);
-
-   if (fault_trace) {
-      const long sync_faults = fault_sync.ru_minflt - fault_start.ru_minflt;
-      if (sync_faults)
-         fprintf(stderr,
-                 "HK_SHADER_PERF publish-fault sync=%ld programs=%u\n",
-                 sync_faults, arena->programs);
-   }
-
    arena->program_bytes += length;
    return reservation->va;
 }

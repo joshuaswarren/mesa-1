@@ -10,6 +10,7 @@
 #include "hk_private.h"
 #include "util/macros.h"
 #include "asahi/lib/agx_device.h"
+#include "util/cache_ops.h"
 
 #include "vk_command_pool.h"
 
@@ -51,20 +52,29 @@ struct agx_device;
 struct agx_ptr;
 struct hk_device;
 
-/* -1 until the environment has been read (hk_g17p_vdm_low_window_init()),
- * then 0 or 1.  Queried several times per draw, so the cached answer is read
- * inline. */
-extern int hk_g17p_vdm_low_window_state;
-int hk_g17p_vdm_low_window_init(void);
+/* G17P command-buffer memory (main/USC pools, VDM slabs, Ioto arenas) is
+ * CPU-cached; recording cleans what it wrote before submission
+ * (hk_cmd_buffer_publish_cached_uploads()). */
+static inline bool
+hk_g17p_cached_cmd_memory(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G17P && util_has_cache_ops();
+}
 
+void hk_cmd_pool_clean_vdm(const struct hk_vdm_allocation *allocation);
+
+/* A VDM record's pointer is 40 bits and hardware reads bit 39 as the UAT
+ * root select, adding 0x1000000000 when it is clear.  G17P's main heap sits
+ * at 0x8000000000, so every main-heap pointer a VDM record carried would have
+ * bit 39 set and be fetched from the upper root instead: the dVDM_SSD
+ * unmapped read at (1<<42)|0x7ffee0400 hardware reported for the first PPP
+ * state record after the root chunk (0x87ffee0400).  Native keeps these
+ * payloads inside the architectural 0x1000000000 window, and so does G17P
+ * recording. */
 static inline bool
 hk_g17p_vdm_low_window_enabled(const struct agx_device *dev)
 {
-   int enabled = hk_g17p_vdm_low_window_state;
-   if (unlikely(enabled < 0))
-      enabled = hk_g17p_vdm_low_window_init();
-
-   return enabled && dev->chip == AGX_CHIP_G17P;
+   return dev->chip == AGX_CHIP_G17P;
 }
 
 struct hk_cmd_pool {
@@ -91,11 +101,6 @@ VkResult hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool,
 void hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool,
                               enum hk_cmd_bo_type type,
                               struct list_head *bos);
-bool hk_g17p_upload_quarantine_enabled(const struct hk_device *dev);
-void hk_g17p_quarantine_command_uploads(
-   struct hk_device *dev, struct list_head *main_bos,
-   struct list_head *usc_bos, struct list_head *root_bos,
-   struct list_head *vdm_allocations);
 VkResult hk_cmd_bo_ensure_vdm_alias(struct hk_cmd_pool *pool,
                                     struct hk_cmd_bo *bo);
 

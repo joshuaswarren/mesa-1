@@ -48,13 +48,28 @@ d12_query_core_is_timestamp_heap(uint32_t heap_type)
 }
 
 bool
-d12_query_core_timestamp_command_compatible(uint32_t heap_type,
-                                            uint32_t command_type)
+d12_query_core_command_compatible(uint32_t heap_type,
+                                  uint32_t command_type)
 {
    if (heap_type == D12_QUERY_CORE_HEAP_COPY_QUEUE_TIMESTAMP)
       return command_type == D12_QUERY_CORE_COMMAND_COPY;
    if (heap_type == D12_QUERY_CORE_HEAP_TIMESTAMP)
       return command_type == D12_QUERY_CORE_COMMAND_DIRECT ||
              command_type == D12_QUERY_CORE_COMMAND_COMPUTE;
-   return true;
+   /* Occlusion, pipeline statistics and SO statistics are direct-list
+    * queries. In particular, bundles cannot contain any query commands.
+    */
+   return d12_query_core_heap_supported(heap_type) &&
+          command_type == D12_QUERY_CORE_COMMAND_DIRECT;
+}
+
+bool
+d12_query_core_resolve_range_valid(uint32_t heap_count, uint32_t first,
+                                  uint32_t count, uint32_t stride,
+                                  uint64_t destination_size,
+                                  uint64_t destination_offset)
+{
+   return count && stride && first < heap_count && count <= heap_count - first &&
+          !(destination_offset & 7) && destination_offset <= destination_size &&
+          (uint64_t)count * stride <= destination_size - destination_offset;
 }

@@ -12,6 +12,14 @@ inc_asahi = include_directories([
 subdir('isa')
 
 with_asahi_d3d12 = get_option('asahi-d3d12')
+asahi_d3d12_platform = get_option('asahi-d3d12-platform')
+if asahi_d3d12_platform == 'auto'
+  asahi_d3d12_platform = host_machine.system() == 'windows' ? 'd3dkmt' : 'linux'
+endif
+if asahi_d3d12_platform == 'wine' and host_machine.system() != 'windows'
+  error('asahi-d3d12-platform=wine needs a Windows (mingw) host machine')
+endif
+inc_asahi_d3d12_wine = include_directories('d3d12/wine/include')
 with_asahi_common = with_gallium_asahi or with_asahi_vk or \
                     with_asahi_d3d12 or with_tools.contains('asahi')
 

@@ -134,8 +134,11 @@ struct hk_device {
    bool radix_sort_failed;
    simple_mtx_t radix_sort_lock;
    struct agx_bg_eot_cache bg_eot;
-   /* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE (hk_cmd_draw.c). */
+   /* frg-codegen v4 BG/EOT device cache (hk_cmd_draw.c). */
    struct hk_g17p_bg_eot_dev_cache *g17p_bg_eot_dev_cache;
+
+   /* HK_PASS_PROFILE diagnostic state, NULL unless enabled. */
+   struct hk_pass_profile *pass_profile;
 
    /* VK_KHR_ray_tracing_pipeline shader group handles.  A handle is one
     * device-unique index, so a handle captured from a pipeline library keeps
@@ -148,9 +151,6 @@ struct hk_device {
     * The libagx programs and their executable BOs have the same lifetime. */
    struct {
       void *templates[LIBAGX_NUM_PROGRAMS];
-      bool report_stats;
-      uint64_t hits;
-      uint64_t misses;
    } g17p_compute_program_cache;
 
    /* v48: kernel-maintained copy of this VM's sticky status
@@ -162,25 +162,9 @@ struct hk_device {
 
    /* Immutable diagnostic selection. Never rescan the process environment
     * from render-pass, draw, dispatch, or per-program publication paths. */
-   struct {
-      bool trace;
-      bool aggregate;
-      bool fault_trace;
-      bool prefault_stack;
-      bool prefault_driver;
-      bool prefault_main;
-      bool prefault_ioto;
-      bool prefault_streams;
-   } g17p_shader_perf;
 
    struct {
       bool launch_trace;
-      bool draw_trace;
-      bool compact_ioto_trace;
-      bool graphics_ioto_cache_stats;
-      bool nonpoint_no_psiz;
-      bool hal200_about_flags1;
-      bool force_tri_merge_disable;
    } g17p_diagnostics;
 
    struct {
@@ -219,28 +203,11 @@ struct hk_device {
          *entries[HK_SHADER_BINARY_CACHE_MAX];
    } shader_binary_cache;
 
-   /* v56e HK_G17P_LAZY_GENERIC=2: background compiles of generic variants. */
-   struct {
-      simple_mtx_t lock;
-      bool initialized;
-      struct util_queue queue;
-   } g17p_lazy;
-
    /* Device-wide compact VDM backing. Command buffers from different pools
     * suballocate immutable spans from the same finite G17P aperture. */
    struct {
       simple_mtx_t lock;
       struct list_head slabs;
-
-      /* Opt-in command-upload lifetime falsifier. These lists retain complete
-       * upload BOs and VDM slab leases after command-buffer reset, preventing
-       * either address from being recycled before device destruction. */
-      struct list_head quarantined_bos;
-      struct list_head quarantined_vdm_allocations;
-      /* Opt-in Ioto-only lifetime falsifier. Unlike the broad command-upload
-       * quarantine, this retains only executable arena BOs whose addresses
-       * were embedded in submitted VDM streams. */
-      struct util_dynarray quarantined_ioto_bos;
    } vdm;
 
    /* Native G17P indirect compute grid helper.  A compact indirect helper
@@ -282,9 +249,6 @@ struct hk_device {
    } scratch;
 
    uint32_t perftest;
-
-   /* Copy of hk_physical_device::g17p_native_tess */
-   bool g17p_native_tess;
 
    struct {
       struct u_rwlock lock;

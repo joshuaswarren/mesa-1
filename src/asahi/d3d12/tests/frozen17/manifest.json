@@ -1,0 +1,501 @@
+{
+  "schema_version": 1,
+  "name": "frozen17",
+  "version": 2,
+  "required_suites": 17,
+  "legacy_commit": "ba4cfd5dfa4c4d6f5b88adcf9ac5eb233c3442a4",
+  "scoring": "17 attempts required. Only rc=0 with ALL PASS and no FAIL/BLOCKED text counts. Missing input, creation refusal, crash, timeout and no verdict count as failures. No skips.",
+  "versions": {
+    "v1": {
+      "input_count": 63,
+      "inputs": {
+        "d12_test_abi.h": "38c9d135b875b206d0d0b88c81e812767d11f534e6424237273d0ff5f03f620c",
+        "d12_test_contract.h": "bb6a8655c6eab1dbf6c7e5141a74e9b1a9b74d7f303d2aecea8e8e58e281a81d",
+        "g10_vertex_buffers.c": "3494ec0a4fa11b9fdeff19c03b5213cb9d9649aa8b01987ab392ea287eda699f",
+        "g11_indexed_instanced.c": "3871bf872089b72101992ef4630ac95317e82e1a7f21a32dcee8d1339b740505",
+        "g1_smoke.c": "d46f62ba6bd578508ae6616c5cbc30d41ea019c06efc44fdb89eae61453c6616",
+        "g2_smoke.c": "42ffaec71d92ab5e63d75fe6d05f6fdb558691cfd4653244569127cff12eeb29",
+        "g3_smoke.c": "f53c95352f061a95c5bb6af5a54d0d0a113647a9bb69a50c771afec54def4aeb",
+        "g4_smoke.c": "e405e07d35e1dded07c18c99309d6629d48a0f58b9a3d010925b43051b70e707",
+        "g4_triangle.c": "aac21c94ac8384ff691e267d39fd59899c9db45c78147bcbc23841afb3391818",
+        "g5_atomics.c": "a0bf2af05d60e296279afed5beacff3a5718a5a64c90e6d46de60848186cfb61",
+        "g5_control_flow.c": "c2bc862cd44c0bca53e5bfbf6a84d73b4c7dede1f39b35765075494f8252139d",
+        "g5_depth.c": "827890c2932313cb4645b01291847da696c130fda37b74ad79ecd579ac5b924f",
+        "g5_descriptors.c": "5069f1ad414443899b6d3b3772983670e6df709059fec6d8066f5e5c6410d9d7",
+        "g5_texture.c": "97215c7e8c5e73c3898eaf5779bb36e824ef61a5d1d6a9f815cdb40d0a1acbe8",
+        "g5_wave.c": "da65a5653eeeecba80576f400f1e41fa3cf2368a2e95f9dc5e3263026a939145",
+        "g6_geometry.c": "e1c762b223966a0a027815ad41c9da8629f7264dbcd9951a4403224a3b7ac8c0",
+        "g7_tessellation.c": "c9d53ee7296b653ac4378c63cee39a6f891e53f6e826c095c43dbbff6984069e",
+        "g8_mesh.c": "bf1f266e4a975a0b48e0026863ca7cfe09f3e9bb980cd1c398475db0b4372973",
+        "g9_amplification.c": "1171420d9dd8bcd7887be1290ca75c87b6a0cfcdd6e83f28a4cf5871e690c72d",
+        "make_probe.c": "daa00a6e1b87508b563f0b4a98bdf276fd0a6cd15571309c73abce56620802b9",
+        "run-suites.sh": "bc9ad87175164e6d5d097e2d10491e382473d6cfebfebc91cb902b9c2e5d28f5",
+        "shaders/as_dispatch.dxil": "d71837ca2b974bd7ac9a3d58bbe1476e5afb93f7a5ba5c525ebf953a301719d0",
+        "shaders/atomic_probe.dxil": "ef43a717ffea4420b155d6cc5204030814c31ad0fed8e6349c01f3616018b75b",
+        "shaders/atomic_probe.hlsl": "89d408cb8ab14df310dffc483a818354ed8b49b6970fd56eaf777476bc3c2952",
+        "shaders/bfi.bc.dxil": "27d9b7521bee33432c2021af87858d6ba940b0d00fb65dfee7d57b9b708df6eb",
+        "shaders/cf_probe.dxil": "212e41df2fffc84585dfbcda90816cf39b7d506429aab7a117985c928aded3da",
+        "shaders/cf_probe.hlsl": "44390d3f838cf3b874e536eac28dd11a250b2e9ee313d40fb19acb56bdf0ab1f",
+        "shaders/constant-struct-aggregate.bc.dxil": "e8bba647bd5b5cbd112f10d3f069fefbd5c9e6023d5a276c9f88940e3f700b73",
+        "shaders/cs.dxil": "b4a4b2c4cfc72fc7dcad2a9ba7bb9f6807fe6ad7be8b9ce9e3fa23b1d11aed5c",
+        "shaders/gs_input_vs.dxil": "246cfe07b4bcf4f35abc25898e3a09b2910e8f3562ff2a6b7e9f9c44b933a2aa",
+        "shaders/gs_point.dxil": "18eb88819513516607b8c61e6ce0cb4c7d47d555ebf6c6c0d6907336b2494345",
+        "shaders/ibfe.bc.dxil": "4e075902472528d9e47ed98cd3dd0fb4da931c5e092acf5e3d5873735347b9ba",
+        "shaders/math.dxil": "f8933cef24e1a872dbb1f6eb8353efda86d439894baf3ed0e1ff03cca73cea0f",
+        "shaders/math2.dxil": "479de0d81a8b9905c984cd1957b65945e6b8065be054071ada470532279fd595",
+        "shaders/mesh_quad.dxil": "59896675202e1838041e10d9fcd1ff71ff89caba1c75c731893a06056e794198",
+        "shaders/res_probe.dxil": "4db9b644e25414d7471dfd6749209f247919350011e316bbf4d97dbe177b6804",
+        "shaders/res_probe.hlsl": "6f00e92d90d51e7d6afa1f7b4f8cd250b674db38f281e4f56b43d75e4afb82dc",
+        "shaders/rootsigs.hlsl": "146ea6bf61976922c8fa425a75573e8220b8b0cc09586d3724f2c5fa46873e01",
+        "shaders/rs_descriptors.rs": "e41865716457de37c3cdd304d3d96b1522064d53ac2e708c87b1878a6bedaece",
+        "shaders/rs_mixed.rs": "cabee15885263d817225eedc31b84fd0f793dd0a7035725c0f48b9326264799e",
+        "shaders/rs_table.rs": "662cf2dc53b5876d7113bd688c4781f141b68affe293cc7b84ad9f2b6f1a9bbf",
+        "shaders/shared_probe.dxil": "d22b226859fc2337b7681089da57952e2ff6f7a5ec781fc91447f78cc1b97b44",
+        "shaders/shared_probe.hlsl": "34798b8b467a6ad317e255bcf3f34186ee5e31336f9108097481bcde9dc705eb",
+        "shaders/solid.dxil": "dedc5a9f215add5ca06d06d163d58c9de09e9b90f5060ce846118e75c7eaffd4",
+        "shaders/solid_g.dxil": "a6f8e03f0548769e70fd2a178f6be39a0ce2147f118b4f00796f58ae79a1d9a8",
+        "shaders/solid_g.hlsl": "7b561a47e209f510bf6972d8ebdcc1a8472b4fc10280bd744d5d67cb35be21a8",
+        "shaders/space_probe.dxil": "10a3b5a3579618aecbb687ce2be33c429a672854207d1c09ce919a338d9d8eec",
+        "shaders/space_probe.hlsl": "6531a699cdef3fa48e1357f9d2b0c6d8267b14c4bfb51b3723c4b9e340ed5eec",
+        "shaders/tess_ds.dxil": "11ecba7c879c59383c17b584983543ef22933776ee285c58f8a11edee5a09f68",
+        "shaders/tess_hs.dxil": "7f61e0bdf14594ba095099eb68a7b8a6602f1319f705ca1aee436f9dd44568a7",
+        "shaders/tex_probe.dxil": "05306fb4aff4d8a69903d07ad7c9865e9913804e30cd4cf836b66cfad9b95f52",
+        "shaders/tex_probe.hlsl": "d8d44cb7835faa7bc1663ea31039c7def662e044d94fc3e3b5626c9b3a0d2be3",
+        "shaders/tri.dxil": "0c610c4ef9a2934184fc6f9e3ae1bbb70d1fd8f6b5769c0b4e54da60d9d8917b",
+        "shaders/tri_depth.dxil": "f0c30e07aa7484983be24f6e02c1759df50d9f06a2ebafde8c1797b8402c1c47",
+        "shaders/tri_depth.hlsl": "d1dd6f3a4dff1c5d09ba93e4792d3e48537c5f211a04ba9af7d97cab3bda6d1f",
+        "shaders/tri_depth_cw.dxil": "b1e1d251ba8f6bb3891f14655329d6b43ef3332d8356978027d64647ccc93ef4",
+        "shaders/tri_depth_cw.hlsl": "08ecbb0783cfbd4a0bba76d213eb29a948574cfbe19de6100c4a6f535ae4b4b5",
+        "shaders/ubfe.bc.dxil": "c5c78104212c8cda4048a1f78797fc52a872335a5b8b1a66b6b09020147caa36",
+        "shaders/vb_inst_vs.dxil": "0e734f34f2ecbb78a4716d620b5eda01b651e5118f915c88d8497af865defa65",
+        "shaders/vb_ps.dxil": "cb0bc2bb6001f05c8753f22673b820b8ae4a4a60aeca0ba76b2164776e03528d",
+        "shaders/vb_vs.dxil": "06aa979129d440d8ec9dfd7c78060c4a6652ad154fdcb5d6437d7ffc64822d8d",
+        "shaders/wave_probe.dxil": "193a2e4921de9298580e70c9e414ff019cf75c55b981c4fca003b458fcc42d56",
+        "shaders/wave_probe.hlsl": "571270b4e2bba4a3c7f2dbadffe7b984ceae847981fda0de21e2386b933972ce"
+      }
+    },
+    "v2": {
+      "input_count": 64,
+      "inputs": {
+        "d12_test_abi.h": "38c9d135b875b206d0d0b88c81e812767d11f534e6424237273d0ff5f03f620c",
+        "d12_test_contract.h": "bb6a8655c6eab1dbf6c7e5141a74e9b1a9b74d7f303d2aecea8e8e58e281a81d",
+        "g10_vertex_buffers.c": "3494ec0a4fa11b9fdeff19c03b5213cb9d9649aa8b01987ab392ea287eda699f",
+        "g11_indexed_instanced.c": "3871bf872089b72101992ef4630ac95317e82e1a7f21a32dcee8d1339b740505",
+        "g1_smoke.c": "705a3e119b4db5ad80e6990f3b5e20fdbc957d2d19d2f93ec842a5d945436796",
+        "g2_smoke.c": "42ffaec71d92ab5e63d75fe6d05f6fdb558691cfd4653244569127cff12eeb29",
+        "g3_smoke.c": "f53c95352f061a95c5bb6af5a54d0d0a113647a9bb69a50c771afec54def4aeb",
+        "g4_smoke.c": "e405e07d35e1dded07c18c99309d6629d48a0f58b9a3d010925b43051b70e707",
+        "g4_triangle.c": "aac21c94ac8384ff691e267d39fd59899c9db45c78147bcbc23841afb3391818",
+        "g5_atomics.c": "a0bf2af05d60e296279afed5beacff3a5718a5a64c90e6d46de60848186cfb61",
+        "g5_control_flow.c": "c2bc862cd44c0bca53e5bfbf6a84d73b4c7dede1f39b35765075494f8252139d",
+        "g5_depth.c": "4f525fdbeb754c855fa3616d5be6c2337fbe52b1cd144a868a66d407d3ad1072",
+        "g5_descriptors.c": "5069f1ad414443899b6d3b3772983670e6df709059fec6d8066f5e5c6410d9d7",
+        "g5_texture.c": "97215c7e8c5e73c3898eaf5779bb36e824ef61a5d1d6a9f815cdb40d0a1acbe8",
+        "g5_wave.c": "da65a5653eeeecba80576f400f1e41fa3cf2368a2e95f9dc5e3263026a939145",
+        "g6_geometry.c": "dc0f3028e39b10e6a9148de1208f2979cf509f6966ca4af2fe0da0cfa15c1d8c",
+        "g7_tessellation.c": "252a3cb80d0521c3b7e0f19926111d42e779ffca3c0ec017e98ad17a7eb8a7f1",
+        "g8_mesh.c": "a3655783f64b75d0133cafe14a98430c464679c604afc8d8e6545fd7cc000021",
+        "g9_amplification.c": "b68f2779e531da87d856d9ca7e6c9b9724b8dca689ac00215ab892884eb14344",
+        "make_probe.c": "8075ca4beb728c56b7e37dee75b7ea72334d621f367942563b76d1ff63d96e48",
+        "run-suites.sh": "47a863faa15b437a0abff288a4c1e18c4e70b4aec7ecadf07517820290115088",
+        "shaders/as_dispatch.dxil": "d71837ca2b974bd7ac9a3d58bbe1476e5afb93f7a5ba5c525ebf953a301719d0",
+        "shaders/atomic_probe.dxil": "ef43a717ffea4420b155d6cc5204030814c31ad0fed8e6349c01f3616018b75b",
+        "shaders/atomic_probe.hlsl": "89d408cb8ab14df310dffc483a818354ed8b49b6970fd56eaf777476bc3c2952",
+        "shaders/bfi.bc.dxil": "27d9b7521bee33432c2021af87858d6ba940b0d00fb65dfee7d57b9b708df6eb",
+        "shaders/cf_probe.dxil": "212e41df2fffc84585dfbcda90816cf39b7d506429aab7a117985c928aded3da",
+        "shaders/cf_probe.hlsl": "44390d3f838cf3b874e536eac28dd11a250b2e9ee313d40fb19acb56bdf0ab1f",
+        "shaders/constant-struct-aggregate.bc.dxil": "e8bba647bd5b5cbd112f10d3f069fefbd5c9e6023d5a276c9f88940e3f700b73",
+        "shaders/cs.dxil": "b4a4b2c4cfc72fc7dcad2a9ba7bb9f6807fe6ad7be8b9ce9e3fa23b1d11aed5c",
+        "shaders/gs_input_vs.dxil": "246cfe07b4bcf4f35abc25898e3a09b2910e8f3562ff2a6b7e9f9c44b933a2aa",
+        "shaders/gs_point.dxil": "18eb88819513516607b8c61e6ce0cb4c7d47d555ebf6c6c0d6907336b2494345",
+        "shaders/ibfe.bc.dxil": "4e075902472528d9e47ed98cd3dd0fb4da931c5e092acf5e3d5873735347b9ba",
+        "shaders/math.dxil": "f8933cef24e1a872dbb1f6eb8353efda86d439894baf3ed0e1ff03cca73cea0f",
+        "shaders/math2.dxil": "479de0d81a8b9905c984cd1957b65945e6b8065be054071ada470532279fd595",
+        "shaders/mesh_quad.dxil": "59896675202e1838041e10d9fcd1ff71ff89caba1c75c731893a06056e794198",
+        "shaders/res_probe.dxil": "4db9b644e25414d7471dfd6749209f247919350011e316bbf4d97dbe177b6804",
+        "shaders/res_probe.hlsl": "6f00e92d90d51e7d6afa1f7b4f8cd250b674db38f281e4f56b43d75e4afb82dc",
+        "shaders/rootsigs.hlsl": "146ea6bf61976922c8fa425a75573e8220b8b0cc09586d3724f2c5fa46873e01",
+        "shaders/rs_descriptors.rs": "e41865716457de37c3cdd304d3d96b1522064d53ac2e708c87b1878a6bedaece",
+        "shaders/rs_mixed.rs": "cabee15885263d817225eedc31b84fd0f793dd0a7035725c0f48b9326264799e",
+        "shaders/rs_table.rs": "662cf2dc53b5876d7113bd688c4781f141b68affe293cc7b84ad9f2b6f1a9bbf",
+        "shaders/shared_probe.dxil": "d22b226859fc2337b7681089da57952e2ff6f7a5ec781fc91447f78cc1b97b44",
+        "shaders/shared_probe.hlsl": "34798b8b467a6ad317e255bcf3f34186ee5e31336f9108097481bcde9dc705eb",
+        "shaders/solid.dxil": "dedc5a9f215add5ca06d06d163d58c9de09e9b90f5060ce846118e75c7eaffd4",
+        "shaders/solid_g.dxil": "a6f8e03f0548769e70fd2a178f6be39a0ce2147f118b4f00796f58ae79a1d9a8",
+        "shaders/solid_g.hlsl": "7b561a47e209f510bf6972d8ebdcc1a8472b4fc10280bd744d5d67cb35be21a8",
+        "shaders/solid_link.dxil": "edecf15bbac580d153b83e244248d72fac9ceaf30f33d91d0f193948343e14a2",
+        "shaders/space_probe.dxil": "10a3b5a3579618aecbb687ce2be33c429a672854207d1c09ce919a338d9d8eec",
+        "shaders/space_probe.hlsl": "6531a699cdef3fa48e1357f9d2b0c6d8267b14c4bfb51b3723c4b9e340ed5eec",
+        "shaders/tess_ds.dxil": "b1778cbafd6c206187d41aa19bd503fb42c8ef06aef9ef46a48cd1a6bcf17940",
+        "shaders/tess_hs.dxil": "7f61e0bdf14594ba095099eb68a7b8a6602f1319f705ca1aee436f9dd44568a7",
+        "shaders/tex_probe.dxil": "05306fb4aff4d8a69903d07ad7c9865e9913804e30cd4cf836b66cfad9b95f52",
+        "shaders/tex_probe.hlsl": "d8d44cb7835faa7bc1663ea31039c7def662e044d94fc3e3b5626c9b3a0d2be3",
+        "shaders/tri.dxil": "0c610c4ef9a2934184fc6f9e3ae1bbb70d1fd8f6b5769c0b4e54da60d9d8917b",
+        "shaders/tri_depth.dxil": "f0c30e07aa7484983be24f6e02c1759df50d9f06a2ebafde8c1797b8402c1c47",
+        "shaders/tri_depth.hlsl": "d1dd6f3a4dff1c5d09ba93e4792d3e48537c5f211a04ba9af7d97cab3bda6d1f",
+        "shaders/tri_depth_cw.dxil": "b1e1d251ba8f6bb3891f14655329d6b43ef3332d8356978027d64647ccc93ef4",
+        "shaders/tri_depth_cw.hlsl": "08ecbb0783cfbd4a0bba76d213eb29a948574cfbe19de6100c4a6f535ae4b4b5",
+        "shaders/ubfe.bc.dxil": "c5c78104212c8cda4048a1f78797fc52a872335a5b8b1a66b6b09020147caa36",
+        "shaders/vb_inst_vs.dxil": "0e734f34f2ecbb78a4716d620b5eda01b651e5118f915c88d8497af865defa65",
+        "shaders/vb_ps.dxil": "cb0bc2bb6001f05c8753f22673b820b8ae4a4a60aeca0ba76b2164776e03528d",
+        "shaders/vb_vs.dxil": "06aa979129d440d8ec9dfd7c78060c4a6652ad154fdcb5d6437d7ffc64822d8d",
+        "shaders/wave_probe.dxil": "193a2e4921de9298580e70c9e414ff019cf75c55b981c4fca003b458fcc42d56",
+        "shaders/wave_probe.hlsl": "571270b4e2bba4a3c7f2dbadffe7b984ceae847981fda0de21e2386b933972ce"
+      }
+    }
+  },
+  "changed_inputs": {
+    "g1_smoke.c": {
+      "v1": "d46f62ba6bd578508ae6616c5cbc30d41ea019c06efc44fdb89eae61453c6616",
+      "v2": "705a3e119b4db5ad80e6990f3b5e20fdbc957d2d19d2f93ec842a5d945436796"
+    },
+    "g5_depth.c": {
+      "v1": "827890c2932313cb4645b01291847da696c130fda37b74ad79ecd579ac5b924f",
+      "v2": "4f525fdbeb754c855fa3616d5be6c2337fbe52b1cd144a868a66d407d3ad1072"
+    },
+    "g6_geometry.c": {
+      "v1": "e1c762b223966a0a027815ad41c9da8629f7264dbcd9951a4403224a3b7ac8c0",
+      "v2": "dc0f3028e39b10e6a9148de1208f2979cf509f6966ca4af2fe0da0cfa15c1d8c"
+    },
+    "g7_tessellation.c": {
+      "v1": "c9d53ee7296b653ac4378c63cee39a6f891e53f6e826c095c43dbbff6984069e",
+      "v2": "252a3cb80d0521c3b7e0f19926111d42e779ffca3c0ec017e98ad17a7eb8a7f1"
+    },
+    "g8_mesh.c": {
+      "v1": "bf1f266e4a975a0b48e0026863ca7cfe09f3e9bb980cd1c398475db0b4372973",
+      "v2": "a3655783f64b75d0133cafe14a98430c464679c604afc8d8e6545fd7cc000021"
+    },
+    "g9_amplification.c": {
+      "v1": "1171420d9dd8bcd7887be1290ca75c87b6a0cfcdd6e83f28a4cf5871e690c72d",
+      "v2": "b68f2779e531da87d856d9ca7e6c9b9724b8dca689ac00215ab892884eb14344"
+    },
+    "make_probe.c": {
+      "v1": "daa00a6e1b87508b563f0b4a98bdf276fd0a6cd15571309c73abce56620802b9",
+      "v2": "8075ca4beb728c56b7e37dee75b7ea72334d621f367942563b76d1ff63d96e48"
+    },
+    "run-suites.sh": {
+      "v1": "bc9ad87175164e6d5d097e2d10491e382473d6cfebfebc91cb902b9c2e5d28f5",
+      "v2": "47a863faa15b437a0abff288a4c1e18c4e70b4aec7ecadf07517820290115088"
+    },
+    "shaders/solid_link.dxil": {
+      "v1": null,
+      "v2": "edecf15bbac580d153b83e244248d72fac9ceaf30f33d91d0f193948343e14a2"
+    },
+    "shaders/tess_ds.dxil": {
+      "v1": "11ecba7c879c59383c17b584983543ef22933776ee285c58f8a11edee5a09f68",
+      "v2": "b1778cbafd6c206187d41aa19bd503fb42c8ef06aef9ef46a48cd1a6bcf17940"
+    }
+  },
+  "corrections": {
+    "g1_smoke": {
+      "rationale": "Capability queries are bounded by their input and checked for consistency; valid heap/allocation descriptors replace obsolete stub expectations. Optional query and Linux LUID behaviour follow the pinned reference.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_feature_levels",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_shader_model",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createheap",
+        "https://github.com/HansKristian-Work/vkd3d-proton/blob/31d1f89ca5b3f2fd3b6f025c8e6f73ed3eaa852b/libs/vkd3d/device.c#L5495"
+      ],
+      "details": "README.md#rationale-by-fixture"
+    },
+    "g5_depth": {
+      "rationale": "Correct target-facing cull expectations; replace invalid colour-as-DSV/Close rejection assumption with a valid depth-resource descriptor check.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_rasterizer_desc",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createdepthstencilview"
+      ],
+      "details": "README.md#rationale-by-fixture"
+    },
+    "g6_geometry": {
+      "rationale": "Use a constant blue PS with no declared inputs, linking both VS and GS; bind the target before each draw. Preserve exact four-point and pixel-equivalence checks.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_graphics_pipeline_state_desc#remarks",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-omsetrendertargets"
+      ],
+      "details": "README.md#rationale-by-fixture"
+    },
+    "g7_tessellation": {
+      "rationale": "Domain signature declares all six quad patch constants and four input control points; bind target before draw. Preserve bilinear quad and exact 4096-pixel oracle.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_graphics_pipeline_state_desc#remarks",
+        "https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-outputpatch",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-omsetrendertargets"
+      ],
+      "details": "README.md#rationale-by-fixture"
+    },
+    "g8_mesh": {
+      "rationale": "Pointer-align entire enum/payload pairs, retain natural member alignment and align stream storage; bind the target. Original mesh shader and full-target oracle unchanged.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_pipeline_state_stream_desc#remarks",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-omsetrendertargets"
+      ],
+      "details": "README.md#rationale-by-fixture"
+    },
+    "g9_amplification": {
+      "rationale": "Same stream ABI and target-binding correction with AS subobject included. Original AS/MS shaders and full-target oracle unchanged.",
+      "sources": [
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_pipeline_state_stream_desc#remarks",
+        "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-omsetrendertargets"
+      ],
+      "details": "README.md#rationale-by-fixture"
+    }
+  },
+  "suites": [
+    {
+      "name": "g1_smoke",
+      "source": "g1_smoke.c",
+      "intent": "device/capabilities/queue/fence/heap ABI",
+      "shader_args": {
+        "v1": [],
+        "v2": []
+      }
+    },
+    {
+      "name": "g2_smoke",
+      "source": "g2_smoke.c",
+      "intent": "resource upload and copy",
+      "shader_args": {
+        "v1": [],
+        "v2": []
+      }
+    },
+    {
+      "name": "g3_smoke",
+      "source": "g3_smoke.c",
+      "intent": "descriptor/root signature plumbing",
+      "shader_args": {
+        "v1": [],
+        "v2": []
+      }
+    },
+    {
+      "name": "g4_smoke",
+      "source": "g4_smoke.c",
+      "intent": "DXIL compute dispatch",
+      "shader_args": {
+        "v1": [
+          "shaders/cs.dxil"
+        ],
+        "v2": [
+          "shaders/cs.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g4_triangle",
+      "source": "g4_triangle.c",
+      "intent": "triangle pixel oracle",
+      "shader_args": {
+        "v1": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil"
+        ],
+        "v2": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g5_depth",
+      "source": "g5_depth.c",
+      "intent": "depth, write mask, interpolation and culling",
+      "shader_args": {
+        "v1": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil",
+          "shaders/tri_depth.dxil",
+          "shaders/solid_g.dxil",
+          "shaders/tri_depth_cw.dxil"
+        ],
+        "v2": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil",
+          "shaders/tri_depth.dxil",
+          "shaders/solid_g.dxil",
+          "shaders/tri_depth_cw.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g5_descriptors",
+      "source": "g5_descriptors.c",
+      "intent": "descriptor binding",
+      "shader_args": {
+        "v1": [
+          "shaders/res_probe.dxil",
+          "shaders/rs_table.rs",
+          "shaders/rs_mixed.rs",
+          "shaders/rs_descriptors.rs",
+          "shaders/space_probe.dxil"
+        ],
+        "v2": [
+          "shaders/res_probe.dxil",
+          "shaders/rs_table.rs",
+          "shaders/rs_mixed.rs",
+          "shaders/rs_descriptors.rs",
+          "shaders/space_probe.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g5_atomics",
+      "source": "g5_atomics.c",
+      "intent": "atomics",
+      "shader_args": {
+        "v1": [
+          "shaders/atomic_probe.dxil"
+        ],
+        "v2": [
+          "shaders/atomic_probe.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g5_control_flow",
+      "source": "g5_control_flow.c",
+      "intent": "control flow",
+      "shader_args": {
+        "v1": [
+          "shaders/cf_probe.dxil"
+        ],
+        "v2": [
+          "shaders/cf_probe.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g5_wave",
+      "source": "g5_wave.c",
+      "intent": "wave operations",
+      "shader_args": {
+        "v1": [
+          "shaders/wave_probe.dxil"
+        ],
+        "v2": [
+          "shaders/wave_probe.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g5_texture",
+      "source": "g5_texture.c",
+      "intent": "texture access",
+      "shader_args": {
+        "v1": [
+          "shaders/tex_probe.dxil"
+        ],
+        "v2": [
+          "shaders/tex_probe.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g6_geometry",
+      "source": "g6_geometry.c",
+      "intent": "pass-through point geometry vs control",
+      "shader_args": {
+        "v1": [
+          "shaders/gs_input_vs.dxil",
+          "shaders/solid.dxil",
+          "shaders/gs_point.dxil"
+        ],
+        "v2": [
+          "shaders/gs_input_vs.dxil",
+          "shaders/solid_link.dxil",
+          "shaders/gs_point.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g7_tessellation",
+      "source": "g7_tessellation.c",
+      "intent": "quad tessellation, 4096 exact pixels",
+      "shader_args": {
+        "v1": [
+          "shaders/gs_input_vs.dxil",
+          "shaders/solid.dxil",
+          "shaders/tess_hs.dxil",
+          "shaders/tess_ds.dxil"
+        ],
+        "v2": [
+          "shaders/gs_input_vs.dxil",
+          "shaders/solid.dxil",
+          "shaders/tess_hs.dxil",
+          "shaders/tess_ds.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g8_mesh",
+      "source": "g8_mesh.c",
+      "intent": "mesh full-target quad",
+      "shader_args": {
+        "v1": [
+          "shaders/mesh_quad.dxil",
+          "shaders/solid.dxil"
+        ],
+        "v2": [
+          "shaders/mesh_quad.dxil",
+          "shaders/solid.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g9_amplification",
+      "source": "g9_amplification.c",
+      "intent": "amplification launches mesh quad",
+      "shader_args": {
+        "v1": [
+          "shaders/as_dispatch.dxil",
+          "shaders/mesh_quad.dxil",
+          "shaders/solid.dxil"
+        ],
+        "v2": [
+          "shaders/as_dispatch.dxil",
+          "shaders/mesh_quad.dxil",
+          "shaders/solid.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g10_vertex_buffers",
+      "source": "g10_vertex_buffers.c",
+      "intent": "bound vertex-buffer rasterisation",
+      "shader_args": {
+        "v1": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil",
+          "shaders/vb_vs.dxil",
+          "shaders/vb_ps.dxil"
+        ],
+        "v2": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil",
+          "shaders/vb_vs.dxil",
+          "shaders/vb_ps.dxil"
+        ]
+      }
+    },
+    {
+      "name": "g11_indexed_instanced",
+      "source": "g11_indexed_instanced.c",
+      "intent": "indexed and instanced draws",
+      "shader_args": {
+        "v1": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil",
+          "shaders/vb_vs.dxil",
+          "shaders/vb_ps.dxil",
+          "shaders/vb_inst_vs.dxil"
+        ],
+        "v2": [
+          "shaders/tri.dxil",
+          "shaders/solid.dxil",
+          "shaders/vb_vs.dxil",
+          "shaders/vb_ps.dxil",
+          "shaders/vb_inst_vs.dxil"
+        ]
+      }
+    }
+  ]
+}

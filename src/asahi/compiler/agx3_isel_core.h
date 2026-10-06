@@ -94,6 +94,9 @@ enum agx3_isel_icond {
 enum agx3_isel_operand {
    AGX3_ISEL_REGISTER = 0,
    AGX3_ISEL_IMMEDIATE = 1,
+   /* An aligned 32-bit uniform (f66/f83 with class f72/f89 = 3). Only
+    * encoded through the explicit-hint path, beside register comparands. */
+   AGX3_ISEL_UNIFORM = 2,
 };
 
 struct agx3_isel_desc {
@@ -108,6 +111,11 @@ struct agx3_isel_desc {
     * selected operands have no hint. Existing register/register forms retain
     * their separate native encoding. */
    bool cmp1_immediate;
+   /* An aligned 32-bit uniform comparand (cmp0: f36 with f42 = 3; cmp1: f51
+    * with f57 = 3), witnessed only against a 32-bit register comparand and
+    * register/immediate selects. */
+   bool cmp0_uniform;
+   bool cmp1_uniform;
    bool cmp_16;
 
    /* GPU1 widens a half-register second comparand against a full-register

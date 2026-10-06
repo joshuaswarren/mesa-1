@@ -310,6 +310,13 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_unroll_restart") ||
           !strcmp(func->name, "libagx_gs_setup_indirect") ||
           !strcmp(func->name, "libagx_prefix_sum_geom") ||
+          /* D3D12 placement-signal producer: KERNEL(1), two 64-bit
+           * arguments and one naturally aligned 64-bit global store. Compile
+           * through the real AGX3b backend with rebased arguments and no
+           * preamble; queue construction separately validates all resulting
+           * staging/TPS/rodata metadata before native Ioto publication.
+           * Enabling this exact catalogue entry is not an execution claim. */
+          !strcmp(func->name, "libagx_write_u64") ||
           !strcmp(func->name, "libagx_copy_uchar") ||
           !strcmp(func->name, "libagx_copy_uint4") ||
           !strcmp(func->name, "libagx_fill") ||
@@ -321,9 +328,14 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_copy_query_gl") ||
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
           !strcmp(func->name, "libagx_setup_indirect_dispatch") ||
+          /* D3D12 mesh command signatures use these existing argument
+           * publication kernels. Runtime native metadata and ownership
+           * checks remain required before any launch. */
+          !strcmp(func->name, "libagx_d3d12_indirect_patch") ||
+          !strcmp(func->name, "libagx_d3d12_indirect_constant") ||
+          !strcmp(func->name, "libagx_d3d12_indirect_root") ||
+          !strcmp(func->name, "libagx_d3d12_indirect_dispatch") ||
           !strcmp(func->name, "libagx_copy_timestamp") ||
-          !strcmp(func->name, "libagx_tess_setup_indirect_hw") ||
-          !strcmp(func->name, "libagx_tess_factors_half") ||
           !strcmp(func->name, "libagx_increment_statistic") ||
           /* Software tessellation */
           !strcmp(func->name, "libagx_tess_setup_indirect") ||

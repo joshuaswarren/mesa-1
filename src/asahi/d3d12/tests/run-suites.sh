@@ -16,6 +16,7 @@ B=${1:-$HERE/../../../../_build/src/asahi/d3d12}
 
 run() {
    local name=$1; shift
+   attempts=$((attempts+1))
    local bin=$B/d3d12agx_$name
    [ -x "$bin" ] || { printf "%-18s MISSING BINARY\n" "$name"; return 1; }
    for f in "$@"; do
@@ -31,11 +32,18 @@ run() {
    fi
    printf "%-18s %s\n" "$name" "$last"
    echo "$out" | grep "^FAIL" | sed 's/^/                   | /'
-   [ $rc -eq 0 ]
+   if [ $rc -ne 0 ] || [[ "$last" != *"ALL PASS"* ]] ||
+      echo "$out" | grep -Eq "^FAIL|BLOCKED"; then
+      return 1
+   fi
+   passes=$((passes+1))
+   return 0
 }
 
 fails=0
-skips=0
+attempts=0
+passes=0
+required=17
 
 # The G1-G4 milestone smokes. They were NOT in this runner, so when the
 # descriptor grew from 32 to 40 bytes g3_smoke failed unnoticed for a
@@ -53,7 +61,7 @@ run g5_descriptors  "$S/res_probe.dxil" "$S/rs_table.rs" "$S/rs_mixed.rs" \
 run g5_atomics      "$S/atomic_probe.dxil"                                         || fails=$((fails+1))
 run g5_control_flow "$S/cf_probe.dxil"                                             || fails=$((fails+1))
 run g5_wave         "$S/wave_probe.dxil"                                           || fails=$((fails+1))
-[ -x "$B/d3d12agx_g5_texture" ] && { run g5_texture "$S/tex_probe.dxil" || fails=$((fails+1)); }
+run g5_texture      "$S/tex_probe.dxil"                                            || fails=$((fails+1))
 
 # G6 runs against probe shaders GENERATED from NIR by d3d12agx_make_probe
 # and committed next to it, so it needs neither dxc (absent on aarch64)
@@ -84,13 +92,12 @@ run g11_indexed_instanced "$S/tri.dxil" "$S/solid.dxil" "$S/vb_vs.dxil" \
    "$S/vb_ps.dxil" "$S/vb_inst_vs.dxil" || fails=$((fails+1))
 
 echo
-# A skipped suite is NOT a green suite. Saying "all green" while two of
-# them never ran is the same lie as a test that prints usage and exits 0.
-if [ $fails -ne 0 ]; then
-   echo "GPU SUITES: $fails suite(s) not green, $skips skipped"
-elif [ $skips -ne 0 ]; then
-   echo "GPU SUITES: all RUN suites green, but $skips SKIPPED - not a full pass"
+# All seventeen suites are required, including texture. Missing input,
+# blocked execution and a zero exit code without ALL PASS remain failures.
+if [ $attempts -ne $required ] || [ $passes -ne $required ] || [ $fails -ne 0 ]; then
+   echo "GPU SUITES: $passes/$required passed, $attempts attempted; not a full pass"
+   [ $fails -ne 0 ] || fails=1
 else
-   echo "GPU SUITES: all green"
+   echo "GPU SUITES: all green ($passes/$required required suites)"
 fi
 exit $fails

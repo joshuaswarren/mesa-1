@@ -39,7 +39,7 @@
  * virtio-only TUs that need the full definitions (agx_device_virtio.c,
  * agx_device.c under HAVE_LIBDRM).
  */
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && !defined(AGX_NO_VIRTIO)
 #include "vdrm.h"
 #include "asahi_proto.h"
 #else
@@ -224,6 +224,9 @@ struct agx_device {
    char name[64];
    struct drm_asahi_params_global params;
    bool is_virtio;
+   /* Native DRM 0.2 added the four render resource-specifier high dwords.
+    * Stock 0.0 kernels do not consume an oversized render packet's tail. */
+   bool render_rsrc_spec_hi;
    /* The current Aurora KMD treats attachment records as the authoritative
     * fragmented-allocation writeback set.  Other winsys backends retain the
     * upstream optional-hint semantics. */
@@ -491,6 +494,9 @@ agx_va_in_usc_window(const struct agx_device *dev, uint64_t addr)
           (addr - dev->shader_base) < AGX_USC_WINDOW_SIZE;
 }
 
+/* On failure the caller retains its fd/platform handle. On success native
+ * DRM transfers the fd to common close; Wine retains it in the platform so
+ * no Unix descriptor is passed to the Windows CRT. */
 bool agx_open_device(void *memctx, struct agx_device *dev);
 
 void agx_close_device(struct agx_device *dev);

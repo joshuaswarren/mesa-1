@@ -145,6 +145,27 @@ bool agx_g17p_vdm_alias_kernel_reserved(uint64_t addr, uint64_t size);
 uint64_t agx_g17p_vdm_alias_heap_capacity(void);
 bool agx_g17p_vdm_alias_compact(uint64_t addr, uint32_t *offset);
 
+/* agx_g17p_vdm_alias_compact() for one byte at addr, for per-draw callers. */
+static inline bool
+agx_g17p_vdm_alias_compact_inline(uint64_t addr, uint32_t *offset)
+{
+   if (addr < AGX_G17P_VDM_ALIAS_BASE || addr == UINT64_MAX)
+      return false;
+
+   const uint64_t end = addr + 1;
+   if (!(end <= AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END &&
+         (end <= AGX_G17P_VDM_ALIAS_RESERVED_START ||
+          addr >= AGX_G17P_VDM_ALIAS_RESERVED_END)))
+      return false;
+
+   const uint64_t compact = addr - AGX_G17P_VDM_USER_BASE;
+   if (compact > UINT32_MAX)
+      return false;
+
+   *offset = (uint32_t)compact;
+   return true;
+}
+
 /* G17P HAL200 VDM payload fields are offsets from the render-context base. */
 bool agx_g17p_vdm_payload_compact(uint64_t addr, uint64_t *compact);
 static inline bool

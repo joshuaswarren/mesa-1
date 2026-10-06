@@ -173,6 +173,52 @@ static const struct isel_vec vectors[] = {
                       .sel_true = 10, .sel_false = 5, .wait_mask = 1u << 2},
     {0x1a, 0x09, 0x1d, 0x07, 0x82, 0x0a, 0x05, 0x60, 0x20, 0x85}, 10},
 
+   /* Uniform operands, metal-nt 32023.850 -arch applegpu_g17p kernels:
+    * (u.x < r) ? r : r, (r < u.x) ? r : r, (r == 7) ? u.y : r,
+    * (r == 7) ? r : u.z, (r == 7) ? u.y : u.z, (r < r) ? u.y : 3u. */
+   {"u_cmp0", {.dest = 0, .cmp0 = 8, .cmp0_uniform = true, .cmp1 = 0,
+               .cond = AGX3_ISEL_ICOND_ULT, .explicit_hints = true,
+               .discard = {false, true, false, false},
+               .true_kind = AGX3_ISEL_REGISTER,
+               .false_kind = AGX3_ISEL_REGISTER,
+               .sel_true = 2, .sel_false = 4, .wait_mask = 1u << 5},
+    {0x02, 0x09, 0x17, 0x01, 0x02, 0x02, 0x85, 0xc0, 0x00, 0x04}, 10},
+   {"u_cmp1", {.dest = 0, .cmp0 = 0, .cmp1 = 8, .cmp1_uniform = true,
+               .cond = AGX3_ISEL_ICOND_ULT, .explicit_hints = true,
+               .discard = {true, false, false, false},
+               .true_kind = AGX3_ISEL_REGISTER,
+               .false_kind = AGX3_ISEL_REGISTER,
+               .sel_true = 2, .sel_false = 4, .wait_mask = 1u << 5},
+    {0x02, 0x01, 0x0f, 0x09, 0x02, 0x02, 0x05, 0xc2, 0x00, 0x04}, 10},
+   {"u_true", {.dest = 0, .cmp0 = 0, .cmp1 = 7, .cmp1_immediate = true,
+               .cond = AGX3_ISEL_ICOND_EQ, .explicit_hints = true,
+               .discard = {true, false, false, false},
+               .true_kind = AGX3_ISEL_UNIFORM,
+               .false_kind = AGX3_ISEL_REGISTER,
+               .sel_true = 10, .sel_false = 2, .wait_mask = 1u << 5},
+    {0x02, 0x01, 0x0f, 0x86, 0x26, 0x0a, 0x17, 0xc2, 0x00, 0x02}, 10},
+   {"u_false", {.dest = 0, .cmp0 = 0, .cmp1 = 7, .cmp1_immediate = true,
+                .cond = AGX3_ISEL_ICOND_EQ, .explicit_hints = true,
+                .discard = {true, false, false, false},
+                .true_kind = AGX3_ISEL_REGISTER,
+                .false_kind = AGX3_ISEL_UNIFORM,
+                .sel_true = 2, .sel_false = 12, .wait_mask = 1u << 5},
+    {0x02, 0x01, 0x0f, 0x86, 0x06, 0x02, 0x17, 0xc2, 0x20, 0x0c}, 10},
+   {"u_both", {.dest = 0, .cmp0 = 0, .cmp1 = 7, .cmp1_immediate = true,
+               .cond = AGX3_ISEL_ICOND_EQ, .explicit_hints = true,
+               .discard = {true, false, false, false},
+               .true_kind = AGX3_ISEL_UNIFORM,
+               .false_kind = AGX3_ISEL_UNIFORM,
+               .sel_true = 10, .sel_false = 12, .wait_mask = 1u << 5},
+    {0x02, 0x01, 0x0f, 0x86, 0x26, 0x0a, 0x17, 0xc2, 0x20, 0x0c}, 10},
+   {"u_true_imm", {.dest = 0, .cmp0 = 0, .cmp1 = 2,
+                   .cond = AGX3_ISEL_ICOND_ULT, .explicit_hints = true,
+                   .discard = {true, false, false, false},
+                   .true_kind = AGX3_ISEL_UNIFORM,
+                   .false_kind = AGX3_ISEL_IMMEDIATE,
+                   .sel_true = 10, .sel_false = 3, .wait_mask = 1u << 5},
+    {0x02, 0x01, 0x0f, 0x03, 0x22, 0x0a, 0x05, 0xc0, 0x20, 0x83}, 10},
+
    /* The boolean form every lowered ICMP becomes: `? 1u : 0u`, 16-bit dest. */
    {"bool1_0", {.dest = 2, .dest_16 = true, .cmp0 = 4, .cmp1 = 6,
                 .cond = AGX3_ISEL_ICOND_ULT, .true_kind = AGX3_ISEL_IMMEDIATE, .false_kind = AGX3_ISEL_IMMEDIATE,
@@ -247,6 +293,33 @@ main(void)
    d.sel_true = 12;
    d.sel_false = 16;
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+
+   /* Uniform shapes outside the witnesses are refused. */
+   {
+      struct agx3_isel_desc u = {.dest = 0, .cmp0 = 8, .cmp0_uniform = true,
+                                 .cmp1 = 0, .cond = AGX3_ISEL_ICOND_ULT,
+                                 .explicit_hints = true,
+                                 .sel_true = 2, .sel_false = 4};
+      CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+      u.cmp1_uniform = true; /* uniform/uniform comparands */
+      CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+      u.cmp1_uniform = false;
+      u.cmp1_immediate = true; /* uniform/immediate comparands */
+      CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+      u.cmp1_immediate = false;
+      u.true_kind = AGX3_ISEL_UNIFORM; /* uniform comparand and select */
+      u.sel_true = 10;
+      CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+      u.true_kind = AGX3_ISEL_REGISTER;
+      u.sel_true = 2;
+      u.cmp0 = 9; /* misaligned uniform word */
+      CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+      u.cmp0 = 256; /* high uniform file */
+      CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+      u.cmp0 = 8;
+      u.dest_16 = true; /* no 16-bit uniform witness */
+      CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &u, out, &len));
+   }
 
    /* Immediates wider than a byte stay gated on both encodings. */
    d.true_kind = AGX3_ISEL_IMMEDIATE;

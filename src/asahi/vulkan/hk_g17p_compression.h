@@ -6,6 +6,7 @@
 #include "asahi/lib/agx_chip.h"
 #include "vulkan/vulkan_core.h"
 #include <stdbool.h>
+#include <string.h>
 
 /* G17P lossless compression policy.
  *
@@ -24,8 +25,12 @@
  *    texels are excluded so that a single-sample tilebuffer never spills a
  *    compressed target (spilling needs libagx_decompress, which has no G17P
  *    binary): 8 targets x 8 B fit in the 120 B/sample G17P budget.
- *  - Depth: D16_UNORM and D32_SFLOAT, one level, one layer, one sample.
- *    Stencil and combined depth/stencil formats stay plain.
+ *  - Depth: D16_UNORM, D32_SFLOAT and the D32_SFLOAT depth plane (plane 0)
+ *    of D32_SFLOAT_S8_UINT, one level, one layer, one sample. Stencil
+ *    planes stay plain. Zink stores GL Z24S8 as D32S8, so its depth plane
+ *    is every GL depth buffer's ZLS traffic; buffer uploads into it take
+ *    the graphics copy (R32_UINT PBE) and the stencil plane keeps the raw
+ *    upload kernel.
  *
  * Images that may be shared with another process or device (external
  * memory, WSI, DRM modifiers) stay plain: the compositor and display paths
@@ -105,7 +110,8 @@ hk_g17p_compression_color_format(VkFormat format)
 static inline bool
 hk_g17p_compression_depth_format(VkFormat format)
 {
-   return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT;
+   return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT ||
+          format == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 /* Mesa-private WSI image marker (src/vulkan/wsi/wsi_common_private.h). */
@@ -123,27 +129,45 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
    if (chip != AGX_CHIP_G17P || plane != 0 || !info)
       return false;
 
-   /* Shared images keep their plain layout contract. */
-   for (const VkBaseInStructure *ext = info->pNext; ext; ext = ext->pNext) {
-      if (ext->sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO &&
-          ((const VkExternalMemoryImageCreateInfo *)ext)->handleTypes)
+   /* Shared images keep their plain layout contract. Read each header by
+    * copy: the chain's structures have other types, and Mesa builds with
+    * strict aliasing (gcc -O2 dropped the stores of a stack chain). */
+   for (const void *next = info->pNext; next;) {
+      VkBaseInStructure ext;
+      memcpy(&ext, next, sizeof(ext));
+      if (ext.sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO &&
+          ((const VkExternalMemoryImageCreateInfo *)next)->handleTypes)
          return false;
-      if (ext->sType == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
+      if (ext.sType == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
          return false;
+      next = ext.pNext;
    }
 
-   const VkImageCreateFlags allowed_flags =
+   VkImageCreateFlags allowed_flags =
       VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   /* Zink marks every depth attachment sample-location compatible, including
+    * single-sample images. This changes sample-location tracking, not the
+    * depth plane's storage class. The one-sample restriction below remains.
+    * Refusing the flag also makes the host-copy performance query advertise
+    * a plain device layout, so zink adds HOST_TRANSFER and keeps depth plain.
+    */
+   if (hk_g17p_compression_depth_format(info->format))
+      allowed_flags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
    /* Only usages whose every access goes through the texture unit, a PBE or
     * ZLS. Storage and host-transfer access is raw; feedback loops read what
     * is being written; video, shading-rate and density-map units have their
     * own (unknown) compression contracts. */
-   const VkImageUsageFlags allowed_usage =
+   VkImageUsageFlags allowed_usage =
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+
+   /* Zink depth feedback reads use the depth plane's ZLS layout. Color
+    * feedback keeps the plain layout required by texture barriers. */
+   if (hk_g17p_compression_depth_format(info->format))
+      allowed_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
    if (info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||
        info->arrayLayers != 1 || info->samples != VK_SAMPLE_COUNT_1_BIT ||

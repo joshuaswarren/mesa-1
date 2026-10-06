@@ -15,8 +15,14 @@
  */
 
 #include "d12_private.h"
+#ifdef D12_PLATFORM_WINE
+bool d12_wine_queue_query_interface(ID3D12CommandQueue *queue, REFIID riid,
+                                    void **out);
+#endif
 #include "d12_agx3_cmdstream_core.h"
+#include "d12_native_render_resources_core.h"
 #include "d12_read_set_core.h"
+#include "d12_submit.h"
 #include "d12_write_set_core.h"
 
 #include "decode.h"
@@ -27,6 +33,8 @@
 #include "drm-uapi/drm.h"
 
 #include "agx_helpers.h"
+#include "asahi/compiler/agx3_compute_program.h"
+#include "agx_abi.h"
 #include "agx_usc.h"
 #include "clc/asahi_clc.h"
 #include "util/u_math.h"
@@ -35,60 +43,29 @@
 #include <errno.h>
 
 /*
- * Aurora: forward progress must not depend on a native waiter wakeup.
+ * Queue synchronisation primitives.
  *
- * On this Windows-on-Apple-Silicon ARM64 target a lost wake was captured
- * directly while bringing up the D3D11 stack: a submission producer sat
- * indefinitely in NtWaitForAlertByThreadId acquiring the submission queue
- * lock, even though the live lock word was already zero, and other workers
- * in the same process showed the identical free-lock/waiter contradiction.
- * A lost wake here stops command submission before dxgkrnl or the KMD is
- * ever called, so it presents as a GPU hang with no submission to blame.
+ * On Linux these are the plain c11 mutex and an untimed condition wait: every
+ * wait below loops on a predicate that is only changed under queue->lock, and
+ * every change of such a predicate (including the stop flags at teardown)
+ * broadcasts the condition variable it guards, so a wakeup is never lost and
+ * an idle queue never polls.
  *
- * Mesa's Windows c11 threads map mtx_t to a CRITICAL_SECTION and cnd_t to a
- * CONDITION_VARIABLE, which are exactly the primitives observed dropping
- * wakes.  Acquire with a bounded try/yield loop, and make every condition
- * wait a legal spurious wakeup followed by a predicate recheck -- every call
- * site below already loops on its predicate, so a spurious wake costs
- * nothing.  A real cnd_signal still returns immediately, so this changes no
- * healthy-path latency; the timeout only bounds the damage of a lost wake.
- *
- * This is deliberately not #ifdef _WIN32.  The Linux build is where these
- * paths get exercised locally, and a concurrency primitive that differs
- * between the test build and the shipping one hides exactly the class of bug
- * it is here to contain.  The portable cost is one interlocked operation on
- * the uncontended path plus a bounded idle poll.
+ * Windows is different.  On the Windows-on-Apple-Silicon ARM64 target a lost
+ * wake was captured directly while bringing up the D3D11 stack: a submission
+ * producer sat indefinitely in NtWaitForAlertByThreadId acquiring the
+ * submission queue lock, even though the live lock word was already zero,
+ * and other workers in the same process showed the identical
+ * free-lock/waiter contradiction.  Mesa's Windows c11 threads map mtx_t to a
+ * CRITICAL_SECTION and cnd_t to a CONDITION_VARIABLE, which are exactly the
+ * primitives observed dropping wakes.  There the lock is acquired with a
+ * bounded try/yield loop and every condition wait is a legal spurious wakeup
+ * followed by a predicate recheck, so the timeout only bounds the damage of
+ * a lost wake and a real signal still returns immediately.
  */
+#ifdef _WIN32
 #define D12_SYNC_SPINS_BEFORE_SLEEP 64u
 #define D12_SYNC_FALLBACK_NS        1000000L
-
-static uint8_t *
-d12_queue_emit_cdm_cache_flush(struct agx_device *dev, uint8_t *cursor)
-{
-   switch (agx_chip_command_stream_generation(dev->chip)) {
-   case AGX_CS_GENERATION_AGX2:
-      return (uint8_t *)agx_cdm_barrier((uint32_t *)cursor, dev->chip);
-
-   case AGX_CS_GENERATION_G15:
-   case AGX_CS_GENERATION_HAL200:
-   case AGX_CS_GENERATION_HAL300: {
-      const struct agx3_cdm_barrier_info info = {
-         .chip = dev->chip,
-         .flags = 0x5,
-      };
-      struct d12_agx3_cdm_barrier_encoding encoded;
-      if (!d12_agx3_encode_cdm_barrier(&info, &encoded))
-         return NULL;
-
-      memcpy(cursor, encoded.bytes, encoded.length);
-      return cursor + encoded.length;
-   }
-
-   case AGX_CS_GENERATION_UNKNOWN:
-   default:
-      return NULL;
-   }
-}
 
 /* A waiter that is blocking a producer polls at the floor: it is only ever
  * waiting because work is already pending, so the poll is transient and the
@@ -160,6 +137,55 @@ d12_sync_wait_idle(cnd_t *cond, mtx_t *mutex, long *backoff_ns)
    if (*backoff_ns < D12_SYNC_IDLE_CEILING_NS)
       *backoff_ns *= 2;
 }
+#else
+static inline void
+d12_sync_lock(mtx_t *mutex)
+{
+   mtx_lock(mutex);
+}
+
+static inline void
+d12_sync_wait(cnd_t *cond, mtx_t *mutex)
+{
+   cnd_wait(cond, mutex);
+}
+
+static inline void
+d12_sync_wait_idle(cnd_t *cond, mtx_t *mutex, long *backoff_ns)
+{
+   (void)backoff_ns;
+   cnd_wait(cond, mutex);
+}
+#endif
+
+static uint8_t *
+d12_queue_emit_cdm_cache_flush(struct agx_device *dev, uint8_t *cursor)
+{
+   switch (agx_chip_command_stream_generation(dev->chip)) {
+   case AGX_CS_GENERATION_AGX2:
+      return (uint8_t *)agx_cdm_barrier((uint32_t *)cursor, dev->chip);
+
+   case AGX_CS_GENERATION_G15:
+   case AGX_CS_GENERATION_HAL200:
+   case AGX_CS_GENERATION_HAL300: {
+      const struct agx3_cdm_barrier_info info = {
+         .chip = dev->chip,
+         .flags = 0x5,
+      };
+      struct d12_agx3_cdm_barrier_encoding encoded;
+      if (!d12_agx3_encode_cdm_barrier(&info, &encoded))
+         return NULL;
+
+      memcpy(cursor, encoded.bytes, encoded.length);
+      return cursor + encoded.length;
+   }
+
+   case AGX_CS_GENERATION_UNKNOWN:
+   default:
+      return NULL;
+   }
+}
+
 
 enum d12_queue_op_type {
    D12_QUEUE_OP_WAIT,
@@ -189,11 +215,13 @@ struct d12_queue_op {
       placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
    uint64_t value;
    struct d12_fence_ticket ticket;
+   struct d12_fence_pending_signal pending_signal;
    uint64_t retire_value;
 
    struct d12_cmd_list *list;
    struct d12_device *submit_device;
    bool bos_initialized;
+   bool capture_failed;
    /*
     * A command list is mutable as soon as ExecuteCommandLists returns: the
     * application may Reset it while this operation is still waiting behind
@@ -204,10 +232,13 @@ struct d12_queue_op {
     * per submit and exhaust system memory before either queue could run.
     */
    struct util_dynarray bos;
+   struct util_dynarray g17p_vdm_storage;
    void *payload;
    size_t payload_size;
    unsigned nr_vdm;
    unsigned nr_cdm;
+   /* Draws recorded into the renders of this submission. */
+   uint32_t draws;
    bool write_set_complete;
    bool read_set_complete;
    uint32_t exact_read_range_count;
@@ -229,6 +260,9 @@ struct d12_queue_op {
 
 static void d12_queue_stop_worker(struct d12_queue *queue);
 static void d12_queue_signal_arena_cleanup(struct d12_queue *queue);
+static bool d12_queue_wait_submit_capacity(struct d12_queue *queue);
+static bool d12_queue_process_submit(struct d12_queue *queue,
+                                     struct d12_queue_op *op);
 
 static HRESULT STDMETHODCALLTYPE
 d12_queue_QueryInterface(ID3D12CommandQueue *iface, REFIID riid, void **out)
@@ -250,6 +284,12 @@ d12_queue_QueryInterface(ID3D12CommandQueue *iface, REFIID riid, void **out)
 
    if (d12_private_data_query_notifier(&queue->private_data, riid, out))
       return S_OK;
+
+#ifdef D12_PLATFORM_WINE
+   /* DXVK's dxgi.dll presents through IDXGIVkSwapChainFactory on the queue. */
+   if (d12_wine_queue_query_interface(iface, riid, out))
+      return *out ? S_OK : E_OUTOFMEMORY;
+#endif
 
    d12_log_unknown_riid("ID3D12CommandQueue::QueryInterface", riid);
    *out = NULL;
@@ -319,14 +359,40 @@ d12_default_sample_positions(unsigned nr_samples)
    return packed;
 }
 
-static void
+/* Mirror the existing native kernel address checks before any ioctl. This
+ * identifies the exact UAPI field; it does not relax alignment or residency. */
+static const char *
+d12_g17p_render_address_error(const struct drm_asahi_cmd_render *c)
+{
+   if (!c->vdm_ctrl_stream_base || (c->vdm_ctrl_stream_base & 3))
+      return "vdm_ctrl_stream_base";
+   if (!c->isp_scissor_base || (c->isp_scissor_base & 7))
+      return "isp_scissor_base";
+   if (c->isp_dbias_base & 7)
+      return "isp_dbias_base";
+   if (c->isp_oclqry_base & 7)
+      return "isp_oclqry_base";
+   if ((c->sampler_heap == 0) != (c->sampler_count == 0) ||
+       (c->sampler_count && (c->sampler_heap & 7)))
+      return "sampler_heap/count";
+   return NULL;
+}
+
+static bool
 d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                     const struct d12_segment *seg,
                     struct drm_asahi_cmd_render *c)
 {
    memset(c, 0, sizeof(*c));
+   if (device->dev.chip == AGX_CHIP_G17P && seg->ds &&
+       (!d12_g17p_depth_enabled(&device->dev) ||
+        !d12_g17p_depth_segment_supported(seg))) {
+      mesa_loge("native depth submission refused before unqualified ZLS metadata");
+      return false;
+   }
 
-   c->vdm_ctrl_stream_base = list->stream_bo->va->addr + seg->stream_start;
+   c->vdm_ctrl_stream_base = seg->g17p_vdm_control_base
+      ? seg->g17p_vdm_control_base : list->stream_bo->va->addr + seg->stream_start;
 
    agx_pack(&c->ppp_ctrl, CR_PPP_CONTROL, cfg) {
       cfg.enable_w_clamp = true;
@@ -339,7 +405,8 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
    /* Background object values: hk's base constant, with the stencil clear
     * value in the low byte.
     */
-   c->isp_bgobjdepth = seg->isp_bgobjdepth;
+   c->isp_bgobjdepth = device->dev.chip == AGX_CHIP_G17P && !seg->ds
+      ? fui(1.0f) : seg->isp_bgobjdepth;
    c->isp_bgobjvals = 0x300 | seg->stencil_clear;
 
    /*
@@ -361,8 +428,9 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
          seg->render_pass
             ? seg->depth_plan
             : (struct d12_render_pass_plan){
-                 .load = seg->depth_cleared ? D12_RP_LOAD_CLEAR
-                                            : D12_RP_LOAD_PRESERVE,
+                 .load = seg->depth_cleared     ? D12_RP_LOAD_CLEAR
+                         : seg->depth_load_none ? D12_RP_LOAD_NONE
+                                                : D12_RP_LOAD_PRESERVE,
                  .store = (seg->depth_cleared ||
                            !(seg->dsv_flags &
                              D3D12_DSV_FLAG_READ_ONLY_DEPTH))
@@ -370,9 +438,12 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                              : D12_RP_STORE_NONE,
               };
 
+      /* A later full clear or discard in the list retired the write-back
+       * (d12_list_retire_attachment_store). */
       struct agx_zls zls = {
          .z_load = depth_plan.load == D12_RP_LOAD_PRESERVE,
-         .z_store = depth_plan.store == D12_RP_STORE_PRESERVE,
+         .z_store = depth_plan.store == D12_RP_STORE_PRESERVE &&
+                    !seg->depth_store_dead,
       };
 
       c->depth.base = seg->ds_address;
@@ -389,8 +460,9 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
             seg->render_pass
                ? seg->stencil_plan
                : (struct d12_render_pass_plan){
-                    .load = seg->stencil_cleared ? D12_RP_LOAD_CLEAR
-                                                 : D12_RP_LOAD_PRESERVE,
+                    .load = seg->stencil_cleared     ? D12_RP_LOAD_CLEAR
+                            : seg->stencil_load_none ? D12_RP_LOAD_NONE
+                                                     : D12_RP_LOAD_PRESERVE,
                     .store = (seg->stencil_cleared ||
                               !(seg->dsv_flags &
                                 D3D12_DSV_FLAG_READ_ONLY_STENCIL))
@@ -400,7 +472,8 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
 
          s = &seg->ds->stencil_layout;
          zls.s_load = stencil_plan.load == D12_RP_LOAD_PRESERVE;
-         zls.s_store = stencil_plan.store == D12_RP_STORE_PRESERVE;
+         zls.s_store = stencil_plan.store == D12_RP_STORE_PRESERVE &&
+                       !seg->stencil_store_dead;
 
          c->stencil.base = seg->stencil_address;
          unsigned s_pages = s->layer_stride_B / AIL_PAGESIZE;
@@ -452,14 +525,23 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
    c->sampler_heap = seg->sampler_heap;
    c->sampler_count = seg->sampler_count;
 
-   static_assert(sizeof(c->bg.rsrc_spec) == sizeof(seg->bg_counts),
-                 "counts word must match rsrc_spec");
-   memcpy(&c->bg.rsrc_spec, &seg->bg_counts, sizeof(seg->bg_counts));
-   memcpy(&c->eot.rsrc_spec, &seg->eot_counts, sizeof(seg->eot_counts));
-   memcpy(&c->partial_bg.rsrc_spec, &seg->partial_bg_counts,
-          sizeof(seg->partial_bg_counts));
-   memcpy(&c->partial_eot.rsrc_spec, &seg->partial_eot_counts,
-          sizeof(seg->partial_eot_counts));
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const struct d12_native_render_resource_specs specs = {
+         .bg = seg->g17p_bg_resources, .eot = seg->g17p_eot_resources,
+         .partial_bg = seg->g17p_partial_bg_resources,
+         .partial_eot = seg->g17p_partial_eot_resources,
+      };
+      d12_native_render_resource_specs_pack(&specs, c);
+   } else {
+      static_assert(sizeof(c->bg.rsrc_spec) == sizeof(seg->bg_counts),
+                    "counts word must match rsrc_spec");
+      memcpy(&c->bg.rsrc_spec, &seg->bg_counts, sizeof(seg->bg_counts));
+      memcpy(&c->eot.rsrc_spec, &seg->eot_counts, sizeof(seg->eot_counts));
+      memcpy(&c->partial_bg.rsrc_spec, &seg->partial_bg_counts,
+             sizeof(seg->partial_bg_counts));
+      memcpy(&c->partial_eot.rsrc_spec, &seg->partial_eot_counts,
+             sizeof(seg->partial_eot_counts));
+   }
 
    /* The scissor array carries both the XY bounds and the depth clip range
     * that draws index into. Occlusion scratch must be valid memory whether
@@ -494,7 +576,25 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
     * same run as the fault and match, exactly as the tessellation VA map
     * did for the last one.
     */
-   if (getenv("D3D12AGX_DUMP_RENDER_CMD")) {
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const char *field = d12_g17p_render_address_error(c);
+      if (field) {
+         mesa_loge("G17P render submission metadata refused: field=%s "
+                   "vdm=0x%llx scissor=0x%llx dbias=0x%llx "
+                   "oclqry=0x%llx sampler=0x%llx/%u extent=%ux%u "
+                   "draws=%u empty_tiles=%u", field,
+                   (unsigned long long)c->vdm_ctrl_stream_base,
+                   (unsigned long long)c->isp_scissor_base,
+                   (unsigned long long)c->isp_dbias_base,
+                   (unsigned long long)c->isp_oclqry_base,
+                   (unsigned long long)c->sampler_heap, c->sampler_count,
+                   c->width_px, c->height_px, seg->has_draws,
+                   seg->process_empty_tiles);
+         return false;
+      }
+   }
+
+   if (d12_debug()->dump_render_cmd) {
       mesa_logi("render cmd: vdm_base=0x%llx (stream_bo 0x%llx..0x%llx, "
                 "seg %zu..%zu, dispatches=%u)",
                 (unsigned long long)c->vdm_ctrl_stream_base,
@@ -512,7 +612,24 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
       mesa_logi("  bg.usc=0x%llx eot.usc=0x%llx  %ux%ux%u samples=%u",
                 (unsigned long long)c->bg.usc, (unsigned long long)c->eot.usc,
                 c->width_px, c->height_px, c->layers, c->samples);
+      if (seg->ds)
+         mesa_logi("  native D32 metadata: zls=0x%llx pixels=0x%x "
+                   "depth-stride=0x%x clear=0x%x load=%u store=%u "
+                   "fd-policy=%s",
+                   (unsigned long long)c->zls_ctrl, c->isp_zls_pixels,
+                   c->depth.stride, c->isp_bgobjdepth,
+                   (unsigned)!seg->depth_cleared,
+                   (unsigned)(seg->depth_cleared ||
+                              !(seg->dsv_flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH)),
+#ifndef D12_PLATFORM_D3DKMT
+                   d12_platform_is_real_asahi_render_fd(device->dev.fd)
+                      ? "physical-asahi-render-D32-optin" : "registered-shim-only"
+#else
+                   "closed-windows"
+#endif
+                   );
    }
+   return true;
 }
 
 static void
@@ -520,6 +637,9 @@ d12_queue_op_destroy(struct d12_queue_op *op)
 {
    if (op->type == D12_QUEUE_OP_WAIT)
       d12_fence_ticket_fini(&op->ticket);
+   if (op->type == D12_QUEUE_OP_SIGNAL && op->fence)
+      d12_fence_pending_signal_retire(op->fence, &op->pending_signal,
+                                      false);
    if (op->fence)
       d12_fence_internal_unref(op->fence);
    if (op->placement_fence)
@@ -532,6 +652,10 @@ d12_queue_op_destroy(struct d12_queue_op *op)
       util_dynarray_foreach(&op->bos, struct agx_bo *, bo)
          agx_bo_unreference(&op->submit_device->dev, *bo);
       util_dynarray_fini(&op->bos);
+      util_dynarray_foreach(&op->g17p_vdm_storage,
+                            struct d12_g17p_vdm_storage *, storage)
+         d12_g17p_vdm_storage_unref(*storage);
+      util_dynarray_fini(&op->g17p_vdm_storage);
    }
    if (op->list)
       ID3D12GraphicsCommandList_Release(&op->list->iface);
@@ -699,13 +823,13 @@ d12_queue_collect_write_tracker(
              ref->heap.count <= heap->desc.NumDescriptors - ref->heap.first)
             heap_limit = ref->heap.first + ref->heap.count;
 
-         simple_mtx_lock(&heap->device->descriptor_heap_lock);
          uint32_t first_word = ref->heap.first >> 6;
          uint32_t last_word = (heap_limit - 1) >> 6;
          if (last_word >= heap->live_resource_word_count)
             last_word = heap->live_resource_word_count - 1;
          for (uint32_t w = first_word; w <= last_word; ++w) {
-            uint64_t active = heap->live_resource_words[w];
+            uint64_t active =
+               p_atomic_read(&heap->live_resource_words[w]);
             if (w == first_word)
                active &= UINT64_MAX << (ref->heap.first & 63);
 
@@ -717,13 +841,10 @@ d12_queue_collect_write_tracker(
                       dev, attachments, count, limit,
                       &heap->slots[index])) {
                   *complete = false;
-                  simple_mtx_unlock(
-                     &heap->device->descriptor_heap_lock);
                   return true;
                }
             }
          }
-         simple_mtx_unlock(&heap->device->descriptor_heap_lock);
          break;
       }
       case D12_WRITE_REF_RESOURCE: {
@@ -874,8 +995,13 @@ d12_queue_op_capture_bo(struct d12_queue_op *op, struct agx_bo *bo)
          return;
    }
 
+   struct agx_bo **slot = util_dynarray_grow(&op->bos, struct agx_bo *, 1);
+   if (!slot) {
+      op->capture_failed = true;
+      return;
+   }
    agx_bo_reference(bo);
-   util_dynarray_append_typed(&op->bos, struct agx_bo *, bo);
+   *slot = bo;
 }
 
 static void
@@ -883,12 +1009,25 @@ d12_queue_op_capture_bos(struct d12_queue_op *op,
                          struct d12_cmd_list *list)
 {
    util_dynarray_init(&op->bos, NULL);
+   util_dynarray_init(&op->g17p_vdm_storage, NULL);
    op->bos_initialized = true;
    op->submit_device = list->device;
 
    d12_queue_op_capture_bo(op, list->stream_bo);
    d12_queue_op_capture_bo(op, list->usc_bo);
    d12_queue_op_capture_bo(op, list->sparse_registry_bo);
+   util_dynarray_foreach(&list->g17p_vdm_storage,
+                         struct d12_g17p_vdm_storage *, storage) {
+      struct d12_g17p_vdm_storage **slot = util_dynarray_grow(
+         &op->g17p_vdm_storage, struct d12_g17p_vdm_storage *, 1);
+      if (!slot) {
+         op->capture_failed = true;
+         return;
+      }
+      d12_g17p_vdm_storage_ref(*storage);
+      *slot = *storage;
+      d12_queue_op_capture_bo(op, (*storage)->bo);
+   }
 
    /* Scratch addresses are packed directly into the DRM command payload. */
    for (unsigned i = 0; i < list->segment_count; i++) {
@@ -1074,9 +1213,9 @@ d12_queue_read_set_add_heap(struct d12_queue_op *op,
       if (!heap->live_resource_words || !heap->live_resource_word_count)
          return false;
 
-      /* Descriptor writes and bitmap maintenance use the same device lock.
-       * This gives Execute a coherent descriptor snapshot while reducing a
-       * one-million-slot heap scan to the number of populated descriptors.
+      /* Descriptor writes maintain the bitmap atomically, so Execute reads
+       * the populated set without a lock and reduces a one-million-slot heap
+       * scan to the number of populated descriptors.
        */
       /* A root range the signature sized explicitly ends. Walking to the
        * end of the heap would pull every later populated descriptor's
@@ -1088,13 +1227,12 @@ d12_queue_read_set_add_heap(struct d12_queue_op *op,
           ref->heap.count <= heap->desc.NumDescriptors - ref->heap.first)
          limit = ref->heap.first + ref->heap.count;
 
-      simple_mtx_lock(&heap->device->descriptor_heap_lock);
       uint32_t first_word = ref->heap.first >> 6;
       uint32_t last_word = (limit - 1) >> 6;
       if (last_word >= heap->live_resource_word_count)
          last_word = heap->live_resource_word_count - 1;
       for (uint32_t w = first_word; w <= last_word; ++w) {
-         uint64_t active = heap->live_resource_words[w];
+         uint64_t active = p_atomic_read(&heap->live_resource_words[w]);
          if (w == first_word)
             active &= UINT64_MAX << (ref->heap.first & 63);
 
@@ -1106,7 +1244,6 @@ d12_queue_read_set_add_heap(struct d12_queue_op *op,
                op, dev, &heap->slots[index]);
          }
       }
-      simple_mtx_unlock(&heap->device->descriptor_heap_lock);
    } else {
       complete &= d12_queue_read_set_add_bo(op, heap->sampler_bo);
    }
@@ -1120,6 +1257,20 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    struct d12_device *device = list->device;
    struct agx_device *dev = &device->dev;
    bool complete = !list->reads.incomplete;
+
+   /* Native DRM consumes no read set: only the retention of the exact BOs
+    * the recording references matters, and ranges never need resolving. */
+   if (!device->submit_read_set) {
+      if (list->reads.initialized) {
+         util_dynarray_foreach(&list->reads.refs, struct d12_read_ref, ref) {
+            if (ref->kind == D12_READ_REF_BO)
+               d12_queue_op_capture_bo(op, ref->bo);
+         }
+      }
+      op->read_set_complete = false;
+      op->exact_read_range_count = 0;
+      return;
+   }
 
    static_assert(sizeof(struct d12_read_range) ==
                     sizeof(struct agx_submit_read_range),
@@ -1137,6 +1288,11 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    struct agx_bo **captured = util_dynarray_begin(&op->bos);
    for (unsigned i = 0; i < captured_count; ++i)
       complete &= d12_queue_read_set_add_bo(op, captured[i]);
+
+   util_dynarray_foreach(&op->g17p_vdm_storage,
+                         struct d12_g17p_vdm_storage *, storage)
+      complete &= d12_queue_read_set_add_range(op, (*storage)->alias,
+                                              (*storage)->bo->size);
 
    /* Every render command names the occlusion buffer even when counting is
     * disabled. Device rodata contains the null region and heap descriptor
@@ -1204,10 +1360,10 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    op->read_set_complete = complete;
    if (!complete) {
       op->exact_read_range_count = 0;
-      if (getenv("D3D12AGX_DUMP_READ_SET"))
+      if (d12_debug()->dump_read_set)
          mesa_logw("ExecuteCommandLists: exact read set incomplete; using "
                    "the conservative WDDM allocation scan");
-   } else if (getenv("D3D12AGX_DUMP_READ_SET")) {
+   } else if (d12_debug()->dump_read_set) {
       mesa_logi("ExecuteCommandLists: exact read set contains %u canonical "
                 "ranges", op->exact_read_range_count);
    }
@@ -1224,31 +1380,144 @@ d12_queue_enqueue_locked(struct d12_queue *queue, struct d12_queue_op *op)
    else
       queue->op_head = op;
    queue->op_tail = op;
-   cnd_signal(&queue->work_available);
+   /* work_available is also waited on by threads other than the worker
+    * (queue teardown); wake them all rather than one arbitrary waiter. */
+   cnd_broadcast(&queue->work_available);
    return true;
 }
 
+/*
+ * Inline processing invariant.
+ *
+ * Operations enter the queue in API order and must reach the hardware (or,
+ * for Signal, take their timeline point) in that order.  Normally the submit
+ * worker is the single consumer, so order is the order of the op list.  An
+ * API thread may process an op itself only when nothing is ahead of it: the
+ * op list is empty, the worker holds no op (worker_busy), no other API
+ * thread is inside the inline path (inline_busy) and, for submissions, the
+ * in-flight capacity check would not block.  While inline_busy is set the
+ * worker does not dequeue, so any op enqueued meanwhile is processed after
+ * the inline one completes; while worker_busy is set or the list is
+ * non-empty no thread goes inline, so an inline op can never overtake an op
+ * the worker owns.  Both flags are only changed under queue->lock and every
+ * change broadcasts work_available.
+ */
+static bool
+d12_queue_idle_locked(const struct d12_queue *queue)
+{
+   return !queue->op_head && !queue->worker_busy && !queue->inline_busy &&
+          !p_atomic_read(&queue->stop);
+}
+
 static void
-d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
+d12_queue_dump_path_locked(const struct d12_queue *queue, const char *what,
+                           bool inline_path)
+{
+   if (!d12_debug()->dump_sync)
+      return;
+   mesa_logi("SYNC %s: queue %p -> %s (queued=%d worker_busy=%d "
+             "inline_busy=%d inflight=%llu stop=%u)",
+             what, (void *)queue, inline_path ? "inline" : "worker",
+             queue->op_head != NULL, queue->worker_busy, queue->inline_busy,
+             (unsigned long long)d12_queue_timeline_inflight(
+                &queue->timeline),
+             p_atomic_read(&queue->stop));
+}
+
+static void
+d12_queue_inline_begin_locked(struct d12_queue *queue)
+{
+   assert(d12_queue_idle_locked(queue));
+   queue->inline_busy = true;
+}
+
+static void
+d12_queue_inline_end_locked(struct d12_queue *queue)
+{
+   assert(queue->inline_busy);
+   queue->inline_busy = false;
+   cnd_broadcast(&queue->work_available);
+}
+
+static void
+d12_queue_retire_enqueue_locked(struct d12_queue *queue,
+                                struct d12_queue_op *op)
 {
    op->next = NULL;
-   d12_sync_lock(&queue->lock);
    if (queue->retire_tail)
       queue->retire_tail->next = op;
    else
       queue->retire_head = op;
    queue->retire_tail = op;
-   cnd_signal(&queue->retire_available);
+   /* retire_available is shared by the retire worker, submit-capacity
+    * waiters and signal-slot waiters. cnd_signal could wake a capacity
+    * waiter whose predicate is still false and leave the retire worker
+    * parked until its fallback timeout; broadcast reaches the right one. */
+   cnd_broadcast(&queue->retire_available);
+}
+
+static void
+d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
+{
+   d12_sync_lock(&queue->lock);
+   d12_queue_retire_enqueue_locked(queue, op);
    mtx_unlock(&queue->lock);
 }
+
+/* A queue Signal takes the point of the last submission ahead of it; the
+ * retirement worker publishes the value once that point completes. */
+void
+d12_queue_publish_pending_signals(struct d12_queue *queue, uint64_t point)
+{
+   d12_sync_lock(&queue->lock);
+   for (struct d12_fence_pending_signal *p = queue->signal_head; p;
+        p = p->queue_next) {
+      if (p->point > point)
+         break;
+      d12_fence_pending_signal_publish(p);
+   }
+   mtx_unlock(&queue->lock);
+}
+
+static void
+d12_queue_schedule_signal_locked(struct d12_queue *queue,
+                                 struct d12_queue_op *op)
+{
+   if (d12_debug()->dump_sync)
+      mesa_logi("SYNC Signal schedule: queue %p fence %p value %llu",
+                (void *)queue, (void *)op->fence,
+                (unsigned long long)op->value);
+   op->retire_value = d12_queue_timeline_marker(&queue->timeline);
+   d12_fence_pending_signal_add(op->fence, &op->pending_signal, queue,
+                                op->retire_value, op->value);
+   d12_queue_retire_enqueue_locked(queue, op);
+}
+
+/* Submit an op from the calling thread.  Returns false when the op was
+ * consumed by a failure (the device is then removed, or stopping). */
+static bool
+d12_queue_submit_inline(struct d12_queue *queue, struct d12_queue_op *op)
+{
+   const bool retire = d12_queue_wait_submit_capacity(queue) &&
+                       d12_queue_process_submit(queue, op);
+   if (retire)
+      d12_queue_retire_enqueue(queue, op);
+   else
+      d12_queue_op_destroy(op);
+   return retire;
+}
+
+_Static_assert(sizeof(struct libagx_write_u64_args) == 16,
+               "queue signal arguments must fit their reserved stream slot");
 
 static HRESULT
 d12_queue_signal_arena_init(struct d12_queue *queue)
 {
    struct agx_device *dev = &queue->device->dev;
-   if (agx_chip_command_stream_generation(dev->chip) !=
-       AGX_CS_GENERATION_AGX2) {
-      mesa_loge("legacy USC queue-signal launch rejected for %s",
+   const bool native = dev->chip == AGX_CHIP_G17P;
+   if (!native && agx_chip_command_stream_generation(dev->chip) !=
+                     AGX_CS_GENERATION_AGX2) {
+      mesa_loge("queue-signal producer unavailable for %s",
                 agx_chip_name(dev->chip));
       return E_NOTIMPL;
    }
@@ -1261,15 +1530,33 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
    uint8_t *stream_map;
    uint8_t *usc_map;
    uint32_t common_control_size = 0;
-   const uint32_t usc_size = agx_usc_size(15);
+   const uint32_t usc_size = native ? AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE
+                                    : agx_usc_size(15);
+   const uint32_t usc_stride = native ? AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE
+                                      : D12_QUEUE_SIGNAL_USC_STRIDE;
+   const uint32_t usc_arena_size = native
+      ? usc_stride * D12_QUEUE_SIGNAL_SLOT_COUNT : D12_QUEUE_SIGNAL_ARENA_SIZE;
 
    if (!program || !program->bo || !dev->params.max_attachments)
+      return E_FAIL;
+
+   /* Only the precompiler's native code container and fully described Ioto
+    * ABI may pass the G17P producer gate. No legacy USC words are reused. */
+   if (native &&
+       (!program->info.main_size || !program->info.nr_gprs ||
+        program->info.nr_preamble_gprs || program->info.printf_uniform ||
+        !program->info.agx3_staging_known ||
+        (program->info.rodata.size_16 && !program->rodata_offset) ||
+        program->entry_offset > UINT64_MAX - program->ptr ||
+        program->rodata_offset > UINT64_MAX - program->ptr ||
+        program->b.workgroup.x != 1 || program->b.workgroup.y != 1 ||
+        program->b.workgroup.z != 1))
       return E_FAIL;
 
    stream = agx_bo_create(dev, D12_QUEUE_SIGNAL_ARENA_SIZE, 0,
                           AGX_BO_WRITEBACK,
                           "d3d12 ddi fence signal stream arena");
-   usc = agx_bo_create(dev, D12_QUEUE_SIGNAL_ARENA_SIZE, 0,
+   usc = agx_bo_create(dev, usc_arena_size, 0,
                        AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
                        "d3d12 ddi fence signal usc arena");
    scratch = agx_bo_create(dev, AIL_PAGESIZE, 0, AGX_BO_WRITEBACK,
@@ -1297,33 +1584,104 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
        * not fit before copying into the tightly packed arena slot. */
       uint32_t control_words[4096 / sizeof(uint32_t)] = {0};
 
-      if (!d12_queue_signal_slot_layout(slot, 0, usc_size,
-                                        &control_offset, &data_offset,
-                                        &usc_offset))
+      if (!d12_queue_signal_slot_layout_program(
+             slot, 0, usc_size, usc_stride, usc_arena_size,
+             &control_offset, &data_offset, &usc_offset))
          goto fail;
 
-      agx_usc_words_precomp((uint32_t *)(usc_map + usc_offset), &program->b,
-                            stream->va->addr + data_offset,
-                            sizeof(struct libagx_write_u64_args));
-      uint8_t *control = (uint8_t *)agx_cdm_launch(
-         control_words, dev->chip, agx_1d(1), program->b.workgroup,
-         program->b.launch,
-         agx_usc_addr(dev, usc->va->addr + usc_offset));
-      control = d12_queue_emit_cdm_cache_flush(dev, control);
+      uint8_t *control;
+      if (native) {
+         struct agx3_ioto_uniform_range ranges[2] = {{
+            .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+            .size_halfs = sizeof(struct libagx_write_u64_args) / 2,
+            .address = stream->va->addr + data_offset,
+         }};
+         unsigned range_count = 1;
+         if (program->info.rodata.size_16) {
+            ranges[range_count++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = program->info.rodata.base_uniform,
+               .size_halfs = program->info.rodata.size_16,
+               .address = program->ptr + program->rodata_offset,
+            };
+         }
+         struct agx3_cdm_direct_template_sources launch_sources;
+         if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                       &launch_sources))
+            goto fail;
+         const struct agx3_g17p_compute_program_desc desc = {
+            .program_va = usc->va->addr + usc_offset,
+            .shader_va = program->ptr + program->entry_offset,
+            .uniform_ranges = ranges,
+            .uniform_range_count = range_count,
+            .shader_binary_size = program->info.main_size,
+            .scratch_size = program->info.agx3_tps_size,
+            .nr_gprs = program->info.nr_gprs,
+            .compiler_d_valid = program->info.agx3_staging_known,
+            .compiler_d = (uint32_t)program->info.agx3_staging_halfs * 2,
+            .threadgroup_memory_size_B = program->info.local_size
+               ? MAX2(256u, ALIGN_POT(program->info.local_size, 64u)) : 0,
+            .launch_sources = launch_sources,
+            .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+         };
+         struct agx3_g17p_compute_program generated;
+         if (!agx_va_in_usc_window(dev, desc.program_va) ||
+             !agx_va_in_usc_window(dev, desc.shader_va) ||
+             !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated) ||
+             generated.length > usc_size)
+            goto fail;
+         memcpy(usc_map + usc_offset, generated.bytes, generated.length);
+         if (!slot && d12_debug()->dump_sync) {
+            mesa_logi("native queue signal producer: code=%u gprs=%u "
+                      "staging_halfs=%u tps=%u rodata_halfs=%u ioto=%u "
+                      "stride=%u slots=%u local=1x1x1",
+                      program->info.main_size, program->info.nr_gprs,
+                      program->info.agx3_staging_halfs,
+                      program->info.agx3_tps_size,
+                      program->info.rodata.size_16, generated.length,
+                      usc_stride, D12_QUEUE_SIGNAL_SLOT_COUNT);
+         }
+         const struct agx3_compute_direct_grid grid = {
+            .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+            .size = {1, 1, 1},
+            .local_size = {program->b.workgroup.x, program->b.workgroup.y,
+                           program->b.workgroup.z},
+            .dimensions = program->b.workgroup.z != 1 ? 3
+               : program->b.workgroup.y != 1 ? 2 : 1,
+         };
+         struct agx3_compute_dispatch_sink sink = {
+            .data = (uint8_t *)control_words,
+            .capacity = sizeof(control_words),
+         };
+         if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
+                &generated.launch, &grid, 0x5, &sink))
+            goto fail;
+         control = (uint8_t *)control_words + sink.length;
+      } else {
+         agx_usc_words_precomp((uint32_t *)(usc_map + usc_offset), &program->b,
+                               stream->va->addr + data_offset,
+                               sizeof(struct libagx_write_u64_args));
+         control = (uint8_t *)agx_cdm_launch(
+            control_words, dev->chip, agx_1d(1), program->b.workgroup,
+            program->b.launch,
+            agx_usc_addr(dev, usc->va->addr + usc_offset));
+         control = d12_queue_emit_cdm_cache_flush(dev, control);
+      }
       if (!control)
          goto fail;
       const uint32_t control_size =
          (uint32_t)(control - (uint8_t *)control_words);
-      if (!d12_queue_signal_slot_layout(slot, control_size, usc_size,
-                                        &control_offset, &data_offset,
-                                        &usc_offset) ||
+      if (!d12_queue_signal_slot_layout_program(
+             slot, control_size, usc_size, usc_stride, usc_arena_size,
+             &control_offset, &data_offset, &usc_offset) ||
           (common_control_size && common_control_size != control_size))
          goto fail;
       common_control_size = control_size;
       memcpy(stream_map + control_offset, control_words, control_size);
    }
 
-   if (!common_control_size)
+   if (!common_control_size ||
+       agx_bo_sync_for_device(usc, 0, usc->size) ||
+       agx_bo_sync_for_device(stream, 0, stream->size))
       goto fail;
    queue->signal_stream_bo = stream;
    queue->signal_usc_bo = usc;
@@ -1331,6 +1689,8 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
    agx_bo_reference(program->bo);
    queue->signal_program_bo = program->bo;
    queue->signal_control_size = common_control_size;
+   queue->signal_program_stride = usc_stride;
+   queue->signal_program_size = usc_size;
    return S_OK;
 
 fail:
@@ -1354,6 +1714,8 @@ d12_queue_signal_arena_cleanup(struct d12_queue *queue)
    queue->signal_program_bo = NULL;
    queue->dependency_scratch_bo = NULL;
    queue->signal_control_size = 0;
+   queue->signal_program_stride = 0;
+   queue->signal_program_size = 0;
    queue->signal_slots = 0;
 }
 
@@ -1401,9 +1763,11 @@ d12_queue_prepare_internal_write(struct d12_queue *queue,
 
    op->signal_slot = (uint32_t)slot;
    op->signal_slot_valid = true;
-   if (!d12_queue_signal_slot_layout(
-          op->signal_slot, queue->signal_control_size, agx_usc_size(15),
-          &control_offset, &data_offset, &usc_offset)) {
+   if (!d12_queue_signal_slot_layout_program(
+          op->signal_slot, queue->signal_control_size,
+          queue->signal_program_size, queue->signal_program_stride,
+          queue->signal_usc_bo->size, &control_offset, &data_offset,
+          &usc_offset)) {
       d12_queue_release_signal_slot(queue, op);
       return false;
    }
@@ -1415,6 +1779,11 @@ d12_queue_prepare_internal_write(struct d12_queue *queue,
    };
    memcpy((uint8_t *)agx_bo_map(queue->signal_stream_bo) + data_offset,
           &shader_args, sizeof(shader_args));
+   if (agx_bo_sync_for_device(queue->signal_stream_bo, data_offset,
+                              sizeof(shader_args))) {
+      d12_queue_release_signal_slot(queue, op);
+      return false;
+   }
 
    op->submit_device = queue->device;
    op->payload_size = 2 * sizeof(struct drm_asahi_cmd_header) +
@@ -1544,6 +1913,42 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
    }
    uint64_t out = in + 1;
 
+   /* The submission waits on nothing of its own, Honeykrisp's shape. The
+    * first hardware command of every slice carries barrier 0 on both
+    * engines, "wait on all previous work on this subqueue", which the
+    * firmware resolves in place, so consecutive submissions stay in
+    * order and the next one's vertex work overlaps this one's fragment
+    * work. An input sync on the queue's previous point instead parks the
+    * job in the kernel scheduler until the completion interrupt, the
+    * syncobj signal and the scheduler wake-up have all run: the GPU
+    * idles for that round trip between every two ExecuteCommandLists,
+    * which pinned a one-triangle frame at 250 us on the M1 Pro however
+    * many frames the application kept in flight (vkd3d-proton: 109 us at
+    * eight). Queue Waits are CPU-side ticket waits ahead of the
+    * submission and placement waits travel in the virt payload, so
+    * neither needs an input sync here. D3D12AGX_SUBMIT_SELF_WAIT=1
+    * restores the old shape for A/B.
+    *
+    * Overlap pays only for light frames, though. Behind a submission
+    * whose renders recorded many draws, the next one's vertex work
+    * overlapping that fragment work costs more GPU time than the round
+    * trip it saves: on the M2, a 1000-draw frame ran 489-572 us per frame
+    * overlapped against 380-397 us serialised, a 4000-draw frame 1122-1296
+    * against 782 us (vkd3d-proton: 444 and 955 us), while a 250-draw frame
+    * still gained from overlap (276 against 288-344 us). Such a submission
+    * waits on the previous one, as before; the wait is free when that one
+    * has already completed.
+    *
+    * The same holds behind compute work. Without the wait, a fence signal
+    * queued behind a heavy dispatch could be lost to a CPU rewind of the
+    * fence while that dispatch ran (vkd3d-proton
+    * test_fence_pending_signal_cpu_rewind_plain failed 5/5 on the M1 Pro,
+    * with waits on the next queue timing out); with it, 5/5 pass. The
+    * render-only frames the overlap was measured on keep it. */
+   const bool self_wait =
+      d12_debug()->submit_self_wait ||
+      p_atomic_read(&queue->prev_submit_compute) ||
+      p_atomic_read(&queue->prev_submit_draws) >= D12_QUEUE_OVERLAP_MAX_DRAWS;
    struct drm_asahi_sync syncs[2] = {
       {
          .sync_type = DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ,
@@ -1561,19 +1966,22 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
                   ? AGX_SUBMIT_WRITE_SET_COMPLETE
                   : 0,
       .queue_id = queue->agx_queue_id,
-      .in_sync_count = 1,
+      .in_sync_count = self_wait ? 1 : 0,
       .out_sync_count = 1,
       .cmdbuf_size = op->payload_size,
-      .syncs = (uint64_t)(uintptr_t)syncs,
+      .syncs = (uint64_t)(uintptr_t)(self_wait ? syncs : &syncs[1]),
       .cmdbuf = (uint64_t)(uintptr_t)op->payload,
    };
 
-   /* The kernel/firmware accept at most 64 commands in one submit ioctl.
-    * Follow Honeykrisp's queue_submit_looped model: slice the packed payload,
-    * make barriers ioctl-relative, wait only on the first slice and signal
-    * only from the last.  The queue itself preserves slice order. */
+   /* The kernel reports how many commands one submit ioctl accepts
+    * (64 on the kernels this driver was brought up on). Follow Honeykrisp's
+    * queue_submit_looped model: slice the packed payload, make barriers
+    * ioctl-relative, wait only on the first slice and signal only from the
+    * last.  The queue itself preserves slice order. */
    const unsigned command_count = op->nr_vdm + op->nr_cdm;
-   const unsigned max_commands = 64;
+   const unsigned reported_max =
+      queue->device->dev.params.max_commands_per_submission;
+   const unsigned max_commands = reported_max ? reported_max : 64;
    uint8_t *cmdbuf = op->payload;
    uint32_t offs = 0;
    unsigned submitted_vdm = 0, submitted_cdm = 0;
@@ -1583,6 +1991,8 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
       placement_dependencies[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
    uint32_t placement_wait_count = 0;
    bool placement_signal_described = false;
+   const int64_t ioctl_start =
+      d12_debug()->dump_sync ? os_time_get_nano() : 0;
 
    for (uint32_t i = 0; i < op->placement_wait_count; ++i) {
       const struct d12_placement_fence *fence =
@@ -1739,7 +2149,9 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
       return false;
    }
    op->retire_value = out;
-   if (getenv("D3D12AGX_DUMP_SYNC")) {
+   p_atomic_set(&queue->prev_submit_draws, op->draws);
+   p_atomic_set(&queue->prev_submit_compute, op->nr_cdm != 0);
+   if (d12_debug()->dump_sync) {
       uint64_t stream_address = 0;
       if (op->bos_initialized && util_dynarray_num_elements(
                                     &op->bos, struct agx_bo *) > 0) {
@@ -1751,16 +2163,43 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
                              D12_QUEUE_SIGNAL_STREAM_STRIDE;
       }
       mesa_logi("SYNC submit: queue %p agxq %u  in=%llu out=%llu  "
-                "list %p stream_bo 0x%llx",
+                "list %p stream_bo 0x%llx  ioctl %lld us",
                 (void *)queue, queue->agx_queue_id,
                 (unsigned long long)in, (unsigned long long)out,
-                (void *)op->list, (unsigned long long)stream_address);
+                (void *)op->list, (unsigned long long)stream_address,
+                (long long)(os_time_get_nano() - ioctl_start) / 1000);
    }
 
    return true;
 }
 
-static bool
+/*
+ * A CPU fence waiter is about to wait on this queue's timeline directly.
+ * Called under the fence lock while the pending-signal record naming the
+ * queue is still linked, which guarantees the retirement worker (which
+ * unlinks every record before it exits) has not been joined yet; teardown
+ * then waits for the count to return to zero before the syncobj and the
+ * queue go away.  The waiter must not touch the queue after _end returns.
+ * This deliberately does not take a COM reference: an application's final
+ * Release may already be tearing the queue down, and a reference taken
+ * then would run d12_queue_Release a second time.
+ */
+void
+d12_queue_direct_wait_begin(struct d12_queue *queue)
+{
+   p_atomic_inc(&queue->direct_waiters);
+}
+
+void
+d12_queue_direct_wait_end(struct d12_queue *queue)
+{
+   d12_sync_lock(&queue->lock);
+   p_atomic_dec(&queue->direct_waiters);
+   cnd_broadcast(&queue->retire_available);
+   mtx_unlock(&queue->lock);
+}
+
+bool
 d12_queue_wait_timeline(struct d12_queue *queue, uint64_t point)
 {
    if (point == 0)
@@ -1842,15 +2281,15 @@ d12_queue_dump_completion(struct d12_device *device)
 
       if (device->dbg_mesh_verts) {
          const float *v = (const float *)device->dbg_mesh_verts;
-         unsigned stride_f = (32 * 16) / 4;
-         for (unsigned i = 0; i < 4; i++) {
+         unsigned stride_f = device->dbg_mesh_vertex_stride / 4;
+         for (unsigned i = 0; i < device->dbg_mesh_vertex_count; i++) {
             const float *p = v + i * stride_f;
             mesa_logi("  mesh vtx %u: %8.4f %8.4f %8.4f %8.4f", i, p[0],
                       p[1], p[2], p[3]);
          }
          const uint32_t *ix = (const uint32_t *)device->dbg_mesh_idx;
-         mesa_logi("  mesh indices: %u %u %u / %u %u %u", ix[0], ix[1],
-                   ix[2], ix[3], ix[4], ix[5]);
+         for (unsigned i = 0; i < device->dbg_mesh_index_count; i++)
+            mesa_logi("  mesh index %u: %u", i, ix[i]);
          device->dbg_mesh_verts = NULL;
       }
       device->dbg_tess_draw = NULL;
@@ -1882,8 +2321,15 @@ d12_queue_retire_worker(void *data)
       op->next = NULL;
       mtx_unlock(&queue->lock);
 
+      const int64_t wait_start =
+         d12_debug()->dump_sync ? os_time_get_nano() : 0;
       const bool completed = d12_queue_wait_timeline(queue,
                                                       op->retire_value);
+      if (d12_debug()->dump_sync) {
+         mesa_logi("SYNC retire: queue %p point %llu waited %lld us",
+                   (void *)queue, (unsigned long long)op->retire_value,
+                   (long long)(os_time_get_nano() - wait_start) / 1000);
+      }
       if (completed) {
          d12_sync_lock(&queue->lock);
          const bool retired =
@@ -1895,13 +2341,14 @@ d12_queue_retire_worker(void *data)
             d12_device_mark_removed(queue->device,
                                     DXGI_ERROR_DEVICE_REMOVED);
          } else if (op->type == D12_QUEUE_OP_SIGNAL) {
-            if (getenv("D3D12AGX_DUMP_SYNC")) {
+            if (d12_debug()->dump_sync) {
                mesa_logi("SYNC Signal retire: queue %p fence %p value %llu "
                          "point %llu", (void *)queue, (void *)op->fence,
                          (unsigned long long)op->value,
                          (unsigned long long)op->retire_value);
             }
-            d12_fence_signal_value(op->fence, op->value);
+            d12_fence_pending_signal_retire(op->fence, &op->pending_signal,
+                                            true);
          } else if (op->type == D12_QUEUE_OP_SUBMIT) {
             d12_queue_dump_completion(queue->device);
          }
@@ -1924,7 +2371,8 @@ d12_queue_worker(void *data)
 
    for (;;) {
       d12_sync_lock(&queue->lock);
-      while (!queue->op_head && !p_atomic_read(&queue->stop))
+      while ((!queue->op_head || queue->inline_busy) &&
+             !p_atomic_read(&queue->stop))
          d12_sync_wait_idle(&queue->work_available, &queue->lock,
                             &idle_backoff_ns);
       idle_backoff_ns = 0;
@@ -1939,17 +2387,30 @@ d12_queue_worker(void *data)
       if (!queue->op_head)
          queue->op_tail = NULL;
       op->next = NULL;
+      queue->worker_busy = true;
       mtx_unlock(&queue->lock);
 
       bool retire = false;
 
       switch (op->type) {
       case D12_QUEUE_OP_WAIT:
-         if (getenv("D3D12AGX_DUMP_SYNC"))
+         if (d12_debug()->dump_sync)
             mesa_logi("SYNC Wait worker: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->fence,
                       (unsigned long long)op->value);
+         /* Publish where this thread parks so d12_queue_stop_worker can
+          * wake it; the stop flag is re-read under the fence lock after
+          * registration, so a stop raised at any point is observed. */
+         d12_sync_lock(&queue->lock);
+         queue->worker_parked_fence = op->fence;
+         queue->worker_blocked = true;
+         cnd_broadcast(&queue->work_available);
+         mtx_unlock(&queue->lock);
          d12_fence_ticket_wait(&op->ticket, &queue->stop);
+         d12_sync_lock(&queue->lock);
+         queue->worker_parked_fence = NULL;
+         queue->worker_blocked = false;
+         mtx_unlock(&queue->lock);
          break;
       case D12_QUEUE_OP_SUBMIT:
          retire = d12_queue_wait_submit_capacity(queue) &&
@@ -1970,20 +2431,25 @@ d12_queue_worker(void *data)
             d12_queue_release_signal_slot(queue, op);
          break;
       case D12_QUEUE_OP_SIGNAL:
-         if (getenv("D3D12AGX_DUMP_SYNC"))
-            mesa_logi("SYNC Signal schedule: queue %p fence %p value %llu",
-                      (void *)queue, (void *)op->fence,
-                      (unsigned long long)op->value);
-         op->retire_value = d12_queue_timeline_marker(&queue->timeline);
-         retire = true;
+         d12_sync_lock(&queue->lock);
+         d12_queue_schedule_signal_locked(queue, op);
+         mtx_unlock(&queue->lock);
+         op = NULL;
          break;
       case D12_QUEUE_OP_PLACEMENT_WAIT:
-         if (getenv("D3D12AGX_DUMP_SYNC"))
+         if (d12_debug()->dump_sync)
             mesa_logi("SYNC DDI Wait worker: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->placement_fence,
                       (unsigned long long)op->value);
+         d12_sync_lock(&queue->lock);
+         queue->worker_blocked = true;
+         cnd_broadcast(&queue->work_available);
+         mtx_unlock(&queue->lock);
          (void)d12_placement_fence_wait(op->placement_fence, op->value,
                                         &queue->stop);
+         d12_sync_lock(&queue->lock);
+         queue->worker_blocked = false;
+         mtx_unlock(&queue->lock);
          break;
       case D12_QUEUE_OP_SPARSE_BIND: {
          if (queue->ddi_immediate_submit)
@@ -2016,8 +2482,13 @@ d12_queue_worker(void *data)
 
       if (retire)
          d12_queue_retire_enqueue(queue, op);
-      else
+      else if (op)
          d12_queue_op_destroy(op);
+
+      d12_sync_lock(&queue->lock);
+      queue->worker_busy = false;
+      cnd_broadcast(&queue->work_available);
+      mtx_unlock(&queue->lock);
    }
 
    return 0;
@@ -2030,11 +2501,30 @@ d12_queue_stop_worker(struct d12_queue *queue)
       return;
 
    if (queue->worker_started) {
+      /* Let the worker finish every queued op that can make progress
+       * (submissions, Signals, satisfied Waits) before stopping it, so a
+       * Signal queued behind a submission still reaches its fence and a
+       * CPU waiter on it is not left waiting forever.  A worker parked on
+       * a Wait that nothing will satisfy ends the drain: that op and the
+       * ones behind it are discarded, as before. */
+      d12_sync_lock(&queue->lock);
+      while ((queue->op_head || queue->worker_busy) &&
+             !queue->worker_blocked)
+         d12_sync_wait(&queue->work_available, &queue->lock);
+      mtx_unlock(&queue->lock);
+
       p_atomic_set(&queue->stop, 1);
       d12_sync_lock(&queue->lock);
       cnd_broadcast(&queue->work_available);
       cnd_broadcast(&queue->retire_available);
+      struct d12_fence *parked = queue->worker_parked_fence;
+      if (parked)
+         d12_fence_internal_ref(parked);
       mtx_unlock(&queue->lock);
+      if (parked) {
+         d12_fence_wake_waiters(parked);
+         d12_fence_internal_unref(parked);
+      }
       thrd_join(queue->worker, NULL);
       queue->worker_started = false;
    }
@@ -2049,6 +2539,13 @@ d12_queue_stop_worker(struct d12_queue *queue)
       thrd_join(queue->retire_worker, NULL);
       queue->retire_worker_started = false;
    }
+
+   /* Every pending-signal record is unlinked now, so no new direct waiter
+    * can start; let the ones already in the kernel wait finish. */
+   d12_sync_lock(&queue->lock);
+   while (p_atomic_read(&queue->direct_waiters))
+      d12_sync_wait(&queue->retire_available, &queue->lock);
+   mtx_unlock(&queue->lock);
 
    struct d12_queue_op *op = queue->op_head;
    while (op) {
@@ -2189,7 +2686,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          continue;
       }
 
-      if (getenv("D3D12AGX_DUMP_SEGS")) {
+      if (d12_debug()->dump_segs) {
          size_t control_used =
             list->stream_cur - (uint8_t *)agx_bo_map(list->stream_bo);
          mesa_logi("list storage: control=%zu data=%zu/%zu usc=%zu/%zu "
@@ -2218,6 +2715,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
 
       size_t payload_size = 0;
       unsigned nr_vdm = 0, nr_cdm = 0;
+      uint32_t draws = 0;
       bool write_set_complete = true;
       bool payload_valid = true;
 
@@ -2225,8 +2723,18 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          const struct d12_segment *seg = &list->segments[s];
          bool compute = seg->type == D12_SEG_CDM;
 
-         if (getenv("D3D12AGX_DUMP_SEGS"))
-            mesa_logi("seg %u: %s start=%zu end=%zu dispatches=%u", s,
+         if (seg->g17p_preraster_metadata_only &&
+             (!compute ||
+              !d12_g17p_preraster_metadata_enabled(&device->dev) ||
+              !(device->dev.params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) ||
+              s + 1 >= list->segment_count ||
+              list->segments[s + 1].type != D12_SEG_RENDER)) {
+            mesa_loge("native preraster registered admission/order revoked");
+            payload_valid = false;
+            break;
+         }
+
+         if (d12_debug()->dump_segs)            mesa_logi("seg %u: %s start=%zu end=%zu dispatches=%u", s,
                       compute ? "CDM" : "RENDER", seg->stream_start,
                       seg->stream_end, seg->dispatches);
 
@@ -2254,11 +2762,28 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
 
          struct drm_asahi_cmd_header header =
             agx_cmd_header(compute, nr_vdm, nr_cdm);
+         if (!compute)
+            header.size = d12_render_cmd_size(device->dev.chip,
+                                              device->dev.render_rsrc_spec_hi,
+                                              device->dev.params.features);
          memcpy(payload + payload_size, &header, sizeof(header));
          payload_size += sizeof(header);
 
          if (compute) {
+            if (seg->g17p_txf_metadata_only &&
+                !d12_g17p_txf_metadata_enabled(&device->dev)) {
+               mesa_loge("native Texture.Load submission remains registered-shim-only");
+               payload_valid = false;
+               break;
+            }
+            if (seg->g17p_txf_physical &&
+                !d12_g17p_txf_physical_enabled(&device->dev)) {
+               mesa_loge("native Texture.Load physical admission revoked");
+               payload_valid = false;
+               break;
+            }
             struct drm_asahi_cmd_compute cmd = {
+               .ts.end = seg->timestamp_end,
                .cdm_ctrl_stream_base =
                   list->stream_bo->va->addr + seg->stream_start,
                .cdm_ctrl_stream_end =
@@ -2277,15 +2802,20 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
             nr_cdm++;
          } else {
             struct drm_asahi_cmd_render cmd;
-            d12_fill_render_cmd(device, list, seg, &cmd);
-            memcpy(payload + payload_size, &cmd, sizeof(cmd));
-            payload_size += sizeof(cmd);
+            if (!d12_fill_render_cmd(device, list, seg, &cmd)) {
+               payload_valid = false;
+               break;
+            }
+            cmd.ts_frag.end = seg->timestamp_end;
+            memcpy(payload + payload_size, &cmd, header.size);
+            payload_size += header.size;
             nr_vdm++;
+            draws += seg->draws;
          }
       }
 
       if (!payload_valid) {
-         mesa_loge("ExecuteCommandLists: invalid GPU write tracker; device "
+         mesa_loge("ExecuteCommandLists: invalid GPU submission metadata or write tracker; device "
                    "removed before submission");
          free(payload);
          d12_device_mark_removed(device, DXGI_ERROR_DEVICE_REMOVED);
@@ -2312,14 +2842,23 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
       op->payload_size = payload_size;
       op->nr_vdm = nr_vdm;
       op->nr_cdm = nr_cdm;
+      op->draws = draws;
       op->write_set_complete = write_set_complete;
-      if (!write_set_complete && getenv("D3D12AGX_DUMP_WRITE_SET")) {
+      if (!write_set_complete && d12_debug()->dump_write_set) {
          mesa_logw("ExecuteCommandLists: submitting conservative attachment "
                    "hints without the Aurora complete-write declaration");
       }
 
       d12_queue_op_capture_bos(op, list);
       d12_queue_op_build_read_set(op, list);
+      if (op->capture_failed) {
+         /* AddRef below has not occurred; partial snapshots own only their
+          * captured BO/alias references, not a command-list reference. */
+         op->list = NULL;
+         d12_queue_op_destroy(op);
+         d12_device_mark_removed(device, E_OUTOFMEMORY);
+         break;
+      }
 
       /* Reset is legal as soon as ExecuteCommandLists returns.  Mark this
        * recording submitted before handing it back to the application, and
@@ -2345,9 +2884,32 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          d12_sync_lock(&queue->lock);
          if (!retire)
             break;
-      } else if (!d12_queue_enqueue_locked(queue, op)) {
-         d12_queue_op_destroy(op);
-         break;
+      } else if (d12_queue_idle_locked(queue) &&
+                 d12_queue_timeline_has_capacity(
+                    &queue->timeline, D12_QUEUE_MAX_INFLIGHT_SUBMITS) &&
+                 (!d12_queue_timeline_inflight(&queue->timeline) ||
+                  d12_debug()->submit_inline_always)) {
+         /* Nothing is ahead of this list and the GPU is idle: submit it
+          * from here, where the worker's wake-up would be latency the
+          * GPU waits for.  While earlier submissions are still in flight
+          * the GPU is busy anyway, so the ioctl (about 30 us on the M1
+          * Pro) goes to the worker and the application thread moves on,
+          * which is vkd3d-proton's shape.  A full in-flight window goes
+          * through the worker too, so this call never blocks on the GPU. */
+         d12_queue_dump_path_locked(queue, "Execute", true);
+         d12_queue_inline_begin_locked(queue);
+         mtx_unlock(&queue->lock);
+         const bool submitted = d12_queue_submit_inline(queue, op);
+         d12_sync_lock(&queue->lock);
+         d12_queue_inline_end_locked(queue);
+         if (!submitted)
+            break;
+      } else {
+         d12_queue_dump_path_locked(queue, "Execute", false);
+         if (!d12_queue_enqueue_locked(queue, op)) {
+            d12_queue_op_destroy(op);
+            break;
+         }
       }
    }
 
@@ -2675,14 +3237,23 @@ d12_queue_Signal(ID3D12CommandQueue *iface, ID3D12Fence *fence_iface,
    op->value = value;
    d12_fence_internal_ref(fence);
 
-   if (getenv("D3D12AGX_DUMP_SYNC")) {
+   if (d12_debug()->dump_sync) {
       mesa_logi("SYNC Signal enqueue: queue %p agxq %u fence %p value %llu",
                 (void *)queue, queue->agx_queue_id, (void *)fence,
                 (unsigned long long)value);
    }
 
    d12_sync_lock(&queue->lock);
-   bool queued = d12_queue_enqueue_locked(queue, op);
+   bool queued;
+   if (d12_queue_idle_locked(queue)) {
+      /* Scheduling a Signal is only a timeline read; do it here. */
+      d12_queue_dump_path_locked(queue, "Signal", true);
+      d12_queue_schedule_signal_locked(queue, op);
+      queued = true;
+   } else {
+      d12_queue_dump_path_locked(queue, "Signal", false);
+      queued = d12_queue_enqueue_locked(queue, op);
+   }
    mtx_unlock(&queue->lock);
    if (!queued) {
       d12_queue_op_destroy(op);
@@ -2711,7 +3282,7 @@ d12_queue_Wait(ID3D12CommandQueue *iface, ID3D12Fence *fence_iface,
    d12_fence_internal_ref(fence);
    d12_fence_ticket_init(fence, &op->ticket, value);
 
-   if (getenv("D3D12AGX_DUMP_SYNC")) {
+   if (d12_debug()->dump_sync) {
       mesa_logi("SYNC Wait enqueue: queue %p agxq %u fence %p value %llu",
                 (void *)queue, queue->agx_queue_id, (void *)fence,
                 (unsigned long long)value);
@@ -2996,7 +3567,8 @@ d12_queue_create_internal(struct d12_device *device,
       return E_FAIL;
    }
 
-   queue->iface.lpVtbl = (ID3D12CommandQueueVtbl *)&d12_queue_vtbl;
+   queue->iface.lpVtbl = (ID3D12CommandQueueVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_QUEUE, &d12_queue_vtbl);
    queue->refcount = 1;
    queue->device = device;
    queue->desc = *desc;

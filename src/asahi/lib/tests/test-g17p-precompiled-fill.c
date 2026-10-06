@@ -105,8 +105,6 @@ main(void)
            i <= LIBAGX_PREFIX_SUM_TESS_1) ||
           i == LIBAGX_INCREMENT_STATISTIC ||
           i == LIBAGX_TESS_SETUP_INDIRECT ||
-          i == LIBAGX_TESS_SETUP_INDIRECT_HW ||
-          i == LIBAGX_TESS_FACTORS_HALF ||
           (i >= LIBAGX_TESS_ISOLINE_0 && i <= LIBAGX_TESS_QUAD_1))
          CHECK(libagx_g17p[i] != NULL);
       else
@@ -194,8 +192,8 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 1414);
-   CHECK(copy_image_info->binary_size == 1414);
+   CHECK(copy_image_info->main_size == 1430);
+   CHECK(copy_image_info->binary_size == 1430);
    CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
    CHECK(copy_image_info->push_count == 54);
@@ -208,7 +206,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x75d08f991b654176));
+         UINT64_C(0xd4321ffb3d0eabb2));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -611,8 +609,8 @@ main(void)
       (const uint8_t *)conditional_blob + sizeof(*conditional_info);
    CHECK(conditional_info->preamble_offset == 0);
    CHECK(conditional_info->main_offset == 0);
-   CHECK(conditional_info->main_size == 180);
-   CHECK(conditional_info->binary_size == 180);
+   CHECK(conditional_info->main_size == 186);
+   CHECK(conditional_info->binary_size == 186);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
    CHECK(conditional_info->push_count == 28);
@@ -625,7 +623,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0xc0f57f69909964bb));
+         UINT64_C(0x352642109b15222a));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);
@@ -666,70 +664,6 @@ main(void)
    CHECK(timestamp_info->agx3_staging_halfs == 0);
    CHECK(memcmp((const uint8_t *)timestamp_blob + sizeof(*timestamp_info),
                 timestamp_expected, sizeof(timestamp_expected)) == 0);
-
-   /* Hardware tessellation factor records: one KERNEL(32) invocation per
-    * patch reading the TCS levels as floats and as bits through the
-    * tessellation parameters, and writing IEEE halves from the draw's first
-    * patch index. Pin the whole generated program and its launch ABI. */
-   const uint32_t *factors_blob = libagx_g17p[LIBAGX_TESS_FACTORS_HALF];
-   CHECK(factors_blob != NULL);
-   if (!factors_blob)
-      return 1;
-   const struct agx_precompiled_kernel_info *factors_info =
-      (const void *)factors_blob;
-   const uint8_t *factors_binary =
-      (const uint8_t *)factors_blob + sizeof(*factors_info);
-   CHECK(factors_info->preamble_offset == 0);
-   CHECK(factors_info->main_offset == 128);
-   CHECK(factors_info->main_size == 1282);
-   CHECK(factors_info->binary_size == 1410);
-   CHECK(factors_info->nr_gprs == 28);
-   CHECK(factors_info->nr_preamble_gprs == 0);
-   CHECK(factors_info->push_count == 30);
-   CHECK(factors_info->workgroup_size[0] == 32);
-   CHECK(factors_info->workgroup_size[1] == 1);
-   CHECK(factors_info->workgroup_size[2] == 1);
-   CHECK(factors_info->local_size == 0);
-   CHECK(factors_info->imageblock_stride == 0);
-   CHECK(!factors_info->uses_txf);
-   CHECK(factors_info->agx3_staging_known);
-   CHECK(factors_info->agx3_staging_halfs == 0);
-   CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
-         UINT64_C(0xc35a55da13cfe766));
-   CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
-                end, sizeof(end)) == 0);
-
-   /* Indirect hardware tessellation setup: one invocation that places the
-    * TCS outputs, vertex outputs and factor records in the heap without the
-    * AGX2 printf/abort overflow ABI, and writes the launch grids and the
-    * patch draw. Pin the whole generated program and its launch ABI. */
-   const uint32_t *setup_blob = libagx_g17p[LIBAGX_TESS_SETUP_INDIRECT_HW];
-   CHECK(setup_blob != NULL);
-   if (!setup_blob)
-      return 1;
-   const struct agx_precompiled_kernel_info *setup_info =
-      (const void *)setup_blob;
-   const uint8_t *setup_binary =
-      (const uint8_t *)setup_blob + sizeof(*setup_info);
-   CHECK(setup_info->preamble_offset == 0);
-   CHECK(setup_info->main_offset == 128);
-   CHECK(setup_info->main_size == 2138);
-   CHECK(setup_info->binary_size == 2266);
-   CHECK(setup_info->nr_gprs == 40);
-   CHECK(setup_info->nr_preamble_gprs == 0);
-   CHECK(setup_info->push_count == 58);
-   CHECK(setup_info->workgroup_size[0] == 1);
-   CHECK(setup_info->workgroup_size[1] == 1);
-   CHECK(setup_info->workgroup_size[2] == 1);
-   CHECK(setup_info->local_size == 0);
-   CHECK(setup_info->imageblock_stride == 0);
-   CHECK(!setup_info->uses_txf);
-   CHECK(setup_info->agx3_staging_known);
-   CHECK(setup_info->agx3_staging_halfs == 0);
-   CHECK(fnv1a64(setup_binary, setup_info->binary_size) ==
-         UINT64_C(0xaf4799f3590fa587));
-   CHECK(memcmp(setup_binary + setup_info->binary_size - sizeof(end),
-                end, sizeof(end)) == 0);
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",

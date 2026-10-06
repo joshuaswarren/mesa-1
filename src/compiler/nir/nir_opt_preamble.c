@@ -21,6 +21,8 @@
  * IN THE SOFTWARE.
  */
 
+#include <limits.h>
+#include "util/hash_table.h"
 #include "util/set.h"
 #include "nir.h"
 #include "nir_builder.h"
@@ -48,7 +50,7 @@ nir_shader_get_preamble(nir_shader *shader)
    }
 }
 
-typedef struct {
+typedef struct def_state {
    bool can_move;
    bool candidate;
    bool must_stay;
@@ -70,6 +72,17 @@ typedef struct {
     * load_preamble.
     */
    float benefit;
+
+   /* With share_equal_values: the candidate whose storage this candidate
+    * shares because it computes the same value, or NULL.
+    */
+   struct def_state *leader;
+
+   /* With share_equal_values, on a group leader: a store of the shared value
+    * has been emitted outside any reconstructed if, so it precedes every
+    * later point of the preamble.
+    */
+   bool stored_unconditionally;
 } def_state;
 
 typedef struct {
@@ -95,6 +108,16 @@ typedef struct {
    BITSET_WORD *reconstructed_defs;
 
    nir_def *def;
+
+   /* With share_equal_values: per-definition index of the first movable
+    * definition in program order that computes the same value (itself if
+    * none), and the definitions by index.
+    */
+   unsigned *value_rep;
+   nir_def **defs;
+
+   /* Depth of reconstructed ifs at the preamble builder's cursor. */
+   unsigned preamble_if_depth;
 
    const nir_opt_preamble_options *options;
 } opt_preamble_ctx;
@@ -391,6 +414,201 @@ candidate_sort(const void *data1, const void *data2)
       return 0;
 }
 
+/*
+ * Value numbering of movable definitions for share_equal_values.
+ *
+ * Every movable definition computes a value that is the same for the whole
+ * draw, and that value depends only on the operation and the values of its
+ * sources. Two movable definitions with the same operation and equal source
+ * values therefore compute the same value regardless of where they sit, even
+ * when neither dominates the other so CSE cannot merge them. Number them in
+ * program order (sources before uses; phis are never shared) so that each
+ * definition maps to the first equal one.
+ */
+static bool
+value_shareable(nir_instr *instr)
+{
+   switch (instr->type) {
+   case nir_instr_type_alu:
+   case nir_instr_type_load_const:
+      return true;
+   case nir_instr_type_intrinsic: {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      const nir_intrinsic_info *info = &nir_intrinsic_infos[intr->intrinsic];
+      return info->has_dest && (info->flags & NIR_INTRINSIC_CAN_ELIMINATE) &&
+             nir_intrinsic_can_reorder(intr);
+   }
+   default:
+      return false;
+   }
+}
+
+static uint32_t
+hash_u32(uint32_t hash, uint32_t v)
+{
+   /* FNV-1a over the four bytes */
+   for (unsigned i = 0; i < 4; ++i) {
+      hash ^= (v >> (8 * i)) & 0xff;
+      hash *= 16777619u;
+   }
+   return hash;
+}
+
+static uint32_t
+hash_shared_value(const opt_preamble_ctx *ctx, nir_instr *instr)
+{
+   uint32_t h = hash_u32(2166136261u, instr->type);
+   nir_def *def = nir_instr_def(instr);
+   h = hash_u32(h, def->bit_size | (def->num_components << 8));
+
+   switch (instr->type) {
+   case nir_instr_type_alu: {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      h = hash_u32(h, alu->op);
+      h = hash_u32(h, alu->fp_math_ctrl | (alu->no_signed_wrap << 30) |
+                         ((uint32_t)alu->no_unsigned_wrap << 31));
+      for (unsigned s = 0; s < nir_op_infos[alu->op].num_inputs; ++s) {
+         h = hash_u32(h, ctx->value_rep[alu->src[s].src.ssa->index]);
+         for (unsigned c = 0; c < nir_ssa_alu_instr_src_components(alu, s); ++c)
+            h = hash_u32(h, alu->src[s].swizzle[c]);
+      }
+      return h;
+   }
+   case nir_instr_type_load_const: {
+      nir_load_const_instr *lc = nir_instr_as_load_const(instr);
+      for (unsigned c = 0; c < lc->def.num_components; ++c) {
+         uint64_t v = nir_const_value_as_uint(lc->value[c], lc->def.bit_size);
+         h = hash_u32(h, (uint32_t)v);
+         h = hash_u32(h, (uint32_t)(v >> 32));
+      }
+      return h;
+   }
+   case nir_instr_type_intrinsic: {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      const nir_intrinsic_info *info = &nir_intrinsic_infos[intr->intrinsic];
+      h = hash_u32(h, intr->intrinsic);
+      for (unsigned i = 0; i < info->num_indices; ++i)
+         h = hash_u32(h, intr->const_index[i]);
+      for (unsigned s = 0; s < info->num_srcs; ++s)
+         h = hash_u32(h, ctx->value_rep[intr->src[s].ssa->index]);
+      return h;
+   }
+   default:
+      UNREACHABLE("not shareable");
+   }
+}
+
+static bool
+shared_values_equal(const opt_preamble_ctx *ctx, nir_instr *a, nir_instr *b)
+{
+   if (a->type != b->type)
+      return false;
+
+   nir_def *da = nir_instr_def(a), *db = nir_instr_def(b);
+   if (da->bit_size != db->bit_size || da->num_components != db->num_components)
+      return false;
+
+   switch (a->type) {
+   case nir_instr_type_alu: {
+      nir_alu_instr *x = nir_instr_as_alu(a), *y = nir_instr_as_alu(b);
+      if (x->op != y->op || x->fp_math_ctrl != y->fp_math_ctrl ||
+          x->no_signed_wrap != y->no_signed_wrap ||
+          x->no_unsigned_wrap != y->no_unsigned_wrap)
+         return false;
+      for (unsigned s = 0; s < nir_op_infos[x->op].num_inputs; ++s) {
+         if (x->src[s].src.ssa->bit_size != y->src[s].src.ssa->bit_size ||
+             ctx->value_rep[x->src[s].src.ssa->index] !=
+                ctx->value_rep[y->src[s].src.ssa->index])
+            return false;
+         for (unsigned c = 0; c < nir_ssa_alu_instr_src_components(x, s); ++c) {
+            if (x->src[s].swizzle[c] != y->src[s].swizzle[c])
+               return false;
+         }
+      }
+      return true;
+   }
+   case nir_instr_type_load_const: {
+      nir_load_const_instr *x = nir_instr_as_load_const(a);
+      nir_load_const_instr *y = nir_instr_as_load_const(b);
+      for (unsigned c = 0; c < x->def.num_components; ++c) {
+         if (nir_const_value_as_uint(x->value[c], x->def.bit_size) !=
+             nir_const_value_as_uint(y->value[c], y->def.bit_size))
+            return false;
+      }
+      return true;
+   }
+   case nir_instr_type_intrinsic: {
+      nir_intrinsic_instr *x = nir_instr_as_intrinsic(a);
+      nir_intrinsic_instr *y = nir_instr_as_intrinsic(b);
+      const nir_intrinsic_info *info = &nir_intrinsic_infos[x->intrinsic];
+      if (x->intrinsic != y->intrinsic || x->num_components != y->num_components)
+         return false;
+      for (unsigned i = 0; i < info->num_indices; ++i) {
+         if (x->const_index[i] != y->const_index[i])
+            return false;
+      }
+      for (unsigned s = 0; s < info->num_srcs; ++s) {
+         if (nir_src_num_components(x->src[s]) != nir_src_num_components(y->src[s]) ||
+             x->src[s].ssa->bit_size != y->src[s].ssa->bit_size ||
+             ctx->value_rep[x->src[s].ssa->index] !=
+                ctx->value_rep[y->src[s].ssa->index])
+            return false;
+      }
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
+static void
+number_shared_values(opt_preamble_ctx *ctx, nir_function_impl *impl)
+{
+   const unsigned n = impl->ssa_alloc;
+   ctx->value_rep = malloc(n * sizeof(*ctx->value_rep));
+   ctx->defs = calloc(n, sizeof(*ctx->defs));
+   unsigned *next_in_bucket = malloc(n * sizeof(*next_in_bucket));
+   struct hash_table_u64 *buckets = _mesa_hash_table_u64_create(NULL);
+
+   for (unsigned i = 0; i < n; ++i)
+      ctx->value_rep[i] = i;
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         nir_def *def = nir_instr_def(instr);
+         if (!def || !ctx->states[def->index].can_move)
+            continue;
+
+         ctx->defs[def->index] = def;
+         if (!value_shareable(instr))
+            continue;
+
+         const uint32_t h = hash_shared_value(ctx, instr);
+         const uintptr_t head =
+            (uintptr_t)_mesa_hash_table_u64_search(buckets, h);
+         unsigned found = UINT_MAX;
+
+         for (uintptr_t i = head; i != 0; i = next_in_bucket[i - 1]) {
+            if (shared_values_equal(ctx, instr, nir_def_instr(ctx->defs[i - 1]))) {
+               found = i - 1;
+               break;
+            }
+         }
+
+         if (found != UINT_MAX) {
+            ctx->value_rep[def->index] = found;
+         } else {
+            next_in_bucket[def->index] = head;
+            _mesa_hash_table_u64_insert(buckets, h,
+                                        (void *)(uintptr_t)(def->index + 1));
+         }
+      }
+   }
+
+   _mesa_hash_table_u64_destroy(buckets);
+   free(next_in_bucket);
+}
+
 static bool
 calculate_can_move_for_block(opt_preamble_ctx *ctx, nir_block *block)
 {
@@ -547,9 +765,17 @@ replace_for_block(nir_builder *b, opt_preamble_ctx *ctx,
       }
 
       if (state->replace) {
-         nir_def *clone_def = nir_instr_def(clone);
-         nir_store_preamble(b, clone_def, .base = state->offset,
-                            .preamble_class = state->class);
+         /* A shared value already stored outside any reconstructed if
+          * precedes this point; storing it again is redundant.
+          */
+         def_state *group = state->leader ? state->leader : state;
+         if (!group->stored_unconditionally) {
+            nir_def *clone_def = nir_instr_def(clone);
+            nir_store_preamble(b, clone_def, .base = state->offset,
+                               .preamble_class = state->class);
+            if (ctx->preamble_if_depth == 0)
+               group->stored_unconditionally = true;
+         }
       }
    }
 }
@@ -579,6 +805,7 @@ replace_for_cf_list(nir_builder *b, opt_preamble_ctx *ctx,
 
             nir_if *reconstructed_nif = NULL;
             reconstructed_nif = nir_push_if(b, remap_cond);
+            ctx->preamble_if_depth++;
 
             b->cursor = nir_before_cf_list(&reconstructed_nif->then_list);
             replace_for_cf_list(b, ctx, remap_table, &nif->then_list);
@@ -586,6 +813,7 @@ replace_for_cf_list(nir_builder *b, opt_preamble_ctx *ctx,
             b->cursor = nir_before_cf_list(&reconstructed_nif->else_list);
             replace_for_cf_list(b, ctx, remap_table, &nif->else_list);
 
+            ctx->preamble_if_depth--;
             nir_pop_if(b, reconstructed_nif);
             b->cursor = nir_after_cf_node(&reconstructed_nif->cf_node);
          } else {
@@ -760,6 +988,9 @@ nir_opt_preamble(nir_shader *shader, const nir_opt_preamble_options *options,
    /* Step 1: Calculate can_move */
    calculate_can_move_for_cf_list(&ctx, &impl->body);
 
+   if (options->share_equal_values)
+      number_shared_values(&ctx, impl);
+
    /* Step 2: Calculate is_candidate. This is complicated by the presence of
     * non-candidate instructions like derefs whose users cannot be rewritten.
     * If a deref chain is used at all by a non-can_move thing, then any offset
@@ -817,8 +1048,17 @@ nir_opt_preamble(nir_shader *shader, const nir_opt_preamble_options *options,
 
    if (num_candidates == 0) {
       free(ctx.states);
+      free(ctx.value_rep);
+      free(ctx.defs);
       return false;
    }
+
+   /* With share_equal_values: the first candidate of each value, by value
+    * representative. */
+   def_state **group_leader =
+      options->share_equal_values
+         ? calloc(impl->ssa_alloc, sizeof(*group_leader))
+         : NULL;
 
    def_state **candidates = malloc(sizeof(*candidates) * num_candidates);
    unsigned candidate_idx = 0;
@@ -869,6 +1109,25 @@ nir_opt_preamble(nir_shader *shader, const nir_opt_preamble_options *options,
             if (state->benefit > 0) {
                options->def_size(def, &state->size, &state->align,
                                  &state->class);
+
+               /* A candidate equal to an earlier one shares its storage: the
+                * group is worth the sum of its members and costs one slot.
+                */
+               if (group_leader) {
+                  def_state **leader =
+                     &group_leader[ctx.value_rep[def->index]];
+                  if (*leader && (*leader)->size == state->size &&
+                      (*leader)->align == state->align &&
+                      (*leader)->class == state->class) {
+                     state->leader = *leader;
+                     (*leader)->value += state->value;
+                     (*leader)->benefit += state->benefit;
+                     continue;
+                  }
+                  if (!*leader)
+                     *leader = state;
+               }
+
                total_size = ALIGN_POT(total_size, state->align);
                total_size += state->size;
                candidates[candidate_idx++] = state;
@@ -883,6 +1142,9 @@ nir_opt_preamble(nir_shader *shader, const nir_opt_preamble_options *options,
 
    if (num_candidates == 0) {
       free(ctx.states);
+      free(ctx.value_rep);
+      free(ctx.defs);
+      free(group_leader);
       free(candidates);
       return false;
    }
@@ -930,6 +1192,22 @@ nir_opt_preamble(nir_shader *shader, const nir_opt_preamble_options *options,
    }
 
    free(candidates);
+
+   /* Members of a shared group take the leader's slot. Each member's own
+    * reconstructed computation stores the same value there, so a use is
+    * covered by a store under exactly its own (uniform) conditions.
+    */
+   if (group_leader) {
+      for (unsigned i = 0; i < impl->ssa_alloc; i++) {
+         def_state *state = &ctx.states[i];
+         if (!state->leader)
+            continue;
+         state->replace = state->leader->replace;
+         state->offset = state->leader->offset;
+         state->class = state->leader->class;
+      }
+      free(group_leader);
+   }
 
    /* Determine which if's need to be reconstructed, based on the replacements
     * we did.
@@ -988,6 +1266,8 @@ nir_opt_preamble(nir_shader *shader, const nir_opt_preamble_options *options,
 
    ralloc_free(remap_table);
    free(ctx.states);
+   free(ctx.value_rep);
+   free(ctx.defs);
    free(ctx.reconstructed_defs);
    _mesa_set_destroy(ctx.reconstructed_ifs, NULL);
    return true;

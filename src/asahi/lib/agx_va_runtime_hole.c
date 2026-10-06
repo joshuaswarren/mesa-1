@@ -81,8 +81,11 @@ agx_g17p_vdm_alias_heap_init(struct util_vma_heap *heap)
          return false;
       }
    }
-
-   return heap->free_size == agx_g17p_vdm_alias_heap_capacity();
+   if (heap->free_size != agx_g17p_vdm_alias_heap_capacity()) {
+      util_vma_heap_finish(heap);
+      return false;
+   }
+   return true;
 }
 
 bool

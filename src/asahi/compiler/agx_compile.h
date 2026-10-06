@@ -94,6 +94,12 @@ struct agx_shader_info {
    /* Number of uniforms */
    uint16_t push_count;
 
+   /* G17P load_preamble declarations after NIR optimization, in native
+    * half-register units. This is a publication contract, not a CProg TPS
+    * import layout. Consumers must also publish compiler rodata separately. */
+   uint64_t agx3_uniform_halfs[AGX3_CPROG_INPUT_WORDS];
+   bool agx3_uniform_halfs_valid;
+
    /* G17P uniform DMA (v51a, AGX_G17P_UNIFORM_DMA): constant-index loads
     * through one 64-bit pointer uniform were replaced by uniform reads of
     * [agx3_uniform_dma_dest, +agx3_uniform_dma_halfs). The driver publishes
@@ -135,6 +141,10 @@ struct agx_shader_info {
    /* The machine program consumes the frozen layout through native TPS RLDs.
     * Older uniform-read programs must not silently select this loader ABI. */
    bool agx3_preamble_tps_inputs;
+   /* Versioned compiler proof: imported inputs followed only by RA-created
+    * static spill slots. Set only after final IR validation and successful pack.
+    * This occupies existing alignment padding, but all ABI layouts are checked. */
+   uint8_t agx3_preamble_static_spill_version;
    struct agx3_cprog_inputs agx3_preamble_inputs;
    unsigned preamble_offset, main_offset;
 
@@ -445,18 +455,14 @@ struct agx_shader_key {
 
    /* AGX3B: build the preamble as a native constant program (CProg inputs
     * imported through its TPS frame, arithmetic results selected straight
-    * into uniform destinations, half exports legalized) for this shader,
-    * independent of AGX_MESA_DEBUG=native_uniforms. G17P vertex programs
-    * always use it.
+    * into uniform destinations, half exports legalized) for this shader.
+    * G17P vertex programs always use it.
     */
    bool agx3_native_cprog;
-   /* v56d: the native constant-program lowering (the AGX_DBG_NATIVE_UNIFORMS
-    * behaviour) for THIS compile. Decided per compile by the driver (G17P
-    * fragment constant program, v57 vertex CProg) and carried in the key:
-    * never by writing the process-global agx_compiler_debug, which every
-    * concurrently compiling thread reads (v56c raced here: a vertex compile
-    * starting on another thread cleared the bit under a fragment compile,
-    * whose preamble then could not be encoded). */
+   /* The native constant-program lowering for THIS compile. Decided per
+    * compile by the driver (G17P fragment and vertex constant programs) and
+    * carried in the key, never in process-global state that concurrently
+    * compiling threads read. */
    bool g17p_native_uniforms;
 
    /* G17P uniform DMA (v51a): hoist constant-index loads through the 64-bit
@@ -601,6 +607,16 @@ bool agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
 
 /* Returns false when the selected backend cannot encode the shader.  On
  * failure, out is cleared and owns no allocation. */
+/* Private extension range ends at the audited 360-byte CProg frame, including
+ * its last spill word. Hardware qualification is required before publication. */
+#define AGX3_CPROG_STATIC_SPILL_MAX_B 360u
+#define AGX3_CPROG_STATIC_SPILL_VERSION 1u
+/* Fragment TI resources have a separate hardware qualification scope. Keep
+ * the published vertex version/range unchanged and never cross-admit tags. */
+#define AGX3_CPROG_FS_STATIC_SPILL_MAX_B 192u
+#define AGX3_CPROG_FS_STATIC_SPILL_VERSION 2u
+bool agx3_cprog_static_spill_info_valid(const struct agx_shader_info *info);
+
 bool agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                             struct agx_shader_part *out);
 
@@ -611,6 +627,17 @@ struct agx_occupancy {
 
 struct agx_occupancy agx_occupancy_for_register_count(unsigned halfregs);
 unsigned agx_max_registers_for_occupancy(unsigned occupancy);
+
+/* Vertex attributes a vertex prolog can hand to the main shader on this
+ * device through the register ABI (AGX_ABI_VIN_ATTRIB): component i of the
+ * compacted attribute slots occupies half-registers 2 * (8 + i) and the one
+ * above it, and the allocator's export accounting needs one more half above
+ * the last one, so a register file of N halves holds (N - 17) / 8 vec4
+ * attributes -- 29 on the 256-half AGX2 file, 21 on G17P's 192 general
+ * halves. Never above AGX_MAX_ATTRIBS. This is the device's
+ * maxVertexInputAttributes.
+ */
+unsigned agx_max_vertex_attribs(const struct agx_device_key *dev);
 
 #ifdef __cplusplus
 }

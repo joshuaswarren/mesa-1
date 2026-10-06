@@ -6,6 +6,7 @@
  */
 #include "hk_physical_device.h"
 
+#include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/compiler/agx_debug.h"
 #include "asahi/lib/agx_device.h"
@@ -970,7 +971,8 @@ hk_get_device_properties(const struct agx_device *dev,
    const unsigned descriptor_generation =
       agx_chip_descriptor_generation(dev->chip);
    const bool texel_buffer_single_texel_alignment =
-      hk_descriptor_generation_is_agx2(descriptor_generation);
+      hk_descriptor_generation_is_agx2(descriptor_generation) ||
+      dev->chip == AGX_CHIP_G17P;
 
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
@@ -988,6 +990,11 @@ hk_get_device_properties(const struct agx_device *dev,
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
+
+   const struct agx_device_key compiler_key = {
+      .chip = dev->chip,
+      .encoding = agx_chip_isa_encoding(dev->chip),
+   };
 
    /* The hardware limit is 128. However, we need to set a lower limit to
     * account for duplicated system values: clip/cull and viewport targets.
@@ -1015,7 +1022,12 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxImageDimension3D = 16384,
       .maxImageDimensionCube = 16384,
       .maxImageArrayLayers = 2048,
-      .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE,
+      /* The G17P texture/PBE includes the software alignment tail in its
+       * height. Reserve the worst-case 15 R8 texels so a maximally sized
+       * view at a single-texel offset still fits the native 2D descriptor.
+       */
+      .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE -
+                               (dev->chip == AGX_CHIP_G17P ? 15 : 0),
       .maxUniformBufferRange = 65536,
 
       /* From a hardware perspective, storage buffers are lowered to global
@@ -1086,8 +1098,11 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetSampledImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetStorageImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetInputAttachments = HK_MAX_DESCRIPTORS,
-      .maxVertexInputAttributes = AGX_MAX_VBUFS,
-      .maxVertexInputBindings = AGX_MAX_ATTRIBS,
+      /* Bounded by the vertex prolog register ABI, not by the key tables:
+       * 21 on G17P, 29 on AGX2 (agx_max_vertex_attribs). DXVK's D3D9
+       * fixed-function vertex shader needs 18. */
+      .maxVertexInputAttributes = agx_max_vertex_attribs(&compiler_key),
+      .maxVertexInputBindings = AGX_MAX_VBUFS,
       .maxVertexInputAttributeOffset = 65535,
       .maxVertexInputBindingStride = 2048,
 
@@ -1522,14 +1537,11 @@ hk_codegen_env_hash(void)
       "TRACE", "DUMP", "_LOG", "PERF", "VERBOSE", "DEBUG_OBJECT", "SLOW_DRAW",
       "DISK_CACHE_ID", "LAZY_GENERIC", "FORCE_GENERIC", "BIND_PREDICT",
       "VARIANT_TRACE",
-      /* v96: HK_G17P_ZLS_ELIDE_UNTOUCHED only changes command recording;
-       * HK_G17P_SLOW_SUBMIT_US only prints. */
-      "ZLS_ELIDE", "SLOW_SUBMIT",
+      /* v96: HK_G17P_SLOW_SUBMIT_US only prints. */
+      "SLOW_SUBMIT",
       /* v96: prolog/epilog disk caching changes where a part comes from,
        * never its bytes (the verify mode proves it). */
       "PROLOG_DISK_CACHE",
-      /* v96c: only chooses a window-system image's modifier. */
-      "WSI_LINEAR",
    };
    const char *list[512];
    unsigned n = 0;
@@ -1550,12 +1562,6 @@ hk_codegen_env_hash(void)
    }
    qsort(list, n, sizeof(list[0]), hk_env_cmp);
    uint64_t h = 0xcbf29ce484222325ull;
-   /* The legacy packed key is full. Hash all codegen bits independently,
-    * including default-enabled options with no environment entry. This feeds
-    * both Vulkan UUIDs and the disk cache; Gallium already keys all 32 bits. */
-   const uint32_t codegen = agx_get_codegen_flags();
-   for (unsigned i = 0; i < 4; ++i)
-      h = (h ^ ((codegen >> (8 * i)) & 0xff)) * UINT64_C(0x100000001b3);
    for (unsigned i = 0; i < n; ++i)
       for (const char *c = list[i]; ; ++c) {
          h = (h ^ (uint8_t)*c) * 0x100000001b3ull;
@@ -1599,13 +1605,6 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_blake3_format(timestamp, instance->driver_build_sha);
-   /* v56f diagnostic: HK_DEBUG_DISK_CACHE_ID=<hex> reads a disk cache written
-    * by another build with the same serialized format (warm-cache forensics
-    * with an instrumented library). Never set in production. */
-   const char *cache_id = getenv("HK_DEBUG_DISK_CACHE_ID");
-   if (cache_id && strlen(cache_id) < sizeof(timestamp))
-      snprintf(timestamp, sizeof(timestamp), "%s", cache_id);
-
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags ^
       (env_hash * UINT64_C(0xff51afd7ed558ccd)));
@@ -1735,9 +1734,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_pdev_alloc;
    }
 
-   pdev->g17p_native_tess = pdev->dev.chip == AGX_CHIP_G17P &&
-                            debug_get_bool_option("HK_G17P_NATIVE_TESS", false);
-
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &hk_physical_device_entrypoints, true);
@@ -1778,6 +1774,26 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
                                     &properties, &dispatch_table);
    if (result != VK_SUCCESS)
       goto fail_agx_device;
+
+   /* Descriptor writes encode a scaled_conversion kind only for views whose
+    * format is [SU]SCALED (hk_scaled_texture_format()). Such a view needs
+    * sampled-image or input-attachment features for its format, so if no
+    * scaled format has them, no valid descriptor carries a nonzero kind. */
+   pdev->scaled_sampling = false;
+   for (VkFormat f = VK_FORMAT_UNDEFINED + 1;
+        f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && !pdev->scaled_sampling; ++f) {
+      if (hk_scaled_texture_format(hk_format_to_pipe_format(f)) ==
+          PIPE_FORMAT_NONE)
+         continue;
+      const VkFormatFeatureFlags2 sampled =
+         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+         VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
+         VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+      pdev->scaled_sampling =
+         (hk_get_image_format_features(pdev, f, VK_IMAGE_TILING_OPTIMAL) |
+          hk_get_image_format_features(pdev, f, VK_IMAGE_TILING_LINEAR)) &
+         sampled;
+   }
 
    hk_physical_device_init_pipeline_cache(pdev);
 

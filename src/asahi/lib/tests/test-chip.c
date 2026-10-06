@@ -410,6 +410,29 @@ test_classification_invariants(void)
    CHECK(strcmp(agx_chip_name(AGX_CHIP_UNKNOWN), "unknown") == 0);
 }
 
+/* The inline lookups answer every per-draw query; they must match the
+ * exhaustive reference switches for every identity, including UNKNOWN and
+ * out-of-range values. */
+static void
+test_inline_lookups_match_reference(void)
+{
+   for (int chip = AGX_CHIP_G13G; chip <= AGX_CHIP_UNKNOWN + 3; ++chip) {
+      const enum agx_chip c = (enum agx_chip)chip;
+      CHECK_EQ(agx_chip_command_stream_generation(c),
+               agx_chip_command_stream_generation_reference(c));
+      CHECK_EQ(agx_chip_descriptor_generation(c),
+               agx_chip_descriptor_generation_reference(c));
+      CHECK_EQ(agx_chip_sampler_generation(c),
+               agx_chip_sampler_generation_reference(c));
+      CHECK_EQ(agx_chip_sampler_heap_element_size(c),
+               agx_chip_sampler_heap_element_size_reference(c));
+   }
+   CHECK_EQ(agx_chip_command_stream_generation((enum agx_chip)-1),
+            AGX_CS_GENERATION_UNKNOWN);
+   CHECK_EQ(agx_chip_descriptor_generation((enum agx_chip)-1),
+            AGX_DESCRIPTOR_GENERATION_UNKNOWN);
+}
+
 int
 main(void)
 {
@@ -418,6 +441,7 @@ main(void)
    test_independent_generation_axes();
    test_invalid_identity();
    test_classification_invariants();
+   test_inline_lookups_match_reference();
 
    if (failures) {
       fprintf(stderr, "agx_chip: %u of %u checks failed\n", failures, checks);

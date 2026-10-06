@@ -21,32 +21,7 @@ main(void)
    static const uint8_t loop_entry[] = {0x0f, 0x05, 0x54, 0x1a};
    static const uint8_t loop_exit[] = {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00};
    static const uint8_t outer_exit[] = {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00};
-   static const uint8_t expected_binary[] = {
-      0x1b, 0x04, 0x01, 0x08, 0x2b, 0x06, 0x01, 0x08,
-      0x0a, 0x05, 0x23, 0x03, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00,
-      0x0f, 0x05, 0x54, 0x01,
-      0x0f, 0x05, 0x54, 0x1a,
-      0x1b, 0x04, 0x01, 0x08,
-      0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00,
-      /* lddev f77 is the coherent flag (agx3_mem_core.c, KV(77, d->coherent)),
-       * whose encoder LUT maps coherent=0 to raw 2 and coherent=1 to raw 4.
-       * This byte was pinned as 0x40 (coherent=0) while the compiler still
-       * dropped the bit -- i.e. the golden recorded a bug: the poll below is
-       * built with ACCESS_COHERENT | ACCESS_VOLATILE, and a non-coherent load
-       * may spin on a stale cached value forever. 1d7521a2e20 ("asahi: fix
-       * G17P Vulkan memory model images") made it honour the access flags, so
-       * the correct byte is 0x80 (coherent=1). */
-      0x11, 0x00, 0x00, 0x80, 0x02, 0x00,
-      0x0b, 0x01, 0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
-      0x0a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,
-      0x8f, 0x04, 0x54, 0x22,
-      0x0f, 0x00, 0x54, 0xd6, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
-      0x0f, 0x06, 0x04, 0x02, 0x00, 0x00,
-      0x0f, 0x06, 0x04, 0x01, 0x00, 0x00,
-      0x0e, 0x00, 0x00, 0x00,
-   };
-
-   /* v53-c2: with AGX_G17P_UNIFORM_COMPARE (default on) both compares read
+   /* Both compares read
     * the preamble uniforms directly (Apple's reg/uniform icmp, f18/f24=3), so
     * the two uniform copies disappear. Same control structure, flag slot 0
     * and inverted CNDLT; decoded: copy h2<-u6, icmp ^h2<u4 (guard), cndst,
@@ -68,15 +43,11 @@ main(void)
       0x0f, 0x06, 0x04, 0x01, 0x00, 0x00,
       0x0e, 0x00, 0x00, 0x00,
    };
-   const bool uniform_compare =
-      agx_get_alu_flags() & AGX_ALU_G17P_UNIFORM_COMPARE;
-   const uint8_t *golden =
-      uniform_compare ? expected_uniform_binary : expected_binary;
-   const size_t golden_size = uniform_compare ? sizeof(expected_uniform_binary)
-                                              : sizeof(expected_binary);
-   /* Offsets of the loop compare and its CNDLT in each form. */
-   const unsigned compare_at = uniform_compare ? 46 : 54;
-   const unsigned cndlt_at = uniform_compare ? 56 : 64;
+   const uint8_t *golden = expected_uniform_binary;
+   const size_t golden_size = sizeof(expected_uniform_binary);
+   /* Offsets of the loop compare and its CNDLT. */
+   const unsigned compare_at = 46;
+   const unsigned cndlt_at = 56;
 
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 event wait");
@@ -123,20 +94,15 @@ main(void)
     * therefore invert this CNDLT. This is the first loop, even though it is
     * inside an if, so it uses flag0. Reject both the old flag1 comparison and
     * the non-inverted CNDLT that keeps waiting after the event reaches SET. */
-   static const uint8_t wrong_break_reg[] = {
-      0x2a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,
-   };
-   static const uint8_t wrong_break_uniform[] = {
+   static const uint8_t wrong_break[] = {
       0x2a, 0x03, 0x23, 0x05, 0x06, 0x00, 0x07, 0x02, 0x00, 0x00,
    };
-   const uint8_t *wrong_break =
-      uniform_compare ? wrong_break_uniform : wrong_break_reg;
    static const uint8_t wrong_cndlt[] = {0x8f, 0x04, 0x54, 0x02};
    const bool rejects_wrong_break =
       part.binary &&
-      part.info.binary_size >= compare_at + sizeof(wrong_break_reg) &&
+      part.info.binary_size >= compare_at + sizeof(wrong_break) &&
       memcmp((const uint8_t *)part.binary + compare_at, wrong_break,
-             sizeof(wrong_break_reg)) != 0 &&
+             sizeof(wrong_break)) != 0 &&
       part.info.binary_size >= cndlt_at + sizeof(wrong_cndlt) &&
       memcmp((const uint8_t *)part.binary + cndlt_at, wrong_cndlt,
              sizeof(wrong_cndlt)) != 0;

@@ -4809,7 +4809,8 @@ static void test_native_select_reg_imm(void)
       AGX_ISA_ENCODING_AGX3B,0,abs_first_src,false,abs_first,no_neg,reg_immediate,
       abs_second_hints,6,false,false,32,bytes,&len));
    exact(bytes,len,"0205070307060300800000800100");
-   assert(!agx3_alu_fcmp_select_reg_imm(
+   /* Ordered dual-absolute selects use the general endpoint. */
+   assert(agx3_alu_fcmp_select_reg_imm(
       AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,both_abs,no_neg,reg_immediate,
       abs_second_hints,5,false,false,32,bytes,&len));
    puts("Native absolute-comparison FSEL: fifteen exact G17P vectors PASS");
@@ -6160,6 +6161,33 @@ test_native_sqrt_step_absolute(void)
  *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
  */
 static void
+test_native_sqrt_step_negation(void)
+{
+   /* Native G17P metal32023.850 probes: plain / neg / absneg. */
+   static const uint8_t apple[3][10] = {
+      {0x2f,0x01,0x56,0x04,0x03,0x00,0x92,0x40,0x00,0x00},
+      {0x2f,0x01,0x56,0x04,0x03,0x00,0x92,0x40,0x01,0x00},
+      {0x2f,0x01,0x56,0x04,0x03,0x00,0x92,0xc0,0x01,0x00},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < 3; ++i) {
+      assert(agx3_alu_sqrt_step_source_modifiers(
+         AGX_ISA_ENCODING_AGX3B, 4, 0, AGX3_ALU_HINT_CACHE, true, 1u << 5,
+         i == 2, i != 0, bytes, &len));
+      assert(len == 10 && memcmp(bytes, apple[i], 10) == 0);
+   }
+   assert(!agx3_alu_sqrt_step_source_modifiers(
+      AGX_ISA_ENCODING_AGX3C, 4, 0, AGX3_ALU_HINT_CACHE, true, 0,
+      false, true, bytes, &len));
+   assert(!agx3_alu_sqrt_step_source_modifiers(
+      AGX_ISA_ENCODING_AGX3B, 3, 0, AGX3_ALU_HINT_CACHE, true, 0,
+      false, true, bytes, &len));
+   assert(!agx3_alu_sqrt_step_source_modifiers(
+      AGX_ISA_ENCODING_AGX3B, 4, 0, AGX3_ALU_HINT_CACHE, true, 0x40,
+      false, true, bytes, &len));
+}
+
+static void
 test_native_fmul_minifloat_narrow(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -6713,6 +6741,7 @@ int main(void){
    test_native_f32_rcp_rsqrt();
    test_native_f32_rsqrt_modifiers();
    test_native_sqrt_step_absolute();
+   test_native_sqrt_step_negation();
    test_native_fmul_minifloat_narrow();
    test_native_isub_shift();
    test_gpu1_integer_reg_lifetimes();

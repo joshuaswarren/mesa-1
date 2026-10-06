@@ -45,12 +45,9 @@ pack_assert_internal(const agx_instr *I, bool condition, const char *msg)
     * Write the instruction dump somewhere a driver can actually be debugged
     * from, and do NOT abort by default.  A malformed instruction is a real
     * defect and the log names exactly which one, but failing one shader must
-    * not be fatal to the process that asked for it.  AGX_PACK_ASSERT_FATAL=1
-    * restores the abort for local debugging; AGX_PACK_ASSERT_LOG overrides
-    * the destination.
+    * not be fatal to the process that asked for it.
     */
-   const char *path = getenv("AGX_PACK_ASSERT_LOG");
-   FILE *log = fopen(path ? path : "C:\\aurora\\logs\\agx-pack-assert.log", "a");
+   FILE *log = fopen("C:\\aurora\\logs\\agx-pack-assert.log", "a");
 
    if (log != NULL)
       out = log;
@@ -65,8 +62,7 @@ pack_assert_internal(const agx_instr *I, bool condition, const char *msg)
       fflush(out);
       fclose(out);
    }
-   if (getenv("AGX_PACK_ASSERT_FATAL") == NULL)
-      return;
+   return;
 #endif
 
    abort();

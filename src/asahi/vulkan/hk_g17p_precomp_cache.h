@@ -29,10 +29,8 @@ hk_g17p_precomp_cache_hash(uint32_t idx, const void *data, size_t data_size)
 static inline uint32_t
 hk_g17p_precomp_cache_search(struct hash_table *index, const void *entries,
                              size_t stride, uint32_t idx, const void *data,
-                             size_t data_size, uint32_t hash,
-                             size_t *probes, size_t *comparisons)
+                             size_t data_size, uint32_t hash)
 {
-   *probes = *comparisons = 0;
    if (!index)
       return 0;
 
@@ -42,12 +40,9 @@ hk_g17p_precomp_cache_search(struct hash_table *index, const void *entries,
    while (cursor) {
       const struct hk_g17p_precomp_cache_key *key =
          (const void *)((const uint8_t *)entries + (cursor - 1) * stride);
-      (*probes)++;
-      if (key->idx == idx && key->data_size == data_size) {
-         (*comparisons)++;
-         if (!memcmp(key->data, data, data_size))
-            return cursor;
-      }
+      if (key->idx == idx && key->data_size == data_size &&
+          !memcmp(key->data, data, data_size))
+         return cursor;
       cursor = key->next;
    }
    return 0;

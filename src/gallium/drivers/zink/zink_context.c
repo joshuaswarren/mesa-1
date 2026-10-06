@@ -41,6 +41,37 @@
 #include "nir/pipe_nir.h"
 #include "util/u_blitter.h"
 #include "util/u_debug.h"
+#include "util/os_time.h"
+#include "util/simple_mtx.h"
+#include <inttypes.h>
+#include <unistd.h>
+
+DEBUG_GET_ONCE_OPTION(zink_rp_stats, "ZINK_RP_STATS", NULL)
+
+/* ZINK_RP_STATS keys are compared by pointer; intern formatted ones. */
+static const char *
+zink_rp_stats_intern(const char *str)
+{
+   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
+   static char strings[256][96];
+   static unsigned count;
+   const char *ret = "other";
+   simple_mtx_lock(&lock);
+   for (unsigned i = 0; i < count; i++) {
+      if (!strcmp(strings[i], str)) {
+         ret = strings[i];
+         goto out;
+      }
+   }
+   if (count < ARRAY_SIZE(strings)) {
+      snprintf(strings[count], sizeof(strings[count]), "%s", str);
+      ret = strings[count++];
+   }
+out:
+   simple_mtx_unlock(&lock);
+   return ret;
+}
+
 #include "util/format_srgb.h"
 #include "util/format/u_format.h"
 #include "util/u_helpers.h"
@@ -3420,6 +3451,40 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
    };
    ctx->dynamic_fb.info.pNext = ctx->transient_msrtss && has_msrtss ? &msrtss : NULL;
 
+   if (unlikely(debug_get_option_zink_rp_stats())) {
+      /* kind: per colour attachment and for depth, load op (L=load C=clear
+       * -=dont care) and store op (S=store -=dont care); x = absent. */
+      static const char lops[] = "LC-", sops[] = "S-";
+      char kind[96], *k = kind;
+      k += sprintf(k, "rp-begin c=");
+      for (unsigned i = 0; i < ctx->dynamic_fb.info.colorAttachmentCount && i < 8; i++) {
+         const VkRenderingAttachmentInfo *a = &ctx->dynamic_fb.attachments[i];
+         if (!a->imageView) {
+            k += sprintf(k, "x");
+            continue;
+         }
+         k += sprintf(k, "%c%c", lops[MIN2((unsigned)a->loadOp, 2)],
+                      sops[MIN2((unsigned)a->storeOp, 1)]);
+      }
+      const VkRenderingAttachmentInfo *z = ctx->dynamic_fb.info.pDepthAttachment;
+      if (!z)
+         z = ctx->dynamic_fb.info.pStencilAttachment;
+      if (z)
+         k += sprintf(k, " z=%c%c", lops[MIN2((unsigned)z->loadOp, 2)],
+                      sops[MIN2((unsigned)z->storeOp, 1)]);
+      else
+         k += sprintf(k, " z=x");
+      char site[64];
+      snprintf(site, sizeof(site), "%ux%u%s",
+               ctx->dynamic_fb.info.renderArea.extent.width,
+               ctx->dynamic_fb.info.renderArea.extent.height,
+               ctx->dynamic_fb.info.renderArea.extent.width < ctx->fb_state.width ||
+               ctx->dynamic_fb.info.renderArea.extent.height < ctx->fb_state.height ||
+               ctx->dynamic_fb.info.renderArea.offset.x ||
+               ctx->dynamic_fb.info.renderArea.offset.y ? " partial-area" : "");
+      zink_rp_stats_note(ctx, zink_rp_stats_intern(kind),
+                         zink_rp_stats_intern(site));
+   }
    VKCTX(CmdBeginRendering)(ctx->bs->cmdbuf, &ctx->dynamic_fb.info);
    ctx->in_rp = true;
    if (formats_changed) {
@@ -3532,11 +3597,69 @@ zink_batch_rp(struct zink_context *ctx)
    }
 }
 
+/* ZINK_RP_STATS: per-site counters, dumped every two seconds. Diagnostic
+ * only; sites are string literals so pointer identity is enough. */
+static struct {
+   simple_mtx_t lock;
+   FILE *out;
+   bool init;
+   uint64_t window_start;
+   unsigned n;
+   struct { const char *kind, *site; uint64_t count; } e[512];
+} zink_rp_stats = { .lock = SIMPLE_MTX_INITIALIZER };
+
 void
-zink_batch_no_rp_safe(struct zink_context *ctx)
+zink_rp_stats_note(struct zink_context *ctx, const char *kind, const char *site)
+{
+   const char *path = debug_get_option_zink_rp_stats();
+   if (!path)
+      return;
+   simple_mtx_lock(&zink_rp_stats.lock);
+   uint64_t now = os_time_get_nano();
+   if (!zink_rp_stats.init) {
+      char name[512];
+      snprintf(name, sizeof(name), "%s.%ld", path, (long)getpid());
+      zink_rp_stats.out = fopen(name, "a");
+      zink_rp_stats.init = true;
+      zink_rp_stats.window_start = now;
+   }
+   unsigned i;
+   for (i = 0; i < zink_rp_stats.n; i++) {
+      if (zink_rp_stats.e[i].site == site && zink_rp_stats.e[i].kind == kind)
+         break;
+   }
+   if (i == zink_rp_stats.n && i < ARRAY_SIZE(zink_rp_stats.e)) {
+      zink_rp_stats.e[i].kind = kind;
+      zink_rp_stats.e[i].site = site;
+      zink_rp_stats.e[i].count = 0;
+      zink_rp_stats.n++;
+   }
+   if (i < ARRAY_SIZE(zink_rp_stats.e))
+      zink_rp_stats.e[i].count++;
+   if (zink_rp_stats.out && now - zink_rp_stats.window_start >= 2000000000ull) {
+      fprintf(zink_rp_stats.out, "== window t=%.3f s=%.3f\n",
+              zink_rp_stats.window_start / 1e9,
+              (now - zink_rp_stats.window_start) / 1e9);
+      for (unsigned j = 0; j < zink_rp_stats.n; j++) {
+         if (zink_rp_stats.e[j].count)
+            fprintf(zink_rp_stats.out, "%8" PRIu64 " %s %s\n",
+                    zink_rp_stats.e[j].count, zink_rp_stats.e[j].kind,
+                    zink_rp_stats.e[j].site);
+         zink_rp_stats.e[j].count = 0;
+      }
+      fflush(zink_rp_stats.out);
+      zink_rp_stats.window_start = now;
+   }
+   simple_mtx_unlock(&zink_rp_stats.lock);
+}
+
+void
+zink_batch_no_rp_safe_site(struct zink_context *ctx, const char *site)
 {
    if (!ctx->in_rp)
       return;
+   if (unlikely(debug_get_option_zink_rp_stats()))
+      zink_rp_stats_note(ctx, "rp-end", site);
    if (ctx->render_condition.query)
       zink_stop_conditional_render(ctx);
    /* suspend all queries that were started in a renderpass
@@ -3582,13 +3705,13 @@ zink_batch_no_rp_safe(struct zink_context *ctx)
 }
 
 void
-zink_batch_no_rp(struct zink_context *ctx)
+zink_batch_no_rp_site(struct zink_context *ctx, const char *site)
 {
    if (!ctx->in_rp)
       return;
    if (ctx->track_renderpasses && !ctx->blitting)
       tc_renderpass_info_reset(&ctx->dynamic_fb.tc_info);
-   zink_batch_no_rp_safe(ctx);
+   zink_batch_no_rp_safe_site(ctx, site);
 }
 
 static void
@@ -3870,8 +3993,10 @@ zink_reset_ds3_states(struct zink_context *ctx)
 }
 
 static void
-flush_batch(struct zink_context *ctx, bool sync)
+flush_batch_site(struct zink_context *ctx, bool sync, const char *site)
 {
+   if (unlikely(debug_get_option_zink_rp_stats()))
+      zink_rp_stats_note(ctx, "flush", site);
    assert(!ctx->unordered_blitting);
    if (ctx->clears_enabled)
       /* start rp to do all the clears */
@@ -3921,6 +4046,7 @@ flush_batch(struct zink_context *ctx, bool sync)
    }
    util_queue_fence_signal(&ctx->flush_fence);
 }
+#define flush_batch(ctx, sync) flush_batch_site(ctx, sync, ZINK_RP_SITE)
 
 void
 zink_flush_queue(struct zink_context *ctx)
@@ -5173,6 +5299,8 @@ zink_image_copy_buffer(struct pipe_context *pctx,
 
    zink_copy_image_buffer(zink_context(pctx), zink_resource(pdst), zink_resource(psrc),
                           buffer_offset, stride, layer_stride, level, box, 0);
+   if (zink_resource(img)->fb_bind_count)
+      zink_context(pctx)->rp_tc_info_updated = true;
 }
 
 static void
@@ -5322,6 +5450,8 @@ zink_resource_copy_region(struct pipe_context *pctx,
                      dst->obj->image, dst->layout,
                      1, &region);
       zink_cmd_debug_marker_end(ctx, cmdbuf, marker);
+      if (dst->fb_bind_count)
+         ctx->rp_tc_info_updated = true;
    } else if (dst->base.b.target == PIPE_BUFFER &&
               src->base.b.target == PIPE_BUFFER) {
       zink_copy_buffer(ctx, dst, src, dstx, src_box->x, src_box->width, false);

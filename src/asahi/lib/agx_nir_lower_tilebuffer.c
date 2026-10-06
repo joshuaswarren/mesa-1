@@ -29,35 +29,8 @@ struct ctx {
    bool preserve_zero_mask;
    bool lower_srgb;
    bool lower_r11g11b10;
+   bool lower_g17p_formats;
 };
-
-static nir_def *
-convert_srgb(nir_builder *b, nir_def *value, unsigned comps, bool encode)
-{
-   nir_def *channels[4];
-   const unsigned bit_size = value->bit_size;
-   const unsigned color_comps = MIN2(comps, 3);
-   nir_def *rgb = nir_trim_vector(b, value, color_comps);
-   if (bit_size != 32)
-      rgb = nir_f2f32(b, rgb);
-
-   rgb = encode ? nir_format_linear_to_srgb(b, rgb)
-                : nir_format_srgb_to_linear(b, rgb);
-
-   if (!encode && bit_size != 32)
-      rgb = nir_f2f16(b, rgb);
-
-   for (unsigned i = 0; i < comps; ++i) {
-      if (i < color_comps) {
-         channels[i] = nir_channel(b, rgb, i);
-      } else {
-         nir_def *alpha = nir_channel(b, value, i);
-         channels[i] = encode && bit_size != 32 ? nir_f2f32(b, alpha) : alpha;
-      }
-   }
-
-   return nir_vec(b, channels, comps);
-}
 
 static void
 store_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
@@ -284,6 +257,34 @@ load_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
                                   .format = format, .access = ACCESS_IN_BOUNDS);
 }
 
+static nir_def *
+convert_srgb(nir_builder *b, nir_def *value, unsigned comps, bool encode)
+{
+   nir_def *channels[4];
+   const unsigned bit_size = value->bit_size;
+   const unsigned color_comps = MIN2(comps, 3);
+   nir_def *rgb = nir_trim_vector(b, value, color_comps);
+   if (bit_size != 32)
+      rgb = nir_f2f32(b, rgb);
+
+   rgb = encode ? nir_format_linear_to_srgb(b, rgb)
+                : nir_format_srgb_to_linear(b, rgb);
+
+   if (!encode && bit_size != 32)
+      rgb = nir_f2f16(b, rgb);
+
+   for (unsigned i = 0; i < comps; ++i) {
+      if (i < color_comps) {
+         channels[i] = nir_channel(b, rgb, i);
+      } else {
+         nir_def *alpha = nir_channel(b, value, i);
+         channels[i] = encode && bit_size != 32 ? nir_f2f32(b, alpha) : alpha;
+      }
+   }
+
+   return nir_vec(b, channels, comps);
+}
+
 static bool
 pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -306,15 +307,31 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    enum pipe_format logical_format = tib->logical_format[rt];
    enum pipe_format format = agx_tilebuffer_physical_format(tib, rt);
    unsigned comps = util_format_get_nr_components(logical_format);
+   /* G17P keeps an R11G11B10 target as one raw 32-bit tile word. Colour
+    * stores and reads keep the packed-float format: the backend converts with
+    * the native pack/unpack layout 2, as Apple's G17P code does
+    * (rgb9e5/native/rgb9e5.py). Only the destination-preserving copy moves
+    * the raw word. */
    const bool lower_r11g11b10 =
       ctx->lower_r11g11b10 &&
       logical_format == PIPE_FORMAT_R11G11B10_FLOAT;
+   const bool native_r11g11b10 =
+      ctx->lower_g17p_formats && logical_format == PIPE_FORMAT_R11G11B10_FLOAT;
+   const bool raw_r11g11b10 = lower_r11g11b10 || native_r11g11b10;
    const bool lower_srgb =
       ctx->lower_srgb && util_format_is_srgb(logical_format);
+   /* G17P stores an 8-bit sRGB target as U8NORM bytes. The colour stores and
+    * reads below keep the sRGB format: the backend encodes and decodes with
+    * the native fltnorm/normflt sRGB modes, as Apple's G17P code does. Only
+    * the destination-preserving copy, which must not convert at all, moves
+    * the raw bytes as U8NORM. */
+   const bool raw_srgb =
+      (ctx->lower_g17p_formats || ctx->lower_srgb) &&
+      util_format_is_srgb(logical_format);
    const enum pipe_format lowered_format =
-      lower_r11g11b10
+      raw_r11g11b10
          ? PIPE_FORMAT_R32_UINT
-         : lower_srgb ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM : format;
+         : raw_srgb ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM : format;
 
    if (intr->intrinsic == nir_intrinsic_store_output) {
       ctx->outputs_written |= BITFIELD_BIT(rt);
@@ -360,15 +377,15 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       if (!write_mask) {
          if (ctx->preserve_zero_mask && !tib->spilled[rt]) {
             nir_def *value = load_tilebuffer(
-               b, tib, lower_r11g11b10 ? 1 : comps,
-               (lower_r11g11b10 || lower_srgb)
+               b, tib, raw_r11g11b10 ? 1 : comps,
+               (raw_r11g11b10 || raw_srgb)
                   ? 32
                   : intr->src[0].ssa->bit_size,
                rt, lowered_format,
                logical_format);
             store_tilebuffer(b, tib, lowered_format, logical_format, rt, value,
                              ctx->write_samples,
-                             lower_r11g11b10 ? 1 : BITFIELD_MASK(comps));
+                             raw_r11g11b10 ? 1 : BITFIELD_MASK(comps));
          }
          return true;
       }
@@ -390,7 +407,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          comps == 3 && ldesc->nr_channels == 4 &&
          ldesc->channel[3].type == UTIL_FORMAT_TYPE_VOID &&
          util_format_get_nr_components(format) == 4 &&
-         !util_format_is_pure_integer(logical_format) && !lower_r11g11b10;
+         !util_format_is_pure_integer(logical_format) && !raw_r11g11b10;
 
       if (x_alpha) {
          value = nir_vec4(b, nir_channel(b, value, 0), nir_channel(b, value, 1),
@@ -418,6 +435,9 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                             : rgb;
             format = lowered_format;
          }
+         /* Every native packed-float witness takes f32 lanes. */
+         if (native_r11g11b10 && value->bit_size != 32)
+            value = nir_f2f32(b, value);
 
          store_tilebuffer(b, tib, format, logical_format, rt, value,
                           ctx->write_samples, write_mask);
@@ -436,23 +456,36 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
          def = load_memory(b, ctx->bindless_base, tib->nr_samples,
                            intr->num_components, bit_size, rt, logical_format);
-      } else {
+      } else if (lower_r11g11b10 || lower_srgb) {
+         /* G17G/G18 keep their qualified explicit format conversions. */
          def = load_tilebuffer(
             b, tib, lower_r11g11b10 ? 1 : intr->num_components,
-            (lower_r11g11b10 || lower_srgb) ? 32 : bit_size, rt,
-            lowered_format, logical_format);
-
-         if (lower_r11g11b10) {
+            32, rt, lowered_format, logical_format);
+         if (lower_r11g11b10)
             def = nir_trim_vector(
                b, nir_format_unpack_rgba(b, def, logical_format),
                intr->num_components);
-            if (bit_size != 32)
-               def = nir_f2f16(b, def);
-         } else if (lower_srgb) {
+         else
             def = convert_srgb(b, def, intr->num_components, false);
-            if (bit_size != 32)
-               def = nir_f2f16(b, def);
-         }
+         if (bit_size != 32)
+            def = nir_f2f16(b, def);
+      } else {
+         /* G17P has no grounded half-width tile load of an RGB10A2 tile
+          * (ld_tile d16 fmt=RGB10A2 is refused, which drops every blended
+          * mediump draw into a 10-bit target). Load it at 32 bits and narrow
+          * explicitly. */
+         const bool widen_rgb10a2 =
+            ctx->lower_g17p_formats && bit_size != 32 &&
+            (enum ail_isa_format)format == AIL_ISA_FORMAT_RGB10A2;
+
+         def = load_tilebuffer(b, tib, intr->num_components,
+                               (native_r11g11b10 || widen_rgb10a2) ? 32
+                                                                  : bit_size,
+                               rt, format, logical_format);
+
+         /* The native unpack produces f32 lanes. */
+         if ((native_r11g11b10 || widen_rgb10a2) && bit_size != 32)
+            def = nir_f2f16(b, def);
       }
 
       nir_def_rewrite_uses(&intr->def, def);
@@ -466,7 +499,7 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
                          uint8_t *colormasks, unsigned *bindless_base,
                          nir_def *write_samples, bool *translucent,
                          bool preserve_zero_mask, bool lower_srgb,
-                         bool lower_r11g11b10)
+                         bool lower_r11g11b10, bool lower_g17p_formats)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -478,6 +511,7 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
       .preserve_zero_mask = preserve_zero_mask,
       .lower_srgb = lower_srgb,
       .lower_r11g11b10 = lower_r11g11b10,
+      .lower_g17p_formats = lower_g17p_formats,
    };
 
    /* Allocate 1 texture + 1 PBE descriptor for each spilled descriptor */
@@ -538,10 +572,10 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
          nir_function_impl *impl = nir_shader_get_entrypoint(shader);
          nir_builder b = nir_builder_at(nir_after_impl(impl));
          enum pipe_format logical = tib->logical_format[i];
-         const bool raw_r11g11b10 = lower_r11g11b10 &&
+         const bool raw_r11g11b10 = (lower_r11g11b10 || lower_g17p_formats) &&
                                   logical == PIPE_FORMAT_R11G11B10_FLOAT;
          enum pipe_format format = raw_r11g11b10 ? PIPE_FORMAT_R32_UINT :
-            lower_srgb && util_format_is_srgb(logical)
+            (lower_srgb || lower_g17p_formats) && util_format_is_srgb(logical)
                ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
                : agx_tilebuffer_physical_format(tib, i);
          unsigned comps = raw_r11g11b10 ? 1 : util_format_get_nr_components(logical);

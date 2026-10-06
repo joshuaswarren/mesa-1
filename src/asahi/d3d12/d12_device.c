@@ -8,12 +8,22 @@
 
 #include "d12_private.h"
 #include "d12_attachment_view_core.h"
+#include "d12_allocation_math.h"
 #include "d12_buffer_view_core.h"
-#include "d12_core_caps.h"
+#include "d12_core_caps_query.h"
 #include "d12_query_core.h"
+#include "d12_pso_stream_core.h"
 
 #include <math.h>
 #include <string.h>
+
+#include "util/hash_table.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
+
+/* Serialize singleton lookup against final Release, without owning a ref. */
+static simple_mtx_t d12_singleton_lock = SIMPLE_MTX_INITIALIZER;
+static struct d12_device *d12_singletons;
 
 /*
  * Report an unimplemented COM method. Logged once per method so a test
@@ -62,24 +72,23 @@ d12_device_QueryInterface(ID3D12Device2 *iface, REFIID riid, void **out)
    if (!out)
       return E_POINTER;
 
-   if (d12_guid_equal(riid, &IID_IUnknown) ||
-       d12_guid_equal(riid, &IID_ID3D12Object) ||
-       d12_guid_equal(riid, &IID_ID3D12Device) ||
-       d12_guid_equal(riid, &IID_ID3D12Device1) ||
-       d12_guid_equal(riid, &IID_ID3D12Device2)) {
-      /* One object, one vtable: ID3D12Device2's is a superset, so the
-       * newer IIDs return the same pointer. Mesh pipelines need
-       * ID3D12Device2::CreatePipelineState.
-       */
-      d12_device_add_ref(device);
-      *out = iface;
-      return S_OK;
-   }
-
-   if (d12_guid_equal(riid, &IID_ID3D12Device15)) {
-      d12_device_add_ref(device);
-      *out = &device->iface15;
-      return S_OK;
+   static const IID *const device_iids[] = {
+      &IID_IUnknown,        &IID_ID3D12Object,   &IID_ID3D12Device,
+      &IID_ID3D12Device1,   &IID_ID3D12Device2,  &IID_ID3D12Device3,
+      &IID_ID3D12Device4,   &IID_ID3D12Device5,  &IID_ID3D12Device6,
+      &IID_ID3D12Device7,   &IID_ID3D12Device8,  &IID_ID3D12Device9,
+      &IID_ID3D12Device10,  &IID_ID3D12Device11, &IID_ID3D12Device12,
+      &IID_ID3D12Device13,  &IID_ID3D12Device14, &IID_ID3D12Device15,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(device_iids); i++) {
+      if (d12_guid_equal(riid, device_iids[i])) {
+         /* One object, one vtable: every ID3D12DeviceN table is a strict
+          * prefix of the ID3D12Device15 table this object carries, so the
+          * newer IIDs return the same pointer. */
+         d12_device_add_ref(device);
+         *out = iface;
+         return S_OK;
+      }
    }
 
    if (d12_guid_equal(riid, &IID_ID3D12DeviceConfiguration) ||
@@ -108,7 +117,18 @@ static ULONG STDMETHODCALLTYPE
 d12_device_Release(ID3D12Device2 *iface)
 {
    struct d12_device *device = d12_device_from_iface(iface);
+   if (device->singleton)
+      simple_mtx_lock(&d12_singleton_lock);
    uint32_t refs = p_atomic_dec_return(&device->refcount);
+   if (device->singleton) {
+      if (!refs) {
+         struct d12_device **entry = &d12_singletons;
+         while (*entry != device)
+            entry = &(*entry)->singleton_next;
+         *entry = device->singleton_next;
+      }
+      simple_mtx_unlock(&d12_singleton_lock);
+   }
 
    if (refs == 0) {
       mesa_logi("closing device %s", device->dev.name);
@@ -218,717 +238,8 @@ static HRESULT STDMETHODCALLTYPE
 d12_device_CheckFeatureSupport(ID3D12Device2 *iface, D3D12_FEATURE feature,
                                void *data, UINT data_size)
 {
-   const struct d12_core_caps *caps = d12_core_get_caps();
-   (void)iface;
-
-   switch (feature) {
-   case D3D12_FEATURE_D3D12_OPTIONS: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /* Honest conservative shape; raised only when the backing exists. */
-      opts->ResourceBindingTier =
-         (D3D12_RESOURCE_BINDING_TIER)caps->resource_binding_tier;
-      opts->TiledResourcesTier =
-         (D3D12_TILED_RESOURCES_TIER)caps->tiled_resources_tier;
-      opts->ResourceHeapTier =
-         (D3D12_RESOURCE_HEAP_TIER)caps->resource_heap_tier;
-      opts->OutputMergerLogicOp = caps->output_merger_logic_op;
-      opts->TypedUAVLoadAdditionalFormats =
-         caps->typed_uav_load_additional_formats;
-      return S_OK;
-   }
-
-   /* A feature-query structure being understood is distinct from the
-    * optional feature being implemented. Return a valid, zero-capability
-    * answer for the structures this runtime exposes instead of E_INVALIDARG:
-    * applications use the fields to choose their fallback paths.
-    */
-   case D3D12_FEATURE_D3D12_OPTIONS1: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS1 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-      memset(opts, 0, sizeof(*opts));
-      opts->WaveOps = caps->wave_ops;
-      opts->WaveLaneCountMin = caps->wave_lane_count_min;
-      opts->WaveLaneCountMax = caps->wave_lane_count_max;
-      opts->TotalLaneCount = caps->total_lane_count;
-      opts->Int64ShaderOps = caps->int64_shader_ops;
-      return S_OK;
-   }
-
-   /* These optional capability structures contain only output fields whose
-    * zero spelling means unsupported/tier 0.  Understanding the query is not
-    * a capability claim: returning E_INVALIDARG here prevents applications
-    * from taking their specified fallback paths.  Keep the answers
-    * conservative until the corresponding command/shader path is complete.
-    */
-#define D12_ZERO_OPTIONS(N)                                                   \
-   case D3D12_FEATURE_D3D12_OPTIONS##N: {                                    \
-      D3D12_FEATURE_DATA_D3D12_OPTIONS##N *opts = data;                      \
-      if (data_size != sizeof(*opts))                                        \
-         return E_INVALIDARG;                                                \
-      memset(opts, 0, sizeof(*opts));                                        \
-      return S_OK;                                                           \
-   }
-
-   D12_ZERO_OPTIONS(6)
-   D12_ZERO_OPTIONS(8)
-   D12_ZERO_OPTIONS(10)
-   D12_ZERO_OPTIONS(20)
-
-#undef D12_ZERO_OPTIONS
-
-   case D3D12_FEATURE_D3D12_OPTIONS2: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS2 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /* DepthBoundsTestSupported stays FALSE. HAL300 has native depth-bounds
-       * state, but its Gen7 PPP selector/block writer is not connected; the
-       * runnable AGX2 path has no such state and Honeykrisp reports none. */
-      opts->ProgrammableSamplePositionsTier =
-         (D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER)
-            caps->programmable_sample_positions_tier;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS3: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS3 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      opts->CopyQueueTimestampQueriesSupported =
-         caps->copy_queue_timestamp_queries;
-      opts->WriteBufferImmediateSupportFlags =
-         (D3D12_COMMAND_LIST_SUPPORT_FLAGS)
-            caps->write_buffer_immediate_support_flags;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS4: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS4 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /* Apple AGX has native 16-bit floating-point ALU support and both the
-       * DXIL front end and AGX compiler retain f16 arithmetic. */
-      opts->Native16BitShaderOpsSupported = caps->native_16bit_shader_ops;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS12: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS12 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /* This counter convention is not known because mesh shaders and their
-       * pipeline statistics are not exposed.  UNKNOWN is the conservative
-       * public spelling, unlike zero/FALSE which would assert a convention.
-       */
-      opts->MSPrimitivesPipelineStatisticIncludesCulledPrimitives =
-         D3D12_TRI_STATE_UNKNOWN;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS7: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS7 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-      memset(opts, 0, sizeof(*opts));
-      opts->MeshShaderTier =
-         (D3D12_MESH_SHADER_TIER)caps->mesh_shader_tier;
-      opts->SamplerFeedbackTier = D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS9: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS9 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-      memset(opts, 0, sizeof(*opts));
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS11: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS11 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-      memset(opts, 0, sizeof(*opts));
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS13: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS13 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-      memset(opts, 0, sizeof(*opts));
-      opts->TextureCopyBetweenDimensionsSupported =
-         caps->texture_copy_between_dimensions;
-      opts->AlphaBlendFactorSupported = caps->alpha_blend_factor;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS16: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS16 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      opts->DynamicDepthBiasSupported = TRUE;
-      opts->GPUUploadHeapSupported = caps->gpu_upload_heap;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS14: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS14 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /* AdvancedTextureOpsSupported needs sampler feedback's companion
-       * operations, which AGX has no equivalent for.
-       * WriteableMSAATexturesSupported needs a TEXTURE2DMS unordered-access
-       * view, which CreateUnorderedAccessView does not build; the shader-side
-       * lowering exists but the descriptor side does not. */
-      opts->IndependentFrontAndBackStencilRefMaskSupported =
-         caps->independent_front_and_back_stencil;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS15: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS15 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      opts->TriangleFanSupported = caps->triangle_fan;
-      opts->DynamicIndexBufferStripCutSupported =
-         caps->dynamic_index_buffer_strip_cut;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS17: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS17 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      opts->NonNormalizedCoordinateSamplersSupported =
-         caps->non_normalized_coordinate_samplers;
-      /* ManualWriteTrackingResourceSupported is a WriteWatch contract this
-       * driver does not implement. */
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS18: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS18 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /* The render-pass implementation honours the declared per-attachment
-       * access types rather than emulating them, so its results are the
-       * results the application asked for. */
-      opts->RenderPassesValid = caps->render_passes_tier != 0;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS19: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS19 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      /* We understand the query but do not yet expose RasterizerDesc2.
-       * A zero capability answer makes applications take the supported
-       * legacy rasterizer path instead of mistaking E_INVALIDARG for an
-       * unknown runtime interface. AGX point sampling was measured across
-       * the 8-bit subtexel boundary: addresses below the boundary never
-       * round up, while linear sampling and gather retain their normal
-       * fixed-point rules.
-       */
-      memset(opts, 0, sizeof(*opts));
-      opts->PointSamplingAddressesNeverRoundUp = TRUE;
-      /* Target-independent rasterization: with nothing attached the render
-       * command's sample count is purely the rasterization rate, so every
-       * count AGX can rasterize is available. */
-      opts->SupportedSampleCountsWithNoOutputs =
-         (1u << 0) | (1u << 1) | (1u << 3);
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_PREDICATION: {
-      D3D12_FEATURE_DATA_PREDICATION *predication = data;
-      if (data_size != sizeof(D3D12_FEATURE_DATA_PREDICATION))
-         return E_INVALIDARG;
-      predication->Supported = caps->predication ? TRUE : FALSE;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_HARDWARE_COPY: {
-      D3D12_FEATURE_DATA_HARDWARE_COPY *hardware_copy = data;
-      if (data_size != sizeof(D3D12_FEATURE_DATA_HARDWARE_COPY))
-         return E_INVALIDARG;
-      hardware_copy->Supported = caps->hardware_copy ? TRUE : FALSE;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_APPLICATION_SPECIFIC_DRIVER_STATE: {
-      D3D12_FEATURE_DATA_APPLICATION_SPECIFIC_DRIVER_STATE *state = data;
-      if (data_size != sizeof(*state))
-         return E_INVALIDARG;
-      state->Supported = FALSE;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_BYTECODE_BYPASS_HASH_SUPPORTED: {
-      D3D12_FEATURE_DATA_BYTECODE_BYPASS_HASH_SUPPORTED *bypass = data;
-      if (data_size != sizeof(*bypass))
-         return E_INVALIDARG;
-      bypass->Supported = FALSE;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_SHADER_CACHE_ABI_SUPPORT:
-      /* The Windows ABI's WCHAR is 16-bit, while the Linux DirectX-Headers
-       * stub currently typedefs it to 32-bit wchar_t. This query returns no
-       * data when unsupported, so accept either public structure spelling.
-       */
-      if (data_size != sizeof(D3D12_FEATURE_DATA_SHADERCACHE_ABI_SUPPORT) &&
-          data_size != 128 * sizeof(uint16_t) + 4 * sizeof(uint64_t))
-         return E_INVALIDARG;
-      return E_FAIL;
-
-   case D3D12_FEATURE_D3D12_OPTIONS22: {
-      D3D12_FEATURE_DATA_D3D12_OPTIONS22 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-      memset(opts, 0, sizeof(*opts));
-      opts->Max1DDispatchSize =
-         D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_BARRIER_LAYOUT: {
-      D3D12_FEATURE_DATA_BARRIER_LAYOUT *layout = data;
-      if (data_size != sizeof(*layout))
-         return E_INVALIDARG;
-
-      bool direct = layout->CommandListType == D3D12_COMMAND_LIST_TYPE_DIRECT;
-      bool compute =
-         layout->CommandListType == D3D12_COMMAND_LIST_TYPE_COMPUTE;
-
-      /* D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON (value 30) was added after
-       * the DirectX-Headers version this build uses. Keep the public value
-       * here so callers built against the current header get the right
-       * queue/layout validation answer.
-       */
-      if ((unsigned)layout->Layout == 30) {
-         layout->Supported =
-            layout->CommandListType == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE ||
-            layout->CommandListType == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
-            layout->CommandListType == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE;
-         return S_OK;
-      }
-
-      switch (layout->Layout) {
-      case D3D12_BARRIER_LAYOUT_COMMON:
-      case D3D12_BARRIER_LAYOUT_UNDEFINED:
-         layout->Supported = TRUE;
-         break;
-
-      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON:
-      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
-      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS:
-      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
-      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE:
-      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
-      case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
-      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
-      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
-      case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
-      case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
-      case D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE:
-         layout->Supported = direct;
-         break;
-
-      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
-      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_GENERIC_READ:
-      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
-      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
-      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
-      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
-         layout->Supported = compute;
-         break;
-
-      case D3D12_BARRIER_LAYOUT_GENERIC_READ:
-      case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
-      case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
-      case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
-      case D3D12_BARRIER_LAYOUT_COPY_DEST:
-         layout->Supported = direct || compute;
-         break;
-
-      case D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_READ:
-      case D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_WRITE:
-         layout->Supported = layout->CommandListType ==
-                             D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS;
-         break;
-
-      case D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_READ:
-      case D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_WRITE:
-         layout->Supported = layout->CommandListType ==
-                             D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE;
-         break;
-
-      case D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ:
-      case D3D12_BARRIER_LAYOUT_VIDEO_DECODE_WRITE:
-         layout->Supported = layout->CommandListType ==
-                             D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE;
-         break;
-
-      default:
-         layout->Supported = FALSE;
-         break;
-      }
-
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT: {
-      D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT *va = data;
-      if (data_size != sizeof(*va))
-         return E_INVALIDARG;
-
-      va->MaxGPUVirtualAddressBitsPerResource =
-         d12_core_get_caps()->gpu_virtual_address_bits;
-      va->MaxGPUVirtualAddressBitsPerProcess =
-         d12_core_get_caps()->gpu_virtual_address_bits;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_ROOT_SIGNATURE: {
-      D3D12_FEATURE_DATA_ROOT_SIGNATURE *rs = data;
-      if (data_size != sizeof(*rs))
-         return E_INVALIDARG;
-
-      /*
-       * This is a REQUEST/REPLY field: the caller writes the highest
-       * version it can use and the runtime writes back the highest it
-       * supports, capped by that. d12_root_sig parses both 1.0 and 1.1
-       * blobs (the version-2 range offset is handled there), so 1.1 is
-       * honest.
-       */
-      if (rs->HighestVersion != D3D_ROOT_SIGNATURE_VERSION_1_0 &&
-          rs->HighestVersion != D3D_ROOT_SIGNATURE_VERSION_1_1) {
-         /* An unrecognised version is refused and the field is LEFT
-          * UNTOUCHED -- the suite checks that 0 and 0xdeadbeef both come
-          * back exactly as passed. Clamping them would look like a
-          * successful negotiation of a version the caller never named. */
-         return E_INVALIDARG;
-      }
-
-      /* Both 1.0 and 1.1 parse (d12_root_sig handles the version-2 range
-       * layout), so whatever the caller can use, we support. */
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_FORMAT_SUPPORT: {
-      D3D12_FEATURE_DATA_FORMAT_SUPPORT *support = data;
-      uint64_t native_support;
-      if (data_size != sizeof(*support))
-         return E_INVALIDARG;
-
-      support->Support1 = D3D12_FORMAT_SUPPORT1_NONE;
-      support->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
-
-      /* Processing the query successfully is distinct from supporting any
-       * particular use of the format.  Reserved/forward-compatible DXGI
-       * spellings are valid negative queries; truly out-of-range values are
-       * malformed. */
-      if ((UINT)support->Format > (UINT)DXGI_FORMAT_A4B4G4R4_UNORM ||
-          (support->Format > DXGI_FORMAT_B4G4R4A4_UNORM &&
-           support->Format < DXGI_FORMAT_P208))
-         return E_INVALIDARG;
-
-      native_support = d12_format_frontend_support(support->Format);
-#define D12_MAP_FORMAT1(frontend_bit, public_bit)                           \
-   do {                                                                      \
-      if (native_support & (frontend_bit))                                   \
-         support->Support1 =                                                 \
-            (D3D12_FORMAT_SUPPORT1)(support->Support1 | (public_bit));        \
-   } while (0)
-#define D12_MAP_FORMAT2(frontend_bit, public_bit)                           \
-   do {                                                                      \
-      if (native_support & (frontend_bit))                                   \
-         support->Support2 =                                                 \
-            (D3D12_FORMAT_SUPPORT2)(support->Support2 | (public_bit));        \
-   } while (0)
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_BUFFER,
-                      D3D12_FORMAT_SUPPORT1_BUFFER);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_VERTEX_BUFFER,
-                      D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_INDEX_BUFFER,
-                      D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_TEXTURE_1D,
-                      D3D12_FORMAT_SUPPORT1_TEXTURE1D);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_TEXTURE_2D,
-                      D3D12_FORMAT_SUPPORT1_TEXTURE2D);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_TEXTURE_3D,
-                      D3D12_FORMAT_SUPPORT1_TEXTURE3D);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_TEXTURE_CUBE,
-                      D3D12_FORMAT_SUPPORT1_TEXTURECUBE);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_SHADER_LOAD,
-                      D3D12_FORMAT_SUPPORT1_SHADER_LOAD);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_SHADER_SAMPLE,
-                      D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_SHADER_SAMPLE_COMPARISON,
-                      D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE_COMPARISON);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_MIP,
-                      D3D12_FORMAT_SUPPORT1_MIP);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_RENDER_TARGET,
-                      D3D12_FORMAT_SUPPORT1_RENDER_TARGET);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_BLENDABLE,
-                      D3D12_FORMAT_SUPPORT1_BLENDABLE);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_DEPTH_STENCIL,
-                      D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_MULTISAMPLE_RESOLVE,
-                      D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_MULTISAMPLE_RENDER_TARGET,
-                      D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RENDERTARGET);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_MULTISAMPLE_LOAD,
-                      D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_DISPLAY,
-                      D3D12_FORMAT_SUPPORT1_DISPLAY);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_CAST_WITHIN_BIT_LAYOUT,
-                      D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_TYPED_UAV,
-                      D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_SHADER_GATHER,
-                      D3D12_FORMAT_SUPPORT1_SHADER_GATHER);
-      D12_MAP_FORMAT1(D12_FRONTEND_FORMAT_SHADER_GATHER_COMPARISON,
-                      D3D12_FORMAT_SUPPORT1_SHADER_GATHER_COMPARISON);
-      D12_MAP_FORMAT2(D12_FRONTEND_FORMAT_UAV_TYPED_LOAD,
-                      D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD);
-      D12_MAP_FORMAT2(D12_FRONTEND_FORMAT_UAV_TYPED_STORE,
-                      D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE);
-#undef D12_MAP_FORMAT1
-#undef D12_MAP_FORMAT2
-
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_FORMAT_INFO: {
-      D3D12_FEATURE_DATA_FORMAT_INFO *info = data;
-      if (data_size != sizeof(*info))
-         return E_INVALIDARG;
-
-      /*
-       * PLANE COUNT. Every format is one plane except a depth format that
-       * also carries stencil -- on AGX those are physically separate
-       * allocations, which is precisely why d12_format_stencil_plane
-       * exists, so the answer is derived from the same source the resource
-       * path uses rather than from a second table.
-       *
-       * DXGI_FORMAT_UNKNOWN is legal here and answers 1; a format we cannot
-       * express at all is E_INVALIDARG, since a plane count for it would be
-       * an invention.
-       */
-      if (info->Format == DXGI_FORMAT_UNKNOWN) {
-         info->PlaneCount = 1;
-         return S_OK;
-      }
-
-      /* 66 is an unassigned hole in the DXGI enum -- not a format with no
-       * planes, but no format at all, so it is refused rather than
-       * answered. */
-      if (info->Format == (DXGI_FORMAT)66)
-         return E_INVALIDARG;
-
-      /*
-       * The PLANE-VIEW formats of a depth/stencil pair. These name one
-       * plane of a two-plane resource -- R32_FLOAT_X8X24_TYPELESS is its
-       * depth half, X32_TYPELESS_G8X24_UINT its stencil half -- so they
-       * describe a 2-plane format even though neither is itself a
-       * depth/stencil format this driver can allocate. They are not in
-       * d12_format_stencil_plane's table for exactly that reason, so they
-       * are listed here rather than by widening a table used for
-       * allocation.
-       */
-      switch (info->Format) {
-      case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
-      case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:
-      case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
-      case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
-         info->PlaneCount = 2;
-         return S_OK;
-      default:
-         break;
-      }
-
-      /*
-       * Everything else is single-plane, INCLUDING formats this driver
-       * cannot allocate. Plane count is a property of the FORMAT, not of
-       * our support for it -- refusing the query for a format we happen not
-       * to implement was the wrong model, and the suite caught it by asking
-       * about formats we do not map and expecting 1.
-       */
-      if (d12_format_stencil_plane(info->Format) != PIPE_FORMAT_NONE)
-         info->PlaneCount = 2;
-      else
-         info->PlaneCount = 1;
-
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS: {
-      D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS *levels = data;
-      if (data_size != sizeof(*levels))
-         return E_INVALIDARG;
-
-      levels->NumQualityLevels = 0;
-
-      /* A zero sample count is a malformed query.  One sample is the
-       * ordinary non-MSAA layout and therefore has one quality level for
-       * every DXGI format spelling, independent of image-format support.
-       * AGX and the resource path currently expose the hardware's 2x and
-       * 4x modes; larger powers of two remain conservatively unsupported.
-       */
-      if (!levels->SampleCount)
-         return E_FAIL;
-
-      if (levels->SampleCount == 1) {
-         levels->NumQualityLevels = 1;
-      } else if (levels->Format != DXGI_FORMAT_UNKNOWN &&
-                 (levels->SampleCount == 2 || levels->SampleCount == 4) &&
-                 (d12_format_to_pipe(levels->Format) != PIPE_FORMAT_NONE ||
-                  d12_format_depth_plane(levels->Format) != PIPE_FORMAT_NONE)) {
-         levels->NumQualityLevels = 1;
-      }
-
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_D3D12_OPTIONS5: {
-      /* d12_raytracing_core.h reproduces these so it can stay free of
-       * Windows headers. Pin them to the real values here. */
-      static_assert(D12_RT_SHADER_IDENTIFIER_SIZE ==
-                          D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES &&
-                       D12_RT_SHADER_RECORD_BYTE_ALIGNMENT ==
-                          D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT &&
-                       D12_RT_SHADER_TABLE_BYTE_ALIGNMENT ==
-                          D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT &&
-                       D12_RT_MAX_SHADER_RECORD_STRIDE ==
-                          D3D12_RAYTRACING_MAX_SHADER_RECORD_STRIDE &&
-                       D12_RT_AS_BYTE_ALIGNMENT ==
-                          D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT &&
-                       D12_RT_MAX_ATTRIBUTE_SIZE ==
-                          D3D12_RAYTRACING_MAX_ATTRIBUTE_SIZE_IN_BYTES &&
-                       D12_RT_MAX_DECLARABLE_RECURSION ==
-                          D3D12_RAYTRACING_MAX_DECLARABLE_TRACE_RECURSION_DEPTH,
-                    "DXR host ABI constants");
-
-      D3D12_FEATURE_DATA_D3D12_OPTIONS5 *opts = data;
-      if (data_size != sizeof(*opts))
-         return E_INVALIDARG;
-
-      memset(opts, 0, sizeof(*opts));
-      /*
-       * Stated rather than left absent. The DXIL translator implements
-       * ray queries as a traversal that visits nothing, which is the
-       * correct answer only while no acceleration structure can exist --
-       * and this is what guarantees that.
-       */
-      /*
-       * Ray tracing is not supported and will report so until a traversal
-       * path exists. The host-side half of DXR -- shader tables, shader
-       * identifiers, DispatchRays bounds, acceleration-structure sizing --
-       * is implemented and tested in d12_raytracing_core.h, because none of
-       * it depends on how rays are traced. What is missing is tracing them:
-       * Apple hardware ray tracing starts at G15 (M3), this driver runs on
-       * G13/G14 (M1/M2) which has none, Mesa supports no G15/G16 part, and
-       * on G17 (M5) the traversal core of the ISA is 96.8% ungrounded so no
-       * traversal code can be emitted.
-       */
-      opts->RaytracingTier = D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
-      opts->RenderPassesTier =
-         (D3D12_RENDER_PASS_TIER)caps->render_passes_tier;
-      opts->SRVOnlyTiledResourceTier3 = FALSE;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_ARCHITECTURE: {
-      D3D12_FEATURE_DATA_ARCHITECTURE *arch = data;
-      if (data_size != sizeof(*arch))
-         return E_INVALIDARG;
-      if (arch->NodeIndex != 0)
-         return E_INVALIDARG;
-
-      arch->TileBasedRenderer = caps->tile_based_deferred_renderer;
-      arch->UMA = caps->uma;
-      arch->CacheCoherentUMA = caps->cache_coherent_uma;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_ARCHITECTURE1: {
-      D3D12_FEATURE_DATA_ARCHITECTURE1 *arch = data;
-      if (data_size != sizeof(*arch))
-         return E_INVALIDARG;
-      if (arch->NodeIndex != 0)
-         return E_INVALIDARG;
-
-      arch->TileBasedRenderer = caps->tile_based_deferred_renderer;
-      arch->UMA = caps->uma;
-      arch->CacheCoherentUMA = caps->cache_coherent_uma;
-      arch->IsolatedMMU = caps->isolated_mmu;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_SHADER_MODEL: {
-      D3D12_FEATURE_DATA_SHADER_MODEL *sm = data;
-      if (data_size != sizeof(*sm))
-         return E_INVALIDARG;
-
-      /* The DXIL front end and AGX compiler preserve native 16-bit SM 6.2
-       * arithmetic. The query clamps DOWN to the shared renderer policy,
-       * per the D3D12 contract. */
-      const D3D_SHADER_MODEL maximum =
-         (D3D_SHADER_MODEL)caps->max_shader_model;
-      if (sm->HighestShaderModel > maximum)
-         sm->HighestShaderModel = maximum;
-      return S_OK;
-   }
-
-   case D3D12_FEATURE_FEATURE_LEVELS: {
-      D3D12_FEATURE_DATA_FEATURE_LEVELS *levels = data;
-      if (data_size != sizeof(*levels))
-         return E_INVALIDARG;
-      if (!levels->pFeatureLevelsRequested || !levels->NumFeatureLevels)
-         return E_INVALIDARG;
-
-      D3D_FEATURE_LEVEL best = (D3D_FEATURE_LEVEL)d12_core_choose_feature_level(
-         (const uint32_t *)levels->pFeatureLevelsRequested,
-         levels->NumFeatureLevels);
-
-      if (!best)
-         return E_INVALIDARG;
-
-      levels->MaxSupportedFeatureLevel = best;
-      return S_OK;
-   }
-
-   default:
-      mesa_logw("ID3D12Device::CheckFeatureSupport: feature %d not "
-                "implemented",
-                (int)feature);
-      return E_INVALIDARG;
-   }
+   return d12_core_caps_query(&d12_device_from_iface(iface)->caps,
+                              feature, data, data_size);
 }
 
 /*
@@ -1039,17 +350,19 @@ d12_embedded_pso_binding_map(const D3D12_SHADER_BYTECODE *const *stages,
  * descriptor key from the value fields, shader bytes, canonical root layout,
  * and the pointed-to input/SO declarations. This is validation metadata, not
  * executable code: a deserialized library recompiles a matching description
- * on first use and then caches that PSO object. */
+ * on first use (through the device shader cache when the stages were
+ * compiled in this process) and then caches that PSO object.
+ *
+ * Each piece is folded in as XXH64(piece, previous lane) so the key is a
+ * chain over the pieces in order; the former byte-at-a-time FNV loop over
+ * the whole bytecode was the largest remaining cost of a cached PSO. The
+ * serialized-library format version covers the key definition. */
 static void
 d12_library_key_add(struct d12_pipeline_library_key *key, const void *data,
                     size_t size)
 {
-   const uint8_t *bytes = data;
-   for (size_t i = 0; i < size; i++) {
-      key->lo = (key->lo ^ bytes[i]) * UINT64_C(1099511628211);
-      key->hi = (key->hi ^ (uint8_t)(bytes[i] + 0x9d)) *
-                UINT64_C(14029467366897019727);
-   }
+   key->lo = XXH64(data, size, key->lo);
+   key->hi = XXH64(data, size, key->hi ^ UINT64_C(0x9e3779b97f4a7c15));
 }
 
 static void
@@ -1170,6 +483,87 @@ d12_library_key_equal(struct d12_pipeline_library_key a,
                       struct d12_pipeline_library_key b)
 {
    return a.lo == b.lo && a.hi == b.hi;
+}
+
+/*
+ * The graphics counterpart of the compute cached-PSO blob: an identifying
+ * header, the five stage bytecodes and the canonical root layout, with the
+ * fixed-function state, input layout and stream-output declaration covered
+ * by the library key. Like the compute blob it is a correctness contract
+ * (exact byte comparison on CreateGraphicsPipelineState) rather than
+ * executable code; the device shader cache is what makes the recreation
+ * cheap in-process.
+ */
+struct d12_graphics_cache_header {
+   char magic[8];
+   uint32_t version;
+   uint32_t num_params;
+   uint32_t num_ranges;
+   uint32_t num_static_samplers;
+   uint32_t flags;
+   uint32_t stage_sizes[5]; /* VS, PS, DS, HS, GS */
+   uint64_t key_lo, key_hi;
+};
+
+static uint8_t *
+d12_graphics_cache_blob(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
+                        const struct d12_root_layout *layout,
+                        struct d12_pipeline_library_key key, size_t *size_out)
+{
+   const D3D12_SHADER_BYTECODE *stages[] = {
+      &desc->VS, &desc->PS, &desc->DS, &desc->HS, &desc->GS,
+   };
+   struct d12_graphics_cache_header header = {
+      .magic = {'D', '1', '2', 'A', 'G', 'X', 'G', 'P'},
+      .version = 1,
+      .num_params = layout->num_params,
+      .num_ranges = layout->num_ranges,
+      .num_static_samplers = layout->num_static_samplers,
+      .flags = layout->flags,
+      .key_lo = key.lo,
+      .key_hi = key.hi,
+   };
+
+   size_t size = sizeof(header);
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); i++) {
+      const size_t stage_size =
+         stages[i]->pShaderBytecode ? stages[i]->BytecodeLength : 0;
+      if (stage_size > UINT32_MAX || stage_size > SIZE_MAX / 2 - size)
+         return NULL;
+      header.stage_sizes[i] = stage_size;
+      size += stage_size;
+   }
+   if (layout->num_params > D12_MAX_ROOT_PARAMS)
+      return NULL;
+   const size_t params_size = layout->num_params * sizeof(layout->params[0]);
+   const size_t ranges_size = layout->num_ranges * sizeof(layout->ranges[0]);
+   const size_t samplers_size =
+      layout->num_static_samplers * sizeof(layout->static_samplers[0]);
+   size += params_size + ranges_size + samplers_size;
+
+   uint8_t *blob = malloc(size);
+   if (!blob)
+      return NULL;
+   uint8_t *cursor = blob;
+   memcpy(cursor, &header, sizeof(header));
+   cursor += sizeof(header);
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); i++) {
+      if (header.stage_sizes[i]) {
+         memcpy(cursor, stages[i]->pShaderBytecode, header.stage_sizes[i]);
+         cursor += header.stage_sizes[i];
+      }
+   }
+   memcpy(cursor, layout->params, params_size);
+   cursor += params_size;
+   if (ranges_size) {
+      memcpy(cursor, layout->ranges, ranges_size);
+      cursor += ranges_size;
+   }
+   if (samplers_size)
+      memcpy(cursor, layout->static_samplers, samplers_size);
+
+   *size_out = size;
+   return blob;
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -1342,13 +736,18 @@ d12_parse_pso_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
                      struct d12_pso_stream *out)
 {
    const uint8_t *p = (const uint8_t *)desc->pPipelineStateSubobjectStream;
-   const uint8_t *end = p + desc->SizeInBytes;
+   size_t remaining = desc->SizeInBytes;
    uint64_t seen = 0;
 
    memset(out, 0, sizeof(*out));
 
-   while (p + sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE) <= end) {
+   if (!d12_pso_stream_span_valid((uintptr_t)p, remaining))
+      return false;
+
+   while (remaining) {
       D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+      if (remaining < sizeof(type))
+         return false;
       memcpy(&type, p, sizeof(type));
 
       if ((unsigned)type >= 64 || (seen & BITFIELD64_BIT((unsigned)type))) {
@@ -1360,15 +759,15 @@ d12_parse_pso_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
 
       const uint8_t *body = NULL;
       size_t body_offset = 0;
-      size_t body_size;
+      size_t entry_size;
 
 #define BODY(ctype)                                                            \
    do {                                                                        \
-      body_offset = ALIGN_POT(sizeof(type), _Alignof(ctype));                  \
+      if (!d12_pso_stream_entry_size(remaining, sizeof(ctype),                 \
+                                      _Alignof(ctype), &body_offset,          \
+                                      &entry_size))                          \
+         return false;                                                       \
       body = p + body_offset;                                                  \
-      body_size = sizeof(ctype);                                               \
-      if (body > end || (size_t)(end - body) < body_size)                     \
-         return false;                                                         \
    } while (0)
 #define SUBOBJ(TY, field, ctype)                                                \
    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_##TY:                              \
@@ -1463,7 +862,8 @@ d12_parse_pso_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
 #undef SUBOBJ
 #undef BODY
 
-      p += ALIGN_POT(body_offset + body_size, sizeof(void *));
+      p += entry_size;
+      remaining -= entry_size;
    }
 
    return true;
@@ -1491,10 +891,12 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
 
    const struct d12_binding_map *map = d12_pso_binding_map(st.root_sig);
 
-   /* A compute stream may carry ignored graphics defaults, but a vertex
-    * shader selects the graphics pipeline class and cannot coexist with CS. */
-   if (st.cs && st.cs->pShaderBytecode &&
-       st.vs && st.vs->pShaderBytecode)
+   /* Graphics defaults can accompany CS, but VS, MS and CS select mutually
+    * exclusive pipeline classes. Empty bytecode does not select a class. */
+   const bool has_vs = st.vs && st.vs->pShaderBytecode && st.vs->BytecodeLength;
+   const bool has_ms = st.ms && st.ms->pShaderBytecode && st.ms->BytecodeLength;
+   const bool has_cs = st.cs && st.cs->pShaderBytecode && st.cs->BytecodeLength;
+   if (!d12_pso_stream_pipeline_class_valid(has_vs, has_ms, has_cs))
       return E_INVALIDARG;
 
    enum pipe_format rt_format = PIPE_FORMAT_NONE;
@@ -1514,33 +916,48 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
       return E_INVALIDARG;
 
    /* A compute pipeline expressed as a stream. */
-   if (st.cs && st.cs->pShaderBytecode) {
+   if (has_cs) {
       return d12_pipeline_state_create_compute(
          device, st.cs->pShaderBytecode, st.cs->BytecodeLength, map, riid,
          out);
    }
 
-   if (st.ms && st.ms->pShaderBytecode) {
-      if (!st.ps || !st.ps->pShaderBytecode) {
-         mesa_loge("CreatePipelineState: a mesh pipeline needs a pixel "
-                   "shader");
+   if (has_ms) {
+      /*
+       * A mesh pipeline may not carry any stage of the legacy geometry
+       * pipeline. D3D12 rejects the combination outright, and so must we:
+       * the mesh branch is taken before the vertex branch below, so
+       * without this an MS+VS stream would silently build a mesh pipeline
+       * and drop the vertex shader on the floor.
+       *
+       * A pixel shader is NOT required. The suite's own words: "On the
+       * most basic level, only a root signature and mesh shader are
+       * required". Input layout and primitive topology are ignored rather
+       * than refused, which is what the ordinary graphics path already
+       * does with them.
+       */
+      if ((st.vs && st.vs->pShaderBytecode) ||
+          (st.gs && st.gs->pShaderBytecode) ||
+          (st.hs && st.hs->pShaderBytecode) ||
+          (st.ds && st.ds->pShaderBytecode)) {
+         mesa_loge("CreatePipelineState: a mesh pipeline cannot also carry "
+                   "a vertex, geometry, hull or domain shader");
          return E_INVALIDARG;
       }
       return d12_pipeline_state_create_mesh(
          device, st.ms->pShaderBytecode, st.ms->BytecodeLength,
          st.as ? st.as->pShaderBytecode : NULL,
-         st.as ? st.as->BytecodeLength : 0, st.ps->pShaderBytecode,
-         st.ps->BytecodeLength, rt_format,
+         st.as ? st.as->BytecodeLength : 0,
+         st.ps ? st.ps->pShaderBytecode : NULL,
+         st.ps ? st.ps->BytecodeLength : 0, rt_format,
          st.have_rt_formats ? st.rt_formats.NumRenderTargets : 0,
          st.rt_formats.RTFormats, nr_samples, sample_mask, st.ds_state,
-         dsv_format,
-         st.raster,
-         st.blend, map, riid, out);
+         dsv_format, st.raster, st.blend, map, riid, out);
    }
 
-   if (st.vs && st.vs->pShaderBytecode) {
+   if (has_vs) {
       return d12_pipeline_state_create_graphics(
-         device, st.vs->pShaderBytecode, st.vs->BytecodeLength,
+         device, st.vs->pShaderBytecode, st.vs->BytecodeLength, false,
          st.ps ? st.ps->pShaderBytecode : NULL,
          st.ps ? st.ps->BytecodeLength : 0,
          st.gs ? st.gs->pShaderBytecode : NULL,
@@ -1551,15 +968,13 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
          st.ds ? st.ds->BytecodeLength : 0, rt_format,
          st.have_rt_formats ? st.rt_formats.NumRenderTargets : 0,
          st.rt_formats.RTFormats, nr_samples, sample_mask, st.ds_state,
-         dsv_format,
-         st.raster, st.raster ? (float)st.raster->DepthBias : 0.0f,
-         true, true,
-         st.ds_state ? st.ds_state->StencilReadMask : UINT8_MAX,
+         dsv_format, st.raster, st.raster ? (float)st.raster->DepthBias : 0.0f,
+         true, true, st.ds_state ? st.ds_state->StencilReadMask : UINT8_MAX,
          st.ds_state ? st.ds_state->StencilWriteMask : UINT8_MAX,
          st.ds_state ? st.ds_state->StencilReadMask : UINT8_MAX,
-         st.ds_state ? st.ds_state->StencilWriteMask : UINT8_MAX,
-         st.blend, st.input_layout, st.stream_output, st.primitive_topology,
-         st.strip_cut, st.flags, map, riid, out);
+         st.ds_state ? st.ds_state->StencilWriteMask : UINT8_MAX, st.blend,
+         st.input_layout, st.stream_output, st.primitive_topology, st.strip_cut,
+         st.flags, map, riid, out);
    }
 
    mesa_loge("CreatePipelineState: stream declares no usable pipeline");
@@ -1669,18 +1084,35 @@ d12_device_CreateGraphicsPipelineState(
       layout = &embedded_layout;
    }
 
+   /* The cached blob GetCachedBlob returns, and the contract a supplied
+    * CachedPSO has to meet byte for byte (same rule as compute). */
+   const struct d12_pipeline_library_key key =
+      d12_graphics_library_key(desc, layout);
+   size_t cache_size = 0;
+   uint8_t *cache = d12_graphics_cache_blob(desc, layout, key, &cache_size);
+   if (!cache) {
+      d12_root_layout_cleanup(&embedded_layout);
+      return E_OUTOFMEMORY;
+   }
+   if (desc->CachedPSO.CachedBlobSizeInBytes &&
+       (!desc->CachedPSO.pCachedBlob ||
+        desc->CachedPSO.CachedBlobSizeInBytes != cache_size ||
+        memcmp(desc->CachedPSO.pCachedBlob, cache, cache_size))) {
+      free(cache);
+      d12_root_layout_cleanup(&embedded_layout);
+      return E_INVALIDARG;
+   }
+
    HRESULT hr = d12_pipeline_state_create_graphics(
-      device, desc->VS.pShaderBytecode, desc->VS.BytecodeLength,
+      device, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, false,
       desc->PS.pShaderBytecode, desc->PS.BytecodeLength,
       desc->GS.pShaderBytecode, desc->GS.BytecodeLength,
       desc->HS.pShaderBytecode, desc->HS.BytecodeLength,
       desc->DS.pShaderBytecode, desc->DS.BytecodeLength, rt_format,
       desc->NumRenderTargets, desc->RTVFormats, desc->SampleDesc.Count,
-      desc->SampleMask, &desc->DepthStencilState,
-      dsv_format, &desc->RasterizerState,
-      (float)desc->RasterizerState.DepthBias,
-      true, true,
-      desc->DepthStencilState.StencilReadMask,
+      desc->SampleMask, &desc->DepthStencilState, dsv_format,
+      &desc->RasterizerState, (float)desc->RasterizerState.DepthBias, true,
+      true, desc->DepthStencilState.StencilReadMask,
       desc->DepthStencilState.StencilWriteMask,
       desc->DepthStencilState.StencilReadMask,
       desc->DepthStencilState.StencilWriteMask, &desc->BlendState,
@@ -1688,9 +1120,13 @@ d12_device_CreateGraphicsPipelineState(
       desc->IBStripCutValue, desc->Flags, map, riid, out);
    if (SUCCEEDED(hr) && out && *out) {
       struct d12_pipeline_state *pso = *(void **)out;
-      pso->library_key = d12_graphics_library_key(desc, layout);
+      pso->cached_blob = cache;
+      pso->cached_blob_size = cache_size;
+      pso->library_key = key;
       pso->library_key_valid = true;
+      cache = NULL;
    }
+   free(cache);
    d12_root_layout_cleanup(&embedded_layout);
    return hr;
 }
@@ -1738,25 +1174,9 @@ d12_device_CreateRootSignature(ID3D12Device2 *iface, UINT node_mask,
  * which is what a caller placing them consecutively in one heap needs.
  */
 /*
- * ABI NOTE, and this cost a segfault to find. Aggregates larger than a
- * register are returned through an explicit RetVal POINTER here, not by
- * value: the callee writes the struct through arg 1 and returns that same
- * pointer. That is widl's WIDL_EXPLICIT_AGGREGATE_RETURNS convention, which
- * the vkd3d test binary is built with (_agxtest/gen/vkd3d_d3d12.h defines
- * it) and which matches what MSVC does on Windows for a struct this size.
- *
- * The Windows branch of DirectX-Headers declares this explicit return
- * pointer ABI.  Accidentally compiling against its non-Windows branch
- * instead makes the caller read the by-value result as a pointer and
- * dereference it. With SizeInBytes = 0 in x0 that is a null dereference,
- * which is exactly how
- * test_resource_allocation_info crashed -- inside the TEST, one instruction
- * after the call (`ldp x3, x21, [x0]`), which is why it looked like a test
- * bug rather than ours.
- *
- * Only GetResourceAllocationInfo and GetCustomHeapProperties take this
- * form among the methods we implement; GetDesc and the descriptor-handle
- * getters really are by-value, which is why they have always worked.
+ * DirectX-Headers C interfaces use an explicit aggregate return pointer on
+ * Windows and a by-value return on Linux. Keep this method and its internal
+ * caller on the same platform ABI as the vtable, using the existing helpers.
  */
 /*
  * Resolve an abstract heap type into the concrete properties this adapter
@@ -1764,10 +1184,9 @@ d12_device_CreateRootSignature(ID3D12Device2 *iface, UINT node_mask,
  * pool, so the pool preference is always L0 and the only thing that varies is
  * how the CPU sees the memory.
  *
- * GPU_UPLOAD is write-combined because that is what it is for -- the CPU
- * streams into it and never reads back, and write-combining is what makes
- * those writes cheap.  UPLOAD is write-combined for the same reason;
- * READBACK is write-back because the CPU reads it.
+ * UPLOAD and GPU_UPLOAD follow the opened adapter's cache-coherent UMA
+ * contract: write-back on coherent UMA, write-combined otherwise. READBACK
+ * is write-back. This must agree with the public architecture query.
  */
 static D12_AGGREGATE_RETURN(D3D12_HEAP_PROPERTIES) STDMETHODCALLTYPE
 d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
@@ -1781,15 +1200,21 @@ d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
       .VisibleNodeMask = node_mask ? node_mask : 1,
    };
 
-   (void)iface;
+   const struct d12_core_caps *caps = &d12_device_from_iface(iface)->caps;
 
    switch (heap_type) {
    case D3D12_HEAP_TYPE_DEFAULT:
       props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
+      props.MemoryPoolPreference = caps->uma ? D3D12_MEMORY_POOL_L0
+                                            : D3D12_MEMORY_POOL_L1;
       break;
    case D3D12_HEAP_TYPE_UPLOAD:
    case D3D12_HEAP_TYPE_GPU_UPLOAD:
-      props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+      props.CPUPageProperty = caps->cache_coherent_uma
+         ? D3D12_CPU_PAGE_PROPERTY_WRITE_BACK
+         : D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+      if (heap_type == D3D12_HEAP_TYPE_GPU_UPLOAD && !caps->uma)
+         props.MemoryPoolPreference = D3D12_MEMORY_POOL_L1;
       break;
    case D3D12_HEAP_TYPE_READBACK:
       props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
@@ -1804,14 +1229,18 @@ d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
    D12_RETURN_AGGREGATE(props);
 }
 
-static D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE
-d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
-                                     D3D12_RESOURCE_ALLOCATION_INFO *ret,
-                                     UINT visible_mask, UINT count,
-                                     const D3D12_RESOURCE_DESC *descs)
+static D3D12_RESOURCE_ALLOCATION_INFO
+d12_device_compute_allocation_info(
+   ID3D12Device2 *iface, UINT visible_mask, UINT count,
+   const D3D12_RESOURCE_DESC *descs, D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
 {
    struct d12_device *device = d12_device_from_iface(iface);
-   D3D12_RESOURCE_ALLOCATION_INFO info = {0, 0};
+   D3D12_RESOURCE_ALLOCATION_INFO info = {
+      UINT64_MAX, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+   };
+
+   if (visible_mask > 1)
+      return info;
 
    /*
     * An EMPTY query is not an invalid one. D3D12 answers count == 0 with
@@ -1823,17 +1252,13 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
    if (!count) {
       info.SizeInBytes = 0;
       info.Alignment = 1;
-      if (ret)
-         *ret = info;
-      return ret;
+      return info;
    }
 
    if (!descs) {
       info.SizeInBytes = UINT64_MAX;
       info.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-      if (ret)
-         *ret = info;
-      return ret;
+      return info;
    }
 
    uint64_t total = 0;
@@ -1887,12 +1312,15 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
       if (d->Alignment != 0 && d->Alignment != align && !want_small) {
          info.SizeInBytes = UINT64_MAX;
          info.Alignment = align;
-         if (ret)
-            *ret = info;
-         return ret;
+         return info;
       }
 
       if (d->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+         if (!d->Width || d->Height != 1 || d->DepthOrArraySize != 1 ||
+             d->MipLevels != 1 || d->Format != DXGI_FORMAT_UNKNOWN ||
+             d->SampleDesc.Count != 1 || d->SampleDesc.Quality != 0 ||
+             d->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
+            return info;
          size = d->Width;
       } else {
          /* The resource constructor and this reflection query share one
@@ -1911,9 +1339,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
              * ALIGNMENT` even on the UINT64_MAX path. */
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            if (ret)
-               *ret = info;
-            return ret;
+            return info;
          }
 
          /* Block-aware size of ONE SLICE OF LEVEL 0; the small-placement
@@ -1946,21 +1372,42 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
          } else {
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            if (ret)
-               *ret = info;
-            return ret;
+            return info;
          }
       }
 
-      total = align64(total, align) + size;
-      max_align = MAX2(max_align, align);
+      uint64_t offset, padded_size;
+      if (!d12_allocation_append(size, align, &total, &max_align,
+                                 &offset, &padded_size)) {
+         info.Alignment = MAX2(max_align, align);
+         return info;
+      }
+      if (info1) {
+         info1[i] = (D3D12_RESOURCE_ALLOCATION_INFO1){
+            .Offset = offset,
+            .Alignment = align,
+            .SizeInBytes = padded_size,
+         };
+      }
    }
 
-   info.SizeInBytes = align64(total, max_align);
+   if (!d12_allocation_align(total, max_align, &info.SizeInBytes)) {
+      info.SizeInBytes = UINT64_MAX;
+      info.Alignment = max_align;
+      return info;
+   }
    info.Alignment = max_align;
-   if (ret)
-         *ret = info;
-      return ret;
+   return info;
+}
+
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device_GetResourceAllocationInfo(
+   ID3D12Device2 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC *descs)
+{
+   D3D12_RESOURCE_ALLOCATION_INFO info = d12_device_compute_allocation_info(
+      iface, visible_mask, count, descs, NULL);
+   D12_RETURN_AGGREGATE(info);
 }
 
 void
@@ -1977,8 +1424,13 @@ d12_device_get_resource_allocation_info_runtime(
    };
    if (!device || !desc)
       return;
+#ifdef _WIN32
    (void)d12_device_GetResourceAllocationInfo(
       (ID3D12Device2 *)&device->iface, info, visible_mask, 1, desc);
+#else
+   *info = d12_device_GetResourceAllocationInfo(
+      (ID3D12Device2 *)&device->iface, visible_mask, 1, desc);
+#endif
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -2006,12 +1458,9 @@ d12_device_CreatePlacedResource(ID3D12Device2 *iface, ID3D12Heap *heap_iface,
    if (out)
       *out = NULL;
 
-   if (!heap_iface || !desc)
+   if (!d12_heap_iface_is_ours(heap_iface) || !desc)
       return E_INVALIDARG;
 
-   /* Resource STATES are not tracked: this driver has no transition
-    * barriers to honour, and UMA gives no separate layouts to move
-    * between. The optimized clear value is a hint we do not need. */
    return d12_resource_create_placed(device, d12_memheap_from_iface(heap_iface),
                                      heap_offset, desc, 0, 0, initial_state,
                                      optimized_clear, riid, out);
@@ -2076,8 +1525,12 @@ struct d12_pipeline_library {
    uint32_t refcount;
    struct d12_private_data_store private_data;
    struct d12_device *device; /* holds a device ref */
+   /* Games store and load from several threads at once. The lock covers
+    * the entry array and the name index; pipeline creation on a load runs
+    * outside it and the first creation to finish is the one kept. */
+   simple_mtx_t lock;
    struct d12_pipeline_library_entry {
-      uint16_t *name;
+      uint16_t *name; /* owned, NUL-terminated */
       uint32_t name_length;
       bool is_compute;
       struct d12_pipeline_library_key key;
@@ -2085,7 +1538,29 @@ struct d12_pipeline_library {
    } *entries;
    uint32_t entry_count;
    uint32_t entry_capacity;
+   /* entry->name -> entry index, so lookups do not scan the array. */
+   struct hash_table *by_name;
 };
+
+static uint32_t
+d12_library_name_hash(const void *key)
+{
+   const uint16_t *name = key;
+   size_t length = 0;
+   while (name[length])
+      length++;
+   return _mesa_hash_data(name, length * sizeof(*name));
+}
+
+static bool
+d12_library_name_equal(const void *a_, const void *b_)
+{
+   const uint16_t *a = a_, *b = b_;
+   size_t i = 0;
+   while (a[i] && a[i] == b[i])
+      i++;
+   return a[i] == b[i];
+}
 
 struct d12_pipeline_library_blob_header {
    char magic[8];
@@ -2103,6 +1578,10 @@ struct d12_pipeline_library_blob_entry {
 static const char d12_pipeline_library_magic[8] = {
    'D', '1', '2', 'A', 'G', 'X', 'P', 'L'
 };
+
+/* Version 2: the entry key became the XXH64 chain in d12_library_key_add.
+ * Older blobs are refused, so the application creates a fresh library. */
+#define D12_PIPELINE_LIBRARY_BLOB_VERSION 2
 
 static inline struct d12_pipeline_library *
 d12_pipeline_library_from_iface(ID3D12PipelineLibrary *iface)
@@ -2158,6 +1637,9 @@ d12_pipeline_library_Release(ID3D12PipelineLibrary *iface)
          free(library->entries[i].name);
       }
       free(library->entries);
+      if (library->by_name)
+         _mesa_hash_table_destroy(library->by_name, NULL);
+      simple_mtx_destroy(&library->lock);
       d12_private_data_store_destroy(&library->private_data);
       d12_device_release(library->device);
       free(library);
@@ -2194,30 +1676,9 @@ d12_pipeline_library_StorePipeline(ID3D12PipelineLibrary *iface, LPCWSTR name,
    if (!name_length || name_length > UINT32_MAX)
       return E_INVALIDARG;
 
-   for (uint32_t i = 0; i < library->entry_count; i++) {
-      const struct d12_pipeline_library_entry *entry = &library->entries[i];
-      if (entry->name_length == name_length &&
-          !memcmp(entry->name, wire_name, name_length * sizeof(uint16_t)))
-         return E_INVALIDARG;
-   }
-
    struct d12_pipeline_state *pso = (struct d12_pipeline_state *)pipeline;
    if (pso->device != library->device || !pso->library_key_valid)
       return E_INVALIDARG;
-
-   if (library->entry_count == library->entry_capacity) {
-      uint32_t capacity = library->entry_capacity
-                             ? library->entry_capacity * 2
-                             : 4;
-      if (capacity < library->entry_capacity)
-         return E_OUTOFMEMORY;
-      void *entries = realloc(library->entries,
-                              capacity * sizeof(library->entries[0]));
-      if (!entries)
-         return E_OUTOFMEMORY;
-      library->entries = entries;
-      library->entry_capacity = capacity;
-   }
 
    uint16_t *owned_name = malloc((name_length + 1) * sizeof(uint16_t));
    if (!owned_name)
@@ -2225,38 +1686,147 @@ d12_pipeline_library_StorePipeline(ID3D12PipelineLibrary *iface, LPCWSTR name,
    memcpy(owned_name, wire_name, name_length * sizeof(uint16_t));
    owned_name[name_length] = 0;
 
-   struct d12_pipeline_library_entry *entry =
-      &library->entries[library->entry_count++];
-   *entry = (struct d12_pipeline_library_entry){
-      .name = owned_name,
-      .name_length = name_length,
-      .is_compute = pso->is_compute,
-      .key = pso->library_key,
-      .pipeline = pso,
-   };
+   simple_mtx_lock(&library->lock);
+   HRESULT hr = S_OK;
+   if (_mesa_hash_table_search(library->by_name, owned_name)) {
+      hr = E_INVALIDARG;
+      goto out;
+   }
+
+   if (library->entry_count == library->entry_capacity) {
+      uint32_t capacity = library->entry_capacity
+                             ? library->entry_capacity * 2
+                             : 4;
+      if (capacity < library->entry_capacity) {
+         hr = E_OUTOFMEMORY;
+         goto out;
+      }
+      void *entries = realloc(library->entries,
+                              capacity * sizeof(library->entries[0]));
+      if (!entries) {
+         hr = E_OUTOFMEMORY;
+         goto out;
+      }
+      library->entries = entries;
+      library->entry_capacity = capacity;
+   }
+
+   const uint32_t index = library->entry_count;
+   if (!_mesa_hash_table_insert(library->by_name, owned_name,
+                                (void *)(uintptr_t)index)) {
+      hr = E_OUTOFMEMORY;
+      goto out;
+   }
+
+   library->entries[library->entry_count++] =
+      (struct d12_pipeline_library_entry){
+         .name = owned_name,
+         .name_length = name_length,
+         .is_compute = pso->is_compute,
+         .key = pso->library_key,
+         .pipeline = pso,
+      };
+   owned_name = NULL;
    d12_pipeline_state_library_ref(pso);
+
+out:
+   simple_mtx_unlock(&library->lock);
+   free(owned_name);
+   return hr;
+}
+
+/* The index of the named entry, or UINT32_MAX; the lock is held. */
+static uint32_t
+d12_pipeline_library_find_locked(struct d12_pipeline_library *library,
+                                 LPCWSTR name)
+{
+   if (!name || !name[0])
+      return UINT32_MAX;
+
+   struct hash_entry *ent =
+      _mesa_hash_table_search(library->by_name, (const uint16_t *)name);
+   return ent ? (uint32_t)(uintptr_t)ent->data : UINT32_MAX;
+}
+
+/*
+ * Load: an entry that already holds its pipeline (stored in this library
+ * object, or loaded earlier) hands it back. A deserialized entry has only
+ * its validation key, so the description is created through the device,
+ * whose shader cache reuses the compiled stages when the same bytecode was
+ * compiled in this process. Creation runs outside the library lock; when
+ * two threads load the same name at once the first result is kept.
+ */
+static HRESULT
+d12_pipeline_library_load(struct d12_pipeline_library *library, LPCWSTR name,
+                          bool compute,
+                          const struct d12_pipeline_library_key *key,
+                          HRESULT (*create)(struct d12_pipeline_library *,
+                                            const void *, REFIID, void **),
+                          const void *desc, REFIID riid, void **out)
+{
+   simple_mtx_lock(&library->lock);
+   const uint32_t index = d12_pipeline_library_find_locked(library, name);
+   if (index == UINT32_MAX || library->entries[index].is_compute != compute ||
+       !d12_library_key_equal(*key, library->entries[index].key)) {
+      simple_mtx_unlock(&library->lock);
+      return E_INVALIDARG;
+   }
+   struct d12_pipeline_state *stored = library->entries[index].pipeline;
+   if (stored)
+      d12_pipeline_state_library_ref(stored);
+   simple_mtx_unlock(&library->lock);
+
+   if (stored) {
+      HRESULT hr = ID3D12PipelineState_QueryInterface(&stored->iface, riid,
+                                                      out);
+      d12_pipeline_state_library_unref(stored);
+      return hr;
+   }
+
+   HRESULT hr = create(library, desc, riid, out);
+   if (FAILED(hr))
+      return hr;
+
+   struct d12_pipeline_state *pso = *out;
+   if (!pso->library_key_valid || !d12_library_key_equal(pso->library_key, *key)) {
+      ID3D12PipelineState_Release(&pso->iface);
+      *out = NULL;
+      return E_INVALIDARG;
+   }
+
+   simple_mtx_lock(&library->lock);
+   struct d12_pipeline_library_entry *entry = &library->entries[index];
+   if (entry->pipeline) {
+      /* Another thread loaded this name meanwhile: return its pipeline. */
+      stored = entry->pipeline;
+      d12_pipeline_state_library_ref(stored);
+      simple_mtx_unlock(&library->lock);
+      ID3D12PipelineState_Release(&pso->iface);
+      hr = ID3D12PipelineState_QueryInterface(&stored->iface, riid, out);
+      d12_pipeline_state_library_unref(stored);
+      return hr;
+   }
+   entry->pipeline = pso;
+   d12_pipeline_state_library_ref(pso);
+   simple_mtx_unlock(&library->lock);
    return S_OK;
 }
 
-static struct d12_pipeline_library_entry *
-d12_pipeline_library_find(struct d12_pipeline_library *library, LPCWSTR name)
+static HRESULT
+d12_pipeline_library_create_graphics(struct d12_pipeline_library *library,
+                                     const void *desc, REFIID riid,
+                                     void **out)
 {
-   if (!name)
-      return NULL;
+   return ID3D12Device_CreateGraphicsPipelineState(&library->device->iface,
+                                                   desc, riid, out);
+}
 
-   const uint16_t *wire_name = (const uint16_t *)name;
-   size_t name_length = 0;
-   while (wire_name[name_length])
-      name_length++;
-
-   for (uint32_t i = 0; i < library->entry_count; i++) {
-      struct d12_pipeline_library_entry *entry = &library->entries[i];
-      if (entry->name_length == name_length &&
-          !memcmp(entry->name, wire_name, name_length * sizeof(uint16_t)))
-         return entry;
-   }
-
-   return NULL;
+static HRESULT
+d12_pipeline_library_create_compute(struct d12_pipeline_library *library,
+                                    const void *desc, REFIID riid, void **out)
+{
+   return ID3D12Device_CreateComputePipelineState(&library->device->iface,
+                                                  desc, riid, out);
 }
 
 static HRESULT
@@ -2331,36 +1901,15 @@ d12_pipeline_library_LoadGraphicsPipeline(
 
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
-   struct d12_pipeline_library_entry *entry =
-      d12_pipeline_library_find(library, name);
-   if (!entry || entry->is_compute)
-      return E_INVALIDARG;
 
    struct d12_pipeline_library_key key;
    HRESULT hr = d12_graphics_desc_library_key(desc, &key);
-   if (FAILED(hr) || !d12_library_key_equal(key, entry->key))
-      return E_INVALIDARG;
-
-   if (entry->pipeline)
-      return ID3D12PipelineState_QueryInterface(&entry->pipeline->iface,
-                                                riid, out);
-
-   hr = ID3D12Device_CreateGraphicsPipelineState(
-      &library->device->iface, desc, riid, out);
    if (FAILED(hr))
-      return hr;
-
-   struct d12_pipeline_state *pso = *out;
-   if (!pso->library_key_valid ||
-       !d12_library_key_equal(pso->library_key, entry->key)) {
-      ID3D12PipelineState_Release(&pso->iface);
-      *out = NULL;
       return E_INVALIDARG;
-   }
 
-   entry->pipeline = pso;
-   d12_pipeline_state_library_ref(pso);
-   return S_OK;
+   return d12_pipeline_library_load(library, name, false, &key,
+                                    d12_pipeline_library_create_graphics,
+                                    desc, riid, out);
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -2375,36 +1924,15 @@ d12_pipeline_library_LoadComputePipeline(
 
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
-   struct d12_pipeline_library_entry *entry =
-      d12_pipeline_library_find(library, name);
-   if (!entry || !entry->is_compute)
-      return E_INVALIDARG;
 
    struct d12_pipeline_library_key key;
    HRESULT hr = d12_compute_desc_library_key(desc, &key);
-   if (FAILED(hr) || !d12_library_key_equal(key, entry->key))
-      return E_INVALIDARG;
-
-   if (entry->pipeline)
-      return ID3D12PipelineState_QueryInterface(&entry->pipeline->iface,
-                                                riid, out);
-
-   hr = ID3D12Device_CreateComputePipelineState(
-      &library->device->iface, desc, riid, out);
    if (FAILED(hr))
-      return hr;
-
-   struct d12_pipeline_state *pso = *out;
-   if (!pso->library_key_valid ||
-       !d12_library_key_equal(pso->library_key, entry->key)) {
-      ID3D12PipelineState_Release(&pso->iface);
-      *out = NULL;
       return E_INVALIDARG;
-   }
 
-   entry->pipeline = pso;
-   d12_pipeline_state_library_ref(pso);
-   return S_OK;
+   return d12_pipeline_library_load(library, name, true, &key,
+                                    d12_pipeline_library_create_compute,
+                                    desc, riid, out);
 }
 
 static SIZE_T STDMETHODCALLTYPE
@@ -2413,14 +1941,18 @@ d12_pipeline_library_GetSerializedSize(ID3D12PipelineLibrary *iface)
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
    size_t size = sizeof(struct d12_pipeline_library_blob_header);
+   simple_mtx_lock(&library->lock);
    for (uint32_t i = 0; i < library->entry_count; i++) {
       const struct d12_pipeline_library_entry *entry = &library->entries[i];
       size_t name_size = (size_t)entry->name_length * sizeof(uint16_t);
       if (name_size > SIZE_MAX - size -
-                         sizeof(struct d12_pipeline_library_blob_entry))
-         return 0;
+                         sizeof(struct d12_pipeline_library_blob_entry)) {
+         size = 0;
+         break;
+      }
       size += sizeof(struct d12_pipeline_library_blob_entry) + name_size;
    }
+   simple_mtx_unlock(&library->lock);
    return size;
 }
 
@@ -2430,14 +1962,22 @@ d12_pipeline_library_Serialize(ID3D12PipelineLibrary *iface, void *data,
 {
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
-   size_t required = d12_pipeline_library_GetSerializedSize(iface);
    if (!data)
       return E_POINTER;
-   if (!required || size < required)
+
+   simple_mtx_lock(&library->lock);
+   size_t required = sizeof(struct d12_pipeline_library_blob_header);
+   for (uint32_t i = 0; i < library->entry_count; i++) {
+      required += sizeof(struct d12_pipeline_library_blob_entry) +
+                  (size_t)library->entries[i].name_length * sizeof(uint16_t);
+   }
+   if (size < required) {
+      simple_mtx_unlock(&library->lock);
       return E_INVALIDARG;
+   }
 
    struct d12_pipeline_library_blob_header header = {
-      .version = 1,
+      .version = D12_PIPELINE_LIBRARY_BLOB_VERSION,
       .entry_count = library->entry_count,
       .total_size = required,
    };
@@ -2459,6 +1999,7 @@ d12_pipeline_library_Serialize(ID3D12PipelineLibrary *iface, void *data,
       memcpy(cursor, entry->name, name_size);
       cursor += name_size;
    }
+   simple_mtx_unlock(&library->lock);
 
    return S_OK;
 }
@@ -2490,7 +2031,8 @@ d12_pipeline_library_deserialize(struct d12_pipeline_library *library,
    memcpy(&header, blob, sizeof(header));
    if (memcmp(header.magic, d12_pipeline_library_magic,
               sizeof(header.magic)) ||
-       header.version != 1 || header.total_size != blob_size ||
+       header.version != D12_PIPELINE_LIBRARY_BLOB_VERSION ||
+       header.total_size != blob_size ||
        header.entry_count > (blob_size - sizeof(header)) /
                                sizeof(struct d12_pipeline_library_blob_entry))
       return E_INVALIDARG;
@@ -2532,14 +2074,15 @@ d12_pipeline_library_deserialize(struct d12_pipeline_library *library,
       bool invalid = false;
       for (uint32_t j = 0; j < serialized.name_length; j++)
          invalid |= name[j] == 0;
-      for (uint32_t j = 0; j < library->entry_count; j++) {
-         const struct d12_pipeline_library_entry *old = &library->entries[j];
-         invalid |= old->name_length == serialized.name_length &&
-                    !memcmp(old->name, name, name_size);
-      }
+      invalid |= _mesa_hash_table_search(library->by_name, name) != NULL;
       if (invalid) {
          free(name);
          return E_INVALIDARG;
+      }
+      if (!_mesa_hash_table_insert(library->by_name, name,
+                                   (void *)(uintptr_t)library->entry_count)) {
+         free(name);
+         return E_OUTOFMEMORY;
       }
 
       library->entries[library->entry_count++] =
@@ -2581,9 +2124,12 @@ d12_device_CreatePipelineLibrary(ID3D12Device2 *iface,
    d12_device_add_ref(library->device);
    d12_private_data_store_init(&library->private_data,
                                (IUnknown *)&library->iface);
+   simple_mtx_init(&library->lock, mtx_plain);
+   library->by_name = _mesa_hash_table_create(NULL, d12_library_name_hash,
+                                              d12_library_name_equal);
 
-   HRESULT hr = S_OK;
-   if (library_blob)
+   HRESULT hr = library->by_name ? S_OK : E_OUTOFMEMORY;
+   if (SUCCEEDED(hr) && library_blob)
       hr = d12_pipeline_library_deserialize(library, library_blob,
                                             library_blob_length);
    if (FAILED(hr)) {
@@ -2711,7 +2257,8 @@ d12_device_CreateCommandSignature(ID3D12Device2 *iface,
       D3D12_INDIRECT_ARGUMENT_TYPE type = desc->pArgumentDescs[i].Type;
       bool terminal = type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
                       type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ||
-                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH ||
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
       if (terminal) {
          if (saw_terminal || i + 1 != desc->NumArgumentDescs)
             return E_INVALIDARG;
@@ -2738,13 +2285,18 @@ d12_device_CreateCommandSignature(ID3D12Device2 *iface,
 
       bool terminal = type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
                       type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ||
-                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH ||
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
 
       if (terminal) {
+         /* DISPATCH_MESH's argument record is three UINTs, the same shape
+          * and size as DISPATCH's, so it shares that arm. */
          packed_size += type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW
                            ? sizeof(D3D12_DRAW_ARGUMENTS)
                         : type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
                            ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
+                        : type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH
+                           ? sizeof(D3D12_DISPATCH_MESH_ARGUMENTS)
                            : sizeof(D3D12_DISPATCH_ARGUMENTS);
       } else if (type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT) {
          if (!rs || !argument->Constant.Num32BitValuesToSet ||
@@ -3519,7 +3071,7 @@ static bool
 d12_fill_buffer_descriptor(struct d12_descriptor *slot,
                            struct d12_resource *res, uint64_t first_element,
                            uint32_t num_elements, uint32_t stride_B,
-                           const char *what)
+                           const char *what, bool typed)
 {
    if (res->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
       mesa_loge("%s: only buffer views are supported so far", what);
@@ -3528,12 +3080,21 @@ d12_fill_buffer_descriptor(struct d12_descriptor *slot,
       return false;
    }
 
-   if (!d12_buffer_view_element_count_valid(num_elements)) {
-      mesa_loge("%s: NumElements exceeds the D3D12 buffer-view limit", what);
+   const uint32_t typed_limit =
+      d12_native_descriptor_legacy_shapes(
+         agx_chip_descriptor_generation(res->device->dev.chip))
+         ? D12_LEGACY_TYPED_BUFFER_MAX_ELEMENTS
+         : D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS;
+   if (typed && num_elements > typed_limit) {
+      mesa_loge("%s: typed view exceeds the qualified native element extent", what);
       slot->kind = D12_DESC_NONE;
       slot->resource = NULL;
       return false;
    }
+
+   /* Raw/structured counts use the complete UINT field. The SDK's REQ
+    * texel count is not a universal ceiling on these byte-addressed views;
+    * validate their complete byte interval below. */
 
    stride_B = MAX2(stride_B, 1);
    if (stride_B > UINT16_MAX) {
@@ -3559,21 +3120,17 @@ d12_fill_buffer_descriptor(struct d12_descriptor *slot,
    return true;
 }
 
-static void STDMETHODCALLTYPE
-d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
-                                    ID3D12Resource *resource,
-                                    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
-                                    D3D12_CPU_DESCRIPTOR_HANDLE dest)
+/*
+ * View creation builds the descriptor in a zeroed local and commits it to
+ * the heap slot once, so the native mirror is refreshed exactly once per
+ * call. Every early return below leaves the local zeroed, which commits a
+ * D12_DESC_NONE descriptor for the rejected view.
+ */
+static void
+d12_device_fill_srv(struct d12_device *device, ID3D12Resource *resource,
+                    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
+                    struct d12_descriptor *slot)
 {
-   struct d12_device *device = d12_device_from_iface(iface);
-   struct d12_descriptor *slot = (struct d12_descriptor *)dest.ptr;
-
-   if (!slot)
-      return;
-
-   memset(slot, 0, sizeof(*slot));
-   d12_descriptor_heap_update_slot(device, slot);
-
    if (!resource) {
       /*
        * A null descriptor must READ AS ZERO, not fault. Leaving address 0
@@ -3827,7 +3384,6 @@ d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
       slot->texture_srv_layers = view_layers;
       slot->texture_srv_dimension = view_dim;
       slot->texture_plane = plane;
-      d12_descriptor_heap_update_slot(device, slot);
       return;
    }
 
@@ -3865,7 +3421,9 @@ d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
       stride = 4;
 
    if (d12_fill_buffer_descriptor(slot, res, first, count, stride,
-                                  "CreateShaderResourceView")) {
+                                  "CreateShaderResourceView",
+                                  !desc || (!(desc->Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) &&
+                                             !desc->Buffer.StructureByteStride))) {
       if (res->reserved)
          slot->address += device->dev.sparse_ro_offset;
       slot->kind = D12_DESC_SRV;
@@ -3876,15 +3434,14 @@ d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
          : desc && desc->Buffer.StructureByteStride
             ? D12_BUFFER_VIEW_STRUCTURED
             : D12_BUFFER_VIEW_TYPED;
-      d12_descriptor_heap_update_slot(device, slot);
    }
 }
 
 static void STDMETHODCALLTYPE
-d12_device_CreateUnorderedAccessView(
-   ID3D12Device2 *iface, ID3D12Resource *resource, ID3D12Resource *counter,
-   const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
-   D3D12_CPU_DESCRIPTOR_HANDLE dest)
+d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
+                                    ID3D12Resource *resource,
+                                    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
+                                    D3D12_CPU_DESCRIPTOR_HANDLE dest)
 {
    struct d12_device *device = d12_device_from_iface(iface);
    struct d12_descriptor *slot = (struct d12_descriptor *)dest.ptr;
@@ -3892,9 +3449,18 @@ d12_device_CreateUnorderedAccessView(
    if (!slot)
       return;
 
-   memset(slot, 0, sizeof(*slot));
+   struct d12_descriptor view = {0};
+   d12_device_fill_srv(device, resource, desc, &view);
+   *slot = view;
    d12_descriptor_heap_update_slot(device, slot);
+}
 
+static void
+d12_device_fill_uav(struct d12_device *device, ID3D12Resource *resource,
+                    ID3D12Resource *counter,
+                    const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
+                    struct d12_descriptor *slot)
+{
    if (!resource) {
       /* Same reasoning as the null SRV above.  Leave counter_address zero:
        * command recording replaces absent counters with a distinct mapped
@@ -4022,7 +3588,6 @@ d12_device_CreateUnorderedAccessView(
                       (unsigned long long)end,
                       res->bo ? res->bo->size : 0);
             memset(slot, 0, sizeof(*slot));
-            d12_descriptor_heap_update_slot(device, slot);
             return;
          }
       }
@@ -4031,7 +3596,6 @@ d12_device_CreateUnorderedAccessView(
       slot->format = view_format;
       slot->kind = D12_DESC_UAV;
       slot->texture_uav_dimension = dimension;
-      d12_descriptor_heap_update_slot(device, slot);
       return;
    }
 
@@ -4085,7 +3649,9 @@ d12_device_CreateUnorderedAccessView(
    }
 
    if (d12_fill_buffer_descriptor(slot, res, first, count, stride,
-                                  "CreateUnorderedAccessView")) {
+                                  "CreateUnorderedAccessView",
+                                  !desc || (!(desc->Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) &&
+                                             !desc->Buffer.StructureByteStride))) {
       slot->kind = D12_DESC_UAV;
       slot->format = desc ? desc->Format : DXGI_FORMAT_UNKNOWN;
       slot->buffer_kind =
@@ -4094,8 +3660,25 @@ d12_device_CreateUnorderedAccessView(
          : desc && desc->Buffer.StructureByteStride
             ? D12_BUFFER_VIEW_STRUCTURED
             : D12_BUFFER_VIEW_TYPED;
-      d12_descriptor_heap_update_slot(device, slot);
    }
+}
+
+static void STDMETHODCALLTYPE
+d12_device_CreateUnorderedAccessView(
+   ID3D12Device2 *iface, ID3D12Resource *resource, ID3D12Resource *counter,
+   const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
+   D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   struct d12_device *device = d12_device_from_iface(iface);
+   struct d12_descriptor *slot = (struct d12_descriptor *)dest.ptr;
+
+   if (!slot)
+      return;
+
+   struct d12_descriptor view = {0};
+   d12_device_fill_uav(device, resource, counter, desc, &view);
+   *slot = view;
+   d12_descriptor_heap_update_slot(device, slot);
 }
 
 static void STDMETHODCALLTYPE
@@ -4109,8 +3692,7 @@ d12_device_CreateConstantBufferView(
    if (!slot)
       return;
 
-   memset(slot, 0, sizeof(*slot));
-   d12_descriptor_heap_update_slot(device, slot);
+   struct d12_descriptor view = {0};
 
    if (!desc || !desc->BufferLocation) {
       /* Null CBVs need the same mapped read-as-zero backing as null SRVs
@@ -4119,21 +3701,21 @@ d12_device_CreateConstantBufferView(
        * load (or a type-mismatched null descriptor load) into an unmapped
        * GPU read instead of returning zero.
        */
-      slot->address = device->null_va;
-      slot->size_B = D12_NULL_REGION_SIZE;
-      d12_descriptor_heap_update_slot(device, slot);
-      return;
+      view.address = device->null_va;
+      view.size_B = D12_NULL_REGION_SIZE;
+   } else {
+      /* A CBV names a GPU address directly, but retain a reserved-buffer
+       * owner when one exists. The read-only sparse alias supplies D3D12's
+       * zero-fill behavior for unmapped tiles, while the resource pointer
+       * publishes its residency map and current backing allocations to the
+       * exact read set. */
+      view.kind = D12_DESC_CBV;
+      view.address = d12_sparse_resolve_cbv_address(
+         device, desc->BufferLocation, &view.resource);
+      view.size_B = desc->SizeInBytes;
    }
 
-   /* A CBV names a GPU address directly, but retain a reserved-buffer owner
-    * when one exists. The read-only sparse alias supplies D3D12's zero-fill
-    * behavior for unmapped tiles, while the resource pointer publishes its
-    * residency map and current backing allocations to the exact read set. */
-   slot->kind = D12_DESC_CBV;
-   slot->resource =
-      d12_sparse_buffer_for_address(device, desc->BufferLocation);
-   slot->address = d12_sparse_read_address(device, desc->BufferLocation);
-   slot->size_B = desc->SizeInBytes;
+   *slot = view;
    d12_descriptor_heap_update_slot(device, slot);
 }
 
@@ -4227,11 +3809,9 @@ d12_device_CopyDescriptorsSimple(
    /* D3D12 forbids overlap between source and destination ranges. */
    memcpy((void *)(uintptr_t)dest.ptr, (const void *)(uintptr_t)src.ptr,
           (size_t)count * stride);
-   for (UINT i = 0; i < count; i++) {
-      struct d12_descriptor *slot =
-         (struct d12_descriptor *)(uintptr_t)(dest.ptr + (SIZE_T)i * stride);
-      d12_descriptor_heap_update_slot(device, slot);
-   }
+   d12_descriptor_heap_copy_range(
+      device, (struct d12_descriptor *)(uintptr_t)dest.ptr,
+      (const struct d12_descriptor *)(uintptr_t)src.ptr, count);
 }
 
 void
@@ -4291,11 +3871,9 @@ d12_device_CopyDescriptors(
          return;
 
       memcpy((void *)dest, (const void *)src, (size_t)count * stride);
-      for (UINT i = 0; i < count; i++) {
-         struct d12_descriptor *slot =
-            (struct d12_descriptor *)(dest + (uintptr_t)i * stride);
-         d12_descriptor_heap_update_slot(device, slot);
-      }
+      d12_descriptor_heap_copy_range(device, (struct d12_descriptor *)dest,
+                                     (const struct d12_descriptor *)src,
+                                     count);
       dest_offset += count;
       src_offset += count;
    }
@@ -4667,32 +4245,470 @@ d12_device_CreateQueryHeap(ID3D12Device2 *iface,
    return d12_query_heap_create(device, desc, riid, out);
 }
 
+/* ID3D12Device3..15 methods. The device object is one pointer for every
+ * interface version, so these see the same `iface` as the Device2 methods. */
 static struct d12_device *
 d12_device_from_iface15(ID3D12Device15 *iface)
 {
-   return container_of(iface, struct d12_device, iface15);
+   return d12_device_from_iface((ID3D12Device2 *)iface);
+}
+
+static inline ID3D12Device2 *
+d12_device2(ID3D12Device15 *iface)
+{
+   return (ID3D12Device2 *)iface;
+}
+
+/* D3D12_RESOURCE_DESC1 is D3D12_RESOURCE_DESC plus a sampler-feedback mip
+ * region, which this driver does not implement; the common prefix is what
+ * every resource path consumes. */
+static D3D12_RESOURCE_DESC
+d12_resource_desc_from_desc1(const D3D12_RESOURCE_DESC1 *desc1)
+{
+   D3D12_RESOURCE_DESC desc = {
+      .Dimension = desc1->Dimension,
+      .Alignment = desc1->Alignment,
+      .Width = desc1->Width,
+      .Height = desc1->Height,
+      .DepthOrArraySize = desc1->DepthOrArraySize,
+      .MipLevels = desc1->MipLevels,
+      .Format = desc1->Format,
+      .SampleDesc = desc1->SampleDesc,
+      .Layout = desc1->Layout,
+      .Flags = desc1->Flags,
+   };
+   return desc;
+}
+
+static bool
+d12_resource_desc1_supported(const D3D12_RESOURCE_DESC1 *desc1)
+{
+   return desc1 && desc1->SamplerFeedbackMipRegion.Width == 0 &&
+          desc1->SamplerFeedbackMipRegion.Height == 0 &&
+          desc1->SamplerFeedbackMipRegion.Depth == 0;
+}
+
+/* GetResourceAllocationInfo1/2/3 add a per-resource breakdown of the
+ * aggregate answer: each resource's offset inside one heap sized by the
+ * aggregate, laid out in order with each resource's own alignment. */
+static D3D12_RESOURCE_ALLOCATION_INFO
+d12_device_allocation_info1(ID3D12Device2 *iface, UINT visible_mask,
+                            UINT count, const D3D12_RESOURCE_DESC *descs,
+                            D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
+{
+   return d12_device_compute_allocation_info(iface, visible_mask, count,
+                                             descs, info1);
 }
 
 static HRESULT STDMETHODCALLTYPE
-d12_device15_QueryInterface(ID3D12Device15 *iface, REFIID riid, void **out)
+d12_device3_EnqueueMakeResident(ID3D12Device15 *iface,
+                                D3D12_RESIDENCY_FLAGS flags, UINT count,
+                                ID3D12Pageable *const *objects,
+                                ID3D12Fence *fence, UINT64 fence_value)
+{
+   /* UMA residency is immediate; the fence may be signalled right away. */
+   HRESULT hr = d12_device_MakeResident(d12_device2(iface), count, objects);
+   if (SUCCEEDED(hr) && fence)
+      hr = ID3D12Fence_Signal(fence, fence_value);
+   return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device4_CreateCommandList1(ID3D12Device15 *iface, UINT node_mask,
+                               D3D12_COMMAND_LIST_TYPE type,
+                               D3D12_COMMAND_LIST_FLAGS flags, REFIID riid,
+                               void **out)
 {
    struct d12_device *device = d12_device_from_iface15(iface);
-   return d12_device_QueryInterface((ID3D12Device2 *)&device->iface,
-                                    riid, out);
+   if (out)
+      *out = NULL;
+   if (node_mask > 1 || flags != D3D12_COMMAND_LIST_FLAG_NONE)
+      return E_INVALIDARG;
+   return d12_cmd_list_create(device, type, NULL, NULL, riid, out);
 }
 
-static ULONG STDMETHODCALLTYPE
-d12_device15_AddRef(ID3D12Device15 *iface)
+static HRESULT STDMETHODCALLTYPE
+d12_device4_CreateCommittedResource1(
+   ID3D12Device15 *iface, const D3D12_HEAP_PROPERTIES *heap_props,
+   D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC *desc,
+   D3D12_RESOURCE_STATES initial_state, const D3D12_CLEAR_VALUE *clear_value,
+   ID3D12ProtectedResourceSession *session, REFIID riid, void **out)
 {
-   return d12_device_AddRef(
-      (ID3D12Device2 *)&d12_device_from_iface15(iface)->iface);
+   if (out)
+      *out = NULL;
+   if (session)
+      return E_INVALIDARG;
+   return d12_device_CreateCommittedResource(d12_device2(iface), heap_props,
+                                             heap_flags, desc, initial_state,
+                                             clear_value, riid, out);
 }
 
-static ULONG STDMETHODCALLTYPE
-d12_device15_Release(ID3D12Device15 *iface)
+static HRESULT STDMETHODCALLTYPE
+d12_device4_CreateHeap1(ID3D12Device15 *iface, const D3D12_HEAP_DESC *desc,
+                        ID3D12ProtectedResourceSession *session, REFIID riid,
+                        void **out)
 {
-   return d12_device_Release(
-      (ID3D12Device2 *)&d12_device_from_iface15(iface)->iface);
+   if (out)
+      *out = NULL;
+   if (session)
+      return E_INVALIDARG;
+   return d12_device_CreateHeap(d12_device2(iface), desc, riid, out);
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device4_CreateReservedResource1(ID3D12Device15 *iface,
+                                    const D3D12_RESOURCE_DESC *desc,
+                                    D3D12_RESOURCE_STATES initial_state,
+                                    const D3D12_CLEAR_VALUE *clear_value,
+                                    ID3D12ProtectedResourceSession *session,
+                                    REFIID riid, void **out)
+{
+   if (out)
+      *out = NULL;
+   if (session)
+      return E_INVALIDARG;
+   return d12_device_CreateReservedResource(d12_device2(iface), desc,
+                                            initial_state, clear_value, riid,
+                                            out);
+}
+
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device4_GetResourceAllocationInfo1(
+   ID3D12Device15 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC *descs,
+   D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
+{
+   D3D12_RESOURCE_ALLOCATION_INFO info = d12_device_allocation_info1(
+      d12_device2(iface), visible_mask, count, descs, info1);
+#ifdef _WIN32
+   *ret = info;
+   return ret;
+#else
+   return info;
+#endif
+}
+
+static void STDMETHODCALLTYPE
+d12_device5_RemoveDevice(ID3D12Device15 *iface)
+{
+   d12_device_mark_removed(d12_device_from_iface15(iface),
+                           DXGI_ERROR_DEVICE_REMOVED);
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device5_EnumerateMetaCommands(ID3D12Device15 *iface, UINT *count,
+                                  D3D12_META_COMMAND_DESC *descs)
+{
+   if (!count)
+      return E_INVALIDARG;
+   *count = 0;
+   return S_OK;
+}
+
+static D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS STDMETHODCALLTYPE
+d12_device5_CheckDriverMatchingIdentifier(
+   ID3D12Device15 *iface, D3D12_SERIALIZED_DATA_TYPE type,
+   const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER *identifier)
+{
+   return D3D12_DRIVER_MATCHING_IDENTIFIER_UNSUPPORTED_TYPE;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device6_SetBackgroundProcessingMode(ID3D12Device15 *iface,
+                                        D3D12_BACKGROUND_PROCESSING_MODE mode,
+                                        D3D12_MEASUREMENTS_ACTION action,
+                                        HANDLE event, BOOL *more_measurements)
+{
+   /* No background shader recompilation exists; nothing to measure. */
+   if (more_measurements)
+      *more_measurements = FALSE;
+   return S_OK;
+}
+
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device8_GetResourceAllocationInfo2(
+   ID3D12Device15 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC1 *descs1,
+   D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
+{
+   D3D12_RESOURCE_ALLOCATION_INFO info = {
+      UINT64_MAX, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+   };
+   D3D12_RESOURCE_DESC *descs =
+      count ? calloc(count, sizeof(*descs)) : NULL;
+   if (!count || (descs && descs1)) {
+      bool ok = true;
+      for (UINT i = 0; i < count; i++) {
+         ok = ok && d12_resource_desc1_supported(&descs1[i]);
+         if (ok)
+            descs[i] = d12_resource_desc_from_desc1(&descs1[i]);
+      }
+      if (ok)
+         info = d12_device_allocation_info1(d12_device2(iface), visible_mask,
+                                            count, descs, info1);
+   }
+   free(descs);
+#ifdef _WIN32
+   *ret = info;
+   return ret;
+#else
+   return info;
+#endif
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device8_CreateCommittedResource2(
+   ID3D12Device15 *iface, const D3D12_HEAP_PROPERTIES *heap_props,
+   D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC1 *desc1,
+   D3D12_RESOURCE_STATES initial_state, const D3D12_CLEAR_VALUE *clear_value,
+   ID3D12ProtectedResourceSession *session, REFIID riid, void **out)
+{
+   if (out)
+      *out = NULL;
+   if (session || !d12_resource_desc1_supported(desc1))
+      return E_INVALIDARG;
+   D3D12_RESOURCE_DESC desc = d12_resource_desc_from_desc1(desc1);
+   return d12_device_CreateCommittedResource(d12_device2(iface), heap_props,
+                                             heap_flags, &desc, initial_state,
+                                             clear_value, riid, out);
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device8_CreatePlacedResource1(ID3D12Device15 *iface, ID3D12Heap *heap,
+                                  UINT64 heap_offset,
+                                  const D3D12_RESOURCE_DESC1 *desc1,
+                                  D3D12_RESOURCE_STATES initial_state,
+                                  const D3D12_CLEAR_VALUE *clear_value,
+                                  REFIID riid, void **out)
+{
+   if (out)
+      *out = NULL;
+   if (!d12_resource_desc1_supported(desc1))
+      return E_INVALIDARG;
+   D3D12_RESOURCE_DESC desc = d12_resource_desc_from_desc1(desc1);
+   return d12_device_CreatePlacedResource(d12_device2(iface), heap,
+                                          heap_offset, &desc, initial_state,
+                                          clear_value, riid, out);
+}
+
+static void STDMETHODCALLTYPE
+d12_device8_GetCopyableFootprints1(
+   ID3D12Device15 *iface, const D3D12_RESOURCE_DESC1 *desc1,
+   UINT first_subresource, UINT num_subresources, UINT64 base_offset,
+   D3D12_PLACED_SUBRESOURCE_FOOTPRINT *layouts, UINT *num_rows,
+   UINT64 *row_size_bytes, UINT64 *total_bytes)
+{
+   if (!desc1) {
+      if (total_bytes)
+         *total_bytes = UINT64_MAX;
+      return;
+   }
+   D3D12_RESOURCE_DESC desc = d12_resource_desc_from_desc1(desc1);
+   d12_device_GetCopyableFootprints(d12_device2(iface), &desc,
+                                    first_subresource, num_subresources,
+                                    base_offset, layouts, num_rows,
+                                    row_size_bytes, total_bytes);
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device9_ShaderCacheControl(ID3D12Device15 *iface,
+                               D3D12_SHADER_CACHE_KIND_FLAGS kinds,
+                               D3D12_SHADER_CACHE_CONTROL_FLAGS control)
+{
+   /* There is no persistent shader cache yet; every control is a no-op. */
+   return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device9_CreateCommandQueue1(ID3D12Device15 *iface,
+                                const D3D12_COMMAND_QUEUE_DESC *desc,
+                                REFIID creator, REFIID riid, void **out)
+{
+   /* The creator ID only tags the queue for tooling. */
+   return d12_device_CreateCommandQueue(d12_device2(iface), desc, riid, out);
+}
+
+/* Enhanced-barrier creation paths: resource states are not tracked, so the
+ * initial layout only needs to be a legal one and castable formats, which
+ * typeless-equivalent views already permit on UMA, are recorded nowhere. */
+static HRESULT STDMETHODCALLTYPE
+d12_device10_CreateCommittedResource3(
+   ID3D12Device15 *iface, const D3D12_HEAP_PROPERTIES *heap_props,
+   D3D12_HEAP_FLAGS heap_flags, const D3D12_RESOURCE_DESC1 *desc1,
+   D3D12_BARRIER_LAYOUT initial_layout, const D3D12_CLEAR_VALUE *clear_value,
+   ID3D12ProtectedResourceSession *session, UINT32 num_castable_formats,
+   const DXGI_FORMAT *castable_formats, REFIID riid, void **out)
+{
+   if (out)
+      *out = NULL;
+   if (session || !d12_resource_desc1_supported(desc1) ||
+       (num_castable_formats && !castable_formats))
+      return E_INVALIDARG;
+   D3D12_RESOURCE_DESC desc = d12_resource_desc_from_desc1(desc1);
+   return d12_device_CreateCommittedResource(
+      d12_device2(iface), heap_props, heap_flags, &desc,
+      D3D12_RESOURCE_STATE_COMMON, clear_value, riid, out);
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device10_CreatePlacedResource2(
+   ID3D12Device15 *iface, ID3D12Heap *heap, UINT64 heap_offset,
+   const D3D12_RESOURCE_DESC1 *desc1, D3D12_BARRIER_LAYOUT initial_layout,
+   const D3D12_CLEAR_VALUE *clear_value, UINT32 num_castable_formats,
+   const DXGI_FORMAT *castable_formats, REFIID riid, void **out)
+{
+   if (out)
+      *out = NULL;
+   if (!d12_resource_desc1_supported(desc1) ||
+       (num_castable_formats && !castable_formats))
+      return E_INVALIDARG;
+   D3D12_RESOURCE_DESC desc = d12_resource_desc_from_desc1(desc1);
+   return d12_device_CreatePlacedResource(d12_device2(iface), heap,
+                                          heap_offset, &desc,
+                                          D3D12_RESOURCE_STATE_COMMON,
+                                          clear_value, riid, out);
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device10_CreateReservedResource2(
+   ID3D12Device15 *iface, const D3D12_RESOURCE_DESC *desc,
+   D3D12_BARRIER_LAYOUT initial_layout, const D3D12_CLEAR_VALUE *clear_value,
+   ID3D12ProtectedResourceSession *session, UINT32 num_castable_formats,
+   const DXGI_FORMAT *castable_formats, REFIID riid, void **out)
+{
+   if (out)
+      *out = NULL;
+   if (session || (num_castable_formats && !castable_formats))
+      return E_INVALIDARG;
+   return d12_device_CreateReservedResource(d12_device2(iface), desc,
+                                            D3D12_RESOURCE_STATE_COMMON,
+                                            clear_value, riid, out);
+}
+
+static bool
+d12_sampler_desc_from_desc2(const D3D12_SAMPLER_DESC2 *desc2,
+                            D3D12_SAMPLER_DESC *desc)
+{
+   if (!desc2)
+      return false;
+   /* Integer border colours have no AGX custom-border encoding here. */
+   if (desc2->Flags & D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR)
+      return false;
+   *desc = (D3D12_SAMPLER_DESC){
+      .Filter = desc2->Filter,
+      .AddressU = desc2->AddressU,
+      .AddressV = desc2->AddressV,
+      .AddressW = desc2->AddressW,
+      .MipLODBias = desc2->MipLODBias,
+      .MaxAnisotropy = desc2->MaxAnisotropy,
+      .ComparisonFunc = desc2->ComparisonFunc,
+      .MinLOD = desc2->MinLOD,
+      .MaxLOD = desc2->MaxLOD,
+   };
+   memcpy(desc->BorderColor, desc2->FloatBorderColor,
+          sizeof(desc->BorderColor));
+   return true;
+}
+
+static void STDMETHODCALLTYPE
+d12_device11_CreateSampler2(ID3D12Device15 *iface,
+                            const D3D12_SAMPLER_DESC2 *desc2,
+                            D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   D3D12_SAMPLER_DESC desc;
+   if (!d12_sampler_desc_from_desc2(desc2, &desc)) {
+      d12_stub_report("ID3D12Device11::CreateSampler2 (unsupported desc)");
+      return;
+   }
+   d12_device_CreateSampler(d12_device2(iface), &desc, dest);
+}
+
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device12_GetResourceAllocationInfo3(
+   ID3D12Device15 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC1 *descs1,
+   const UINT32 *num_castable_formats,
+   const DXGI_FORMAT *const *castable_formats,
+   D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
+{
+   /* Castable formats never change the allocation on UMA. */
+#ifdef _WIN32
+   return d12_device8_GetResourceAllocationInfo2(iface, ret, visible_mask,
+                                                 count, descs1, info1);
+#else
+   return d12_device8_GetResourceAllocationInfo2(iface, visible_mask, count,
+                                                 descs1, info1);
+#endif
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device15_TryCreateShaderResourceView(
+   ID3D12Device15 *iface, ID3D12Resource *resource,
+   const D3D12_SHADER_RESOURCE_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   if (!dest.ptr || (!resource && !desc))
+      return E_INVALIDARG;
+   d12_device_CreateShaderResourceView(d12_device2(iface), resource, desc,
+                                       dest);
+   return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device15_TryCreateUnorderedAccessView(
+   ID3D12Device15 *iface, ID3D12Resource *resource, ID3D12Resource *counter,
+   const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
+   D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   if (!dest.ptr || (!resource && !desc))
+      return E_INVALIDARG;
+   d12_device_CreateUnorderedAccessView(d12_device2(iface), resource, counter,
+                                        desc, dest);
+   return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device15_TryCreateConstantBufferView(
+   ID3D12Device15 *iface, const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc,
+   D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   if (!dest.ptr)
+      return E_INVALIDARG;
+   d12_device_CreateConstantBufferView(d12_device2(iface), desc, dest);
+   return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device15_TryCreateSampler2(ID3D12Device15 *iface,
+                               const D3D12_SAMPLER_DESC2 *desc2,
+                               D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   D3D12_SAMPLER_DESC desc;
+   if (!dest.ptr || !d12_sampler_desc_from_desc2(desc2, &desc))
+      return E_INVALIDARG;
+   d12_device_CreateSampler(d12_device2(iface), &desc, dest);
+   return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device15_TryCreateRenderTargetView(
+   ID3D12Device15 *iface, ID3D12Resource *resource,
+   const D3D12_RENDER_TARGET_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   if (!dest.ptr || (!resource && !desc))
+      return E_INVALIDARG;
+   d12_device_CreateRenderTargetView(d12_device2(iface), resource, desc, dest);
+   return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE
+d12_device15_TryCreateDepthStencilView(
+   ID3D12Device15 *iface, ID3D12Resource *resource,
+   const D3D12_DEPTH_STENCIL_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   if (!dest.ptr || (!resource && !desc))
+      return E_INVALIDARG;
+   d12_device_CreateDepthStencilView(d12_device2(iface), resource, desc, dest);
+   return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -4750,13 +4766,6 @@ d12_device15_ResolveQueryData(ID3D12Device15 *iface,
    return S_OK;
 }
 
-static const ID3D12Device15Vtbl d12_device15_vtbl = {
-   .QueryInterface = d12_device15_QueryInterface,
-   .AddRef = d12_device15_AddRef,
-   .Release = d12_device15_Release,
-   .CreateQueryHeap1 = d12_device15_CreateQueryHeap1,
-   .ResolveQueryData = d12_device15_ResolveQueryData,
-};
 
 static struct d12_device *
 d12_device_from_config1(ID3D12DeviceConfiguration1 *iface)
@@ -4787,8 +4796,8 @@ d12_device_config1_Release(ID3D12DeviceConfiguration1 *iface)
       (ID3D12Device2 *)&d12_device_from_config1(iface)->iface);
 }
 
-static D12_AGGREGATE_RETURN(D3D12_DEVICE_CONFIGURATION_DESC) STDMETHODCALLTYPE
-d12_device_config1_GetDesc(
+D12_AGGREGATE_RETURN(D3D12_DEVICE_CONFIGURATION_DESC) STDMETHODCALLTYPE
+d12_config_GetDesc(
    ID3D12DeviceConfiguration1 *iface
    D12_AGGREGATE_OUT(D3D12_DEVICE_CONFIGURATION_DESC))
 {
@@ -4802,8 +4811,8 @@ d12_device_config1_GetDesc(
    D12_RETURN_AGGREGATE(desc);
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_GetEnabledExperimentalFeatures(
+HRESULT STDMETHODCALLTYPE
+d12_config_GetEnabledExperimentalFeatures(
    ID3D12DeviceConfiguration1 *iface, GUID *guids, UINT count)
 {
    (void)iface;
@@ -4811,8 +4820,8 @@ d12_device_config1_GetEnabledExperimentalFeatures(
    return count == 0 ? S_OK : E_INVALIDARG;
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_SerializeVersionedRootSignature(
+HRESULT STDMETHODCALLTYPE
+d12_config_SerializeVersionedRootSignature(
    ID3D12DeviceConfiguration1 *iface,
    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob,
    ID3DBlob **error_blob)
@@ -4835,8 +4844,8 @@ d12_device_config1_SerializeVersionedRootSignature(
    return *blob ? S_OK : E_OUTOFMEMORY;
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_CreateVersionedRootSignatureDeserializer(
+HRESULT STDMETHODCALLTYPE
+d12_config_CreateVersionedRootSignatureDeserializer(
    ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
    REFIID riid, void **out)
 {
@@ -4845,8 +4854,8 @@ d12_device_config1_CreateVersionedRootSignatureDeserializer(
                                                            out);
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary(
+HRESULT STDMETHODCALLTYPE
+d12_config_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary(
    ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
    LPCWSTR subobject_name, REFIID riid, void **out)
 {
@@ -4859,19 +4868,257 @@ static const ID3D12DeviceConfiguration1Vtbl d12_device_config1_vtbl = {
    .QueryInterface = d12_device_config1_QueryInterface,
    .AddRef = d12_device_config1_AddRef,
    .Release = d12_device_config1_Release,
-   .GetDesc = d12_device_config1_GetDesc,
+   .GetDesc = d12_config_GetDesc,
    .GetEnabledExperimentalFeatures =
-      d12_device_config1_GetEnabledExperimentalFeatures,
+      d12_config_GetEnabledExperimentalFeatures,
    .SerializeVersionedRootSignature =
-      d12_device_config1_SerializeVersionedRootSignature,
+      d12_config_SerializeVersionedRootSignature,
    .CreateVersionedRootSignatureDeserializer =
-      d12_device_config1_CreateVersionedRootSignatureDeserializer,
+      d12_config_CreateVersionedRootSignatureDeserializer,
    .CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary =
-      d12_device_config1_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary,
+      d12_config_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary,
 };
 
-static const ID3D12Device2Vtbl d12_device_vtbl = {
+/* The generated C interfaces repeat every inherited function pointer with a
+ * newer This type. Keep the type-checked ID3D12Device2 table as an exact
+ * prefix and append the ID3D12Device3..15 slots, so COM callers see one flat
+ * ID3D12Device15 vtable while every callback stays checked against the
+ * interface it was written for (the same shape as d12_list9_vtbl). */
+struct d12_device_vtbl {
+   ID3D12Device2Vtbl v2;
+   /* ID3D12Device3 */
+   HRESULT (STDMETHODCALLTYPE *OpenExistingHeapFromAddress)(
+      ID3D12Device15 *, const void *, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *OpenExistingHeapFromFileMapping)(
+      ID3D12Device15 *, HANDLE, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *EnqueueMakeResident)(
+      ID3D12Device15 *, D3D12_RESIDENCY_FLAGS, UINT, ID3D12Pageable *const *,
+      ID3D12Fence *, UINT64);
+   /* ID3D12Device4 */
+   HRESULT (STDMETHODCALLTYPE *CreateCommandList1)(
+      ID3D12Device15 *, UINT, D3D12_COMMAND_LIST_TYPE,
+      D3D12_COMMAND_LIST_FLAGS, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *CreateProtectedResourceSession)(
+      ID3D12Device15 *, const D3D12_PROTECTED_RESOURCE_SESSION_DESC *, REFIID,
+      void **);
+   HRESULT (STDMETHODCALLTYPE *CreateCommittedResource1)(
+      ID3D12Device15 *, const D3D12_HEAP_PROPERTIES *, D3D12_HEAP_FLAGS,
+      const D3D12_RESOURCE_DESC *, D3D12_RESOURCE_STATES,
+      const D3D12_CLEAR_VALUE *, ID3D12ProtectedResourceSession *, REFIID,
+      void **);
+   HRESULT (STDMETHODCALLTYPE *CreateHeap1)(
+      ID3D12Device15 *, const D3D12_HEAP_DESC *,
+      ID3D12ProtectedResourceSession *, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *CreateReservedResource1)(
+      ID3D12Device15 *, const D3D12_RESOURCE_DESC *, D3D12_RESOURCE_STATES,
+      const D3D12_CLEAR_VALUE *, ID3D12ProtectedResourceSession *, REFIID,
+      void **);
+#ifdef _WIN32
+   D3D12_RESOURCE_ALLOCATION_INFO *(STDMETHODCALLTYPE *GetResourceAllocationInfo1)(
+      ID3D12Device15 *, D3D12_RESOURCE_ALLOCATION_INFO *, UINT, UINT,
+      const D3D12_RESOURCE_DESC *, D3D12_RESOURCE_ALLOCATION_INFO1 *);
+#else
+   D3D12_RESOURCE_ALLOCATION_INFO (STDMETHODCALLTYPE *GetResourceAllocationInfo1)(
+      ID3D12Device15 *, UINT, UINT, const D3D12_RESOURCE_DESC *,
+      D3D12_RESOURCE_ALLOCATION_INFO1 *);
+#endif
+   /* ID3D12Device5 */
+   HRESULT (STDMETHODCALLTYPE *CreateLifetimeTracker)(
+      ID3D12Device15 *, ID3D12LifetimeOwner *, REFIID, void **);
+   void (STDMETHODCALLTYPE *RemoveDevice)(ID3D12Device15 *);
+   HRESULT (STDMETHODCALLTYPE *EnumerateMetaCommands)(
+      ID3D12Device15 *, UINT *, D3D12_META_COMMAND_DESC *);
+   HRESULT (STDMETHODCALLTYPE *EnumerateMetaCommandParameters)(
+      ID3D12Device15 *, REFGUID, D3D12_META_COMMAND_PARAMETER_STAGE, UINT *,
+      UINT *, D3D12_META_COMMAND_PARAMETER_DESC *);
+   HRESULT (STDMETHODCALLTYPE *CreateMetaCommand)(
+      ID3D12Device15 *, REFGUID, UINT, const void *, SIZE_T, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *CreateStateObject)(
+      ID3D12Device15 *, const D3D12_STATE_OBJECT_DESC *, REFIID, void **);
+   void (STDMETHODCALLTYPE *GetRaytracingAccelerationStructurePrebuildInfo)(
+      ID3D12Device15 *,
+      const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *,
+      D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO *);
+   D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS (
+      STDMETHODCALLTYPE *CheckDriverMatchingIdentifier)(
+      ID3D12Device15 *, D3D12_SERIALIZED_DATA_TYPE,
+      const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER *);
+   /* ID3D12Device6 */
+   HRESULT (STDMETHODCALLTYPE *SetBackgroundProcessingMode)(
+      ID3D12Device15 *, D3D12_BACKGROUND_PROCESSING_MODE,
+      D3D12_MEASUREMENTS_ACTION, HANDLE, BOOL *);
+   /* ID3D12Device7 */
+   HRESULT (STDMETHODCALLTYPE *AddToStateObject)(
+      ID3D12Device15 *, const D3D12_STATE_OBJECT_DESC *, ID3D12StateObject *,
+      REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *CreateProtectedResourceSession1)(
+      ID3D12Device15 *, const D3D12_PROTECTED_RESOURCE_SESSION_DESC1 *,
+      REFIID, void **);
+   /* ID3D12Device8 */
+#ifdef _WIN32
+   D3D12_RESOURCE_ALLOCATION_INFO *(STDMETHODCALLTYPE *GetResourceAllocationInfo2)(
+      ID3D12Device15 *, D3D12_RESOURCE_ALLOCATION_INFO *, UINT, UINT,
+      const D3D12_RESOURCE_DESC1 *, D3D12_RESOURCE_ALLOCATION_INFO1 *);
+#else
+   D3D12_RESOURCE_ALLOCATION_INFO (STDMETHODCALLTYPE *GetResourceAllocationInfo2)(
+      ID3D12Device15 *, UINT, UINT, const D3D12_RESOURCE_DESC1 *,
+      D3D12_RESOURCE_ALLOCATION_INFO1 *);
+#endif
+   HRESULT (STDMETHODCALLTYPE *CreateCommittedResource2)(
+      ID3D12Device15 *, const D3D12_HEAP_PROPERTIES *, D3D12_HEAP_FLAGS,
+      const D3D12_RESOURCE_DESC1 *, D3D12_RESOURCE_STATES,
+      const D3D12_CLEAR_VALUE *, ID3D12ProtectedResourceSession *, REFIID,
+      void **);
+   HRESULT (STDMETHODCALLTYPE *CreatePlacedResource1)(
+      ID3D12Device15 *, ID3D12Heap *, UINT64, const D3D12_RESOURCE_DESC1 *,
+      D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE *, REFIID, void **);
+   void (STDMETHODCALLTYPE *CreateSamplerFeedbackUnorderedAccessView)(
+      ID3D12Device15 *, ID3D12Resource *, ID3D12Resource *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   void (STDMETHODCALLTYPE *GetCopyableFootprints1)(
+      ID3D12Device15 *, const D3D12_RESOURCE_DESC1 *, UINT, UINT, UINT64,
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT *, UINT *, UINT64 *, UINT64 *);
+   /* ID3D12Device9 */
+   HRESULT (STDMETHODCALLTYPE *CreateShaderCacheSession)(
+      ID3D12Device15 *, const D3D12_SHADER_CACHE_SESSION_DESC *, REFIID,
+      void **);
+   HRESULT (STDMETHODCALLTYPE *ShaderCacheControl)(
+      ID3D12Device15 *, D3D12_SHADER_CACHE_KIND_FLAGS,
+      D3D12_SHADER_CACHE_CONTROL_FLAGS);
+   HRESULT (STDMETHODCALLTYPE *CreateCommandQueue1)(
+      ID3D12Device15 *, const D3D12_COMMAND_QUEUE_DESC *, REFIID, REFIID,
+      void **);
+   /* ID3D12Device10 */
+   HRESULT (STDMETHODCALLTYPE *CreateCommittedResource3)(
+      ID3D12Device15 *, const D3D12_HEAP_PROPERTIES *, D3D12_HEAP_FLAGS,
+      const D3D12_RESOURCE_DESC1 *, D3D12_BARRIER_LAYOUT,
+      const D3D12_CLEAR_VALUE *, ID3D12ProtectedResourceSession *, UINT32,
+      const DXGI_FORMAT *, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *CreatePlacedResource2)(
+      ID3D12Device15 *, ID3D12Heap *, UINT64, const D3D12_RESOURCE_DESC1 *,
+      D3D12_BARRIER_LAYOUT, const D3D12_CLEAR_VALUE *, UINT32,
+      const DXGI_FORMAT *, REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *CreateReservedResource2)(
+      ID3D12Device15 *, const D3D12_RESOURCE_DESC *, D3D12_BARRIER_LAYOUT,
+      const D3D12_CLEAR_VALUE *, ID3D12ProtectedResourceSession *, UINT32,
+      const DXGI_FORMAT *, REFIID, void **);
+   /* ID3D12Device11 */
+   void (STDMETHODCALLTYPE *CreateSampler2)(
+      ID3D12Device15 *, const D3D12_SAMPLER_DESC2 *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   /* ID3D12Device12 */
+#ifdef _WIN32
+   D3D12_RESOURCE_ALLOCATION_INFO *(STDMETHODCALLTYPE *GetResourceAllocationInfo3)(
+      ID3D12Device15 *, D3D12_RESOURCE_ALLOCATION_INFO *, UINT, UINT,
+      const D3D12_RESOURCE_DESC1 *, const UINT32 *,
+      const DXGI_FORMAT *const *, D3D12_RESOURCE_ALLOCATION_INFO1 *);
+#else
+   D3D12_RESOURCE_ALLOCATION_INFO (STDMETHODCALLTYPE *GetResourceAllocationInfo3)(
+      ID3D12Device15 *, UINT, UINT, const D3D12_RESOURCE_DESC1 *,
+      const UINT32 *, const DXGI_FORMAT *const *,
+      D3D12_RESOURCE_ALLOCATION_INFO1 *);
+#endif
+   /* ID3D12Device13 */
+   HRESULT (STDMETHODCALLTYPE *OpenExistingHeapFromAddress1)(
+      ID3D12Device15 *, const void *, SIZE_T, REFIID, void **);
+   /* ID3D12Device14 */
+   HRESULT (STDMETHODCALLTYPE *CreateRootSignatureFromSubobjectInLibrary)(
+      ID3D12Device15 *, UINT, const void *, SIZE_T, LPCWSTR, REFIID, void **);
+   /* ID3D12Device15 */
+   HRESULT (STDMETHODCALLTYPE *RegisterTrimNotificationCallback)(
+      ID3D12Device15 *, D3D12_REGISTER_TRIM_NOTIFICATION *);
+   HRESULT (STDMETHODCALLTYPE *UnregisterTrimNotificationCallback)(
+      ID3D12Device15 *, DWORD);
+   HRESULT (STDMETHODCALLTYPE *TryCreateShaderResourceView)(
+      ID3D12Device15 *, ID3D12Resource *,
+      const D3D12_SHADER_RESOURCE_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *TryCreateUnorderedAccessView)(
+      ID3D12Device15 *, ID3D12Resource *, ID3D12Resource *,
+      const D3D12_UNORDERED_ACCESS_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *TryCreateConstantBufferView)(
+      ID3D12Device15 *, const D3D12_CONSTANT_BUFFER_VIEW_DESC *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *TryCreateSampler2)(
+      ID3D12Device15 *, const D3D12_SAMPLER_DESC2 *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *TryCreateRenderTargetView)(
+      ID3D12Device15 *, ID3D12Resource *, const D3D12_RENDER_TARGET_VIEW_DESC *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *TryCreateDepthStencilView)(
+      ID3D12Device15 *, ID3D12Resource *, const D3D12_DEPTH_STENCIL_VIEW_DESC *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *TryCreateSamplerFeedbackUnorderedAccessView)(
+      ID3D12Device15 *, ID3D12Resource *, ID3D12Resource *,
+      D3D12_CPU_DESCRIPTOR_HANDLE);
+   HRESULT (STDMETHODCALLTYPE *CreateQueryHeap1)(
+      ID3D12Device15 *, const D3D12_QUERY_HEAP_DESC *, D3D12_QUERY_HEAP_FLAGS,
+      REFIID, void **);
+   HRESULT (STDMETHODCALLTYPE *ResolveQueryData)(
+      ID3D12Device15 *, ID3D12QueryHeap *, D3D12_QUERY_TYPE, UINT, UINT,
+      void *);
+};
+
+static_assert(offsetof(ID3D12Device15Vtbl, OpenExistingHeapFromAddress) ==
+                 sizeof(ID3D12Device2Vtbl),
+              "device 2 must be an exact vtable prefix of device 15");
+static_assert(offsetof(struct d12_device_vtbl, CreateQueryHeap1) ==
+                 offsetof(ID3D12Device15Vtbl, CreateQueryHeap1),
+              "private device-15 vtable must match the public ABI");
+static_assert(sizeof(struct d12_device_vtbl) == sizeof(ID3D12Device15Vtbl),
+              "private device-15 vtable must match the public ABI");
+
+#define D12_DEVICE15_TAIL(name) .name = d12_stub_ID3D12Device15_##name
+
+static const struct d12_device_vtbl d12_device_vtbl = {
    /* every unimplemented slot fails safely */
+   D12_DEVICE15_TAIL(OpenExistingHeapFromAddress),
+   D12_DEVICE15_TAIL(OpenExistingHeapFromFileMapping),
+   .EnqueueMakeResident = d12_device3_EnqueueMakeResident,
+   .CreateCommandList1 = d12_device4_CreateCommandList1,
+   D12_DEVICE15_TAIL(CreateProtectedResourceSession),
+   .CreateCommittedResource1 = d12_device4_CreateCommittedResource1,
+   .CreateHeap1 = d12_device4_CreateHeap1,
+   .CreateReservedResource1 = d12_device4_CreateReservedResource1,
+   .GetResourceAllocationInfo1 = d12_device4_GetResourceAllocationInfo1,
+   D12_DEVICE15_TAIL(CreateLifetimeTracker),
+   .RemoveDevice = d12_device5_RemoveDevice,
+   .EnumerateMetaCommands = d12_device5_EnumerateMetaCommands,
+   D12_DEVICE15_TAIL(EnumerateMetaCommandParameters),
+   D12_DEVICE15_TAIL(CreateMetaCommand),
+   D12_DEVICE15_TAIL(CreateStateObject),
+   D12_DEVICE15_TAIL(GetRaytracingAccelerationStructurePrebuildInfo),
+   .CheckDriverMatchingIdentifier = d12_device5_CheckDriverMatchingIdentifier,
+   .SetBackgroundProcessingMode = d12_device6_SetBackgroundProcessingMode,
+   D12_DEVICE15_TAIL(AddToStateObject),
+   D12_DEVICE15_TAIL(CreateProtectedResourceSession1),
+   .GetResourceAllocationInfo2 = d12_device8_GetResourceAllocationInfo2,
+   .CreateCommittedResource2 = d12_device8_CreateCommittedResource2,
+   .CreatePlacedResource1 = d12_device8_CreatePlacedResource1,
+   D12_DEVICE15_TAIL(CreateSamplerFeedbackUnorderedAccessView),
+   .GetCopyableFootprints1 = d12_device8_GetCopyableFootprints1,
+   D12_DEVICE15_TAIL(CreateShaderCacheSession),
+   .ShaderCacheControl = d12_device9_ShaderCacheControl,
+   .CreateCommandQueue1 = d12_device9_CreateCommandQueue1,
+   .CreateCommittedResource3 = d12_device10_CreateCommittedResource3,
+   .CreatePlacedResource2 = d12_device10_CreatePlacedResource2,
+   .CreateReservedResource2 = d12_device10_CreateReservedResource2,
+   .CreateSampler2 = d12_device11_CreateSampler2,
+   .GetResourceAllocationInfo3 = d12_device12_GetResourceAllocationInfo3,
+   D12_DEVICE15_TAIL(OpenExistingHeapFromAddress1),
+   D12_DEVICE15_TAIL(CreateRootSignatureFromSubobjectInLibrary),
+   D12_DEVICE15_TAIL(RegisterTrimNotificationCallback),
+   D12_DEVICE15_TAIL(UnregisterTrimNotificationCallback),
+   .TryCreateShaderResourceView = d12_device15_TryCreateShaderResourceView,
+   .TryCreateUnorderedAccessView = d12_device15_TryCreateUnorderedAccessView,
+   .TryCreateConstantBufferView = d12_device15_TryCreateConstantBufferView,
+   .TryCreateSampler2 = d12_device15_TryCreateSampler2,
+   .TryCreateRenderTargetView = d12_device15_TryCreateRenderTargetView,
+   .TryCreateDepthStencilView = d12_device15_TryCreateDepthStencilView,
+   D12_DEVICE15_TAIL(TryCreateSamplerFeedbackUnorderedAccessView),
+   .CreateQueryHeap1 = d12_device15_CreateQueryHeap1,
+   .ResolveQueryData = d12_device15_ResolveQueryData,
+
+   .v2 = {
    D12_ID3D12Device2_DEFAULTS,
    .QueryInterface = d12_device_QueryInterface,
    .AddRef = d12_device_AddRef,
@@ -4921,7 +5168,8 @@ static const ID3D12Device2Vtbl d12_device_vtbl = {
       d12_device_SetEventOnMultipleFenceCompletion,
    .GetDeviceRemovedReason = d12_device_GetDeviceRemovedReason,
    .GetAdapterLuid = d12_device_GetAdapterLuid,
-   /* Everything unset is NULL: a call is a loud crash, not silent lies. */
+   /* Everything unset keeps its generated fail-safe stub. */
+   },
 };
 
 /*
@@ -4939,6 +5187,11 @@ HRESULT
 d12_device_backend_init(struct d12_device *device,
                         D3D_FEATURE_LEVEL feature_level)
 {
+   d12_core_caps_init_agx(&device->caps, &device->dev);
+   if (!device->caps.max_feature_level)
+      return E_INVALIDARG;
+   feature_level = (D3D_FEATURE_LEVEL)device->caps.max_feature_level;
+
    d12_device_removal_state_init(&device->removal);
    agx_bg_eot_init(&device->bg_eot, &device->dev);
    if (!device->bg_eot.ht)
@@ -4950,9 +5203,13 @@ d12_device_backend_init(struct d12_device *device,
       goto fail_bg;
 
    /* Sampler 0, tessellation descriptor, then the zero-backed NULL region. */
+   const unsigned sampler_size =
+      agx_chip_sampler_heap_element_size(device->dev.chip);
+   if (!sampler_size)
+      goto fail_oclqry;
    device->rodata_bo =
       agx_bo_create(&device->dev,
-                    ALIGN_POT(AGX_SAMPLER_LENGTH, 16) +
+                    ALIGN_POT(sampler_size, 16) +
                        sizeof(struct poly_heap) + D12_NULL_REGION_SIZE,
                     0, 0, "d3d12 rodata");
    if (!device->rodata_bo)
@@ -4965,11 +5222,27 @@ d12_device_backend_init(struct d12_device *device,
    if (!rodata)
       goto fail_rodata;
 
-   agx_pack_txf_sampler((struct agx_sampler_packed *)rodata);
-   agx_pack(&device->dev.txf_sampler, USC_SAMPLER, cfg) {
-      cfg.start = 0;
-      cfg.count = 1;
-      cfg.buffer = device->rodata_bo->va->addr;
+   memset(rodata, 0, sampler_size);
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      if (sampler_size != 32 || agx_chip_sampler_generation(device->dev.chip) !=
+                               AGX_SAMPLER_GENERATION_GEN4_HAL200)
+         goto fail_rodata;
+      agx_pack(rodata, SAMPLER_HAL200, cfg) {
+         cfg.minimum_lod = 0.0f;
+         cfg.maximum_lod = INFINITY;
+         cfg.maximum_anisotropy = 1;
+         cfg.mip_filter = AGX_MIP_FILTER_NEAREST;
+         cfg.wrap_s = cfg.wrap_t = cfg.wrap_r = AGX_WRAP_CLAMP_TO_BORDER;
+         cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+      }
+      memset(&device->dev.txf_sampler, 0, sizeof(device->dev.txf_sampler));
+   } else {
+      agx_pack_txf_sampler((struct agx_sampler_packed *)rodata);
+      agx_pack(&device->dev.txf_sampler, USC_SAMPLER, cfg) {
+         cfg.start = 0;
+         cfg.count = 1;
+         cfg.buffer = device->rodata_bo->va->addr;
+      }
    }
 
    /* Match Honeykrisp's 128 MiB geometry/tessellation heap. */
@@ -4978,7 +5251,7 @@ d12_device_backend_init(struct d12_device *device,
    if (!device->heap_bo)
       goto fail_rodata;
 
-   const size_t heap_off = ALIGN_POT(AGX_SAMPLER_LENGTH, 16);
+   const size_t heap_off = ALIGN_POT(sampler_size, 16);
    const size_t null_off = heap_off + sizeof(struct poly_heap);
    device->heap_desc_va = device->rodata_bo->va->addr + heap_off;
    device->null_va = device->rodata_bo->va->addr + null_off;
@@ -4996,7 +5269,7 @@ d12_device_backend_init(struct d12_device *device,
    {
       DXGI_FORMAT missing = DXGI_FORMAT_UNKNOWN;
       if (!d12_format_typed_uav_load_complete(
-             d12_core_get_caps()->typed_uav_load_additional_formats,
+             device->caps.typed_uav_load_additional_formats,
              &missing)) {
          mesa_loge("capability policy advertises typed UAV loads that DXGI "
                    "format %u does not report", (unsigned)missing);
@@ -5006,13 +5279,15 @@ d12_device_backend_init(struct d12_device *device,
    simple_mtx_init(&device->scratch_lock, mtx_plain);
    simple_mtx_init(&device->descriptor_heap_lock, mtx_plain);
    simple_mtx_init(&device->sparse_resource_lock, mtx_plain);
+   d12_device_g17p_vdm_pool_init(device);
    list_inithead(&device->sparse_resources);
+   d12_shader_cache_init(device);
    agx_scratch_init(&device->dev, &device->scratch_vs);
    agx_scratch_init(&device->dev, &device->scratch_fs);
    agx_scratch_init(&device->dev, &device->scratch_cs);
 
-   device->iface.lpVtbl = (ID3D12DeviceVtbl *)&d12_device_vtbl;
-   device->iface15.lpVtbl = (ID3D12Device15Vtbl *)&d12_device15_vtbl;
+   device->iface.lpVtbl = (ID3D12DeviceVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_DEVICE, &d12_device_vtbl);
    device->iface_config1.lpVtbl =
       (ID3D12DeviceConfiguration1Vtbl *)&d12_device_config1_vtbl;
    device->refcount = 1;
@@ -5043,34 +5318,24 @@ d12_device_backend_cleanup(struct d12_device *device)
    agx_scratch_fini(&device->scratch_vs);
    agx_scratch_fini(&device->scratch_fs);
    agx_scratch_fini(&device->scratch_cs);
+   d12_device_g17p_vdm_pool_fini(device);
+   d12_shader_cache_finish(device);
    simple_mtx_destroy(&device->scratch_lock);
+   d12_descriptor_registry_destroy(device);
    simple_mtx_destroy(&device->descriptor_heap_lock);
    simple_mtx_destroy(&device->sparse_resource_lock);
    agx_bg_eot_cleanup(&device->bg_eot);
 }
 
-PUBLIC HRESULT WINAPI
-D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
-                  REFIID riid, void **out)
+HRESULT
+d12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
+                  REFIID riid, void **out, bool singleton)
 {
-   const D3D_FEATURE_LEVEL max_fl =
-      (D3D_FEATURE_LEVEL)d12_core_get_caps()->max_feature_level;
-
-   /* D3D12 has no levels below 11_0; accepting 9_x/10_x would claim
-    * support for a contract that does not exist here.
-    */
-   if (!d12_core_supports_feature_level((uint32_t)minimum_feature_level)) {
-      mesa_loge("D3D12CreateDevice: feature level 0x%x unsupported (this "
-                "driver is 0x%x only)",
-                minimum_feature_level, max_fl);
+   if (out)
+      *out = NULL;
+   /* Validation-only calls ignore the requested interface, including NULL. */
+   if (out && !riid)
       return E_INVALIDARG;
-   }
-
-   /* Answer the capability probe before opening anything, so the result
-    * does not depend on whether a GPU node happens to be present.
-    */
-   if (!out)
-      return S_FALSE;
 
    struct d12_device *device = calloc(1, sizeof(*device));
    if (!device)
@@ -5082,9 +5347,57 @@ D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
       return E_FAIL;
    }
 
+   d12_core_caps_init_agx(&device->caps, &device->dev);
+   const bool supported = d12_core_caps_supports_feature_level(
+      &device->caps, minimum_feature_level);
+   if (!supported) {
+      d12_platform_close_device(device);
+      free(device);
+      return E_INVALIDARG;
+   }
+   const D3D_FEATURE_LEVEL max_fl =
+      (D3D_FEATURE_LEVEL)device->caps.max_feature_level;
+
+   if (singleton) {
+      simple_mtx_lock(&d12_singleton_lock);
+      for (struct d12_device *existing = d12_singletons; existing;
+           existing = existing->singleton_next) {
+         if (existing->adapter_luid.LowPart != device->adapter_luid.LowPart ||
+             existing->adapter_luid.HighPart != device->adapter_luid.HighPart)
+            continue;
+         HRESULT hr = d12_device_is_removed(existing)
+                         ? DXGI_ERROR_DEVICE_REMOVED
+                         : out ? d12_device_QueryInterface(
+                                    (ID3D12Device2 *)&existing->iface, riid, out)
+                               : S_FALSE;
+         simple_mtx_unlock(&d12_singleton_lock);
+         d12_platform_close_device(device);
+         free(device);
+         return hr;
+      }
+   }
+
+   if (!out) {
+      if (singleton)
+         simple_mtx_unlock(&d12_singleton_lock);
+      d12_platform_close_device(device);
+      free(device);
+      return S_FALSE;
+   }
+
+#ifdef D12_PLATFORM_D3DKMT
+   device->submit_read_set = true;
+#else
+   /* Linux DRM (native or through the Wine unixlib) never consumes the read
+    * set; only virtio needs it. */
+   device->submit_read_set = device->dev.is_virtio;
+#endif
+
    HRESULT hr = d12_device_backend_init(device, max_fl);
    if (FAILED(hr)) {
       mesa_loge("D3D12CreateDevice: native backend initialization failed");
+      if (singleton)
+         simple_mtx_unlock(&d12_singleton_lock);
       d12_platform_close_device(device);
       free(device);
       return hr;
@@ -5095,6 +5408,22 @@ D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
              device->feature_level);
 
    hr = d12_device_QueryInterface((ID3D12Device2 *)&device->iface, riid, out);
+   if (singleton) {
+      if (SUCCEEDED(hr)) {
+         device->singleton = true;
+         device->singleton_next = d12_singletons;
+         d12_singletons = device;
+      }
+      /* Drop the construction ref while lookup is still excluded. */
+      uint32_t refs = p_atomic_dec_return(&device->refcount);
+      simple_mtx_unlock(&d12_singleton_lock);
+      if (!refs) {
+         d12_device_backend_cleanup(device);
+         d12_platform_close_device(device);
+         free(device);
+      }
+      return hr;
+   }
    /* Drop the construction ref; QueryInterface holds the caller's. */
    d12_device_Release((ID3D12Device2 *)&device->iface);
    return hr;
@@ -5119,8 +5448,8 @@ D3D12GetDebugInterface(REFIID riid, void **out)
  * corresponding feature exists.
  */
 
-PUBLIC HRESULT WINAPI
-D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc,
+static HRESULT
+d12_export_D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc,
                             D3D_ROOT_SIGNATURE_VERSION version,
                             ID3DBlob **blob, ID3DBlob **error_blob)
 {
@@ -5153,8 +5482,8 @@ D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc,
    return *blob ? S_OK : E_OUTOFMEMORY;
 }
 
-PUBLIC HRESULT WINAPI
-D3D12SerializeVersionedRootSignature(
+static HRESULT
+d12_export_D3D12SerializeVersionedRootSignature(
    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob,
    ID3DBlob **error_blob)
 {
@@ -5178,15 +5507,15 @@ D3D12SerializeVersionedRootSignature(
    return *blob ? S_OK : E_OUTOFMEMORY;
 }
 
-PUBLIC HRESULT WINAPI
-D3D12CreateRootSignatureDeserializer(const void *src, SIZE_T size,
+static HRESULT
+d12_export_D3D12CreateRootSignatureDeserializer(const void *src, SIZE_T size,
                                      REFIID riid, void **out)
 {
    return d12_root_signature_deserializer_create(src, size, riid, out);
 }
 
-PUBLIC HRESULT WINAPI
-D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size,
+static HRESULT
+d12_export_D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size,
                                               REFIID riid, void **out)
 {
    return d12_versioned_root_signature_deserializer_create(src, size, riid,
@@ -5194,18 +5523,89 @@ D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size,
 }
 
 PUBLIC HRESULT WINAPI
-D3D12GetInterface(REFCLSID rclsid, REFIID riid, void **out)
-{
-   d12_stub_report("D3D12GetInterface");
-   if (out)
-      *out = NULL;
-   return E_NOINTERFACE;
-}
-
-PUBLIC HRESULT WINAPI
 D3D12EnableExperimentalFeatures(UINT num_features, const IID *iids,
                                 void *configs, UINT *configs_sizes)
 {
+   /* No experimental feature is implemented; enabling none is a success,
+    * which is what runtimes probe before creating a device. */
+   if (num_features == 0)
+      return S_OK;
    d12_stub_report("D3D12EnableExperimentalFeatures");
    return E_NOINTERFACE;
+}
+
+/*
+ * Exported entry points. The real bodies are the static d12_export_*
+ * functions above; these thin wrappers add the D3D12AGX_DEBUG=api trace,
+ * which the vtable-based trace cannot see because there is no object yet.
+ */
+
+PUBLIC HRESULT WINAPI
+D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level, REFIID riid, void **out)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12CreateDevice", NULL, "adapter=%p, minimum_feature_level=0x%x, riid=%s, out=%p", (const void *)adapter, (unsigned)minimum_feature_level, d12_api_trace_guid(riid, g0), (const void *)out);
+   HRESULT hr = d12_create_device(adapter, minimum_feature_level, riid, out, true);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12CreateDevice", NULL, hr, trace ? NULL : "adapter=%p, minimum_feature_level=0x%x, riid=%s, out=%p", (const void *)adapter, (unsigned)minimum_feature_level, d12_api_trace_guid(riid, g0), (const void *)out);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc, D3D_ROOT_SIGNATURE_VERSION version, ID3DBlob **blob, ID3DBlob **error_blob)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12SerializeRootSignature", NULL, "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, (unsigned)version, (const void *)blob, (const void *)error_blob);
+   HRESULT hr = d12_export_D3D12SerializeRootSignature(desc, version, blob, error_blob);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12SerializeRootSignature", NULL, hr, trace ? NULL : "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, (unsigned)version, (const void *)blob, (const void *)error_blob);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob, ID3DBlob **error_blob)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12SerializeVersionedRootSignature", NULL, "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, desc ? (unsigned)desc->Version : 0u, (const void *)blob, (const void *)error_blob);
+   HRESULT hr = d12_export_D3D12SerializeVersionedRootSignature(desc, blob, error_blob);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12SerializeVersionedRootSignature", NULL, hr, trace ? NULL : "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, desc ? (unsigned)desc->Version : 0u, (const void *)blob, (const void *)error_blob);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12CreateRootSignatureDeserializer(const void *src, SIZE_T size, REFIID riid, void **out)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12CreateRootSignatureDeserializer", NULL, "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   HRESULT hr = d12_export_D3D12CreateRootSignatureDeserializer(src, size, riid, out);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12CreateRootSignatureDeserializer", NULL, hr, trace ? NULL : "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size, REFIID riid, void **out)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12CreateVersionedRootSignatureDeserializer", NULL, "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   HRESULT hr = d12_export_D3D12CreateVersionedRootSignatureDeserializer(src, size, riid, out);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12CreateVersionedRootSignatureDeserializer", NULL, hr, trace ? NULL : "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   return hr;
 }

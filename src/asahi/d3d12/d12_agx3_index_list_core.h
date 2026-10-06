@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "asahi/lib/agx_chip.h"
+#include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,30 @@ enum d12_agx3_index_size {
    D12_AGX3_INDEX_SIZE_U16 = 1,
    D12_AGX3_INDEX_SIZE_U32 = 2,
 };
+
+/* API draw arguments adapted to Honeykrisp's native G17P producers. Base
+ * instance lives in D12_UNIFORM_DRAW, independently of the VDM record. */
+struct d12_agx3_native_direct_draw_info {
+   uint32_t draw_state_context_offset;
+   uint8_t primitive;
+   bool indexed;
+   uint8_t index_size_B;
+   uint64_t index_buffer;
+   uint32_t index_buffer_range_B;
+   uint32_t count;
+   uint32_t instances;
+   uint32_t first_index;
+   uint32_t first_vertex; /* Non-indexed start or raw signed base vertex. */
+};
+
+struct d12_agx3_native_direct_draw {
+   uint8_t bytes[AGX_VDM_HAL200_INDEXED_DRAW_LENGTH];
+   uint8_t length;
+};
+
+bool d12_agx3_encode_native_direct_draw(
+   enum agx_chip chip, const struct d12_agx3_native_direct_draw_info *info,
+   struct d12_agx3_native_direct_draw *out);
 
 struct d12_agx3_direct_nonindexed_index_list_info {
    uint8_t primitive;

@@ -571,9 +571,21 @@ main(void)
    depth_upload.aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
    depth_upload.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   /* The compressed depth plane of a split D32S8 image (zink's GL Z24S8)
+    * takes the same fallback; its image has two planes, never one. */
    depth_upload.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.plane_count = 2;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   depth_upload.array_layers = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.array_layers = 1;
    depth_upload.format = VK_FORMAT_D32_SFLOAT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.plane_count = 1;
    depth_upload.array_layers = 2;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
    depth_upload.array_layers = 1;
@@ -592,6 +604,9 @@ main(void)
    CHECK(hk_g17p_buffer_to_image_copy_supported(&depth_upload));
    depth_upload.format = VK_FORMAT_D16_UNORM_S8_UINT;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.plane_count = 2;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.plane_count = 1;
    depth_upload.format = VK_FORMAT_X8_D24_UNORM_PACK32;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
 

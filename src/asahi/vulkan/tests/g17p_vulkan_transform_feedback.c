@@ -20,21 +20,32 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "g17p_vulkan_transform_feedback_indexed.h"
 #include "g17p_vulkan_transform_feedback_vert.h"
-#include "g17p_wsi_triangle_vert.h"
 #include "g17p_wsi_triangle_frag.h"
+#include "g17p_wsi_triangle_vert.h"
 
 #define T8140_DEVICE_ID 0x8140
-#define GUARD 64
-#define VERTEX_STRIDE 32
-#define XFB_STRIDE 32
-#define VERTICES 3
-#define ROUNDS 2
-#define XFB_BYTES (VERTICES * ROUNDS * XFB_STRIDE)
-#define SENTINEL 0xa5
+#define GUARD           64
+#define VERTEX_STRIDE   32
+#define XFB_STRIDE      32
+#define VERTICES        3
+#define ROUNDS          2
+#define XFB_BYTES       (VERTICES * ROUNDS * XFB_STRIDE)
+#define SENTINEL        0xa5
 
 #define VK_FN(name) static PFN_##name name
 VK_FN(vkGetInstanceProcAddr);
+VK_FN(vkCreateBufferView);
+VK_FN(vkDestroyBufferView);
+VK_FN(vkCreateDescriptorSetLayout);
+VK_FN(vkDestroyDescriptorSetLayout);
+VK_FN(vkCreateDescriptorPool);
+VK_FN(vkDestroyDescriptorPool);
+VK_FN(vkAllocateDescriptorSets);
+VK_FN(vkUpdateDescriptorSets);
+VK_FN(vkCmdBindDescriptorSets);
+
 VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkDestroyInstance);
@@ -113,21 +124,21 @@ check(VkResult result, const char *what)
    do {                                                                        \
       name = (PFN_##name)vkGetInstanceProcAddr(VK_NULL_HANDLE, #name);         \
       if (!name)                                                               \
-         die("loader is missing " #name);                                     \
+         die("loader is missing " #name);                                      \
    } while (0)
 
 #define LOAD_INSTANCE(instance, name)                                          \
    do {                                                                        \
       name = (PFN_##name)vkGetInstanceProcAddr(instance, #name);               \
       if (!name)                                                               \
-         die("instance is missing " #name);                                   \
+         die("instance is missing " #name);                                    \
    } while (0)
 
 #define LOAD_DEVICE(device, name)                                              \
    do {                                                                        \
       name = (PFN_##name)vkGetDeviceProcAddr(device, #name);                   \
       if (!name)                                                               \
-         die("device is missing " #name);                                     \
+         die("device is missing " #name);                                      \
    } while (0)
 
 struct buffer {
@@ -189,7 +200,7 @@ destroy_buffer(VkDevice device, struct buffer *buffer)
 
 static unsigned
 verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
-             const struct buffer *counter)
+             const struct buffer *counter, bool indexed)
 {
    static const float values[VERTICES][4] = {
       {1.0f, 2.0f, 3.0f, 4.0f},
@@ -206,21 +217,27 @@ verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
             expected = ((const uint8_t *)values[v])[i - payload];
       }
       if (vertices->map[i] != expected) {
-         fprintf(stderr, "%s: vertex source changed at byte %zu: %02x != %02x\n",
-                 NAME, i, vertices->map[i], expected);
+         fprintf(stderr,
+                 "%s: vertex source changed at byte %zu: %02x != %02x\n", NAME,
+                 i, vertices->map[i], expected);
          failures++;
          break;
       }
    }
 
+   float expected_values[VERTICES][4];
+   for (unsigned v = 0; v < VERTICES; v++)
+      for (unsigned c = 0; c < 4; c++)
+         expected_values[v][c] =
+            values[v][c] + (indexed ? (float)(100 * (v + 1) + c + 1) : 0.0f);
    for (size_t i = 0; i < xfb->size; ++i) {
       uint8_t expected = SENTINEL;
       for (unsigned round = 0; round < ROUNDS; ++round) {
          for (unsigned v = 0; v < VERTICES; ++v) {
-            const size_t payload = GUARD + round * VERTICES * XFB_STRIDE +
-                                   v * XFB_STRIDE + 16;
-            if (i >= payload && i < payload + sizeof(values[v]))
-               expected = ((const uint8_t *)values[v])[i - payload];
+            const size_t payload =
+               GUARD + round * VERTICES * XFB_STRIDE + v * XFB_STRIDE + 16;
+            if (i >= payload && i < payload + sizeof(expected_values[v]))
+               expected = ((const uint8_t *)expected_values[v])[i - payload];
          }
       }
       if (xfb->map[i] != expected) {
@@ -257,8 +274,8 @@ verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
       if (i >= GUARD && i < GUARD + sizeof(final_offset))
          expected = ((const uint8_t *)&final_offset)[i - GUARD];
       if (counter->map[i] != expected) {
-         fprintf(stderr, "%s: counter/guard byte %zu: %02x != %02x\n",
-                 NAME, i, counter->map[i], expected);
+         fprintf(stderr, "%s: counter/guard byte %zu: %02x != %02x\n", NAME, i,
+                 counter->map[i], expected);
          failures++;
          break;
       }
@@ -266,8 +283,7 @@ verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
    if (failures) {
       uint32_t observed_offset;
       memcpy(&observed_offset, counter->map + GUARD, sizeof(observed_offset));
-      fprintf(stderr, "%s: observed XFB counter %#x\n", NAME,
-              observed_offset);
+      fprintf(stderr, "%s: observed XFB counter %#x\n", NAME, observed_offset);
    }
    return failures;
 }
@@ -276,10 +292,19 @@ int
 main(int argc, char **argv)
 {
    const bool rasterized = getenv("G17P_XFB_RASTERIZED_DIAGNOSTIC") != NULL;
-   const bool execute = argc == 2 && !strcmp(argv[1], "--execute");
+   const bool geometry =
+      argc == 2 && (!strcmp(argv[1], "--indexed-gs-execute") ||
+                    !strcmp(argv[1], "--indexed-gs-record"));
+   const bool indexed =
+      geometry || (argc == 2 && (!strcmp(argv[1], "--indexed-execute") ||
+                                 !strcmp(argv[1], "--indexed-record")));
+   const bool execute = argc == 2 && (!strcmp(argv[1], "--execute") ||
+                                      !strcmp(argv[1], "--indexed-execute") ||
+                                      !strcmp(argv[1], "--indexed-gs-execute"));
    const bool submit_only = argc == 2 && !strcmp(argv[1], "--submit-only");
-   if (argc > 2 || (argc == 2 && !execute && !submit_only))
-      die("usage: g17p-vulkan-transform-feedback [--submit-only|--execute]");
+   if (argc > 2 || (argc == 2 && !execute && !submit_only && !indexed))
+      die(
+         "usage: g17p-vulkan-transform-feedback [--submit-only|--execute|--indexed-record|--indexed-execute|--indexed-gs-record|--indexed-gs-execute]");
    if (submit_only && !getenv("ASAHI_SHIM_G17P_EXPECT_XFB"))
       die("--submit-only is a drm-shim oracle; use --execute on hardware");
 
@@ -350,7 +375,8 @@ main(int argc, char **argv)
       die("no T8140/G17P graphics device");
 
    VkPhysicalDeviceTransformFeedbackFeaturesEXT xfb_feature = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
    };
    VkPhysicalDeviceFeatures2 features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -361,7 +387,8 @@ main(int argc, char **argv)
       die("transformFeedback not advertised");
 
    VkPhysicalDeviceTransformFeedbackPropertiesEXT xfb_properties = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT,
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT,
    };
    VkPhysicalDeviceProperties2 properties2 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
@@ -384,9 +411,13 @@ main(int argc, char **argv)
    xfb_feature.transformFeedback = VK_TRUE;
    xfb_feature.geometryStreams = VK_FALSE;
    const char *extensions[] = {VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME};
+   if (geometry && !features.features.geometryShader)
+      die("geometryShader not supported");
+   const VkPhysicalDeviceFeatures core_features = {.geometryShader = geometry};
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
       .pNext = &xfb_feature,
+      .pEnabledFeatures = &core_features,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
       .enabledExtensionCount = 1,
@@ -397,28 +428,60 @@ main(int argc, char **argv)
          "vkCreateDevice");
 
 #define LOAD(name) LOAD_DEVICE(device, name)
-   LOAD(vkDestroyDevice); LOAD(vkGetDeviceQueue);
-   LOAD(vkCreateBuffer); LOAD(vkDestroyBuffer);
-   LOAD(vkGetBufferMemoryRequirements); LOAD(vkAllocateMemory);
-   LOAD(vkFreeMemory); LOAD(vkBindBufferMemory); LOAD(vkMapMemory);
-   LOAD(vkUnmapMemory); LOAD(vkCreateImage); LOAD(vkDestroyImage);
-   LOAD(vkGetImageMemoryRequirements); LOAD(vkBindImageMemory);
-   LOAD(vkCreateImageView); LOAD(vkDestroyImageView);
+   LOAD(vkCreateBufferView);
+   LOAD(vkDestroyBufferView);
+   LOAD(vkCreateDescriptorSetLayout);
+   LOAD(vkDestroyDescriptorSetLayout);
+   LOAD(vkCreateDescriptorPool);
+   LOAD(vkDestroyDescriptorPool);
+   LOAD(vkAllocateDescriptorSets);
+   LOAD(vkUpdateDescriptorSets);
+   LOAD(vkCmdBindDescriptorSets);
+   LOAD(vkDestroyDevice);
+   LOAD(vkGetDeviceQueue);
+   LOAD(vkCreateBuffer);
+   LOAD(vkDestroyBuffer);
+   LOAD(vkGetBufferMemoryRequirements);
+   LOAD(vkAllocateMemory);
+   LOAD(vkFreeMemory);
+   LOAD(vkBindBufferMemory);
+   LOAD(vkMapMemory);
+   LOAD(vkUnmapMemory);
+   LOAD(vkCreateImage);
+   LOAD(vkDestroyImage);
+   LOAD(vkGetImageMemoryRequirements);
+   LOAD(vkBindImageMemory);
+   LOAD(vkCreateImageView);
+   LOAD(vkDestroyImageView);
    LOAD(vkCreateShaderModule);
-   LOAD(vkDestroyShaderModule); LOAD(vkCreateRenderPass);
-   LOAD(vkDestroyRenderPass); LOAD(vkCreateFramebuffer);
-   LOAD(vkDestroyFramebuffer); LOAD(vkCreatePipelineLayout);
-   LOAD(vkDestroyPipelineLayout); LOAD(vkCreateGraphicsPipelines);
-   LOAD(vkDestroyPipeline); LOAD(vkCreateCommandPool);
-   LOAD(vkDestroyCommandPool); LOAD(vkAllocateCommandBuffers);
-   LOAD(vkBeginCommandBuffer); LOAD(vkEndCommandBuffer);
-   LOAD(vkCmdBeginRenderPass); LOAD(vkCmdEndRenderPass);
-   LOAD(vkCmdBindPipeline); LOAD(vkCmdBindVertexBuffers);
+   LOAD(vkDestroyShaderModule);
+   LOAD(vkCreateRenderPass);
+   LOAD(vkDestroyRenderPass);
+   LOAD(vkCreateFramebuffer);
+   LOAD(vkDestroyFramebuffer);
+   LOAD(vkCreatePipelineLayout);
+   LOAD(vkDestroyPipelineLayout);
+   LOAD(vkCreateGraphicsPipelines);
+   LOAD(vkDestroyPipeline);
+   LOAD(vkCreateCommandPool);
+   LOAD(vkDestroyCommandPool);
+   LOAD(vkAllocateCommandBuffers);
+   LOAD(vkBeginCommandBuffer);
+   LOAD(vkEndCommandBuffer);
+   LOAD(vkCmdBeginRenderPass);
+   LOAD(vkCmdEndRenderPass);
+   LOAD(vkCmdBindPipeline);
+   LOAD(vkCmdBindVertexBuffers);
    LOAD(vkCmdBindTransformFeedbackBuffersEXT);
-   LOAD(vkCmdBeginTransformFeedbackEXT); LOAD(vkCmdEndTransformFeedbackEXT);
+   LOAD(vkCmdBeginTransformFeedbackEXT);
+   LOAD(vkCmdEndTransformFeedbackEXT);
    LOAD(vkCmdDrawIndirectByteCountEXT);
-   LOAD(vkCmdDraw); LOAD(vkCmdPipelineBarrier); LOAD(vkCreateFence);
-   LOAD(vkDestroyFence); LOAD(vkQueueSubmit); LOAD(vkWaitForFences);
+   LOAD(vkCmdDraw);
+   LOAD(vkCmdPipelineBarrier);
+   LOAD(vkCreateFence);
+   LOAD(vkDestroyFence);
+   LOAD(vkQueueSubmit);
+   LOAD(vkWaitForFences);
 #undef LOAD
 
    VkQueue queue;
@@ -426,15 +489,15 @@ main(int argc, char **argv)
    VkPhysicalDeviceMemoryProperties memory;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory);
 
-   struct buffer vertices = make_buffer(
-      device, &memory, GUARD + VERTICES * VERTEX_STRIDE + GUARD,
-      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-   struct buffer xfb = make_buffer(
-      device, &memory, GUARD + XFB_BYTES + GUARD,
-      VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT);
-   struct buffer counter = make_buffer(
-      device, &memory, GUARD + sizeof(uint32_t) + GUARD,
-      VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT);
+   struct buffer vertices =
+      make_buffer(device, &memory, GUARD + VERTICES * VERTEX_STRIDE + GUARD,
+                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+   struct buffer xfb =
+      make_buffer(device, &memory, GUARD + XFB_BYTES + GUARD,
+                  VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT);
+   struct buffer counter =
+      make_buffer(device, &memory, GUARD + sizeof(uint32_t) + GUARD,
+                  VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT);
    memset(vertices.map, SENTINEL, vertices.size);
    memset(xfb.map, SENTINEL, xfb.size);
    memset(counter.map, SENTINEL, counter.size);
@@ -447,12 +510,70 @@ main(int argc, char **argv)
       memcpy(vertices.map + GUARD + v * VERTEX_STRIDE + 8, values[v],
              sizeof(values[v]));
 
+   struct buffer texture = make_buffer(
+      device, &memory, VERTICES * 16, VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT);
+   for (unsigned v = 0; v < VERTICES; v++)
+      for (unsigned c = 0; c < 4; c++)
+         ((float *)texture.map)[v * 4 + c] = (float)(100 * (v + 1) + c + 1);
+   VkBufferView texture_view;
+   check(
+      vkCreateBufferView(device,
+                         &(VkBufferViewCreateInfo){
+                            .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
+                            .buffer = texture.buffer,
+                            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+                            .range = VERTICES * 16},
+                         NULL, &texture_view),
+      "texture view");
+   VkDescriptorSetLayoutBinding tb = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT};
+   VkDescriptorSetLayout dlayout;
+   check(vkCreateDescriptorSetLayout(
+            device,
+            &(VkDescriptorSetLayoutCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+               .bindingCount = 1,
+               .pBindings = &tb},
+            NULL, &dlayout),
+         "descriptor layout");
+   VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1};
+   VkDescriptorPool dp;
+   check(vkCreateDescriptorPool(
+            device,
+            &(VkDescriptorPoolCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+               .maxSets = 1,
+               .poolSizeCount = 1,
+               .pPoolSizes = &ps},
+            NULL, &dp),
+         "descriptor pool");
+   VkDescriptorSet ds;
+   check(vkAllocateDescriptorSets(
+            device,
+            &(VkDescriptorSetAllocateInfo){
+               .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+               .descriptorPool = dp,
+               .descriptorSetCount = 1,
+               .pSetLayouts = &dlayout},
+            &ds),
+         "descriptor allocate");
+   VkWriteDescriptorSet wr = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = ds,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+      .pTexelBufferView = &texture_view};
+   vkUpdateDescriptorSets(device, 1, &wr, 0, NULL);
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = VK_FORMAT_R8G8B8A8_UNORM,
       .extent = {1, 1, 1},
-      .mipLevels = 1, .arrayLayers = 1,
+      .mipLevels = 1,
+      .arrayLayers = 1,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -465,8 +586,8 @@ main(int argc, char **argv)
    const VkMemoryAllocateInfo image_alloc = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .allocationSize = image_requirements.size,
-      .memoryTypeIndex = memory_type(&memory,
-                                     image_requirements.memoryTypeBits),
+      .memoryTypeIndex =
+         memory_type(&memory, image_requirements.memoryTypeBits),
    };
    VkDeviceMemory image_memory;
    check(vkAllocateMemory(device, &image_alloc, NULL, &image_memory),
@@ -475,12 +596,15 @@ main(int argc, char **argv)
          "vkBindImageMemory");
    const VkImageViewCreateInfo view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = image, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .image = image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
       .format = VK_FORMAT_R8G8B8A8_UNORM,
-      .subresourceRange = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-         .levelCount = 1, .layerCount = 1,
-      },
+      .subresourceRange =
+         {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+         },
    };
    VkImageView image_view;
    check(vkCreateImageView(device, &view_info, NULL, &image_view),
@@ -516,27 +640,36 @@ main(int argc, char **argv)
    const VkFramebufferCreateInfo framebuffer_info = {
       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
       .renderPass = render_pass,
-      .attachmentCount = 1, .pAttachments = &image_view,
-      .width = 1, .height = 1, .layers = 1,
+      .attachmentCount = 1,
+      .pAttachments = &image_view,
+      .width = 1,
+      .height = 1,
+      .layers = 1,
    };
    VkFramebuffer framebuffer;
    check(vkCreateFramebuffer(device, &framebuffer_info, NULL, &framebuffer),
          "vkCreateFramebuffer");
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = indexed ? 1 : 0,
+      .pSetLayouts = &dlayout,
    };
    VkPipelineLayout layout;
    check(vkCreatePipelineLayout(device, &layout_info, NULL, &layout),
          "vkCreatePipelineLayout");
    const VkShaderModuleCreateInfo vertex_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_vulkan_transform_feedback_vert_spv),
-      .pCode = g17p_vulkan_transform_feedback_vert_spv,
+      .codeSize = indexed ? (geometry ? sizeof(g17p_xfb_indexed_vert_spv)
+                                      : sizeof(g17p_xfb_indexed_auto_vert_spv))
+                          : sizeof(g17p_vulkan_transform_feedback_vert_spv),
+      .pCode = indexed ? (geometry ? g17p_xfb_indexed_vert_spv
+                                   : g17p_xfb_indexed_auto_vert_spv)
+                       : g17p_vulkan_transform_feedback_vert_spv,
    };
    VkShaderModule vertex_module;
-   check(vkCreateShaderModule(device, &vertex_module_info, NULL,
-                              &vertex_module),
-         "vkCreateShaderModule(vertex)");
+   check(
+      vkCreateShaderModule(device, &vertex_module_info, NULL, &vertex_module),
+      "vkCreateShaderModule(vertex)");
    const VkShaderModuleCreateInfo fragment_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
       .codeSize = sizeof(g17p_wsi_triangle_frag_spv),
@@ -556,6 +689,15 @@ main(int argc, char **argv)
                               &draw_vertex_module),
          "vkCreateShaderModule(draw vertex)");
 
+   VkShaderModule geometry_module;
+   check(vkCreateShaderModule(
+            device,
+            &(VkShaderModuleCreateInfo){
+               .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+               .codeSize = sizeof(g17p_xfb_passthrough_geom_spv),
+               .pCode = g17p_xfb_passthrough_geom_spv},
+            NULL, &geometry_module),
+         "geometry module");
    const VkPipelineShaderStageCreateInfo stages[2] = {
       {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -565,44 +707,57 @@ main(int argc, char **argv)
       },
       {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-         .module = fragment_module,
+         .stage = geometry ? VK_SHADER_STAGE_GEOMETRY_BIT
+                           : VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = geometry ? geometry_module : fragment_module,
          .pName = "main",
       },
    };
    const VkVertexInputBindingDescription binding = {
-      .binding = 0, .stride = VERTEX_STRIDE,
+      .binding = 0,
+      .stride = VERTEX_STRIDE,
       .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
    };
    const VkVertexInputAttributeDescription attribute = {
-      .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+      .location = 0,
+      .binding = 0,
+      .format = VK_FORMAT_R32G32B32A32_SFLOAT,
       .offset = 8,
    };
    const VkPipelineVertexInputStateCreateInfo vertex_input = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-      .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &binding,
       .vertexAttributeDescriptionCount = 1,
       .pVertexAttributeDescriptions = &attribute,
    };
    const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .topology = geometry ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+                           : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
    };
    const VkViewport static_viewport = {
-      .x = 0.0f, .y = 0.0f, .width = 1.0f, .height = 1.0f,
-      .minDepth = 0.0f, .maxDepth = 1.0f,
+      .x = 0.0f,
+      .y = 0.0f,
+      .width = 1.0f,
+      .height = 1.0f,
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
    };
    const VkRect2D static_scissor = {.extent = {1, 1}};
    const VkPipelineViewportStateCreateInfo viewport = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-      .viewportCount = 1, .pViewports = &static_viewport,
-      .scissorCount = 1, .pScissors = &static_scissor,
+      .viewportCount = 1,
+      .pViewports = &static_viewport,
+      .scissorCount = 1,
+      .pScissors = &static_scissor,
    };
    const VkPipelineRasterizationStateCreateInfo raster = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
       .rasterizerDiscardEnable = !rasterized,
       .polygonMode = VK_POLYGON_MODE_FILL,
-      .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1.0f,
+      .cullMode = VK_CULL_MODE_NONE,
+      .lineWidth = 1.0f,
    };
    const VkPipelineMultisampleStateCreateInfo multisample = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -610,11 +765,14 @@ main(int argc, char **argv)
    };
    const VkGraphicsPipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-      .stageCount = rasterized ? 2 : 1, .pStages = stages,
+      .stageCount = geometry || rasterized ? 2 : 1,
+      .pStages = stages,
       .pVertexInputState = &vertex_input,
       .pInputAssemblyState = &input_assembly,
-      .pViewportState = &viewport, .pRasterizationState = &raster,
-      .pMultisampleState = &multisample, .layout = layout,
+      .pViewportState = &viewport,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .layout = layout,
       .renderPass = render_pass,
    };
    VkPipeline pipeline;
@@ -655,29 +813,35 @@ main(int argc, char **argv)
    VkCommandBuffer command;
    const VkCommandBufferAllocateInfo command_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandPool = pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
       .commandBufferCount = 1,
    };
    check(vkAllocateCommandBuffers(device, &command_info, &command),
          "vkAllocateCommandBuffers");
-   check(vkBeginCommandBuffer(command,
-                              &(VkCommandBufferBeginInfo){
-                                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                              }),
+   check(vkBeginCommandBuffer(
+            command,
+            &(VkCommandBufferBeginInfo){
+               .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            }),
          "vkBeginCommandBuffer");
    const VkRenderPassBeginInfo begin_render = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-      .renderPass = render_pass, .framebuffer = framebuffer,
+      .renderPass = render_pass,
+      .framebuffer = framebuffer,
       .renderArea = {.extent = {1, 1}},
    };
    vkCmdBeginRenderPass(command, &begin_render, VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   if (indexed)
+      vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
+                              0, 1, &ds, 0, NULL);
    const VkDeviceSize vertex_offset = GUARD;
    vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &vertex_offset);
    const VkDeviceSize xfb_offset = GUARD;
    const VkDeviceSize xfb_size = XFB_BYTES;
-   vkCmdBindTransformFeedbackBuffersEXT(command, 0, 1, &xfb.buffer,
-                                        &xfb_offset, &xfb_size);
+   vkCmdBindTransformFeedbackBuffersEXT(command, 0, 1, &xfb.buffer, &xfb_offset,
+                                        &xfb_size);
    const VkDeviceSize counter_offset = GUARD;
    const VkBuffer null_counter = VK_NULL_HANDLE;
    vkCmdBeginTransformFeedbackEXT(command, 0, 1, &null_counter,
@@ -685,6 +849,30 @@ main(int argc, char **argv)
    vkCmdDraw(command, VERTICES, 1, 0, 0);
    vkCmdEndTransformFeedbackEXT(command, 0, 1, &counter.buffer,
                                 &counter_offset);
+   vkCmdEndRenderPass(command);
+   /* Resume consumes the previous EndTransformFeedback counter write.
+    * Put the dependency outside the render pass so it needs no subpass
+    * self-dependency. VK_EXT_transform_feedback requires this ordering. */
+   VkBufferMemoryBarrier resume_barrier = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT,
+      .dstAccessMask = VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .buffer = counter.buffer,
+      .offset = counter_offset,
+      .size = sizeof(uint32_t)};
+   vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT,
+                        VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT, 0, 0,
+                        NULL, 1, &resume_barrier, 0, NULL);
+   vkCmdBeginRenderPass(command, &begin_render, VK_SUBPASS_CONTENTS_INLINE);
+   vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   if (indexed)
+      vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
+                              0, 1, &ds, 0, NULL);
+   vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &vertex_offset);
+   vkCmdBindTransformFeedbackBuffersEXT(command, 0, 1, &xfb.buffer, &xfb_offset,
+                                        &xfb_size);
    vkCmdBeginTransformFeedbackEXT(command, 0, 1, &counter.buffer,
                                   &counter_offset);
    vkCmdDraw(command, VERTICES, 1, 0, 0);
@@ -711,9 +899,8 @@ main(int argc, char **argv)
     * exactly three vertices without reading the counter on the CPU. */
    vkCmdBeginRenderPass(command, &begin_render, VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw_pipeline);
-   vkCmdDrawIndirectByteCountEXT(command, 1, 0, counter.buffer,
-                                 counter_offset, VERTICES * XFB_STRIDE,
-                                 XFB_STRIDE);
+   vkCmdDrawIndirectByteCountEXT(command, 1, 0, counter.buffer, counter_offset,
+                                 VERTICES * XFB_STRIDE, XFB_STRIDE);
    vkCmdEndRenderPass(command);
    const VkMemoryBarrier host_barrier = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -721,27 +908,30 @@ main(int argc, char **argv)
       .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
    };
    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                        VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host_barrier,
-                        0, NULL, 0, NULL);
+                        VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host_barrier, 0,
+                        NULL, 0, NULL);
    check(vkEndCommandBuffer(command), "vkEndCommandBuffer");
 
    if (execute || submit_only) {
       VkFence fence;
-      check(vkCreateFence(device, &(VkFenceCreateInfo){
+      check(vkCreateFence(device,
+                          &(VkFenceCreateInfo){
                              .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-                          }, NULL, &fence),
+                          },
+                          NULL, &fence),
             "vkCreateFence");
       const VkSubmitInfo submit = {
          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-         .commandBufferCount = 1, .pCommandBuffers = &command,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &command,
       };
       check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
       check(vkWaitForFences(device, 1, &fence, VK_TRUE, 10000000000ull),
             "vkWaitForFences");
       if (execute) {
-         unsigned failures = verify_bytes(&vertices, &xfb, &counter);
+         unsigned failures = verify_bytes(&vertices, &xfb, &counter, indexed);
          sleep(3);
-         failures += verify_bytes(&vertices, &xfb, &counter);
+         failures += verify_bytes(&vertices, &xfb, &counter, indexed);
          if (failures)
             die("exact output, counter, or guard check failed");
       }
@@ -754,7 +944,12 @@ main(int argc, char **argv)
    vkDestroyShaderModule(device, fragment_module, NULL);
    vkDestroyShaderModule(device, draw_vertex_module, NULL);
    vkDestroyShaderModule(device, vertex_module, NULL);
+   vkDestroyShaderModule(device, geometry_module, NULL);
    vkDestroyPipelineLayout(device, layout, NULL);
+   vkDestroyDescriptorPool(device, dp, NULL);
+   vkDestroyDescriptorSetLayout(device, dlayout, NULL);
+   vkDestroyBufferView(device, texture_view, NULL);
+   destroy_buffer(device, &texture);
    vkDestroyFramebuffer(device, framebuffer, NULL);
    vkDestroyRenderPass(device, render_pass, NULL);
    vkDestroyImageView(device, image_view, NULL);
@@ -768,12 +963,15 @@ main(int argc, char **argv)
    dlclose(loader);
 
    if (execute)
-      printf("G17P TRANSFORM FEEDBACK %s PASS: two exact guarded captures "
-             "and resumed counter stayed exact immediately and after 3 seconds\n",
-             rasterized ? "RASTERIZED DIAGNOSTIC" : "");
+      printf(
+         "G17P TRANSFORM FEEDBACK %s PASS: two exact guarded captures "
+         "and resumed counter stayed exact immediately and after 3 seconds\n",
+         rasterized ? "RASTERIZED DIAGNOSTIC" : "");
    else if (submit_only)
-      puts("G17P TRANSFORM FEEDBACK SUBMIT PASS: public XFB path reached the UAPI stream validator");
+      puts(
+         "G17P TRANSFORM FEEDBACK SUBMIT PASS: public XFB path reached the UAPI stream validator");
    else
-      puts("G17P TRANSFORM FEEDBACK RECORD PASS: public feature and complete native XFB path reached vkEndCommandBuffer");
+      puts(
+         "G17P TRANSFORM FEEDBACK RECORD PASS: public feature and complete native XFB path reached vkEndCommandBuffer");
    return EXIT_SUCCESS;
 }

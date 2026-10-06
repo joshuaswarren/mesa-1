@@ -17,6 +17,8 @@
 #pragma once
 
 #define COBJMACROS
+#include "d12_debug.h"
+#include "d12_core_caps.h"
 #include <wsl/winadapter.h>
 #include <directx/d3d12.h>
 
@@ -24,20 +26,26 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
-#include "d12_frontend.h"
 #include "d12_agx3_vdm_state_update_core.h"
+#include "d12_buffer_view_core.h"
 #include "d12_bundle_state_core.h"
 #include "d12_command_validation_core.h"
 #include "d12_device_removal_core.h"
+#include "d12_frontend.h"
+#include "d12_native_compute.h"
 #include "d12_native_descriptor_core.h"
 #include "d12_queue_timeline_core.h"
-#include "d12_sparse_residency_core.h"
+#include "d12_raytracing_core.h"
 #include "d12_render_pass_core.h"
 #include "d12_sample_position_core.h"
-#include "d12_raytracing_core.h"
+#include "d12_sparse_residency_core.h"
 #include "d12_viewport_math.h"
 
+#include "agx3_compute_program_core.h"
+#include "d12_agx3_graphics_bind_core.h"
+#include "agx3_ioto_uniform_program.h"
 #include "agx_bg_eot.h"
 #include "agx_compile.h"
 #include "agx_device.h"
@@ -62,6 +70,14 @@
 #include "c11/threads.h"
 
 struct d12_queue;
+
+/* Which kernel backend this build talks to. The Wine build is a Windows PE
+ * (so it keeps the _WIN32 COM ABI below) but drives the Linux DRM backend;
+ * everything that is really "WDDM/D3DKMT only" keys off D12_PLATFORM_D3DKMT
+ * rather than _WIN32. */
+#if defined(_WIN32) && !defined(D12_PLATFORM_WINE)
+#define D12_PLATFORM_D3DKMT 1
+#endif
 
 /* widl/Windows spells aggregate COM returns as an explicit out pointer,
  * while the same DirectX-Headers interfaces return them by value elsewhere. */
@@ -208,23 +224,221 @@ HRESULT d12_private_data_set_name(struct d12_private_data_store *store,
  */
 #define D12_VB_PARAMS_FAILED ((uint64_t)~0ull)
 
+/* One registered descriptor heap: the half-open byte range of its slot
+ * array. The registry keeps these sorted by start so a slot pointer resolves
+ * to its heap by binary search.
+ */
+struct d12_descriptor_heap_range {
+   uintptr_t start;
+   uintptr_t end;
+   struct d12_descriptor_heap *heap;
+};
+
+/* Seqlock-published sorted range table. Writers (heap creation and release)
+ * hold descriptor_heap_lock and bump seq to odd while they edit the table;
+ * readers retry a search that observed an odd or changed seq. A table that
+ * growth replaced may still be under a reader's binary search, so retired
+ * tables stay mapped until the device is destroyed.
+ */
+struct d12_descriptor_registry {
+   uint32_t seq;
+   uint32_t count;
+   uint32_t capacity;
+   struct d12_descriptor_heap_range *ranges;
+   struct d12_descriptor_heap_range **retired;
+   uint32_t retired_count;
+};
+
+/* Driver-generated shader parts (vertex prolog, fragment prolog/epilog),
+ * compiled once per device and shared by every pipeline that links them:
+ * the same table Honeykrisp keeps as hk_device::prolog_epilog. See
+ * d12_shader_cache.c. */
+struct d12_device;
+struct hash_table;
+struct nir_builder;
+typedef void (*d12_part_builder_t)(struct nir_builder *b, const void *key);
+
+/*
+ * AGX's coefficient unit transports floating-point varyings.  Integer flat
+ * values therefore need an explicit integer -> float -> integer round trip,
+ * but only when we also bypass native flat interpolation through Poly.  Keep
+ * the component masks exact so ordinary integer links retain their established
+ * path byte-for-byte.
+ */
+struct d12_flat_transport {
+   uint64_t uint_components[4];
+   uint64_t sint_components[4];
+   uint64_t flat_outputs;
+   bool enabled;
+   bool bitcast;
+};
+
+/* What a compiled API stage is a function of, beyond the device: the
+ * bytecode, the root-signature binding map and the per-PSO compile keys.
+ * Zeroed before it is filled so the whole struct hashes and compares. */
+struct d12_stage_cache_key {
+   uint64_t blob_hash;
+   uint64_t map_hash[2];
+   uint32_t blob_size;
+   uint8_t stage; /* mesa_shader_stage */
+   uint8_t has_map;
+   uint16_t api_sample_mask;
+   uint8_t a8_mask;
+   uint8_t nr_samples;
+   uint8_t nr_layout_formats;
+   uint8_t flags; /* D12_STAGE_KEY_* */
+   uint16_t layout_formats[AGX_MAX_RENDER_TARGETS]; /* enum pipe_format */
+   uint8_t nr_velems;
+   uint8_t pad[7];
+   struct agx_velem_key velems[D12_MAX_VB_ATTRIBS];
+};
+
+#define D12_STAGE_KEY_FS_EPILOG_REQUESTED (1u << 0)
+#define D12_STAGE_KEY_FLAT_TRANSPORT      (1u << 1)
+#define D12_STAGE_KEY_LOSSLESS_FLAT       (1u << 2)
+
+/* Everything compile_gfx_stage / the compute path derive from the NIR
+ * besides the binary, so a cache hit replays a compile exactly. */
+struct d12_stage_outputs {
+   struct agx_unlinked_uvs_layout uvs; /* vertex */
+   uint64_t outputs_written;
+   struct agx_fs_epilog_link_info fs_epilog_link; /* fragment */
+   struct d12_flat_transport flat_transport;       /* fragment */
+   uint8_t cull_distance_size;                     /* vertex */
+   bool use_fs_epilog;                             /* fragment, resolved */
+   bool root_only;
+   bool reads_root;
+   bool writes_memory;
+   bool native_txf; /* compute, G17P */
+   /* Fragment, G17P: the one sample was rewritten to the bounded native
+    * texture0/sampler0 ABI (d12_nir_lower_g17p_fragment_sample). The draw
+    * publishes the texture descriptor and the static sampler as the two
+    * pointers in uniform halves 0..7. */
+   bool g17p_fragment_sample;
+   uint8_t g17p_sample_slot;           /* API sampler s<N> */
+   uint32_t g17p_texture_offset_B;     /* byte offset in the root texture table */
+   uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
+};
+
+/* The fast-link variant of a cached stage: which prolog/epilog it was
+ * linked with. Zeroed before it is filled. */
+struct d12_link_key {
+   uint8_t fragment, has_prolog, has_epilog, nr_samples_shaded;
+   struct agx_vs_prolog_key vs_prolog;
+   struct agx_fs_prolog_key fs_prolog;
+   struct agx_fs_epilog_key fs_epilog;
+};
+
+struct d12_cached_stage {
+   struct d12_stage_cache_key key;
+   void *blob; /* the bytecode, compared on every hit */
+   /* The table's reference plus one per live lookup; under the cache
+    * lock. An evicted entry lives until its last user drops it. */
+   uint32_t refcount;
+   bool in_table;
+   struct list_head lru_link;
+
+   struct agx_shader_part part;
+   struct d12_stage_outputs out;
+
+   /* The whole part uploaded once and shared: the compute program, or the
+    * preamble the fast linker does not copy. Created on first use. */
+   struct agx_bo *code_bo;
+   /* struct d12_link_key -> struct agx_linked_shader, each holding one
+    * reference on its BO. */
+   struct hash_table *links;
+};
+
+struct d12_shader_cache {
+   simple_mtx_t lock;
+   struct hash_table *parts;  /* struct d12_part_key -> agx_shader_part */
+   struct hash_table *stages; /* d12_stage_cache_key -> d12_cached_stage */
+   struct list_head stage_lru; /* d12_cached_stage::lru_link, oldest first */
+   unsigned nr_stages;
+   /* Compiled stages across processes (util/disk_cache, the mesa shader
+    * cache every Mesa driver shares); NULL when unavailable or disabled. */
+   struct disk_cache *disk;
+};
+
+void d12_shader_cache_init(struct d12_device *device);
+void d12_shader_cache_finish(struct d12_device *device);
+
+void d12_stage_cache_key_init(struct d12_stage_cache_key *key,
+                              mesa_shader_stage stage, const void *blob,
+                              size_t blob_size,
+                              const struct d12_binding_map *map);
+
+/* A referenced entry for an identical compile, or NULL. */
+struct d12_cached_stage *
+d12_shader_cache_find_stage(struct d12_device *device,
+                            const struct d12_stage_cache_key *key,
+                            const void *blob);
+
+/* Publish a compile. Takes the part's binary on success (part->binary is
+ * cleared); returns a referenced entry, which may be one another thread
+ * inserted meanwhile. With insert false the entry is private to the
+ * caller and dies with its reference. */
+struct d12_cached_stage *
+d12_shader_cache_add_stage(struct d12_device *device,
+                           const struct d12_stage_cache_key *key,
+                           const void *blob, struct agx_shader_part *part,
+                           const struct d12_stage_outputs *out, bool insert);
+
+void d12_cached_stage_unref(struct d12_device *device,
+                            struct d12_cached_stage *stage);
+
+/* A new reference on the stage's shared executable upload, or NULL. */
+struct agx_bo *d12_cached_stage_code_bo(struct d12_device *device,
+                                        struct d12_cached_stage *stage,
+                                        const char *name);
+
+/* The stage fast-linked with these parts; *out owns a new BO reference. */
+bool d12_cached_stage_link(struct d12_device *device,
+                           struct d12_cached_stage *stage,
+                           const struct d12_link_key *key,
+                           const struct agx_shader_part *prolog,
+                           const struct agx_shader_part *epilog,
+                           struct agx_linked_shader *out);
+
+bool d12_upload_executable(struct agx_bo *bo, const void *binary,
+                           size_t size);
+
+/* The cached part for (builder, key). Owned by the cache: never freed by
+ * the caller, valid for the device's lifetime. NULL when the compile was
+ * refused. A successful compile with no code is a valid (empty) part. */
+const struct agx_shader_part *
+d12_shader_cache_part(struct d12_device *device, d12_part_builder_t builder,
+                      const void *key, size_t key_size,
+                      const struct agx_shader_key *backend_key,
+                      bool preprocess);
+
 struct d12_device {
+   /* One vtable answers every IID from ID3D12Device to ID3D12Device15: the
+    * newer interfaces are strict supersets, so the slots are appended to the
+    * ID3D12Device2 table (see struct d12_device_vtbl in d12_device.c). */
    ID3D12Device iface; /* must be first */
-   /* Narrow modern-device tear-off for the CPU query-heap methods added by
-    * ID3D12Device15. IUnknown still resolves to iface above. */
-   ID3D12Device15 iface15;
    /* D3D12Core configuration is a device-owned tear-off too.  It exposes
     * serialization helpers without changing the ID3D12Device2 ABI used by
     * the main interface. */
    ID3D12DeviceConfiguration1 iface_config1;
    uint32_t refcount;
+   /* Weak per-adapter registry; final Release removes the entry. */
+   bool singleton;
+   struct d12_device *singleton_next;
    struct d12_private_data_store private_data;
 
    /* The real GPU. Owned: closed on final release. */
    struct agx_device dev;
+   struct d12_core_caps caps;
 
    /* Platform sync objects use one provider surface on DRM and D3DKMT. */
    struct util_sync_provider *sync;
+
+   /* Whether submissions carry an exact read set (allocation list). The
+    * D3DKMT and virtio backends consume one; native Linux DRM ignores it,
+    * so the recorder skips every read reference except the BO retention
+    * the queue needs, and the queue skips resolving ranges to BOs. */
+   bool submit_read_set;
 
    /* The adapter identity DXGI and D3DKMT use for zero-copy interop. */
    LUID adapter_luid;
@@ -244,12 +458,20 @@ struct d12_device {
    struct agx_scratch scratch_vs, scratch_fs, scratch_cs;
 
    /* CPU descriptor handles are opaque pointers into a heap's slot array.
-    * View creation only receives that pointer, so retain a small registry to
-    * locate the owning heap and mirror the slot into its GPU-native texture,
-    * PBE or sampler table. Descriptor heaps hold a device ref, hence every
-    * registry entry is removed before final device destruction. */
+    * View creation only receives that pointer, so retain a registry of
+    * slot-array ranges to locate the owning heap and mirror the slot into
+    * its GPU-native texture, PBE or sampler table. Descriptor heaps hold a
+    * device ref, hence every registry entry is removed before final device
+    * destruction. The lock serialises registry writers and whole-registry
+    * walks; descriptor writes resolve their heap without it. */
    simple_mtx_t descriptor_heap_lock;
-   struct d12_descriptor_heap *descriptor_heaps;
+   struct d12_descriptor_registry descriptor_registry;
+
+   /* Retired G17P native VDM slabs, kept bound at their low-window alias
+    * for the next command list (the alias is immutable for the BO's life,
+    * as Honeykrisp's pooled command BOs keep theirs). */
+   simple_mtx_t g17p_vdm_pool_lock;
+   struct util_dynarray g17p_vdm_pool;
 
    /* Root SRV/CBV setters receive only a raw GPU VA. Retain the live sparse
     * intervals so read-only root descriptors can select the zero-backed
@@ -302,6 +524,8 @@ struct d12_device {
    void *dbg_mesh_disp;
    void *dbg_mesh_verts;
    void *dbg_mesh_idx;
+   unsigned dbg_mesh_vertex_stride, dbg_mesh_vertex_count;
+   unsigned dbg_mesh_index_count;
    void *dbg_tcs_buf;
    unsigned dbg_tcs_buf_n;
 
@@ -313,6 +537,8 @@ struct d12_device {
     * immediately publishes the same transition to the D3D12 core layer.
     */
    struct d12_device_removal_state removal;
+
+   struct d12_shader_cache shader_cache;
 };
 
 static inline bool
@@ -517,6 +743,9 @@ HRESULT d12_sparse_collect_tiles(
    const D3D12_TILE_REGION_SIZE *sizes, uint32_t **out_tiles,
    uint32_t *out_count);
 uint64_t d12_sparse_read_address(struct d12_device *device, uint64_t address);
+uint64_t d12_sparse_resolve_cbv_address(struct d12_device *device,
+                                        uint64_t address,
+                                        struct d12_resource **owner);
 struct d12_resource *d12_sparse_buffer_for_address(
    struct d12_device *device, uint64_t address);
 uint64_t d12_sparse_buffer_residency_address(
@@ -727,24 +956,54 @@ struct d12_descriptor_heap {
    struct agx_bo *pbe_bo;
    uint8_t texture_stride_B;
    uint8_t pbe_stride_B;
+   /* The generation's null TEXTURE/PBE descriptors, packed once at heap
+    * creation. Every slot starts as a copy, and a slot without a resource
+    * (D12_DESC_NONE, CBV, null view) mirrors to exactly these bytes. */
+   uint8_t null_texture[D12_NATIVE_DESCRIPTOR_MAX_B];
+   uint8_t null_pbe[D12_NATIVE_DESCRIPTOR_MAX_B];
    /* One 64-bit sparse residency-map pointer per logical resource
     * descriptor. Zero keeps dense resources on the no-load fast path. */
    struct agx_bo *residency_bo;
    struct agx_bo *sampler_bo;
    uint32_t sampler_unique_count;
+   /* Shader-visible sampler heaps keep the packed-state deduplication table
+    * (2,048 open-addressed buckets of native indices) across writes, so a
+    * descriptor write inserts one state instead of rebuilding the heap.
+    * sampler_lock serialises native sampler table maintenance. */
+   simple_mtx_t sampler_lock;
+   uint16_t *sampler_hash;
 
    /* Exact WDDM read-set construction must inspect descriptors which can be
     * reached through an unbounded table or SM 6.6 heap handle. A maximum
     * resource heap contains one million slots, so walking every slot on
     * every ExecuteCommandLists call is not viable. Maintain a compact CPU
     * occupancy bitmap as descriptors are written and visit only live slots.
-    * descriptor_heap_lock protects this bitmap and the matching slot reads.
+    * The words are maintained with atomic read-modify-writes; the slots
+    * themselves are only ever written by the application thread that owns
+    * the descriptor, as D3D12 requires.
     */
    uint64_t *live_resource_words;
    uint32_t live_resource_word_count;
 
-   struct d12_descriptor_heap *registry_next;
+   /* Shape windows per slot in the native tables (3 on generations that
+    * keep the legacy 2D and 2D-array mirrors, else 1). */
+   uint8_t native_windows;
+   /* A CPU (non-shader-visible) CBV/SRV/UAV heap keeps the same TEXTURE
+    * and PBE words, packed when a descriptor is written, so that
+    * CopyDescriptors into a shader-visible heap copies them rather than
+    * packing every copied descriptor again: the D3D12 pattern is to write
+    * a descriptor once into a CPU heap and copy it every frame. Pages of
+    * D12_STAGING_NATIVE_PAGE slots are allocated on the first write into
+    * them and start as the null words; a slot's record is every window's
+    * TEXTURE word, then every window's PBE word. NULL when the heap keeps
+    * none, and copies from it pack as before. */
+   uint8_t **staging_native_pages;
+   uint32_t staging_native_page_count;
+   /* A page allocation failed: some written slot has no record. */
+   bool staging_native_incomplete;
 };
+
+#define D12_STAGING_NATIVE_PAGE 1024u
 
 /* A finite descriptor table is flattened into the command-list root and
  * texture heaps for AGX.  D3D12 nevertheless permits the application to
@@ -760,7 +1019,6 @@ struct d12_descriptor_fixup {
    uint32_t slot;
    uint16_t table_count;
    uint8_t texture_shape;
-   bool native_only;
 };
 
 /* ExecuteIndirect root constants are sourced from the argument buffer at
@@ -790,27 +1048,108 @@ struct d12_indirect_argument_fixup {
 };
 
 /*
- * Bundles are recorded before the direct command list state they inherit is
- * known.  Keep draw calls logical until ExecuteBundle so render targets,
- * viewport/scissor and root bindings come from the calling list.  Pipeline
- * state and primitive topology are deliberately snapshotted separately:
- * D3D12 does not inherit either of those into a bundle.
+ * Bundles are recorded before the direct command list state they inherit
+ * is known, so a bundle keeps a LOG OF THE API CALLS it received and
+ * ExecuteBundle replays them against the calling list: render targets,
+ * viewport/scissor and everything the bundle did not set come from the
+ * caller, everything it did set (root arguments, IA state, dynamic state,
+ * pipeline, root signatures, descriptor heaps) is applied in order and
+ * stays applied afterwards, which is D3D12's inheritance rule. Pipeline
+ * state and primitive topology are not inherited INTO a bundle, so a draw
+ * recorded without them is replayed as nothing.
+ *
+ * One log entry: the header, then `size_B - sizeof(header)` bytes of
+ * payload (root constant values, vertex buffer views).
  */
-struct d12_bundle_draw {
-   uint32_t vertex_count;
-   uint32_t instance_count;
-   uint32_t first_vertex;
-   uint32_t first_instance;
-   uint32_t first_index;
-   bool indexed;
+enum d12_bundle_op {
+   D12_BUNDLE_SET_PIPELINE_STATE,
+   D12_BUNDLE_SET_GRAPHICS_ROOT_SIGNATURE,
+   D12_BUNDLE_SET_COMPUTE_ROOT_SIGNATURE,
+   D12_BUNDLE_SET_DESCRIPTOR_HEAPS,
+   D12_BUNDLE_SET_ROOT_TABLE,
+   D12_BUNDLE_SET_ROOT_DESCRIPTOR,
+   D12_BUNDLE_SET_ROOT_CONSTANTS,
+   D12_BUNDLE_IA_PRIMITIVE_TOPOLOGY,
+   D12_BUNDLE_IA_VERTEX_BUFFERS,
+   D12_BUNDLE_IA_INDEX_BUFFER,
+   D12_BUNDLE_OM_BLEND_FACTOR,
+   D12_BUNDLE_OM_STENCIL_REF,
+   D12_BUNDLE_RS_DEPTH_BIAS,
+   D12_BUNDLE_IA_STRIP_CUT,
+   D12_BUNDLE_DRAW,
+   D12_BUNDLE_DRAW_INDEXED,
+   D12_BUNDLE_DISPATCH,
+   D12_BUNDLE_DISPATCH_MESH,
+   D12_BUNDLE_EXECUTE_INDIRECT,
+};
 
-   struct d12_pipeline_state *pso;
-   struct d12_root_signature *graphics_rs;
-   enum mesa_prim topology;
-   unsigned patch_control_points;
-   bool graphics_rs_set;
+struct d12_bundle_cmd {
+   enum d12_bundle_op op;
+   uint32_t size_B; /* header plus payload, 8-aligned */
+
+   /* Whether the bundle itself had set a pipeline / topology when a draw
+    * or dispatch was recorded; neither is inherited from the caller. */
+   bool pso_set;
    bool topology_set;
-   struct d12_bundle_dynamic_state dynamic_state;
+
+   union {
+      ID3D12PipelineState *pso;
+      ID3D12RootSignature *root_sig;
+      struct {
+         UINT count;
+         ID3D12DescriptorHeap *heaps[2];
+      } heaps;
+      struct {
+         bool compute;
+         UINT index;
+         D3D12_GPU_DESCRIPTOR_HANDLE base;
+      } table;
+      struct {
+         bool compute;
+         UINT index;
+         D3D12_GPU_VIRTUAL_ADDRESS address;
+         D3D12_ROOT_PARAMETER_TYPE type;
+      } descriptor;
+      struct {
+         bool compute;
+         UINT index;
+         UINT count;  /* payload: count 32-bit values */
+         UINT offset;
+      } constants;
+      D3D12_PRIMITIVE_TOPOLOGY topology;
+      struct {
+         UINT start;
+         UINT count;  /* payload: count D3D12_VERTEX_BUFFER_VIEW */
+      } vertex_buffers;
+      struct {
+         bool bound;
+         D3D12_INDEX_BUFFER_VIEW view;
+      } index_buffer;
+      float blend_factor[4];
+      struct {
+         UINT front, back;
+      } stencil_ref;
+      struct {
+         float bias, clamp, slope;
+      } depth_bias;
+      D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut;
+      struct {
+         UINT vertex_count, instance_count, first_vertex, first_instance;
+         UINT first_index;
+         INT base_vertex;
+      } draw;
+      struct {
+         UINT x, y, z;
+      } dispatch;
+      struct {
+         ID3D12CommandSignature *signature;
+         UINT max_count;
+         ID3D12Resource *args;
+         UINT64 args_offset;
+         ID3D12Resource *count;
+         UINT64 count_offset;
+      } execute_indirect;
+   };
 };
 
 /*
@@ -825,6 +1164,7 @@ struct d12_query_heap {
    struct d12_device *device; /* holds a device ref */
    D3D12_QUERY_HEAP_DESC desc;
    D3D12_QUERY_HEAP_FLAGS flags;
+   uint32_t timestamp_handle;
    unsigned stride;   /* bytes per result */
    size_t start_offset; /* occlusion BeginQuery snapshots, 0 otherwise */
    struct agx_bo *bo;
@@ -933,6 +1273,9 @@ struct d12_root_signature {
     * against it and the command list fills the root table through it.
     */
    struct d12_binding_map map;
+   /* The map names a UAV, or the heap is directly indexed: only then can a
+    * draw or dispatch under this signature write through a binding. */
+   bool may_write_uavs;
 };
 
 /* Root signature blobs (d12_root_sig.c) */
@@ -962,6 +1305,19 @@ ID3DBlob *d12_blob_create(const void *data, size_t size);
 
 /* One linked graphics stage */
 struct d12_gfx_stage {
+   /* Frontend scan before texture lowering: only root/buffer resources. */
+   bool g17p_root_only;
+   bool reads_root;
+   bool g17p_writes_memory;
+   /* Fragment stage compiled to the bounded native texture0/sampler0 ABI:
+    * one 2D sample through the root texture table and a static sampler,
+    * both published as pointers in uniform halves 0..7 (see
+    * d12_stage_outputs). Admitted by the G17P producer like root-only. */
+   struct {
+      bool valid;
+      uint8_t sampler_slot;
+      uint32_t texture_offset_B;
+   } g17p_sample;
    struct agx_shader_info info;
    struct agx_linked_shader linked;
 
@@ -1033,28 +1389,45 @@ struct d12_pipeline_library_key {
 /* A compiled pipeline: AGX machine code produced from the app's DXIL. */
 struct d12_pipeline_state {
    ID3D12PipelineState iface; /* must be first */
-   uint32_t refcount;
-   /* Pipeline libraries retain a hidden ownership reference. It deliberately
-    * does not change the public COM count: a stored PSO may reach public
-    * refcount zero, retain its private data, and later be returned again from
-    * the same library as required by D3D12. */
-   uint32_t library_refcount;
-   bool device_ref_active;
+   uint32_t refcount; /* public COM count */
+
+   /*
+    * Ownership is ONE atomic count: one reference for the public COM
+    * count while it is non-zero, plus one per pipeline-library entry. The
+    * object is destroyed when this reaches zero, by whichever release got
+    * there, so a library and the application releasing concurrently can
+    * never both decide to free it or race its device reference.
+    *
+    * The public count deliberately stays separate: a stored PSO may reach
+    * public refcount zero, retain its private data, and later be returned
+    * again from the same library, as D3D12 requires.
+    */
+   uint32_t lifetime;
    struct d12_private_data_store private_data;
 
-   struct d12_device *device; /* holds a device ref */
-   /* Driver-private validation blob returned by GetCachedBlob.  The current
-    * implementation still recompiles cached PSOs, but validates that the
-    * supplied shader and canonical root layout are an exact match. */
+   struct d12_device *device; /* holds a device ref for the lifetime */
+   /* Driver-private validation blob returned by GetCachedBlob: the shader
+    * bytes and the canonical root layout (plus the library key for graphics
+    * PSOs). A supplied CachedPSO must match it exactly; the recreation
+    * itself is served by the device shader cache. */
    void *cached_blob;
    size_t cached_blob_size;
    bool is_compute;
+   /* SO without an application GS can inherit the primitive class from IA
+    * when a PSO stream omits PRIMITIVE_TOPOLOGY. Point is this object;
+    * line and triangle retain ordinary pipelines compiled by the same path. */
+   bool so_dynamic_topology;
+   struct d12_pipeline_state *so_line, *so_triangle;
    struct d12_pipeline_library_key library_key;
    bool library_key_valid;
    /* A null pixel shader still uses an empty hardware fragment program for
     * depth/stencil rasterization, but it has no colour attachments or stores.
     */
    bool has_pixel_shader;
+   /* Some enabled render target blends with a BLEND_FACTOR / ALPHA_FACTOR
+    * operand, so the fragment stage reads OMSetBlendFactor's constants from
+    * uniform halves 4..11. */
+   bool blend_constants_used;
    /* False only for a stream-output PSO whose RasterizedStream is explicitly
     * D3D12_SO_NO_RASTERIZED_STREAM. */
    bool rasterization_enabled;
@@ -1069,6 +1442,11 @@ struct d12_pipeline_state {
    struct agx_bo *code_bo;
    uint64_t code_va;
    struct agx_shader_info info;
+   /* Native compute code_va is the CODE entry, never the allocation base. */
+   bool g17p_compute_container;
+   /* Native indexed Texture.Load ABI with texture/sampler pointer prefix. */
+   bool g17p_native_txf;
+   uint64_t g17p_rodata_va;
 
    /* VERTEX ATTRIBUTES. Resolved at PSO creation by matching each
     * D3D12_INPUT_ELEMENT_DESC's (SemanticName, SemanticIndex) against the
@@ -1130,6 +1508,8 @@ struct d12_pipeline_state {
     * The compute programs are plain code BOs like the compute PSO's;
     * gs_rast is fast-linked like any other vertex stage.
     */
+   struct d12_native_compute_abi native_stages[D12_NATIVE_STAGE_COUNT];
+
    bool has_gs;
    struct poly_gs_info gs_info;
 
@@ -1227,6 +1607,8 @@ struct d12_pipeline_state {
    struct agx_unlinked_uvs_layout ms_uvs;
    struct agx_varyings_vs ms_varyings;
    uint64_t ms_outputs;
+   uint64_t ms_primitive_outputs;
+   uint32_t ms_max_vertices, ms_max_primitives;
 
    enum tess_primitive_mode tess_mode;
    enum gl_tess_spacing tess_spacing;
@@ -1242,6 +1624,7 @@ d12_pipeline_state_from_iface(ID3D12PipelineState *iface)
 struct d12_cmd_allocator {
    ID3D12CommandAllocator iface; /* must be first */
    uint32_t refcount;
+   uint32_t lifetime_refcount; /* command lists do not change COM refs */
    struct d12_private_data_store private_data;
 
    struct d12_device *device; /* holds a device ref */
@@ -1252,7 +1635,20 @@ struct d12_cmd_allocator {
     */
    unsigned recording_lists;
 
+   /* Command-list storage this allocator owns. A list that is Reset after
+    * a submission parks its stream and USC BOs here (the GPU may still be
+    * reading them); ID3D12CommandAllocator::Reset, which the application
+    * may only call once that work completed, moves them to the free pool
+    * from which later recordings take their storage instead of allocating
+    * and faulting in fresh BOs. */
+   struct util_dynarray parked_stream_bos; /* struct agx_bo * */
+   struct util_dynarray parked_usc_bos;
+   struct util_dynarray free_stream_bos;
+   struct util_dynarray free_usc_bos;
 };
+
+/* Free BOs kept per allocator and kind; the rest return to the device cache. */
+#define D12_ALLOCATOR_POOL_MAX 8
 
 enum d12_list_state {
    D12_LIST_RECORDING,
@@ -1380,7 +1776,43 @@ struct d12_read_tracker {
    bool incomplete;
 };
 
+struct d12_fragment_state_cache_entry {
+   uint64_t generation;
+   bool valid;
+   const struct d12_pipeline_state *pso;
+   uint32_t fs_usc, varyings;
+   enum mesa_prim topology;
+   uint8_t dsv_flags;
+   uint8_t stencil_ref_front, stencil_ref_back;
+   bool has_ds, has_stencil, depth_bias_enable;
+   bool occlusion_counting;
+   uint64_t gpu;
+   uint16_t size;
+};
+
+/* Fixed PPP groups, excluding culling and the fragment shader words.
+ * Kept by value so switching/releasing a PSO cannot leave a dangling key. */
+struct d12_fragment_static_state {
+   struct d12_depth_stencil_state ds;
+   struct agx_fragment_control_packed control;
+   struct agx_fragment_face_2_packed face;
+   struct agx_fragment_shader_word_0_packed fs_counts;
+   struct agx_output_select_packed vs_osel, fs_osel;
+   struct agx_varying_counts_packed counts_32, counts_16;
+   uint32_t output_size;
+   enum agx_polygon_mode polygon_mode;
+   bool smooth_line;
+};
+
 struct d12_segment {
+   /* Firmware timestamp destination, bound through agx_bind_timestamps. */
+   struct drm_asahi_timestamp timestamp_end;
+   /* P10 recording certificate only. Recheck the registered fd at submit;
+    * this is not physical GS/raster admission. */
+   bool g17p_preraster_metadata_only;
+   /* Revalidate the admission used when recording each native texture path. */
+   bool g17p_txf_metadata_only;
+   bool g17p_txf_physical;
    /* Base addresses of the render target SLICES this pass writes. Array and
     * 3D RTVs may select a bounded layer range; layers are contiguous at
     * layer_stride_B, so the view carries an offset the resource does not.
@@ -1401,9 +1833,18 @@ struct d12_segment {
     */
    size_t stream_start;
    size_t stream_end;
+   uint64_t g17p_vdm_control_base;
 
    /* CDM */
    uint32_t dispatches;
+   /* The last API dispatch launched without its trailing cache flush;
+    * the flush is owed before any barrier, helper launch or the
+    * segment's terminator (d12_list_flush_cdm_pending). */
+   bool cdm_flush_pending;
+   /* Stream offset one past the weak barrier word of the last native G17P
+    * API launch while it is still the end of the stream, else 0; the owed
+    * strong flush rewrites that word in place (d12_list_flush_cdm_pending). */
+   size_t g17p_weak_barrier_end;
 
    /* Bindless AGX samplers are addressed from one heap named by the DRM
     * command, not by a USC sampler-state record. Capture the heap selected
@@ -1438,9 +1879,24 @@ struct d12_segment {
    bool merge_unused_rts;
    uint32_t bg_usc, eot_usc; /* agx_usc_addr()-encoded */
    uint32_t partial_bg_usc, partial_eot_usc;
+   uint64_t g17p_bg_resources, g17p_eot_resources;
+   uint64_t g17p_partial_bg_resources, g17p_partial_eot_resources;
    struct agx_counts_packed bg_counts, eot_counts;
    struct agx_counts_packed partial_bg_counts, partial_eot_counts;
    bool has_draws;
+   /* A draw in this render ran a shader that writes memory (UAVs), so a
+    * later barrier with a memory scope may depend on it. */
+   bool draws_write_memory;
+   /* The end-of-tile op chosen per colour attachment (enum agx_bg_eot_op),
+    * kept so a later full clear or discard of the attachment can retire a
+    * store nothing will read (d12_list_retire_attachment_store). */
+   uint8_t eot_ops[AGX_MAX_RENDER_TARGETS];
+   /* The depth/stencil write-back is dead: a full clear or a discard of the
+    * aspect follows this render with nothing in between. */
+   bool depth_store_dead, stencil_store_dead;
+   /* The aspect was discarded before this render, so its tiles are not
+    * seeded from memory. */
+   bool depth_load_none, stencil_load_none;
    bool process_empty_tiles;
 
    /* Depth/stencil attachment. Unlike colour, depth never passes through a
@@ -1496,6 +1952,31 @@ struct d12_segment {
     * state is persistent, so repeating an identical update on every draw is
     * pure command/data growth. */
    bool viewport_ppp_valid;
+   /* The list's vp_hw_cache generation viewport_scissor_index was pushed
+    * for: while it holds, the draw's scissor records are already there. */
+   uint32_t viewport_hw_gen;
+   /* Draws recorded into this render. */
+   uint32_t draws;
+   /* The list's om_gen under which the bound attachments last matched
+    * this render (0: never), and for which kind of pipeline. */
+   uint32_t om_gen;
+   bool om_gen_use_rtv;
+   /* The vertex VDM state last emitted in this render (AGX2): a draw with
+    * the same vertex program words and restart index re-emits nothing. */
+   bool vs_state_valid;
+   /* The fragment PPP blob the render's last draw pointed the PPP at: a
+    * draw with the same blob emits no PPP_STATE packet. */
+   uint64_t fragment_ppp_gpu;
+   /* The inputs of the fragment state the PPP holds in this render, with
+    * the fragment shader words it was last given. A draw that differs only
+    * in those words (a root constant or binding change rebuilds them) loads
+    * just the fragment shader group, Honeykrisp's root-dirty update, rather
+    * than a whole fragment state. `valid` false: unknown. */
+   struct d12_fragment_state_cache_entry fragment_loaded;
+   struct d12_fragment_static_state fragment_static;
+   uint32_t vs_state_usc;
+   uint32_t vs_state_restart;
+   const struct d12_gfx_stage *vs_state_stage;
    uint8_t viewport_count;
    uint16_t viewport_scissor_index;
    uint16_t viewport_depth_bias_index;
@@ -1508,6 +1989,8 @@ struct d12_segment {
 /* Per-render-pass array chunks. Recording rolls to a load-preserving pass
  * before either fills, which bounds storage without limiting command lists. */
 #define D12_SCISSORS_PER_SEGMENT 256
+/* Full clears a command list may hold back for the pass that consumes them. */
+#define D12_PENDING_CLEARS 8
 #define D12_DEPTH_BIASES_PER_SEGMENT 64
 
 /* A command list may legally contain a large sequence of independent render
@@ -1518,48 +2001,95 @@ struct d12_segment {
 
 struct d12_binding_upload_cache {
    bool valid;
+   /* Root-table generation this upload was built from; equal generations
+    * mean no root parameter was written since, so the hit needs no compare. */
+   uint32_t generation;
    const struct d12_root_signature *rs;
+   const struct d12_pipeline_state *pso;
    const struct d12_descriptor_heap *resource_heap;
    const struct d12_descriptor_heap *sampler_heap;
+   /* The uploaded dense root planes, kept so a root constant or root
+    * descriptor change re-roots only the affected slots instead of
+    * rebuilding texture and PBE heaps. */
+   uint64_t compact[D12_ROOT_TABLE_ENTRIES];
+   uint64_t pbe_table;
    struct d12_descriptor table[D12_MAX_RESOURCE_BINDINGS];
    struct d12_descriptor samplers[D12_MAX_RESOURCE_BINDINGS];
    const struct d12_descriptor *sources[D12_MAX_RESOURCE_BINDINGS];
    uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
    uint64_t root, textures, pbes;
+   uint64_t texture_table, texture_table_size_B;
    uint64_t heap, heap_textures, heap_pbes, heap_samplers;
    uint64_t tables;
    uint32_t table_count;
 };
 
+#define D12_BINDING_CACHE_WAYS 4
+
 #define D12_GFX_UPLOAD_CACHE_SIZE 1024
+/* Probe window for the hashed USC caches. Past it an entry is evicted
+ * rather than scanning the whole table, which is what turned a full cache
+ * into a 1024-probe miss on every draw. */
+#define D12_USC_CACHE_PROBES 8
 
 struct d12_gfx_upload_cache_entry {
+   uint64_t generation;
    bool valid;
    const struct d12_pipeline_state *pso;
    struct agx_tilebuffer_layout tib;
    uint64_t root, textures, pbes;
    uint64_t heap, heap_textures, heap_pbes, heap_samplers;
-   uint64_t draw, blend;
+   uint64_t draw, blend, vb_params;
    uint32_t vs_usc, fs_usc, varyings;
 };
 
 #define D12_FRAGMENT_STATE_CACHE_SIZE 2048
 
-struct d12_fragment_state_cache_entry {
+
+/* Native PPP uploads keep their low VDM alias until the last submitted
+ * operation retires, independently of command-list Reset/release. */
+struct d12_g17p_vdm_storage {
+   uint32_t refcount;
+   struct d12_device *device;
+   struct agx_bo *bo;
+   uint64_t alias;
+   size_t used;
+};
+
+/* The native G17P compute state-loader program of the previous API
+ * dispatch, reused while the PSO and its uniform ranges repeat. */
+struct d12_g17p_program_cache {
    bool valid;
    const struct d12_pipeline_state *pso;
-   uint32_t fs_usc, varyings;
-   enum mesa_prim topology;
-   uint8_t dsv_flags;
-   uint8_t stencil_ref_front, stencil_ref_back;
-   bool has_ds, has_stencil, depth_bias_enable;
-   bool occlusion_counting;
-   uint64_t gpu;
-   uint16_t size;
+   unsigned range_count;
+   struct agx3_ioto_uniform_range ranges[10];
+   struct agx3_cdm_direct_template_sources launch_sources;
+   struct agx3_compute_program launch;
+   /* Native Texture.Load: the sampler-table cell uploaded for this
+    * recording (the table is the device's, so one cell serves every
+    * dispatch and the uniform ranges, hence the program, repeat), and the
+    * texture table last made visible to the device. */
+   uint64_t txf_sampler_cell;
+   uint64_t txf_synced_table;
+   size_t txf_synced_table_size_B;
+};
+
+/* The bind state and draw-index records of the previous native G17P draw
+ * of the open render, reused while a draw repeats them: each is otherwise
+ * a fresh VDM slab allocation (188 + 8 bytes, 64-byte aligned) per draw. */
+struct d12_g17p_bind_cache {
+   unsigned segment; /* index of the render this cache belongs to */
+   bool bind_valid;
+   struct d12_agx3_triangle_bind_desc desc; /* compact_va zeroed */
+   struct d12_agx3_triangle_bind generated;
+   bool indices_valid;
+   unsigned scissor_index, depth_bias_index;
+   uint32_t draw_offset;
 };
 
 struct d12_cmd_list {
    ID3D12GraphicsCommandList iface; /* must be first */
+   struct util_dynarray g17p_vdm_storage;
    uint32_t refcount;
    struct d12_private_data_store private_data;
 
@@ -1582,6 +2112,8 @@ struct d12_cmd_list {
    struct d12_segment segments[D12_MAX_SEGMENTS];
    unsigned segment_count;
    bool cdm_open;    /* last segment is an unterminated CDM */
+   struct d12_g17p_program_cache g17p_program_cache;
+   struct d12_g17p_bind_cache g17p_bind_cache;
    bool render_open; /* last segment is an unterminated RENDER */
 
    /* THE PRE-GRAPHICS COMPUTE STREAM.
@@ -1661,6 +2193,17 @@ struct d12_cmd_list {
       uint32_t size_B;
       uint32_t stride_B;
    } vb[D12_MAX_VB_SLOTS];
+   /* Bumped by every vertex-buffer binding change and every Reset. */
+   uint32_t vb_generation;
+   /* The fetch parameter block last uploaded for (PSO, bindings). A run
+    * of draws with the same vertex buffers reuses it, so the uniform that
+    * names it, and with it the vertex USC words, repeat across draws. */
+   struct {
+      const struct d12_pipeline_state *pso;
+      uint32_t generation;
+      uint64_t params_gpu;
+      uint64_t data_gpu;
+   } vb_params_cache;
 
    /* IASetIndexBuffer. size_B of zero means nothing is bound, which is
     * distinct from a bound buffer of length zero only in that the latter
@@ -1685,6 +2228,9 @@ struct d12_cmd_list {
    unsigned patch_control_points;
    struct d12_cmd_allocator *allocator; /* the one it is recording into */
    struct d12_pipeline_state *pso; /* not referenced; app keeps alive */
+   /* The PSO whose code BOs were last added to the read tracker; a draw
+    * with the same PSO bound adds nothing. */
+   const struct d12_pipeline_state *tracked_pso;
 
    /* SetPredication snapshots the API buffer's 64-bit value into command-list
     * storage at the exact point where the call is recorded. Later draw and
@@ -1712,10 +2258,13 @@ struct d12_cmd_list {
     * is reserved for texture Load; API sampler S is uploaded at S + 1. */
    struct d12_descriptor compute_sampler_table[D12_MAX_RESOURCE_BINDINGS];
    struct d12_descriptor graphics_sampler_table[D12_MAX_RESOURCE_BINDINGS];
+   /* Bumped by every root parameter write (compute, graphics); the binding
+    * upload cache compares this instead of 33 KiB of table contents. */
+   uint32_t root_generation[2];
    struct util_dynarray descriptor_fixups;
    struct util_dynarray indirect_constant_fixups;
    struct util_dynarray indirect_argument_fixups;
-   struct util_dynarray bundle_draws;
+   struct util_dynarray bundle_cmds; /* struct d12_bundle_cmd log */
 
    /* ExecuteIndirect reads GPU-produced root/VBV/IBV addresses. A fixed view
     * cell lives in this recording's stream BO; immediately before submission
@@ -1730,8 +2279,24 @@ struct d12_cmd_list {
     * changes.  Exhaustive PSO-mix tests revisit the same 512 pipelines
     * hundreds of times; rebuilding 6 KiB root planes and USC programs per
     * draw is both needless and larger than the command-list arena. */
-   struct d12_binding_upload_cache binding_upload_cache[2];
-   struct d12_gfx_upload_cache_entry gfx_upload_cache[D12_GFX_UPLOAD_CACHE_SIZE];
+   /* A few ways per pipeline type so alternating root state (two descriptor
+    * tables, two root signatures) keeps hitting. */
+   struct d12_binding_upload_cache
+      binding_upload_cache[2][D12_BINDING_CACHE_WAYS];
+   uint8_t binding_cache_next[2];
+   /* Round-robin victim selection for the bounded USC cache probes. */
+   uint32_t usc_cache_tick;
+   const uint8_t *last_gfx_usc_cpu[2];
+   size_t last_gfx_usc_size[2];
+   uint32_t last_gfx_usc[2];
+   uint64_t gfx_cache_generation;
+   struct d12_gfx_upload_cache_entry
+      gfx_upload_cache[2][D12_GFX_UPLOAD_CACHE_SIZE];
+   /* The VS-to-FS coefficient link of the last pipeline whose words were
+    * built: a function of the pipeline alone, kept while a root constant
+    * or binding change rebuilds the stage words around it. */
+   const struct d12_pipeline_state *varyings_link_pso;
+   uint32_t varyings_link_usc;
    struct d12_fragment_state_cache_entry
       fragment_state_cache[D12_FRAGMENT_STATE_CACHE_SIZE];
    bool direct_draw_params_valid;
@@ -1741,12 +2306,10 @@ struct d12_cmd_list {
    float blend_upload[4];
    uint64_t blend_upload_gpu;
 
-   /* Explicit state written while recording a bundle.  The final values are
-    * inherited back into its caller even when the bundle contains no draw.
-    */
-   bool bundle_graphics_rs_set;
+   /* Whether IASetPrimitiveTopology was called while recording a bundle:
+    * the topology is not inherited into it, so draws before that are
+    * replayed as nothing. */
    bool bundle_topology_set;
-   struct d12_bundle_dynamic_state bundle_dynamic_state;
 
    /* SetDescriptorHeaps state.  GPU descriptor handles remain CPU pointers
     * for application arithmetic, so the bound object is also how an
@@ -1778,6 +2341,21 @@ struct d12_cmd_list {
    uint8_t viewport_count;
    struct d12_scissor_desc scissors[D12_VIEWPORT_STATE_MAX];
    uint8_t scissor_count;
+   /* Bumped by every write of bound_rtv/bound_dsv (never 0 after the
+    * first, never reset), so a draw can skip comparing them with the open
+    * render while they are unchanged. */
+   uint32_t om_gen;
+   /* The hardware viewport and clip state built from the above for one
+    * render size, kept until RSSetViewports/RSSetScissorRects or a render
+    * of another size: every draw needs it, and rebuilding it (float math
+    * and a 16-entry clear) was an eighth of a plain draw's recording. */
+   struct {
+      bool valid;
+      uint16_t width_px, height_px;
+      unsigned count;
+      uint32_t gen; /* bumped on every rebuild, never reset */
+      struct d12_viewport_hw_state states[D12_VIEWPORT_STATE_MAX];
+   } vp_hw_cache;
 
    /* OM bindings are descriptor snapshots, not just resource pointers: RTV
     * array slices share a resource but have different addresses, and typeless
@@ -1788,6 +2366,35 @@ struct d12_cmd_list {
    uint8_t bound_rtv_count;
    bool has_bound_dsv;
 
+   /* Full-view clears and discards recorded but not yet applied. The next
+    * render that binds and writes the view seeds its tiles from the value
+    * (or from nothing) instead of loading from memory; a command that could
+    * observe the view before that turns each clear into a render of its
+    * own (d12_list_flush_pending_clears) and drops the discard hints. */
+   struct d12_pending_rt_clear {
+      /* A clear names a view; a discard names a resource and a range of
+       * its subresources, matched against the views later bound. */
+      bool discard;
+      struct d12_descriptor view;
+      float color[4];
+      struct d12_resource *resource;
+      bool whole;
+      uint32_t first_subresource, subresource_count;
+   } pending_rt_clear[D12_PENDING_CLEARS];
+   unsigned pending_rt_clear_count;
+   struct d12_pending_ds_clear {
+      bool valid;
+      struct d12_descriptor view;
+      bool depth, stencil;
+      float depth_value;
+      uint8_t stencil_value;
+   } pending_ds_clear;
+   struct d12_pending_ds_discard {
+      struct d12_resource *resource; /* NULL: none pending */
+      bool whole;
+      uint32_t first_subresource, subresource_count;
+   } pending_ds_discard;
+
    /* Render-pass tile traffic for the attachments bound above. Carried on
     * the list because the pass is declared before the first draw opens a
     * hardware segment; d12_list_begin_render copies it across. */
@@ -1797,6 +2404,22 @@ struct d12_cmd_list {
    uint32_t sample_positions;
 
    bool render_pass_active;
+   /* Hardware renders opened so far for the active declared pass, and the
+    * attachments whose declared entry traffic one of them has applied. A
+    * render that binds an attachment already applied loads PRESERVE
+    * whatever the pass declared: the pass was split and this render
+    * resumes it; the render it continues stores (d12_list_close_cdm).
+    * Entry traffic a draw's render never applied (an attachment no draw
+    * wrote, or a pass without draws) is applied by EndRenderPass. */
+   unsigned render_pass_segments;
+   uint8_t render_pass_applied_rts;
+   bool render_pass_applied_depth, render_pass_applied_stencil;
+   /* The last declared pass suspended (SUSPENDING_PASS); the next pass
+    * must resume it with the same attachment shape. */
+   bool render_pass_suspended;
+   bool render_pass_suspending;
+   unsigned render_pass_suspended_rt_count;
+   bool render_pass_suspended_has_ds;
    struct d12_render_pass_plan render_pass_rt_plan[AGX_MAX_RENDER_TARGETS];
    float render_pass_rt_clear[AGX_MAX_RENDER_TARGETS][4];
    struct d12_render_pass_plan render_pass_depth_plan;
@@ -1840,6 +2463,25 @@ d12_cmd_list_from_iface(void *iface)
 }
 
 struct d12_fence_event_waiter;
+
+/* A queue Signal that has taken its timeline point but has not retired.
+ * Linked on the fence under fence->lock so a CPU waiter can wait for the
+ * point itself instead of for the retirement worker's hop.  Whoever observes
+ * the point complete first publishes the value; the record is published at
+ * most once so a value never re-arrives after a later CPU Signal rewinds
+ * the fence. */
+struct d12_fence_pending_signal {
+   struct d12_fence_pending_signal *next;
+   struct d12_fence_pending_signal *queue_next;
+   struct d12_fence *fence;
+   struct d12_queue *queue;
+   uint64_t point;
+   uint64_t value;
+   bool registered;
+   bool queue_registered;
+   bool published;
+};
+
 struct d12_fence_ticket {
    struct d12_fence_ticket *next;
    struct d12_fence *fence;
@@ -1868,6 +2510,7 @@ struct d12_fence {
    bool destroyed;
    struct d12_fence_event_waiter *event_waiters;
    struct d12_fence_ticket *tickets;
+   struct d12_fence_pending_signal *pending_signals;
 
    /* Queue operations and asynchronous event waiters must keep the storage
     * alive without changing the public COM reference count. */
@@ -1920,6 +2563,12 @@ struct d12_queue {
     * syncobjs cannot natively represent wait-before-signal. */
    uint32_t syncobj;
    struct d12_queue_timeline_state timeline;
+   /* Draws in the renders of the last real submission: a submission behind
+    * a heavy one waits on its timeline point (see d12_queue_process_submit). */
+   uint32_t prev_submit_draws;
+   /* The last real submission ran compute (CDM) commands; the next one
+    * waits on its timeline point too. */
+   bool prev_submit_compute;
 
    mtx_t lock;
    /* DDI callbacks submit on the entering runtime thread. This lock keeps
@@ -1939,9 +2588,32 @@ struct d12_queue {
    struct agx_bo *signal_program_bo;
    struct agx_bo *dependency_scratch_bo;
    uint32_t signal_control_size;
+   /* USC records on AGX2; stable full Ioto program slots on G17P. */
+   uint32_t signal_program_stride;
+   uint32_t signal_program_size;
    uint64_t signal_slots;
    uint32_t stop;
    uint32_t retire_stop;
+   /* The fence the submit worker is parked on for a queue Wait, if any.
+    * Teardown broadcasts it after raising stop, so the worker never needs a
+    * timed poll to notice cancellation. */
+   struct d12_fence *worker_parked_fence;
+   /* The worker is blocked in a fence or placement wait that only another
+    * party can satisfy; teardown stops draining when it sees this. */
+   bool worker_blocked;
+   /* Ownership of the queue's API order, both under queue->lock.
+    * worker_busy: the submit worker holds an op it dequeued and has not
+    * finished.  inline_busy: an API thread is processing an op in place.
+    * See d12_queue_idle_locked for the ordering invariant. */
+   bool worker_busy;
+   bool inline_busy;
+   /* CPU fence waiters blocked on this queue's timeline directly (see
+    * d12_queue_direct_wait_begin).  Teardown waits for zero before the
+    * syncobj is destroyed. */
+   uint32_t direct_waiters;
+   /* Scheduled Signals stay here until retirement, including the op
+    * currently being retired. Protected by queue->lock. */
+   struct d12_fence_pending_signal *signal_head, *signal_tail;
    uint32_t pending_placement_wait_count;
    struct d12_queue_placement_wait
       pending_placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
@@ -1958,6 +2630,27 @@ struct d12_command_signature {
    D3D12_COMMAND_SIGNATURE_DESC desc;
    D3D12_INDIRECT_ARGUMENT_DESC *arguments;
 };
+
+/* Direct interface-to-object casts rely on every COM interface being first.
+ * Protect all shared frontend objects in every C/C++ translation unit. */
+#ifdef __cplusplus
+#define D12_ASSERT_IFACE_FIRST(type) static_assert(offsetof(struct type, iface) == 0, #type " COM interface must be first")
+#else
+#define D12_ASSERT_IFACE_FIRST(type) _Static_assert(offsetof(struct type, iface) == 0, #type " COM interface must be first")
+#endif
+D12_ASSERT_IFACE_FIRST(d12_device);
+D12_ASSERT_IFACE_FIRST(d12_resource);
+D12_ASSERT_IFACE_FIRST(d12_heap);
+D12_ASSERT_IFACE_FIRST(d12_descriptor_heap);
+D12_ASSERT_IFACE_FIRST(d12_query_heap);
+D12_ASSERT_IFACE_FIRST(d12_root_signature);
+D12_ASSERT_IFACE_FIRST(d12_pipeline_state);
+D12_ASSERT_IFACE_FIRST(d12_cmd_allocator);
+D12_ASSERT_IFACE_FIRST(d12_cmd_list);
+D12_ASSERT_IFACE_FIRST(d12_fence);
+D12_ASSERT_IFACE_FIRST(d12_queue);
+D12_ASSERT_IFACE_FIRST(d12_command_signature);
+#undef D12_ASSERT_IFACE_FIRST
 
 static inline struct d12_device *
 d12_device_from_iface(void *iface)
@@ -1985,6 +2678,19 @@ void d12_fence_internal_unref(struct d12_fence *fence);
 HRESULT d12_fence_signal_value(struct d12_fence *fence, uint64_t value);
 bool d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
                           const uint32_t *cancel);
+void d12_fence_wake_waiters(struct d12_fence *fence);
+void d12_fence_pending_signal_add(struct d12_fence *fence,
+                                  struct d12_fence_pending_signal *pending,
+                                  struct d12_queue *queue, uint64_t point,
+                                  uint64_t value);
+void d12_fence_pending_signal_retire(
+   struct d12_fence *fence, struct d12_fence_pending_signal *pending,
+   bool completed);
+bool d12_queue_wait_timeline(struct d12_queue *queue, uint64_t point);
+void d12_fence_pending_signal_publish(struct d12_fence_pending_signal *pending);
+void d12_queue_publish_pending_signals(struct d12_queue *queue, uint64_t point);
+void d12_queue_direct_wait_begin(struct d12_queue *queue);
+void d12_queue_direct_wait_end(struct d12_queue *queue);
 void d12_fence_ticket_init(struct d12_fence *fence,
                            struct d12_fence_ticket *ticket, uint64_t value);
 void d12_fence_ticket_fini(struct d12_fence_ticket *ticket);
@@ -2051,6 +2757,23 @@ HRESULT d12_descriptor_heap_create(struct d12_device *device,
                             REFIID riid, void **out);
 void d12_descriptor_heap_update_slot(struct d12_device *device,
                                      struct d12_descriptor *slot);
+void d12_descriptor_heap_update_range(struct d12_device *device,
+                                      struct d12_descriptor *first,
+                                      uint32_t count);
+/* After `count` slots were copied from `src` to `dst` (CopyDescriptors):
+ * bring the destination heap's native words up to date, copying the
+ * source heap's where it keeps them. */
+void d12_descriptor_heap_copy_range(struct d12_device *device,
+                                    struct d12_descriptor *dst,
+                                    const struct d12_descriptor *src,
+                                    uint32_t count);
+void d12_descriptor_registry_destroy(struct d12_device *device);
+/* Walk every registered heap; the caller holds descriptor_heap_lock. */
+#define d12_descriptor_registry_foreach(device, heap, i)                    \
+   for (uint32_t i = 0;                                                     \
+        i < (device)->descriptor_registry.count &&                          \
+        ((heap) = (device)->descriptor_registry.ranges[i].heap, true);      \
+        i++)
 void d12_device_create_srv_runtime(
    struct d12_device *device, ID3D12Resource *resource,
    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
@@ -2105,6 +2828,26 @@ void d12_pack_sampler_descriptor(struct d12_device *device,
                                  const D3D12_SAMPLER_DESC2 *desc);
 bool d12_set_null_texture_descriptor(struct d12_device *device, void *out);
 bool d12_set_null_pbe_descriptor(struct d12_device *device, void *out);
+void d12_apply_texture_shape(struct d12_descriptor *d, unsigned shape);
+/* Native windows share the view's original count in the logical metadata. */
+static inline bool
+d12_buffer_window_descriptor(const struct d12_descriptor *d, unsigned window,
+                             struct d12_descriptor *out)
+{
+   uint64_t offset;
+   uint32_t count;
+   if (!d->resource ||
+       d->resource->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+       d->buffer_kind != D12_BUFFER_VIEW_TYPED ||
+       !d12_typed_buffer_window(d->buffer_count, d->buffer_stride_B, window,
+                                &offset, &count))
+      return false;
+   *out = *d;
+   out->address += offset;
+   out->buffer_count = count;
+   return true;
+}
+
 bool d12_refresh_texture_descriptor(struct d12_device *device, void *out,
                                     const struct d12_descriptor *d);
 bool d12_refresh_pbe_descriptor(struct d12_device *device, void *out,
@@ -2135,6 +2878,12 @@ HRESULT d12_pipeline_state_create_compute(struct d12_device *device,
                                           REFIID riid, void **out);
 void d12_pipeline_state_library_ref(struct d12_pipeline_state *pso);
 void d12_pipeline_state_library_unref(struct d12_pipeline_state *pso);
+/* Registered-no-submit compiler diagnostic, never an API/physical admission. */
+HRESULT d12_pipeline_state_certify_native_gs(
+   struct d12_device *device, const struct d12_binding_map *map,
+   const void *vs, size_t vs_size, const void *gs, size_t gs_size,
+   ID3D12PipelineState **out);
+
 HRESULT d12_pipeline_state_create_mesh(
    struct d12_device *device, const void *ms_dxil, size_t ms_size,
    const void *as_dxil, size_t as_size, const void *ps_dxil, size_t ps_size,
@@ -2145,12 +2894,18 @@ HRESULT d12_pipeline_state_create_mesh(
    const D3D12_BLEND_DESC *blend_desc,
    const struct d12_binding_map *map, REFIID riid, void **out);
 
+/*
+ * vs_is_mesh: this is the graphics half of a MESH pipeline. There is no
+ * vertex shader -- vs_dxil must be NULL -- and the vertex-side signature
+ * check is skipped, because the pixel shader's inputs are fed by the mesh
+ * shader's outputs rather than by a VS.
+ */
 HRESULT d12_pipeline_state_create_graphics(
    struct d12_device *device, const void *vs_dxil, size_t vs_size,
-   const void *ps_dxil, size_t ps_size, const void *gs_dxil, size_t gs_size,
-   const void *hs_dxil, size_t hs_size, const void *ds_dxil, size_t ds_size,
-   enum pipe_format rt_format, unsigned nr_rt, const DXGI_FORMAT *rt_formats,
-   unsigned nr_samples, UINT sample_mask,
+   bool vs_is_mesh, const void *ps_dxil, size_t ps_size, const void *gs_dxil,
+   size_t gs_size, const void *hs_dxil, size_t hs_size, const void *ds_dxil,
+   size_t ds_size, enum pipe_format rt_format, unsigned nr_rt,
+   const DXGI_FORMAT *rt_formats, unsigned nr_samples, UINT sample_mask,
    const D3D12_DEPTH_STENCIL_DESC *ds_desc, DXGI_FORMAT dsv_format,
    const D3D12_RASTERIZER_DESC *rs_desc, float rasterizer_depth_bias,
    bool front_stencil_enable, bool back_stencil_enable,
@@ -2161,15 +2916,37 @@ HRESULT d12_pipeline_state_create_graphics(
    const D3D12_STREAM_OUTPUT_DESC *so_desc,
    D3D12_PRIMITIVE_TOPOLOGY_TYPE primitive_topology_type,
    D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut,
-   D3D12_PIPELINE_STATE_FLAGS flags,
-   const struct d12_binding_map *map, REFIID riid, void **out);
+   D3D12_PIPELINE_STATE_FLAGS flags, const struct d12_binding_map *map,
+   REFIID riid, void **out);
 
 void d12_device_add_ref(struct d12_device *device);
 void d12_device_release(struct d12_device *device);
+HRESULT d12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level,
+                         REFIID iid, void **out, bool singleton);
+/* Stateless configuration methods shared by device and factory tear-offs. */
+D12_AGGREGATE_RETURN(D3D12_DEVICE_CONFIGURATION_DESC) STDMETHODCALLTYPE
+d12_config_GetDesc(ID3D12DeviceConfiguration1 *iface
+                  D12_AGGREGATE_OUT(D3D12_DEVICE_CONFIGURATION_DESC));
+HRESULT STDMETHODCALLTYPE d12_config_GetEnabledExperimentalFeatures(
+   ID3D12DeviceConfiguration1 *iface, GUID *guids, UINT count);
+HRESULT STDMETHODCALLTYPE d12_config_SerializeVersionedRootSignature(
+   ID3D12DeviceConfiguration1 *iface,
+   const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob,
+   ID3DBlob **error_blob);
+HRESULT STDMETHODCALLTYPE d12_config_CreateVersionedRootSignatureDeserializer(
+   ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
+   REFIID iid, void **out);
+HRESULT STDMETHODCALLTYPE
+d12_config_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary(
+   ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
+   LPCWSTR name, REFIID iid, void **out);
 HRESULT d12_device_backend_init(struct d12_device *device,
                                 D3D_FEATURE_LEVEL feature_level);
 void d12_device_backend_cleanup(struct d12_device *device);
 
+#ifndef D12_PLATFORM_D3DKMT
+bool d12_platform_is_real_asahi_render_fd(int fd);
+#endif
 bool d12_platform_open_device(struct d12_device *device, IUnknown *adapter);
 void d12_platform_close_device(struct d12_device *device);
 void d12_platform_signal_event(HANDLE event);
@@ -2200,3 +2977,30 @@ HRESULT d12_platform_set_bo_resident(struct d12_device *device,
 HRESULT d12_platform_open_shared_handle_by_name(struct d12_device *device,
                                                 LPCWSTR name, DWORD access,
                                                 HANDLE *handle);
+
+void d12_g17p_vdm_storage_ref(struct d12_g17p_vdm_storage *storage);
+void d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage);
+void d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list);
+void d12_device_g17p_vdm_pool_init(struct d12_device *device);
+void d12_device_g17p_vdm_pool_fini(struct d12_device *device);
+void *d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
+                            size_t alignment, uint64_t *compact_va);
+
+uint32_t d12_build_g17p_bg_eot(
+   struct d12_cmd_list *list, const struct d12_segment *seg,
+   const float legacy_color[4],
+   const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
+   const struct agx_tilebuffer_layout *tib,
+   uint64_t *out_resources);
+
+/* Bounded D32 qualification: registered shim metadata or separately opted-in
+ * verified physical Asahi render fd. Every segment shape check is mandatory. */
+bool d12_g17p_depth_enabled(const struct agx_device *dev);
+bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
+
+/* Native Texture.Load metadata producer never admits a physical DRM fd. */
+bool d12_g17p_txf_metadata_enabled(const struct agx_device *dev);
+bool d12_g17p_preraster_metadata_enabled(const struct agx_device *dev);
+HRESULT d12_cmd_certify_native_gs(struct d12_pipeline_state *pso,
+                                 bool indirect, const char *directory);
+bool d12_g17p_txf_physical_enabled(const struct agx_device *dev);

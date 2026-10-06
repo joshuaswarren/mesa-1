@@ -2,14 +2,100 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * ID3D12Resource for committed buffers: one agx_bo with a writeback (cached,
- * coherent on Apple UMA) CPU mapping. Textures are a later milestone (G3).
+ * ID3D12Resource storage and CPU access. G17P UMA is cached and requires
+ * explicit buffer and opaque texture cache maintenance.
  */
 
 #include "d12_private.h"
 #include "d12_core_caps.h"
+#include "d12_heap_desc.h"
+#include "d12_allocation_math.h"
 #include "d12_sparse_residency_core.h"
 #include "util/os_misc.h"
+#include "util/cache_ops.h"
+#include <limits.h>
+
+/* GEM storage on UMA is charged to the allocating process's memory cgroup.
+ * The kernel may kill that process while faulting/binding a BO, before GEM
+ * creation can return ENOMEM. Bound resource allocations by the real Linux
+ * budget so D3D12 can return E_OUTOFMEMORY instead. Observe all ancestors:
+ * memory.max can be unlimited in the leaf while a parent has a hard limit.
+ */
+static uint64_t
+d12_resource_available_memory(void)
+{
+   uint64_t available = UINT64_MAX;
+   os_get_available_system_memory(&available);
+#if DETECT_OS_LINUX
+   char path[PATH_MAX], line[PATH_MAX];
+   FILE *file = fopen("/proc/self/cgroup", "r");
+   if (!file)
+      return available;
+   bool found = false;
+   while (fgets(line, sizeof(line), file)) {
+      if (strncmp(line, "0::/", 4))
+         continue;
+      line[strcspn(line, "\n")] = '\0';
+      int length = snprintf(path, sizeof(path), "/sys/fs/cgroup%s", line + 3);
+      found = length > 0 && length < sizeof(path);
+      break;
+   }
+   fclose(file);
+   if (!found)
+      return available;
+
+   while (strlen(path) >= strlen("/sys/fs/cgroup")) {
+      char filename[PATH_MAX];
+      uint64_t maximum, current;
+      int length = snprintf(filename, sizeof(filename), "%s/memory.max", path);
+      if (length > 0 && length < sizeof(filename)) {
+         file = fopen(filename, "r");
+         bool limited = file && fscanf(file, "%" SCNu64, &maximum) == 1;
+         if (file)
+            fclose(file);
+         if (limited) {
+            length = snprintf(filename, sizeof(filename), "%s/memory.current", path);
+            file = length > 0 && length < sizeof(filename)
+                      ? fopen(filename, "r") : NULL;
+            if (file) {
+               if (fscanf(file, "%" SCNu64, &current) == 1)
+                  available = MIN2(available, current < maximum ? maximum - current : 0);
+               fclose(file);
+            }
+         }
+      }
+      *strrchr(path, '/') = '\0';
+   }
+#endif
+   return available;
+}
+
+static struct agx_bo *
+d12_resource_bo_create(struct d12_device *device, size_t size, unsigned align,
+                       enum agx_bo_flags flags, const char *label)
+{
+   /* Serialize the check and allocation across resource-creation threads.
+    * Reserve room for command streams and CPU allocations which do not go
+    * through this helper. This is an allocation refusal, not a capability
+    * limit; previously created resources and the device remain usable.
+    */
+   static simple_mtx_t allocation_lock = SIMPLE_MTX_INITIALIZER;
+   const uint64_t reserve = 128ull * 1024 * 1024;
+   struct agx_bo *bo = NULL;
+   if (!size || size > SIZE_MAX - (AIL_PAGESIZE - 1))
+      return NULL;
+   const uint64_t required = ALIGN_POT(size, AIL_PAGESIZE);
+   simple_mtx_lock(&allocation_lock);
+   uint64_t available = d12_resource_available_memory();
+   if (available <= reserve || required > available - reserve) {
+      agx_bo_cache_evict_all(&device->dev);
+      available = d12_resource_available_memory();
+   }
+   if (available > reserve && required <= available - reserve)
+      bo = agx_bo_create(&device->dev, size, align, flags, label);
+   simple_mtx_unlock(&allocation_lock);
+   return bo;
+}
 
 static_assert(AIL_PAGESIZE == D12_AGX_SPARSE_PAGE_SIZE_B,
               "portable sparse page size must match AIL");
@@ -409,6 +495,51 @@ d12_resource_GetDevice(ID3D12Resource *iface, REFIID riid, void **out)
    return ID3D12Device_QueryInterface(&res->device->iface, riid, out);
 }
 
+/* G17P CPU-visible buffers are cached but CacheCoherentUMA is false. Keep
+ * cache operations within the resource's BO window, including placed offsets.
+ * Callers still synchronize GPU access with a fence before a reading Map. */
+static bool
+d12_resource_buffer_cache_range(const struct d12_resource *res,
+                                const D3D12_RANGE *range,
+                                size_t *begin, size_t *size)
+{
+   uint64_t width = res->desc.Width;
+   if (!res->bo || width > SIZE_MAX || res->offset_B > res->bo->size ||
+       width > res->bo->size - res->offset_B)
+      return false;
+
+   uint64_t first = range ? range->Begin : 0;
+   uint64_t last = range ? range->End : width;
+   if (first > width || last > width)
+      return false;
+   *begin = first;
+   *size = first < last ? last - first : 0;
+   if (*size) {
+      /* The platform helper rounds to cache lines. Its maximum granule
+       * must remain inside the owned BO, even for an unaligned range. */
+      size_t granule = util_cache_granularity();
+      if (!granule || (granule & (granule - 1)))
+         return false;
+      uint64_t final_line = (res->offset_B + last - 1) &
+                            ~((uint64_t)granule - 1);
+      if (final_line > res->bo->size ||
+          granule > res->bo->size - final_line)
+         return false;
+   }
+   return true;
+}
+
+static bool
+d12_resource_needs_buffer_cache_ops(const struct d12_resource *res)
+{
+#ifndef D12_PLATFORM_D3DKMT
+   return res->device->dev.chip == AGX_CHIP_G17P &&
+          res->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+#else
+   return false;
+#endif
+}
+
 static HRESULT STDMETHODCALLTYPE
 d12_resource_Map(ID3D12Resource *iface, UINT subresource,
                  const D3D12_RANGE *read_range, void **data)
@@ -426,16 +557,22 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
     * is still legal (it establishes the mapping without exposing the VA),
     * but returning a pointer would falsely describe the opaque layout as a
     * linear byte array.  Rejections must leave the caller's sentinel alone. */
+   /* Opaque multi-mip volumes cannot establish a CPU mapping, even when
+    * ppData is NULL. Use the normalized layout count for MipLevels=0. */
    /* GPU_UPLOAD is the one non-staging heap type the CPU may write: that is
     * the entire point of it. */
    if ((res->heap_props.Type == D3D12_HEAP_TYPE_DEFAULT) ||
        res->heap_props.CPUPageProperty ==
           D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
+       (res->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D &&
+        res->desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN &&
+        res->layout.levels > 1) ||
        (data && res->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
         res->desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN))
       return E_INVALIDARG;
 
-   /* Persistent coherent mapping; ranges are an optimization hint only.
+   /* Persistent mapping; a noncoherent G17P buffer reads through explicit
+    * cache maintenance of the caller's read range.
     * offset_B is nonzero for a PLACED resource, which is a window into a
     * heap -- mapping the BO base would hand back the start of the heap.
     *
@@ -448,6 +585,17 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
    if (!mapping)
       return E_OUTOFMEMORY;
 
+   if (d12_resource_needs_buffer_cache_ops(res)) {
+      size_t begin, size;
+      if (!util_has_cache_ops())
+         return E_FAIL;
+      if (!d12_resource_buffer_cache_range(res, read_range, &begin, &size))
+         return E_INVALIDARG;
+      if (size)
+         util_flush_inval_range((uint8_t *)mapping + res->offset_B + begin,
+                               size);
+   }
+
    if (data)
       *data = (uint8_t *)mapping + res->offset_B;
    return S_OK;
@@ -457,7 +605,20 @@ static void STDMETHODCALLTYPE
 d12_resource_Unmap(ID3D12Resource *iface, UINT subresource,
                    const D3D12_RANGE *written_range)
 {
-   /* Coherent UMA: nothing to flush. */
+   struct d12_resource *res = d12_resource_from_iface(iface);
+   if (subresource || res->reserved ||
+       res->heap_props.Type == D3D12_HEAP_TYPE_DEFAULT ||
+       res->heap_props.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
+       !d12_resource_needs_buffer_cache_ops(res) || !util_has_cache_ops())
+      return;
+
+   size_t begin, size;
+   if (!d12_resource_buffer_cache_range(res, written_range, &begin, &size) ||
+       !size)
+      return;
+   void *mapping = agx_bo_map(res->bo);
+   if (mapping)
+      util_flush_range((uint8_t *)mapping + res->offset_B + begin, size);
 }
 
 static D12_AGGREGATE_RETURN(D3D12_RESOURCE_DESC) STDMETHODCALLTYPE
@@ -486,9 +647,12 @@ struct d12_cpu_subresource {
    uint32_t y_el;
    uint32_t width_el;
    uint32_t height_el;
+   uint32_t z, depth;
+   uint64_t slice_stride_B;
    uint32_t blocksize_B;
    uint32_t texture_pitch_B;
    bool empty;
+   bool tiled;
 };
 
 static HRESULT
@@ -498,7 +662,12 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
 {
    memset(out, 0, sizeof(*out));
 
-   if (res->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+   const bool volume = res->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+   const bool legacy = res->device->dev.params.gpu_generation == 13 ||
+                       res->device->dev.params.gpu_generation == 14;
+   if ((res->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        !(legacy && (volume || res->desc.Dimension ==
+                               D3D12_RESOURCE_DIMENSION_TEXTURE1D))) ||
        res->heap_props.Type != D3D12_HEAP_TYPE_CUSTOM ||
        res->heap_props.CPUPageProperty ==
           D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
@@ -511,7 +680,8 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
    const uint32_t blocksize = util_format_get_blocksize(format);
    const uint32_t width = res->layout.width_px;
    const uint32_t height = res->layout.height_px;
-   const D3D12_BOX whole = {0, 0, 0, width, height, 1};
+   const uint32_t depth = volume ? res->layout.depth_px : 1;
+   const D3D12_BOX whole = {0, 0, 0, width, height, depth};
    const D3D12_BOX *b = box ? box : &whole;
 
    /* Coordinates must still name the resource even when the box is empty:
@@ -520,16 +690,13 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
     * the conformance test.
     */
    if (b->left > width || b->right > width || b->top > height ||
-       b->bottom > height || b->front > 1 || b->back > 1)
+       b->bottom > height || b->front > depth || b->back > depth)
       return E_INVALIDARG;
 
    if (b->left >= b->right || b->top >= b->bottom || b->front >= b->back) {
       out->empty = true;
       return S_OK;
    }
-
-   if (b->front != 0 || b->back != 1)
-      return E_INVALIDARG;
 
    /* BC regions are expressed in pixels but copied in whole format blocks.
     * The right/bottom edge may be the image edge; interior coordinates must
@@ -540,7 +707,23 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
        (b->bottom % block_height && b->bottom != height))
       return E_INVALIDARG;
 
-   if (res->layout.tiling != AIL_TILING_LINEAR)
+   const bool tiled = res->layout.tiling != AIL_TILING_LINEAR;
+   const enum agx_chip chip = res->device->dev.chip;
+   const bool cpu_tiling_supported = chip == AGX_CHIP_G17P ||
+      chip == AGX_CHIP_G13G || chip == AGX_CHIP_G13X ||
+      chip == AGX_CHIP_G14G || chip == AGX_CHIP_G14X;
+   if (tiled &&
+       (!cpu_tiling_supported ||
+        (res->layout.tiling != AIL_TILING_GPU && res->layout.tiling != AIL_TILING_TWIDDLED) ||
+        res->heap_props.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_WRITE_BACK ||
+        res->heap_props.MemoryPoolPreference != D3D12_MEMORY_POOL_L0 ||
+        res->desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN || res->reserved ||
+        res->layout.levels != 1 || (!volume && res->desc.DepthOrArraySize != 1) ||
+        res->layout.sample_count_sa != 1 || res->layout.compressed ||
+        !util_has_cache_ops() ||
+        (format != PIPE_FORMAT_R8G8B8A8_UNORM && format != PIPE_FORMAT_B8G8R8A8_UNORM) ||
+        res->offset_B > res->bo->size ||
+        res->layout.size_B > res->bo->size - res->offset_B))
       return E_INVALIDARG;
 
    void *mapping = agx_bo_map(res->bo);
@@ -555,11 +738,18 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
       .y_el = b->top / block_height,
       .width_el = right_el - b->left / block_width,
       .height_el = bottom_el - b->top / block_height,
+      .z = b->front, .depth = b->back - b->front,
+      .slice_stride_B = res->layout.layer_stride_B,
       .blocksize_B = blocksize,
-      .texture_pitch_B = ail_get_linear_stride_B(&res->layout, 0),
+      .texture_pitch_B = tiled ? 0 : ail_get_linear_stride_B(&res->layout, 0),
+      .tiled = tiled,
    };
 
+   if (tiled)
+      return S_OK;
+
    const uint64_t last =
+      (uint64_t)(out->z + out->depth - 1) * out->slice_stride_B +
       (uint64_t)(out->y_el + out->height_el - 1) * out->texture_pitch_B +
       (uint64_t)(out->x_el + out->width_el) * blocksize;
    if (last > res->layout.size_B ||
@@ -575,8 +765,6 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
                                 const D3D12_BOX *dst_box, const void *src,
                                 UINT src_row_pitch, UINT src_depth_pitch)
 {
-   (void)src_depth_pitch;
-
    struct d12_resource *res = d12_resource_from_iface(iface);
    struct d12_cpu_subresource surface;
    HRESULT hr = d12_resource_cpu_subresource(res, dst_subresource, dst_box,
@@ -588,15 +776,38 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (src_row_pitch < row_bytes)
+   const uint64_t slice_bytes =
+      (uint64_t)(surface.height_el - 1) * src_row_pitch + row_bytes;
+   if ((surface.depth > 1 && src_depth_pitch < slice_bytes) ||
+       src_row_pitch < row_bytes ||
+       (surface.tiled && src_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
+
+   if (surface.tiled) {
+      /* UNKNOWN-layout UMA textures expose no CPU pointer. AIL owns the
+       * resource's actual tiled layout; only caller-provided bytes are stored. */
+      for (uint32_t z = 0; z < surface.depth; ++z)
+         ail_tile(surface.map + (uint64_t)(surface.z + z) * surface.slice_stride_B,
+                  (void *)((const uint8_t *)src + (uint64_t)z * src_depth_pitch),
+                  &res->layout, 0, src_row_pitch, surface.x_el, surface.y_el,
+                  surface.width_el, surface.height_el);
+      /* Non-coherent UMA is intentionally advertised. Publish dirty CPU
+       * cache lines before the resource can return to GPU ownership. */
+      util_flush_range(surface.map, res->layout.size_B);
+      if (agx_bo_sync_for_device(res->bo, res->offset_B, res->layout.size_B))
+         return E_FAIL;
+      return S_OK;
+   }
 
    uint8_t *dst = surface.map +
                   (uint64_t)surface.y_el * surface.texture_pitch_B +
                   (uint64_t)surface.x_el * surface.blocksize_B;
-   for (uint32_t y = 0; y < surface.height_el; ++y)
-      memcpy(dst + (uint64_t)y * surface.texture_pitch_B,
-             (const uint8_t *)src + (uint64_t)y * src_row_pitch, row_bytes);
+   for (uint32_t z = 0; z < surface.depth; ++z)
+      for (uint32_t y = 0; y < surface.height_el; ++y)
+         memcpy(dst + (uint64_t)(surface.z + z) * surface.slice_stride_B +
+                      (uint64_t)y * surface.texture_pitch_B,
+                (const uint8_t *)src + (uint64_t)z * src_depth_pitch +
+                                      (uint64_t)y * src_row_pitch, row_bytes);
 
    return S_OK;
 }
@@ -607,8 +818,6 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
                                  UINT src_subresource,
                                  const D3D12_BOX *src_box)
 {
-   (void)dst_depth_pitch;
-
    struct d12_resource *res = d12_resource_from_iface(iface);
    struct d12_cpu_subresource surface;
    HRESULT hr = d12_resource_cpu_subresource(res, src_subresource, src_box,
@@ -620,15 +829,36 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (dst_row_pitch < row_bytes)
+   const uint64_t slice_bytes =
+      (uint64_t)(surface.height_el - 1) * dst_row_pitch + row_bytes;
+   if ((surface.depth > 1 && dst_depth_pitch < slice_bytes) ||
+       dst_row_pitch < row_bytes ||
+       (surface.tiled && dst_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
+
+   if (surface.tiled) {
+      /* Copy the real EOT-written resource bytes after the caller's fence and
+       * COMMON transition; this does not invoke a shader or synthesize pixels. */
+      /* The caller synchronized GPU completion before this CPU access.
+       * Drop clean/stale CPU lines before reading actual EOT writes. */
+      util_flush_inval_range(surface.map, res->layout.size_B);
+      for (uint32_t z = 0; z < surface.depth; ++z)
+         ail_detile(surface.map + (uint64_t)(surface.z + z) * surface.slice_stride_B,
+                    (uint8_t *)dst + (uint64_t)z * dst_depth_pitch,
+                    &res->layout, 0, dst_row_pitch, surface.x_el, surface.y_el,
+                    surface.width_el, surface.height_el);
+      return S_OK;
+   }
 
    const uint8_t *src = surface.map +
                         (uint64_t)surface.y_el * surface.texture_pitch_B +
                         (uint64_t)surface.x_el * surface.blocksize_B;
-   for (uint32_t y = 0; y < surface.height_el; ++y)
-      memcpy((uint8_t *)dst + (uint64_t)y * dst_row_pitch,
-             src + (uint64_t)y * surface.texture_pitch_B, row_bytes);
+   for (uint32_t z = 0; z < surface.depth; ++z)
+      for (uint32_t y = 0; y < surface.height_el; ++y)
+         memcpy((uint8_t *)dst + (uint64_t)z * dst_depth_pitch +
+                                (uint64_t)y * dst_row_pitch,
+                src + (uint64_t)(surface.z + z) * surface.slice_stride_B +
+                      (uint64_t)y * surface.texture_pitch_B, row_bytes);
 
    return S_OK;
 }
@@ -1145,7 +1375,7 @@ d12_sparse_apply_updates(struct d12_resource *res,
          ops[count++] = op;
       }
 
-      if (getenv("D3D12AGX_DUMP_SPARSE")) {
+      if (d12_debug()->dump_sparse) {
          mesa_logi("sparse tile %u pages=%u bo=%u heap=0x%llx "
                    "va=0x%llx..0x%llx",
                    update->tile, pages,
@@ -1406,7 +1636,8 @@ d12_sparse_copy_tile_mappings(
 bool
 d12_resource_iface_is_ours(ID3D12Resource *iface)
 {
-   return iface && iface->lpVtbl == &d12_resource_vtbl;
+   return iface && d12_api_trace_vtbl_matches(
+      D12_API_TRACE_RESOURCE, iface->lpVtbl, &d12_resource_vtbl);
 }
 
 bool
@@ -1601,9 +1832,20 @@ d12_resource_compute_texture_layout(
    const bool writeable_image =
       interop_layout ||
       (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+   /* Render targets and depth buffers are twiddled. AGX renders through
+    * the tile buffer and stores whole tiles, so a linear target pays a
+    * strided store per row and a strided load on every partial render,
+    * and the G17P native background/end-of-tile programs admit only
+    * tiled targets (a linear one refuses to record). Only an explicit
+    * ROW_MAJOR layout keeps a renderable surface linear. */
+   const bool render_attachment =
+      desc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
+      (desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
    const bool linear_ok =
       !gpu_tiled && !is_3d && levels == 1 && samples == 1 &&
-      desc->DepthOrArraySize == 1 && !blocked && !writeable_image;
+      desc->DepthOrArraySize == 1 && !blocked && !writeable_image &&
+      !render_attachment;
    uint32_t linear_stride_B = 0;
 
    if (linear_ok) {
@@ -1699,6 +1941,7 @@ d12_resource_create(struct d12_device *device,
 {
    if (!out)
       return E_POINTER;
+   *out = NULL;
    if (!heap_props || !desc)
       return E_INVALIDARG;
 
@@ -1849,7 +2092,10 @@ d12_resource_create(struct d12_device *device,
        */
       uint64_t need = size_B;
       if (is_depth_stencil && stencil_layout.size_B) {
-         stencil_offset_B = heap_offset_B + size_B;
+         if (stencil_layout.size_B > UINT64_MAX - need) {
+            free(res);
+            return E_INVALIDARG;
+         }
          need += stencil_layout.size_B;
       }
 
@@ -1907,13 +2153,16 @@ d12_resource_create(struct d12_device *device,
        * rounding either kind here rejects an otherwise in-bounds resource.
        */
 
-      if (heap_offset_B + need > heap->bo->size) {
+      if (!d12_allocation_fits(heap_offset_B, need, heap->desc.SizeInBytes) ||
+          !d12_allocation_fits(heap_offset_B, need, heap->bo->size)) {
          mesa_loge("CreatePlacedResource: %" PRIu64 " bytes at offset %"
-                   PRIu64 " does not fit a %zu-byte heap",
-                   need, heap_offset_B, (size_t)heap->bo->size);
+                   PRIu64 " does not fit a %" PRIu64 "-byte heap",
+                   need, heap_offset_B, heap->desc.SizeInBytes);
          free(res);
          return E_INVALIDARG;
       }
+      if (is_depth_stencil && stencil_layout.size_B)
+         stencil_offset_B = heap_offset_B + size_B;
 
       res->bo = heap->bo;
       res->stencil_bo = (is_depth_stencil && stencil_layout.size_B)
@@ -1956,8 +2205,13 @@ d12_resource_create(struct d12_device *device,
        * handle methods remain E_NOTIMPL, while Windows must never silently
        * fall back to an unshareable BO after a real D3DKMT failure. */
       if (!shared || shared_hr == E_NOTIMPL)
-         res->bo = agx_bo_create(&device->dev, size_B, 0, bo_flags,
-                                 "d3d12 resource");
+         res->bo = d12_resource_bo_create(
+            device, size_B,
+            desc->Alignment ? desc->Alignment
+            : desc->SampleDesc.Count > 1
+               ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT
+               : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            bo_flags, "d3d12 resource");
       if (!res->bo) {
          free(res);
          return shared && shared_hr != E_NOTIMPL ? shared_hr
@@ -1970,7 +2224,7 @@ d12_resource_create(struct d12_device *device,
             res->stencil_bo = res->bo;
          } else {
             res->stencil_bo =
-               agx_bo_create(&device->dev, stencil_layout.size_B, 0,
+               d12_resource_bo_create(device, stencil_layout.size_B, 0,
                              bo_flags, "d3d12 stencil plane");
          }
          if (!res->stencil_bo) {
@@ -2020,7 +2274,8 @@ d12_resource_create(struct d12_device *device,
          res->stencil_bo ? res->stencil_bo->va->addr + stencil_offset_B : 0;
    }
 
-   res->iface.lpVtbl = (ID3D12ResourceVtbl *)&d12_resource_vtbl;
+   res->iface.lpVtbl = (ID3D12ResourceVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_RESOURCE, &d12_resource_vtbl);
    res->refcount = 1;
    d12_private_data_store_init(&res->private_data, (IUnknown *)&res->iface);
    res->device = device;
@@ -2055,6 +2310,45 @@ d12_sparse_read_address(struct d12_device *device, uint64_t address)
    }
    simple_mtx_unlock(&device->sparse_resource_lock);
    return address;
+}
+
+/* CreateConstantBufferView needs both answers for one address: the
+ * reserved buffer that owns it, if any, and the address to read it through.
+ * Give both from one walk under one lock, and skip the lock entirely while
+ * no reserved resource exists, which is the common case. The list head is
+ * read without the lock: a resource's address can only reach this thread
+ * after its creation, which registered it, returned. */
+uint64_t
+d12_sparse_resolve_cbv_address(struct d12_device *device, uint64_t address,
+                               struct d12_resource **owner)
+{
+   *owner = NULL;
+   if (p_atomic_read_relaxed(&device->sparse_resources.next) ==
+       &device->sparse_resources)
+      return address;
+
+   uint64_t probe = address;
+   if (agx_addr_is_ro(&device->dev, probe))
+      probe -= device->dev.sparse_ro_offset;
+
+   uint64_t read_address = address;
+   bool read_found = false;
+   simple_mtx_lock(&device->sparse_resource_lock);
+   list_for_each_entry(struct d12_resource, res, &device->sparse_resources,
+                       sparse_link) {
+      if (!*owner && res->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+          probe >= res->addr && probe - res->addr < res->sparse_size_B)
+         *owner = res;
+      if (!read_found && address >= res->addr &&
+          address - res->addr < res->sparse_size_B) {
+         read_address = address + device->dev.sparse_ro_offset;
+         read_found = true;
+      }
+      if (*owner && read_found)
+         break;
+   }
+   simple_mtx_unlock(&device->sparse_resource_lock);
+   return read_address;
 }
 
 struct d12_resource *
@@ -2135,6 +2429,10 @@ d12_validate_resource_desc(const D3D12_HEAP_PROPERTIES *heap_props,
     * ignore. Both are checked directly by the suite.
     */
    if (is_buffer) {
+      if (desc->Alignment &&
+          desc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+         return E_INVALIDARG;
+
       if (desc->MipLevels != 1)
          return E_INVALIDARG;
 
@@ -2327,6 +2625,8 @@ d12_resource_create_committed(struct d12_device *device,
                               const D3D12_CLEAR_VALUE *clear_value,
                               REFIID riid, void **out)
 {
+   if (out)
+      *out = NULL;
    HRESULT valid = d12_validate_resource_desc(heap_props, desc, initial_state,
                                               clear_value);
    if (FAILED(valid))
@@ -2345,7 +2645,9 @@ d12_resource_create_placed(struct d12_device *device, struct d12_heap *heap,
                            const D3D12_CLEAR_VALUE *clear_value, REFIID riid,
                            void **out)
 {
-   if (!heap || !desc)
+   if (out)
+      *out = NULL;
+   if (!heap || !desc || heap->device != device)
       return E_INVALIDARG;
 
    /* The ALLOW_ONLY_* heap flags are aliases for combinations of these
@@ -2394,6 +2696,8 @@ d12_resource_create_reused(struct d12_device *device,
    uint64_t explicit_row_major_size_B = 0;
    uint64_t absolute_offset;
 
+   if (out)
+      *out = NULL;
    if (!device || !source || source->device != device || !desc ||
        source->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
        source->reserved || !source->bo || !source->bo->va ||
@@ -2431,8 +2735,9 @@ d12_resource_create_reused(struct d12_device *device,
                              };
    captured_heap.desc.SizeInBytes = source->bo->size;
    captured_heap.bo = source->bo;
+   captured_heap.device = device;
 
-   /* d12_resource_create_placed consumes the heap description and BO only
+   /* d12_resource_create_placed consumes the heap description, device and BO
     * during this call, then retains the BO and copies the description. This
     * exactly models the DDI's capture-GPUVA lifetime without retaining the
     * public heap COM object. */
@@ -2722,7 +3027,8 @@ static const ID3D12HeapVtbl d12_heap_vtbl = {
 bool
 d12_heap_iface_is_ours(ID3D12Heap *iface)
 {
-   return iface && iface->lpVtbl == &d12_heap_vtbl;
+   return iface && d12_api_trace_vtbl_matches(
+      D12_API_TRACE_HEAP, iface->lpVtbl, &d12_heap_vtbl);
 }
 
 static HRESULT
@@ -2730,10 +3036,12 @@ d12_heap_create_internal(struct d12_device *device,
                          const D3D12_HEAP_DESC *desc,
                          struct agx_bo *imported_bo, REFIID riid, void **out)
 {
-   if (!out)
-      return E_POINTER;
-   if (!desc || !desc->SizeInBytes)
+   if (out)
+      *out = NULL;
+   if (!d12_heap_desc_valid(desc, d12_core_get_caps()->gpu_upload_heap))
       return E_INVALIDARG;
+   if (!out)
+      return S_FALSE;
 
    /* Apple UMA has no separate VRAM pool. Match Honeykrisp's Asahi policy:
     * expose at most half of physical RAM to one GPU heap so allocation
@@ -2743,31 +3051,6 @@ d12_heap_create_internal(struct d12_device *device,
    if (os_get_total_physical_memory(&system_memory) &&
        desc->SizeInBytes > system_memory / 2)
       return E_OUTOFMEMORY;
-
-   /*
-    * HEAP VALIDATION -- desc->Flags and desc->Properties were both being
-    * ignored, the same dropped-parameter shape as the resource path.
-    *
-    * Cross-adapter memory is shared with another device, so it cannot also
-    * be CPU-visible: a CUSTOM heap carrying SHARED_CROSS_ADAPTER must have
-    * CPUPageProperty NOT_AVAILABLE. test_map_texture_validation checks both
-    * halves -- WRITE_BACK is refused, NOT_AVAILABLE is accepted.
-    */
-   if (desc->Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) {
-      if (desc->Properties.Type == D3D12_HEAP_TYPE_CUSTOM) {
-         if (desc->Properties.CPUPageProperty !=
-             D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
-            return E_INVALIDARG;
-      } else if (desc->Properties.Type != D3D12_HEAP_TYPE_DEFAULT) {
-         return E_INVALIDARG;
-      }
-   }
-
-   /* GPU_UPLOAD heaps are accepted on UMA; see d12_resource_placement_valid
-    * for why they need no separate placement rules. */
-   if (desc->Properties.Type == D3D12_HEAP_TYPE_GPU_UPLOAD &&
-       !d12_core_get_caps()->gpu_upload_heap)
-      return E_INVALIDARG;
 
    D3D12_HEAP_DESC resolved = *desc;
 
@@ -2782,17 +3065,6 @@ d12_heap_create_internal(struct d12_device *device,
 
    if (!resolved.Alignment)
       resolved.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-
-   if (resolved.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT &&
-       resolved.Alignment != D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT)
-      return E_INVALIDARG;
-
-   /* ALLOW_DISPLAY heaps have platform/display ownership requirements that
-    * this driver does not implement. Refuse the capability instead of
-    * returning an ordinary private BO under a display-capable descriptor.
-    */
-   if (resolved.Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY)
-      return E_INVALIDARG;
 
    struct d12_heap *heap = calloc(1, sizeof(*heap));
    if (!heap)
@@ -2820,7 +3092,7 @@ d12_heap_create_internal(struct d12_device *device,
       }
       if (!(resolved.Flags & D3D12_HEAP_FLAG_SHARED) ||
           shared_hr == E_NOTIMPL) {
-         heap->bo = agx_bo_create(&device->dev, resolved.SizeInBytes,
+         heap->bo = d12_resource_bo_create(device, resolved.SizeInBytes,
                                   resolved.Alignment, bo_flags,
                                   "d3d12 heap");
       }
@@ -2834,7 +3106,8 @@ d12_heap_create_internal(struct d12_device *device,
       return E_OUTOFMEMORY;
    }
 
-   heap->iface.lpVtbl = (ID3D12HeapVtbl *)&d12_heap_vtbl;
+   heap->iface.lpVtbl = (ID3D12HeapVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_HEAP, &d12_heap_vtbl);
    heap->refcount = 1;
    heap->device = device;
    heap->desc = resolved;

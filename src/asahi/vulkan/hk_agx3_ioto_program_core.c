@@ -268,6 +268,9 @@ hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size)
 {
+   /* The shared composer's range budget covers the GL collector. hk's
+    * collector and cache key hold at most HK_AGX3_G17P_GRAPHICS_MAX_RANGES,
+    * so a larger list is refused here, fail closed. */
    if (range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
       return false;
    return agx3_g17p_graphics_program_bound(chip, ranges, range_count, size);
@@ -294,7 +297,6 @@ hk_agx3_g17p_shared_graphics_desc(
       .preloaded_root = desc->preloaded_root,
       .constant_program = desc->constant_program,
       .cprog_inputs = desc->cprog_inputs,
-      .uniform_range_cpu = desc->uniform_range_cpu,
    };
 }
 
@@ -303,7 +305,7 @@ hk_agx3_g17p_graphics_program_desc_bound(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    size_t *size)
 {
-   if (!desc)
+   if (!desc || desc->uniform_range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
       return false;
    const struct agx3_g17p_graphics_program_desc shared_desc =
       hk_agx3_g17p_shared_graphics_desc(desc);

@@ -4639,10 +4639,48 @@ test_sparse_residency(void)
    return 0;
 }
 
+/* Local Metal 32023.850, applegpu_g17p, linked Subnautica 7064 VS/FS.
+ * The native pipeline publishes distinct four-half coordinate ranges before
+ * issuing their samples, including ranges above half 127. These are encoding
+ * witnesses, not substituted shader code. */
+static int
+test_linked_staging_witnesses(void)
+{
+   const struct { unsigned dest, coord, slot, wait, texture, sampler; bool final;
+                  const char *hex; } cases[] = {
+      {0, 4, 1, 2, 88, 92, false, "05c20c383c010900da0390010100802000000000"},
+      {10, 8, 1, 4, 88, 92, false, "2dc40c383c020900da0390010100802000000000"},
+      {18, 12, 1, 8, 88, 92, false, "4dc60c383c000900da0390010100802000001000"},
+      {26, 16, 1, 16, 88, 92, true, "6dc00cb93c000900da0390010100802000002000"},
+      {34, 84, 5, 16, 96, 100, false, "8d820c3934900900ec0390010100802001002000"},
+      {84, 140, 5, 32, 96, 100, false, "55864c3834900900ec0390010100802002004000"},
+      {74, 132, 4, 8, 96, 100, false, "2d824c38346c0900ec0390010100802002001000"},
+      {66, 128, 4, 4, 96, 100, false, "0d804c38346e0900ec0390010100802002000000"},
+      {102, 152, 5, 2, 96, 100, true, "9d844cb934910900ec0390010100802002000000"},
+   };
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      const struct agx3_tex_sample_desc d = {
+         .dest = cases[i].dest, .coord = cases[i].coord,
+         .width = AGX3_TEX_W32, .mask = 15, .lod = AGX3_TEX_LOD_LEVEL,
+         .slot = cases[i].slot, .wait_mask = cases[i].wait,
+         .coord_kill = true, .final = cases[i].final,
+         .texture_kind = AGX3_TEX_OPERAND_UNIFORM,
+         .texture_value = cases[i].texture,
+         .sampler_kind = AGX3_TEX_OPERAND_UNIFORM,
+         .sampler_value = cases[i].sampler,
+      };
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      CHECK(hex_eq(bytes, length, cases[i].hex));
+   }
+   return 0;
+}
+
 int
 main(void)
 {
-   if (test_g17g_sample_lod_witnesses() ||
+   if (test_linked_staging_witnesses() ||
+       test_g17g_sample_lod_witnesses() ||
        test_m5_array_sample() || test_runtime_gather_witnesses() ||
        test_minimum_lod_witnesses() || test_register_lod() || test_fetch_lod() ||
        test_register_array_layer() || test_cube_coordinate_stage() ||

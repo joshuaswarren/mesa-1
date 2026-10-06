@@ -2115,12 +2115,20 @@ agx_init_shader_caps(struct pipe_screen *pscreen)
       caps->integers = true;
 
       caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives = !is_no16;
+      /* G17P's AGX3 packer has witnessed half-precision forms mostly from
+       * fragment programs; mediump vertex arithmetic (half adds with an
+       * immediate, half varying stores) has none. mediump is a precision
+       * floor, so evaluate the other stages at full precision, as the
+       * Vulkan path effectively does, and keep fragment mediump at half. */
+      if (agx_device(pscreen)->chip == AGX_CHIP_G17P &&
+          i != MESA_SHADER_FRAGMENT)
+         caps->fp16 = caps->glsl_16bit_consts = caps->fp16_derivatives = false;
       /* GLSL compiler is broken. Flip this on when Panfrost does. */
       caps->int16 = false;
       /* This cap is broken, see 9a38dab2d18 ("zink: disable
        * pipe_shader_caps.fp16_const_buffers") */
       caps->fp16_const_buffers = false;
-      caps->glsl_16bit_load_dst = true;
+      caps->glsl_16bit_load_dst = caps->fp16;
 
       /* G17P's Ioto path publishes a native 32-byte per-stage sampler table.
        * Slots 15+ are selected indirectly after accounting for the reserved

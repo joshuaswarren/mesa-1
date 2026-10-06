@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "d12_test_contract.h"
 
 static int failures = 0;
 
@@ -74,11 +75,23 @@ slurp(const char *path, size_t *size)
 }
 
 /* One subobject: type tag padded to void*, then the payload. */
-#define SUBOBJ(name, tag, type)                                              \
-   struct {                                                                  \
-      __attribute__((aligned(sizeof(void *))))                                 \
-         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t;                              \
-      __attribute__((aligned(sizeof(void *)))) type v;                                                \
+/*
+ * One stream subobject. D3D12 aligns each SUBOBJECT to void*, but the
+ * inner struct sits at its own natural alignment straight after the type
+ * tag -- that is what CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT does, and
+ * what the driver's stream parser steps by.
+ *
+ * Aligning the INNER member to void* instead (as this did until
+ * 2026-08-10) pushes any 4-aligned payload -- D3D12_RASTERIZER_DESC,
+ * D3D12_RT_FORMAT_ARRAY -- from offset 4 to offset 8. The parser then
+ * reads the following subobject's type out of padding, sees a zero, and
+ * rejects the stream with "duplicate or invalid stream subobject 0".
+ * That was a bug in this test, not in the driver.
+ */
+#define SUBOBJ(name, tag, type)                                                \
+   struct __attribute__((aligned(sizeof(void *)))) {                           \
+      D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t;                                   \
+      type v;                                                                  \
    } name = {.t = tag}
 
 int
@@ -87,7 +100,7 @@ main(int argc, char **argv)
    if (argc < 3) {
       printf("usage: %s ms.dxil ps.dxil\n", argv[0]);
       printf("       (run-suites.sh passes shaders/mesh_quad.dxil)\n");
-      return 77;
+      return 2;
    }
 
    size_t ms_size = 0, ps_size = 0;
@@ -101,12 +114,14 @@ main(int argc, char **argv)
    ID3D12Device *dev0 = NULL;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev0);
+   TEST_OBJECT(hr, dev0, "checked D3D12CreateDevice dev0");
    CHECK(hr == S_OK && dev0, "D3D12CreateDevice");
    if (!dev0)
       return 1;
 
    ID3D12Device2 *dev = NULL;
    hr = ID3D12Device_QueryInterface(dev0, &IID_ID3D12Device2, (void **)&dev);
+   TEST_OBJECT(hr, dev, "checked ID3D12Device_QueryInterface dev");
    CHECK(hr == S_OK && dev,
          "the device answers to ID3D12Device2 (mesh pipelines need it)");
    if (!dev)
@@ -116,13 +131,16 @@ main(int argc, char **argv)
    ID3DBlob *sig = NULL;
    hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig,
                                     NULL);
+   TEST_OBJECT(hr, sig, "checked D3D12SerializeRootSignature sig");
    ID3D12RootSignature *root_sig = NULL;
    if (hr == S_OK)
       hr = ID3D12Device_CreateRootSignature(
          dev0, 0, ID3D10Blob_GetBufferPointer(sig),
          ID3D10Blob_GetBufferSize(sig), &IID_ID3D12RootSignature,
          (void **)&root_sig);
+   TEST_OBJECT(hr, root_sig, "checked ID3D12Device_CreateRootSignature root_sig");
    CHECK(hr == S_OK && root_sig, "create root signature");
+   ID3D10Blob_Release(sig);
    if (!root_sig)
       return 1;
 
@@ -141,7 +159,7 @@ main(int argc, char **argv)
    so_rs.v = root_sig;
    so_ms.v = (D3D12_SHADER_BYTECODE){ms, ms_size};
    so_ps.v = (D3D12_SHADER_BYTECODE){ps, ps_size};
-   so_rast.v = (D3D12_RASTERIZER_DESC){.CullMode = D3D12_CULL_MODE_NONE};
+   so_rast.v = (D3D12_RASTERIZER_DESC){.FillMode = D3D12_FILL_MODE_SOLID, .CullMode = D3D12_CULL_MODE_NONE, .DepthClipEnable = TRUE};
    so_rt.v.NumRenderTargets = 1;
    so_rt.v.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 
@@ -166,13 +184,14 @@ main(int argc, char **argv)
    ID3D12PipelineState *pso = NULL;
    hr = ID3D12Device2_CreatePipelineState(dev, &sd, &IID_ID3D12PipelineState,
                                           (void **)&pso);
+   TEST_OBJECT(hr, pso, "checked ID3D12Device2_CreatePipelineState pso");
    CHECK(hr == S_OK && pso,
          "CreatePipelineState builds a MESH pipeline from a stream "
          "descriptor");
    if (!pso)
       goto done;
 
-   D3D12_HEAP_PROPERTIES hp = {.Type = D3D12_HEAP_TYPE_DEFAULT};
+   D3D12_HEAP_PROPERTIES hp = D12_TEST_UMA_HEAP;
    D3D12_RESOURCE_DESC rd = {
       .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
       .Width = W,
@@ -181,13 +200,15 @@ main(int argc, char **argv)
       .MipLevels = 1,
       .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
       .SampleDesc = {.Count = 1},
-      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+      .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
    };
    ID3D12Resource *rt = NULL;
    hr = ID3D12Device_CreateCommittedResource(
       dev0, &hp, D3D12_HEAP_FLAG_NONE, &rd,
-      D3D12_RESOURCE_STATE_RENDER_TARGET, NULL, &IID_ID3D12Resource,
+      D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
       (void **)&rt);
+   TEST_OBJECT(hr, rt, "checked ID3D12Device_CreateCommittedResource rt");
    CHECK(hr == S_OK && rt, "create render target");
    if (!rt)
       goto done;
@@ -195,27 +216,30 @@ main(int argc, char **argv)
    D3D12_DESCRIPTOR_HEAP_DESC hd = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
                                     .NumDescriptors = 1};
    ID3D12DescriptorHeap *rtv_heap = NULL;
-   ID3D12Device_CreateDescriptorHeap(dev0, &hd, &IID_ID3D12DescriptorHeap,
-                                     (void **)&rtv_heap);
+   TEST_OBJECT(ID3D12Device_CreateDescriptorHeap(dev0, &hd, &IID_ID3D12DescriptorHeap,
+                                     (void **)&rtv_heap), rtv_heap, "checked ID3D12Device_CreateDescriptorHeap rtv_heap");
    D3D12_CPU_DESCRIPTOR_HANDLE rtv =
       d12_test_descriptor_heap_get_cpu_start(rtv_heap);
+   CHECK(rtv.ptr != 0, "valid RTV descriptor handle");
+   if (!rtv.ptr) return 1;
    ID3D12Device_CreateRenderTargetView(dev0, rt, NULL, rtv);
 
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_DIRECT};
    ID3D12CommandQueue *queue = NULL;
-   ID3D12Device_CreateCommandQueue(dev0, &qd, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
+   TEST_OBJECT(ID3D12Device_CreateCommandQueue(dev0, &qd, &IID_ID3D12CommandQueue,
+                                   (void **)&queue), queue, "checked ID3D12Device_CreateCommandQueue queue");
    ID3D12CommandAllocator *alloc = NULL;
-   ID3D12Device_CreateCommandAllocator(dev0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+   TEST_OBJECT(ID3D12Device_CreateCommandAllocator(dev0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                        &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
+                                       (void **)&alloc), alloc, "checked ID3D12Device_CreateCommandAllocator alloc");
    ID3D12GraphicsCommandList *list0 = NULL;
-   ID3D12Device_CreateCommandList(dev0, 0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+   TEST_OBJECT(ID3D12Device_CreateCommandList(dev0, 0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                   alloc, NULL, &IID_ID3D12GraphicsCommandList,
-                                  (void **)&list0);
+                                  (void **)&list0), list0, "checked ID3D12Device_CreateCommandList list0");
    ID3D12GraphicsCommandList6 *list = NULL;
    hr = ID3D12GraphicsCommandList_QueryInterface(
       list0, &IID_ID3D12GraphicsCommandList6, (void **)&list);
+   TEST_OBJECT(hr, list, "checked ID3D12GraphicsCommandList_QueryInterface list");
    CHECK(hr == S_OK && list,
          "the command list answers to ID3D12GraphicsCommandList6 "
          "(DispatchMesh needs it)");
@@ -223,19 +247,24 @@ main(int argc, char **argv)
       goto done;
 
    ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev0, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
-   ID3D12CommandList *lists[] = {(ID3D12CommandList *)list0};
+   TEST_OBJECT(ID3D12Device_CreateFence(dev0, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                            (void **)&fence), fence, "checked ID3D12Device_CreateFence fence");
 
-   uint8_t *map = NULL;
-   ID3D12Resource_Map(rt, 0, NULL, (void **)&map);
+   uint8_t *map = malloc(STRIDE * H);
+   CHECK(map != NULL, "CPU storage for opaque target");
+   if (!map) return 1;
    memset(map, 0x55, STRIDE * H);
+   TEST_CALL(d12_test_opaque_texture_transfer(rt, map, STRIDE, STRIDE * H, true), "publish original texture poison in COMMON");
+
+   TEST_CALL(ID3D12GraphicsCommandList_Close(list0), "close initial empty list");
 
    const FLOAT clear_red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
    D3D12_VIEWPORT vp = {.Width = W, .Height = H, .MaxDepth = 1.0f};
    D3D12_RECT sc = {.right = W, .bottom = H};
 
-   ID3D12GraphicsCommandList_Reset(list0, alloc, NULL);
+   TEST_CALL(ID3D12CommandAllocator_Reset(alloc), "reset fenced allocator");
+   TEST_CALL(ID3D12GraphicsCommandList_Reset(list0, alloc, NULL), "reset checked graphics list");
+   d12_test_transition(list0, rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
    ID3D12GraphicsCommandList_ClearRenderTargetView(list0, rtv, clear_red, 0,
                                                    NULL);
    ID3D12GraphicsCommandList_RSSetViewports(list0, 1, &vp);
@@ -243,16 +272,17 @@ main(int argc, char **argv)
    ID3D12GraphicsCommandList_SetGraphicsRootSignature(list0, root_sig);
    ID3D12GraphicsCommandList_SetPipelineState(list0, pso);
    ID3D12GraphicsCommandList6_DispatchMesh(list, 1, 1, 1);
+   d12_test_transition(list0, rt, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
    hr = ID3D12GraphicsCommandList_Close(list0);
    CHECK(hr == S_OK, "mesh command list closes cleanly");
    if (hr != S_OK)
       goto teardown;
 
-   ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
-   ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
-
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1,
+   TEST_CALL(d12_test_submit_closed(dev0, list0, queue, fence, 1), "exact render fence and device status");
+   memset(map, 0x33, STRIDE * H);
+   TEST_CALL(d12_test_opaque_texture_transfer(rt, map, STRIDE, STRIDE * H, false), "read actual opaque bytes only after fence");
+   CHECK(ID3D12Fence_GetCompletedValue(fence) != UINT64_MAX &&
+            ID3D12Fence_GetCompletedValue(fence) >= 1,
          "the GPU COMPLETES a mesh draw: two compute dispatches and an "
          "indexed indirect draw are a stream it accepts");
 
@@ -290,7 +320,7 @@ main(int argc, char **argv)
          "4 vertices, 2 primitives, every pixel drawn");
 
 teardown:
-   ID3D12Resource_Unmap(rt, 0, NULL);
+   free(map);
    if (fence)
       ID3D12Fence_Release(fence);
    ID3D12CommandQueue_Release(queue);

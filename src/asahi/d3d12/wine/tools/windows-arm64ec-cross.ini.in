@@ -1,0 +1,26 @@
+[binaries]
+c = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-clang'
+cpp = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-clang++'
+ar = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-ar'
+strip = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-strip'
+windres = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-windres'
+pkg-config = 'false'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'arm64ec'
+endian = 'little'
+
+[built-in options]
+# @WINE_INCLUDE@ carries the Linux ioctl encoding (sys/ioccom.h) and
+# linux/types.h for every UAPI header the PE build touches (asahi_drm.h is
+# pulled in by agx_chip.h, i.e. by the compiler library too), plus the
+# xf86drm.h shim that routes to the unixlib.
+c_args = ['-mno-ms-bitfields', '-I@WINE_INCLUDE@']
+cpp_args = ['-mno-ms-bitfields', '-I@WINE_INCLUDE@']
+c_link_args = []
+cpp_link_args = []
+
+[properties]
+needs_exe_wrapper = true

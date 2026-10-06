@@ -156,10 +156,22 @@ agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
    } else {
       simple_mtx_lock(&dev->bo_cache.lock);
 
-      if (bo->size > AGX_BO_CACHE_MAX_SIZE ||
-          dev->bo_cache.size > AGX_BO_CACHE_MAX_SIZE - bo->size) {
+      if (bo->size > AGX_BO_CACHE_MAX_SIZE) {
          simple_mtx_unlock(&dev->bo_cache.lock);
          return false;
+      }
+
+      /* Prefer the newly freed BO to older cache entries. Refusing it when
+       * the cache is full makes a repeated large allocation miss forever:
+       * even one small cached BO prevents a 256 MiB BO from being retained.
+       * Evict only zero-reference BOs, under the same locks as stale eviction,
+       * and keep the existing total-byte limit. */
+      while (dev->bo_cache.size > AGX_BO_CACHE_MAX_SIZE - bo->size) {
+         struct agx_bo *entry =
+            list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
+         agx_bo_cache_remove_locked(dev, entry);
+         agx_g17p_va_lifetime_trace(dev, "cache-evict-capacity", entry);
+         agx_bo_free(dev, entry);
       }
 
       agx_bo_cache_put_locked(dev, bo);

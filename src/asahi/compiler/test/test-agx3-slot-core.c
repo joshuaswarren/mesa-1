@@ -711,6 +711,33 @@ int main(void)
       CHECK(memcmp(before, r, sizeof(r)) == 0);
    }
 
+   /* A completed producer event can supply the consumer's physical slot.
+    * Subsequent users of the original value must not wait that slot's new
+    * generation; fixed-slot protocols retain their required assignment.
+    */
+   {
+      struct agx3_slot_instr consumer = ld(8);
+      consumer.nr_srcs = 1;
+      consumer.src[0] = 0;
+      consumer.coalesce_src = 1;
+      struct agx3_slot_instr p[] = {ld(0), consumer, st(0), st(8)};
+      CHECK(agx3_slot_assign(p, 4, 6, r));
+      CHECK(r[0].slot == 1 && r[1].slot == 1 && r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0 && r[3].wait_mask == 1);
+      p[1].preferred_slot = 4;
+      CHECK(agx3_slot_assign(p, 4, 6, r));
+      CHECK(r[1].slot == 4 && r[1].wait_mask == 1 && r[3].wait_mask == 8);
+      p[1].preferred_slot = 0;
+      p[1].transient_slots = 1;
+      CHECK(agx3_slot_assign(p, 4, 6, r));
+      CHECK(r[1].slot != 1 && r[1].wait_mask == 1);
+      p[1].coalesce_src = 2;
+      CHECK(!agx3_slot_assign(p, 4, 6, r));
+      p[1].coalesce_src = 1;
+      p[1].is_async = false;
+      CHECK(!agx3_slot_assign(p, 4, 6, r));
+   }
+
    /* Malformed inputs. */
    CHECK(!agx3_slot_assign(NULL, 1, 6, r));
    { struct agx3_slot_instr p=ld(0); CHECK(!agx3_slot_assign(&p,1,0,r)); CHECK(!agx3_slot_assign(&p,1,9,r)); }

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_device.h"
+#include "hk_pass_profile.h"
 
 #include "hk_acceleration_structure.h"
 
@@ -61,9 +62,6 @@ hk_g17p_prewarm_poly_kernels(struct hk_device *dev)
    PREWARM(LIBAGX_PREFIX_SUM_TESS_0, libagx_prefix_sum_tess_args);
    PREWARM(LIBAGX_PREFIX_SUM_TESS_1, libagx_prefix_sum_tess_args);
    PREWARM(LIBAGX_TESS_SETUP_INDIRECT, libagx_tess_setup_indirect_args);
-   PREWARM(LIBAGX_TESS_SETUP_INDIRECT_HW,
-           libagx_tess_setup_indirect_hw_args);
-   PREWARM(LIBAGX_TESS_FACTORS_HALF, libagx_tess_factors_half_args);
    PREWARM(LIBAGX_TESS_ISOLINE_0, libagx_tess_isoline_args);
    PREWARM(LIBAGX_TESS_ISOLINE_1, libagx_tess_isoline_args);
    PREWARM(LIBAGX_TESS_TRI_0, libagx_tess_tri_args);
@@ -138,7 +136,7 @@ hk_upload_rodata(struct hk_device *dev)
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       const uint64_t pointers[2] = {
-         dev->sampled_images.bo->va->addr,
+         dev->sampled_images.base_va,
          dev->samplers.table.bo->va->addr,
       };
 
@@ -791,7 +789,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
-   dev->g17p_native_tess = pdev->g17p_native_tess;
 
    if (instance->no_border) {
       dev->perftest |= HK_PERF_NOBORDER;
@@ -828,13 +825,17 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
              dev->dev.user_timestamp_to_ns.den &&
           "user timestamps are in ns");
 
+   hk_pass_profile_init(dev);
+
    result = hk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)
       goto fail_dev;
 
    if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
+      /* Descriptor memory grows by chunks up to HK_MAX_DESCRIPTORS. */
       result = hk_descriptor_table_init(dev, &dev->sampled_images, 32,
-                                        HK_MAX_DESCRIPTORS, HK_MAX_DESCRIPTORS);
+                                        HK_DESCRIPTOR_TABLE_CHUNK_B / 32,
+                                        HK_MAX_DESCRIPTORS);
       if (result != VK_SUCCESS)
          goto fail_samplers;
 
@@ -867,38 +868,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
    hk_g17p_bg_eot_dev_cache_init(dev);
 
-   dev->g17p_compute_program_cache.report_stats =
-      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
-   dev->g17p_shader_perf.trace =
-      debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
-   dev->g17p_shader_perf.aggregate =
-      debug_get_bool_option("HK_SHADER_PERF_AGGREGATE", false);
-   dev->g17p_shader_perf.fault_trace =
-      debug_get_bool_option("HK_SHADER_PERF_FAULT_TRACE", false);
-   dev->g17p_shader_perf.prefault_stack =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STACK", false);
-   dev->g17p_shader_perf.prefault_driver =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_DRIVER", false);
-   dev->g17p_shader_perf.prefault_main =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_MAIN", false);
-   dev->g17p_shader_perf.prefault_ioto =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_IOTO", false);
-   dev->g17p_shader_perf.prefault_streams =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STREAMS", false);
    dev->g17p_diagnostics.launch_trace =
       debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
-   dev->g17p_diagnostics.draw_trace =
-      debug_get_bool_option("HK_G17P_DRAW_TRACE", false);
-   dev->g17p_diagnostics.compact_ioto_trace =
-      debug_get_bool_option("HK_G17P_COMPACT_IOTO_TRACE", false);
-   dev->g17p_diagnostics.graphics_ioto_cache_stats =
-      debug_get_bool_option("HK_G17P_GRAPHICS_IOTO_CACHE_STATS", false);
-   dev->g17p_diagnostics.nonpoint_no_psiz =
-      debug_get_bool_option("HK_G17P_NONPOINT_NO_PSIZ", false);
-   dev->g17p_diagnostics.hal200_about_flags1 =
-      debug_get_bool_option("HK_G17P_HAL200_ABOUT_FLAGS1", false);
-   dev->g17p_diagnostics.force_tri_merge_disable =
-      debug_get_bool_option("HK_G17P_FORCE_TRI_MERGE_DISABLE", false);
 
    /* Geometry and tessellation are advertised core functionality on G17P.
     * Upload their immutable internal kernels with the device instead of
@@ -967,12 +938,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    simple_mtx_init(&dev->vdm.lock, mtx_plain);
    list_inithead(&dev->vdm.slabs);
-   list_inithead(&dev->vdm.quarantined_bos);
-   list_inithead(&dev->vdm.quarantined_vdm_allocations);
-   util_dynarray_init(&dev->vdm.quarantined_ioto_bos, NULL);
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
    simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
-   simple_mtx_init(&dev->g17p_lazy.lock, mtx_plain);
    agx_scratch_init(&dev->dev, &dev->scratch.vs);
    agx_scratch_init(&dev->dev, &dev->scratch.fs);
    agx_scratch_init(&dev->dev, &dev->scratch.cs);
@@ -1040,7 +1007,6 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
-   hk_lazy_compile_finish(dev);
    hk_shader_binary_cache_finish(dev);
    hk_g17p_compute_program_cache_finish(dev);
    hk_device_finish_accel_struct_state(dev);
@@ -1054,6 +1020,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       hk_queue_finish(dev, queue);
    }
 
+   hk_pass_profile_fini(dev);
    vk_device_finish(&dev->vk);
 
    hk_device_finish_vdm_slabs(dev);

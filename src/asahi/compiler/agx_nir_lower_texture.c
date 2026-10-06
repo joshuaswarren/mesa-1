@@ -631,6 +631,16 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    if (nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0)
       return false;
 
+   /* An implicit clamp uses the hardware bias + minimum form. Frontends
+    * keeping sampler bias in the descriptor need a zero shader bias here.
+    * Do this after constant folding, which turns txb(0) back into tex, and
+    * immediately pack both sources below. */
+   if (tex->op == nir_texop_tex &&
+       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0) {
+      tex->op = nir_texop_txb;
+      nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float16(b, 0.0));
+   }
+
    /* Get the coordinates */
    nir_def *coord = nir_steal_tex_src(tex, nir_tex_src_coord);
    nir_def *ms_idx = nir_steal_tex_src(tex, nir_tex_src_ms_index);
@@ -773,19 +783,8 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
        * 4- and 8-layer images, requested layers 0/1/3/4/7/100/100000, all
        * return the correctly clamped layer with this disabled. An unclamped
        * read would wrap or read out of bounds; layer 9 of 4 returns layer 3,
-       * not layer 1.
-       *
-       * AGX_G17P_LAYER_CLAMP=1 forces the software clamp back for A/B. */
-      bool skip_layer_clamp = options && options->gen9;
-      {
-         static int force = -1;
-         if (force < 0) {
-            const char *v = getenv("AGX_G17P_LAYER_CLAMP");
-            force = (v && v[0] && v[0] != '0') ? 1 : 0;
-         }
-         if (force)
-            skip_layer_clamp = false;
-      }
+       * not layer 1. */
+      const bool skip_layer_clamp = options && options->gen9;
 
       if (!(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP) && !is_txf &&
           !skip_layer_clamp) {
@@ -1057,7 +1056,7 @@ txs_for_image(nir_builder *b, nir_intrinsic_instr *intr,
 
 static nir_def *
 image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
-                    bool return_index, bool gen9)
+                    bool return_index, bool gen9, bool buffer_metadata)
 {
    /* First, calculate the address of the PBE descriptor */
    nir_def *desc_address =
@@ -1081,6 +1080,21 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
 
    if (dim == GLSL_SAMPLER_DIM_BUF && return_index) {
       return nir_channel(b, coord, 0);
+   } else if (dim == GLSL_SAMPLER_DIM_BUF && buffer_metadata) {
+      /* Buffer atomics receive the PBE handle, but Gen9 has no AGX2
+       * software address/offset fields. Use the same sideband as buffer
+       * loads and stores, relative to the start of the descriptor.
+       */
+      nir_def *desc = nir_iadd_imm(
+         b, desc_address, -AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET);
+      nir_def *base = load_buffer_metadata(
+         b, desc, AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, 64);
+      nir_def *tail = load_buffer_metadata(
+         b, desc, AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, 32);
+      nir_def *element = nir_iadd(b, nir_channel(b, coord, 0), tail);
+      return nir_iadd(b, base,
+                      nir_imul(b, nir_u2u64(b, element),
+                               nir_u2u64(b, blocksize_B)));
    } else if (dim == GLSL_SAMPLER_DIM_BUF) {
       return libagx_buffer_texel_address(b, desc_address, coord, blocksize_B);
    } else if (gen9) {
@@ -1346,7 +1360,8 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    case nir_intrinsic_bindless_image_texel_address:
       nir_def_rewrite_uses(&intr->def,
-                           image_texel_address(b, intr, false, gen9));
+                           image_texel_address(b, intr, false, gen9,
+                                               options && options->buffer_metadata));
       return true;
 
    case nir_intrinsic_is_sparse_texels_resident:
@@ -1644,6 +1659,31 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
 }
 
 static bool
+lower_lod_clamp(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+{
+   int min_idx = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   if (min_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   if (tex->op == nir_texop_txl) {
+      /* Explicit LOD has no separate hardware minimum operand. Clamp before
+       * legalizing to fp16, at the precision of the requested LOD. */
+      nir_def *min_lod = nir_steal_tex_src(tex, nir_tex_src_min_lod);
+      int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+      assert(lod_idx >= 0);
+      nir_def *lod = tex->src[lod_idx].src.ssa;
+      nir_src_rewrite(&tex->src[lod_idx].src,
+                      nir_fmax(b, lod, nir_f2fN(b, min_lod, lod->bit_size)));
+      return true;
+   }
+
+   /* txb is packed below; txd keeps its gradient + minimum operand. */
+   return false;
+}
+
+static bool
 lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
               bool robust_formatless_images, uint64_t sparse_ro_offset,
               bool sparse_buffer_residency)
@@ -1680,6 +1720,8 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
             nir_metadata_control_flow, NULL);
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_images,
             nir_metadata_control_flow, (void *)&options);
+   NIR_PASS(progress, s, nir_shader_tex_pass, lower_lod_clamp,
+            nir_metadata_control_flow, NULL);
    NIR_PASS(progress, s, nir_legalize_16bit_sampler_srcs, tex_constraints);
 
    /* Fold constants after nir_legalize_16bit_sampler_srcs so we can detect 0 in
@@ -1779,7 +1821,7 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
          intr->src[1].ssa, nir_u2u32(b, intr->src[2].ssa),
          nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))));
    } else {
-      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false));
+      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false, false));
    }
    nir_def *coord2d = coords_for_buffer_texture(b, index_px);
 
@@ -1869,4 +1911,87 @@ agx_nir_needs_texture_crawl(nir_instr *instr)
    }
 
    return false;
+}
+
+/* Walk uses once, including loop-carried phis. A depth limit can miss a
+ * sampled value after a long ALU chain; recursive traversal can also revisit
+ * the same phi indefinitely. */
+static bool
+agx_g17p_reaches_derivative(nir_def *def)
+{
+   struct set *visited = _mesa_pointer_set_create(NULL);
+   struct util_dynarray pending;
+   util_dynarray_init(&pending, NULL);
+   util_dynarray_append(&pending, def);
+   bool found = false;
+
+   while (util_dynarray_num_elements(&pending, nir_def *) && !found) {
+      nir_def *current = util_dynarray_pop(&pending, nir_def *);
+      if (_mesa_set_search(visited, current))
+         continue;
+      _mesa_set_add(visited, current);
+
+      nir_foreach_use(use, current) {
+         nir_instr *instr = nir_src_parent_instr(use);
+         if (instr->type == nir_instr_type_intrinsic) {
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_ddx:
+            case nir_intrinsic_ddx_fine:
+            case nir_intrinsic_ddx_coarse:
+            case nir_intrinsic_ddy:
+            case nir_intrinsic_ddy_fine:
+            case nir_intrinsic_ddy_coarse:
+               found = true;
+               break;
+            default:
+               break;
+            }
+         } else if (instr->type == nir_instr_type_alu) {
+            util_dynarray_append(&pending, &nir_instr_as_alu(instr)->def);
+         } else if (instr->type == nir_instr_type_phi) {
+            util_dynarray_append(&pending, &nir_instr_as_phi(instr)->def);
+         }
+      }
+   }
+
+   util_dynarray_fini(&pending);
+   _mesa_set_destroy(visited, NULL);
+   return found;
+}
+
+/* G17P's driver-profile implicit sample returns zero in helper lanes even
+ * under the native helper-capable fragment protocol.  That is unobservable
+ * unless the sampled value itself feeds a later derivative.  For that exact
+ * shape, spell the implicit LOD as the equivalent explicit gradients: the
+ * witnessed gradient sampler executes in helper lanes and preserves the quad
+ * values required by fwidth(texture(...)). */
+static bool
+agx_g17p_explicit_helper_gradient(nir_builder *b, nir_tex_instr *tex,
+                                  UNUSED void *data)
+{
+   if (tex->op != nir_texop_tex ||
+       tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
+       tex->is_shadow || tex->is_sparse ||
+       !agx_g17p_reaches_derivative(&tex->def))
+      return false;
+
+   const int coord_idx =
+      nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *coord = tex->src[coord_idx].src.ssa;
+   nir_tex_instr_add_src(tex, nir_tex_src_ddx, nir_ddx(b, coord));
+   nir_tex_instr_add_src(tex, nir_tex_src_ddy, nir_ddy(b, coord));
+   tex->op = nir_texop_txd;
+   return true;
+}
+
+bool
+agx_nir_lower_g17p_helper_samples(nir_shader *shader)
+{
+   assert(shader->info.stage == MESA_SHADER_FRAGMENT);
+   return nir_shader_tex_pass(shader, agx_g17p_explicit_helper_gradient,
+                              nir_metadata_control_flow, NULL);
 }

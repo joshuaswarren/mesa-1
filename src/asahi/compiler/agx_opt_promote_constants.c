@@ -90,9 +90,7 @@ constant_use_accepts_uniform(agx_context *ctx, const agx_instr *I, unsigned s,
       return true;
 
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B || I->nr_srcs > 3 ||
-       uniform >= AGX_NUM_UNIFORMS ||
-       !(agx_get_codegen_flags() &
-         AGX_CODEGEN_G17P_PROMOTE_INTEGER_CONSTANTS))
+       uniform >= AGX_NUM_UNIFORMS)
       return false;
 
    agx_instr candidate = *I;
@@ -116,6 +114,16 @@ pass(agx_context *ctx, void *memctx)
    /* Set of SSA indices that map to immediate values */
    BITSET_WORD *is_immediate = BITSET_RZALLOC(memctx, ctx->alloc);
 
+   /* Probe uniform acceptance where the first promoted constant will land:
+    * the range starts 32-bit aligned on AGX3, and aligned f32 operands
+    * (FFMA, FADD, FMUL, FCMPSEL) refuse an odd index. Probing the raw count
+    * after a preamble that ends on a 16-bit export refused every such use.
+    */
+   const unsigned probe_uniform =
+      ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2
+         ? ALIGN_POT(ctx->out->push_count, 2)
+         : ctx->out->push_count;
+
    /* Gather constant definitions and use */
    agx_foreach_instr_global(ctx, I) {
       if (I->op == AGX_OPCODE_MOV_IMM) {
@@ -125,9 +133,8 @@ pass(agx_context *ctx, void *memctx)
       } else {
          agx_foreach_ssa_src(I, s) {
             if (BITSET_TEST(is_immediate, I->src[s].value) &&
-                constant_use_accepts_uniform(ctx, I, s,
-                                          ctx->out->push_count,
-                                          I->src[s].size)) {
+                constant_use_accepts_uniform(ctx, I, s, probe_uniform,
+                                             I->src[s].size)) {
 
                record_use(memctx, constants, values[I->src[s].value],
                           I->src[s].size);

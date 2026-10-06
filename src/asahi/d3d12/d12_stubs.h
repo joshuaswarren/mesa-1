@@ -896,6 +896,918 @@ d12_stub_ID3D12Device2_CreatePipelineState(ID3D12Device2 * This, const D3D12_PIP
    .SetResidencyPriority = d12_stub_ID3D12Device2_SetResidencyPriority, \
    .CreatePipelineState = d12_stub_ID3D12Device2_CreatePipelineState
 
+/* ---- ID3D12Device15: 94 methods ---- */
+static inline HRESULT
+d12_stub_ID3D12Device15_QueryInterface(ID3D12Device15 * This, REFIID riid, void **ppvObject)
+{
+   d12_stub_report("ID3D12Device15::QueryInterface");
+   if (ppvObject)
+      *ppvObject = NULL;
+   return E_NOTIMPL;
+}
+
+static inline ULONG
+d12_stub_ID3D12Device15_AddRef(ID3D12Device15 * This)
+{
+   d12_stub_report("ID3D12Device15::AddRef");
+   return 0;
+}
+
+static inline ULONG
+d12_stub_ID3D12Device15_Release(ID3D12Device15 * This)
+{
+   d12_stub_report("ID3D12Device15::Release");
+   return 0;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_GetPrivateData(ID3D12Device15 * This, REFGUID guid, UINT *pDataSize, _Out_writes_bytes_opt_( *pDataSize ) void *pData)
+{
+   d12_stub_report("ID3D12Device15::GetPrivateData");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetPrivateData(ID3D12Device15 * This, REFGUID guid, UINT DataSize, _In_reads_bytes_opt_( DataSize ) const void *pData)
+{
+   d12_stub_report("ID3D12Device15::SetPrivateData");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetPrivateDataInterface(ID3D12Device15 * This, REFGUID guid, const IUnknown *pData)
+{
+   d12_stub_report("ID3D12Device15::SetPrivateDataInterface");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetName(ID3D12Device15 * This, _In_z_ LPCWSTR Name)
+{
+   d12_stub_report("ID3D12Device15::SetName");
+   return E_NOTIMPL;
+}
+
+static inline UINT
+d12_stub_ID3D12Device15_GetNodeCount(ID3D12Device15 * This)
+{
+   d12_stub_report("ID3D12Device15::GetNodeCount");
+   return 0;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommandQueue(ID3D12Device15 * This, const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue)
+{
+   d12_stub_report("ID3D12Device15::CreateCommandQueue");
+   if (ppCommandQueue)
+      *ppCommandQueue = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommandAllocator(ID3D12Device15 * This, D3D12_COMMAND_LIST_TYPE type, REFIID riid, void **ppCommandAllocator)
+{
+   d12_stub_report("ID3D12Device15::CreateCommandAllocator");
+   if (ppCommandAllocator)
+      *ppCommandAllocator = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateGraphicsPipelineState(ID3D12Device15 * This, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState)
+{
+   d12_stub_report("ID3D12Device15::CreateGraphicsPipelineState");
+   if (ppPipelineState)
+      *ppPipelineState = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateComputePipelineState(ID3D12Device15 * This, const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState)
+{
+   d12_stub_report("ID3D12Device15::CreateComputePipelineState");
+   if (ppPipelineState)
+      *ppPipelineState = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommandList(ID3D12Device15 * This, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *pCommandAllocator, ID3D12PipelineState *pInitialState, REFIID riid, void **ppCommandList)
+{
+   d12_stub_report("ID3D12Device15::CreateCommandList");
+   if (ppCommandList)
+      *ppCommandList = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CheckFeatureSupport(ID3D12Device15 * This, D3D12_FEATURE Feature, _Inout_updates_bytes_(FeatureSupportDataSize) void *pFeatureSupportData, UINT FeatureSupportDataSize)
+{
+   d12_stub_report("ID3D12Device15::CheckFeatureSupport");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateDescriptorHeap(ID3D12Device15 * This, const D3D12_DESCRIPTOR_HEAP_DESC *pDescriptorHeapDesc, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::CreateDescriptorHeap");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline UINT
+d12_stub_ID3D12Device15_GetDescriptorHandleIncrementSize(ID3D12Device15 * This, D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapType)
+{
+   d12_stub_report("ID3D12Device15::GetDescriptorHandleIncrementSize");
+   return 0;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateRootSignature(ID3D12Device15 * This, UINT nodeMask, _In_reads_(blobLengthInBytes) const void *pBlobWithRootSignature, SIZE_T blobLengthInBytes, REFIID riid, void **ppvRootSignature)
+{
+   d12_stub_report("ID3D12Device15::CreateRootSignature");
+   if (ppvRootSignature)
+      *ppvRootSignature = NULL;
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateConstantBufferView(ID3D12Device15 * This, const D3D12_CONSTANT_BUFFER_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateConstantBufferView");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateShaderResourceView(ID3D12Device15 * This, ID3D12Resource *pResource, const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateShaderResourceView");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateUnorderedAccessView(ID3D12Device15 * This, ID3D12Resource *pResource, ID3D12Resource *pCounterResource, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateUnorderedAccessView");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateRenderTargetView(ID3D12Device15 * This, ID3D12Resource *pResource, const D3D12_RENDER_TARGET_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateRenderTargetView");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateDepthStencilView(ID3D12Device15 * This, ID3D12Resource *pResource, const D3D12_DEPTH_STENCIL_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateDepthStencilView");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateSampler(ID3D12Device15 * This, const D3D12_SAMPLER_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateSampler");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CopyDescriptors(ID3D12Device15 * This, UINT NumDestDescriptorRanges, _In_reads_(NumDestDescriptorRanges) const D3D12_CPU_DESCRIPTOR_HANDLE *pDestDescriptorRangeStarts, _In_reads_opt_(NumDestDescriptorRanges) const UINT *pDestDescriptorRangeSizes, UINT NumSrcDescriptorRanges, _In_reads_(NumSrcDescriptorRanges) const D3D12_CPU_DESCRIPTOR_HANDLE *pSrcDescriptorRangeStarts, _In_reads_opt_(NumSrcDescriptorRanges) const UINT *pSrcDescriptorRangeSizes, D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapsType)
+{
+   d12_stub_report("ID3D12Device15::CopyDescriptors");
+}
+
+static inline void
+d12_stub_ID3D12Device15_CopyDescriptorsSimple(ID3D12Device15 * This, UINT NumDescriptors, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptorRangeStart, D3D12_CPU_DESCRIPTOR_HANDLE SrcDescriptorRangeStart, D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapsType)
+{
+   d12_stub_report("ID3D12Device15::CopyDescriptorsSimple");
+}
+
+#ifdef _WIN32
+static inline D3D12_RESOURCE_ALLOCATION_INFO *
+d12_stub_ID3D12Device15_GetResourceAllocationInfo(ID3D12Device15 * This, D3D12_RESOURCE_ALLOCATION_INFO * RetVal, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC *pResourceDescs)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo");
+   if (RetVal)
+      memset(RetVal, 0, sizeof(*RetVal));
+   return RetVal;
+}
+
+#else
+static inline D3D12_RESOURCE_ALLOCATION_INFO
+d12_stub_ID3D12Device15_GetResourceAllocationInfo(ID3D12Device15 * This, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC *pResourceDescs)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo");
+   D3D12_RESOURCE_ALLOCATION_INFO zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+#endif
+
+#ifdef _WIN32
+static inline D3D12_HEAP_PROPERTIES *
+d12_stub_ID3D12Device15_GetCustomHeapProperties(ID3D12Device15 * This, D3D12_HEAP_PROPERTIES * RetVal, UINT nodeMask, D3D12_HEAP_TYPE heapType)
+{
+   d12_stub_report("ID3D12Device15::GetCustomHeapProperties");
+   if (RetVal)
+      memset(RetVal, 0, sizeof(*RetVal));
+   return RetVal;
+}
+
+#else
+static inline D3D12_HEAP_PROPERTIES
+d12_stub_ID3D12Device15_GetCustomHeapProperties(ID3D12Device15 * This, UINT nodeMask, D3D12_HEAP_TYPE heapType)
+{
+   d12_stub_report("ID3D12Device15::GetCustomHeapProperties");
+   D3D12_HEAP_PROPERTIES zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+#endif
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommittedResource(ID3D12Device15 * This, const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialResourceState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riidResource, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateCommittedResource");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateHeap(ID3D12Device15 * This, const D3D12_HEAP_DESC *pDesc, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::CreateHeap");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreatePlacedResource(ID3D12Device15 * This, ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riid, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreatePlacedResource");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateReservedResource(ID3D12Device15 * This, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riid, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateReservedResource");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateSharedHandle(ID3D12Device15 * This, ID3D12DeviceChild *pObject, const SECURITY_ATTRIBUTES *pAttributes, DWORD Access, LPCWSTR Name, HANDLE *pHandle)
+{
+   d12_stub_report("ID3D12Device15::CreateSharedHandle");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_OpenSharedHandle(ID3D12Device15 * This, HANDLE NTHandle, REFIID riid, void **ppvObj)
+{
+   d12_stub_report("ID3D12Device15::OpenSharedHandle");
+   if (ppvObj)
+      *ppvObj = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_OpenSharedHandleByName(ID3D12Device15 * This, LPCWSTR Name, DWORD Access, /* [annotation][out] */ HANDLE *pNTHandle)
+{
+   d12_stub_report("ID3D12Device15::OpenSharedHandleByName");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_MakeResident(ID3D12Device15 * This, UINT NumObjects, _In_reads_(NumObjects) ID3D12Pageable *const *ppObjects)
+{
+   d12_stub_report("ID3D12Device15::MakeResident");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_Evict(ID3D12Device15 * This, UINT NumObjects, _In_reads_(NumObjects) ID3D12Pageable *const *ppObjects)
+{
+   d12_stub_report("ID3D12Device15::Evict");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateFence(ID3D12Device15 * This, UINT64 InitialValue, D3D12_FENCE_FLAGS Flags, REFIID riid, void **ppFence)
+{
+   d12_stub_report("ID3D12Device15::CreateFence");
+   if (ppFence)
+      *ppFence = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_GetDeviceRemovedReason(ID3D12Device15 * This)
+{
+   d12_stub_report("ID3D12Device15::GetDeviceRemovedReason");
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_GetCopyableFootprints(ID3D12Device15 * This, const D3D12_RESOURCE_DESC *pResourceDesc, _In_range_(0,D3D12_REQ_SUBRESOURCES) UINT FirstSubresource, _In_range_(0,D3D12_REQ_SUBRESOURCES-FirstSubresource) UINT NumSubresources, UINT64 BaseOffset, _Out_writes_opt_(NumSubresources) D3D12_PLACED_SUBRESOURCE_FOOTPRINT *pLayouts, _Out_writes_opt_(NumSubresources) UINT *pNumRows, _Out_writes_opt_(NumSubresources) UINT64 *pRowSizeInBytes, UINT64 *pTotalBytes)
+{
+   d12_stub_report("ID3D12Device15::GetCopyableFootprints");
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateQueryHeap(ID3D12Device15 * This, const D3D12_QUERY_HEAP_DESC *pDesc, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::CreateQueryHeap");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetStablePowerState(ID3D12Device15 * This, BOOL Enable)
+{
+   d12_stub_report("ID3D12Device15::SetStablePowerState");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommandSignature(ID3D12Device15 * This, const D3D12_COMMAND_SIGNATURE_DESC *pDesc, ID3D12RootSignature *pRootSignature, REFIID riid, void **ppvCommandSignature)
+{
+   d12_stub_report("ID3D12Device15::CreateCommandSignature");
+   if (ppvCommandSignature)
+      *ppvCommandSignature = NULL;
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_GetResourceTiling(ID3D12Device15 * This, ID3D12Resource *pTiledResource, UINT *pNumTilesForEntireResource, D3D12_PACKED_MIP_INFO *pPackedMipDesc, D3D12_TILE_SHAPE *pStandardTileShapeForNonPackedMips, UINT *pNumSubresourceTilings, UINT FirstSubresourceTilingToGet, _Out_writes_(*pNumSubresourceTilings) D3D12_SUBRESOURCE_TILING *pSubresourceTilingsForNonPackedMips)
+{
+   d12_stub_report("ID3D12Device15::GetResourceTiling");
+}
+
+#ifdef _WIN32
+static inline LUID *
+d12_stub_ID3D12Device15_GetAdapterLuid(ID3D12Device15 * This, LUID * RetVal)
+{
+   d12_stub_report("ID3D12Device15::GetAdapterLuid");
+   if (RetVal)
+      memset(RetVal, 0, sizeof(*RetVal));
+   return RetVal;
+}
+
+#else
+static inline LUID
+d12_stub_ID3D12Device15_GetAdapterLuid(ID3D12Device15 * This)
+{
+   d12_stub_report("ID3D12Device15::GetAdapterLuid");
+   LUID zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+#endif
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreatePipelineLibrary(ID3D12Device15 * This, _In_reads_(BlobLength) const void *pLibraryBlob, SIZE_T BlobLength, REFIID riid, void **ppPipelineLibrary)
+{
+   d12_stub_report("ID3D12Device15::CreatePipelineLibrary");
+   if (ppPipelineLibrary)
+      *ppPipelineLibrary = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetEventOnMultipleFenceCompletion(ID3D12Device15 * This, _In_reads_(NumFences) ID3D12Fence *const *ppFences, _In_reads_(NumFences) const UINT64 *pFenceValues, UINT NumFences, D3D12_MULTIPLE_FENCE_WAIT_FLAGS Flags, HANDLE hEvent)
+{
+   d12_stub_report("ID3D12Device15::SetEventOnMultipleFenceCompletion");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetResidencyPriority(ID3D12Device15 * This, UINT NumObjects, _In_reads_(NumObjects) ID3D12Pageable *const *ppObjects, _In_reads_(NumObjects) const D3D12_RESIDENCY_PRIORITY *pPriorities)
+{
+   d12_stub_report("ID3D12Device15::SetResidencyPriority");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreatePipelineState(ID3D12Device15 * This, const D3D12_PIPELINE_STATE_STREAM_DESC *pDesc, REFIID riid, void **ppPipelineState)
+{
+   d12_stub_report("ID3D12Device15::CreatePipelineState");
+   if (ppPipelineState)
+      *ppPipelineState = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_OpenExistingHeapFromAddress(ID3D12Device15 * This, const void *pAddress, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::OpenExistingHeapFromAddress");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_OpenExistingHeapFromFileMapping(ID3D12Device15 * This, HANDLE hFileMapping, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::OpenExistingHeapFromFileMapping");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_EnqueueMakeResident(ID3D12Device15 * This, D3D12_RESIDENCY_FLAGS Flags, UINT NumObjects, _In_reads_(NumObjects) ID3D12Pageable *const *ppObjects, ID3D12Fence *pFenceToSignal, UINT64 FenceValueToSignal)
+{
+   d12_stub_report("ID3D12Device15::EnqueueMakeResident");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommandList1(ID3D12Device15 * This, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type, D3D12_COMMAND_LIST_FLAGS flags, REFIID riid, void **ppCommandList)
+{
+   d12_stub_report("ID3D12Device15::CreateCommandList1");
+   if (ppCommandList)
+      *ppCommandList = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateProtectedResourceSession(ID3D12Device15 * This, const D3D12_PROTECTED_RESOURCE_SESSION_DESC *pDesc, REFIID riid, void **ppSession)
+{
+   d12_stub_report("ID3D12Device15::CreateProtectedResourceSession");
+   if (ppSession)
+      *ppSession = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommittedResource1(ID3D12Device15 * This, const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialResourceState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession, REFIID riidResource, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateCommittedResource1");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateHeap1(ID3D12Device15 * This, const D3D12_HEAP_DESC *pDesc, ID3D12ProtectedResourceSession *pProtectedSession, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::CreateHeap1");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateReservedResource1(ID3D12Device15 * This, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession, REFIID riid, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateReservedResource1");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+#ifdef _WIN32
+static inline D3D12_RESOURCE_ALLOCATION_INFO *
+d12_stub_ID3D12Device15_GetResourceAllocationInfo1(ID3D12Device15 * This, D3D12_RESOURCE_ALLOCATION_INFO * RetVal, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC *pResourceDescs, _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1 *pResourceAllocationInfo1)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo1");
+   if (RetVal)
+      memset(RetVal, 0, sizeof(*RetVal));
+   return RetVal;
+}
+
+#else
+static inline D3D12_RESOURCE_ALLOCATION_INFO
+d12_stub_ID3D12Device15_GetResourceAllocationInfo1(ID3D12Device15 * This, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC *pResourceDescs, _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1 *pResourceAllocationInfo1)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo1");
+   D3D12_RESOURCE_ALLOCATION_INFO zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+#endif
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateLifetimeTracker(ID3D12Device15 * This, ID3D12LifetimeOwner *pOwner, REFIID riid, void **ppvTracker)
+{
+   d12_stub_report("ID3D12Device15::CreateLifetimeTracker");
+   if (ppvTracker)
+      *ppvTracker = NULL;
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_RemoveDevice(ID3D12Device15 * This)
+{
+   d12_stub_report("ID3D12Device15::RemoveDevice");
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_EnumerateMetaCommands(ID3D12Device15 * This, UINT *pNumMetaCommands, _Out_writes_opt_(*pNumMetaCommands) D3D12_META_COMMAND_DESC *pDescs)
+{
+   d12_stub_report("ID3D12Device15::EnumerateMetaCommands");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_EnumerateMetaCommandParameters(ID3D12Device15 * This, REFGUID CommandId, D3D12_META_COMMAND_PARAMETER_STAGE Stage, UINT *pTotalStructureSizeInBytes, UINT *pParameterCount, _Out_writes_opt_(*pParameterCount) D3D12_META_COMMAND_PARAMETER_DESC *pParameterDescs)
+{
+   d12_stub_report("ID3D12Device15::EnumerateMetaCommandParameters");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateMetaCommand(ID3D12Device15 * This, REFGUID CommandId, UINT NodeMask, _In_reads_bytes_opt_(CreationParametersDataSizeInBytes) const void *pCreationParametersData, SIZE_T CreationParametersDataSizeInBytes, REFIID riid, void **ppMetaCommand)
+{
+   d12_stub_report("ID3D12Device15::CreateMetaCommand");
+   if (ppMetaCommand)
+      *ppMetaCommand = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateStateObject(ID3D12Device15 * This, const D3D12_STATE_OBJECT_DESC *pDesc, REFIID riid, void **ppStateObject)
+{
+   d12_stub_report("ID3D12Device15::CreateStateObject");
+   if (ppStateObject)
+      *ppStateObject = NULL;
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_GetRaytracingAccelerationStructurePrebuildInfo(ID3D12Device15 * This, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *pDesc, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO *pInfo)
+{
+   d12_stub_report("ID3D12Device15::GetRaytracingAccelerationStructurePrebuildInfo");
+}
+
+static inline D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS
+d12_stub_ID3D12Device15_CheckDriverMatchingIdentifier(ID3D12Device15 * This, D3D12_SERIALIZED_DATA_TYPE SerializedDataType, const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER *pIdentifierToCheck)
+{
+   d12_stub_report("ID3D12Device15::CheckDriverMatchingIdentifier");
+   D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_SetBackgroundProcessingMode(ID3D12Device15 * This, D3D12_BACKGROUND_PROCESSING_MODE Mode, D3D12_MEASUREMENTS_ACTION MeasurementsAction, HANDLE hEventToSignalUponCompletion, BOOL *pbFurtherMeasurementsDesired)
+{
+   d12_stub_report("ID3D12Device15::SetBackgroundProcessingMode");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_AddToStateObject(ID3D12Device15 * This, const D3D12_STATE_OBJECT_DESC *pAddition, ID3D12StateObject *pStateObjectToGrowFrom, REFIID riid, void **ppNewStateObject)
+{
+   d12_stub_report("ID3D12Device15::AddToStateObject");
+   if (ppNewStateObject)
+      *ppNewStateObject = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateProtectedResourceSession1(ID3D12Device15 * This, const D3D12_PROTECTED_RESOURCE_SESSION_DESC1 *pDesc, REFIID riid, void **ppSession)
+{
+   d12_stub_report("ID3D12Device15::CreateProtectedResourceSession1");
+   if (ppSession)
+      *ppSession = NULL;
+   return E_NOTIMPL;
+}
+
+#ifdef _WIN32
+static inline D3D12_RESOURCE_ALLOCATION_INFO *
+d12_stub_ID3D12Device15_GetResourceAllocationInfo2(ID3D12Device15 * This, D3D12_RESOURCE_ALLOCATION_INFO * RetVal, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC1 *pResourceDescs, _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1 *pResourceAllocationInfo1)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo2");
+   if (RetVal)
+      memset(RetVal, 0, sizeof(*RetVal));
+   return RetVal;
+}
+
+#else
+static inline D3D12_RESOURCE_ALLOCATION_INFO
+d12_stub_ID3D12Device15_GetResourceAllocationInfo2(ID3D12Device15 * This, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC1 *pResourceDescs, _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1 *pResourceAllocationInfo1)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo2");
+   D3D12_RESOURCE_ALLOCATION_INFO zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+#endif
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommittedResource2(ID3D12Device15 * This, const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_RESOURCE_STATES InitialResourceState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession, REFIID riidResource, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateCommittedResource2");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreatePlacedResource1(ID3D12Device15 * This, ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riid, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreatePlacedResource1");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateSamplerFeedbackUnorderedAccessView(ID3D12Device15 * This, ID3D12Resource *pTargetedResource, ID3D12Resource *pFeedbackResource, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateSamplerFeedbackUnorderedAccessView");
+}
+
+static inline void
+d12_stub_ID3D12Device15_GetCopyableFootprints1(ID3D12Device15 * This, const D3D12_RESOURCE_DESC1 *pResourceDesc, _In_range_(0,D3D12_REQ_SUBRESOURCES) UINT FirstSubresource, _In_range_(0,D3D12_REQ_SUBRESOURCES-FirstSubresource) UINT NumSubresources, UINT64 BaseOffset, _Out_writes_opt_(NumSubresources) D3D12_PLACED_SUBRESOURCE_FOOTPRINT *pLayouts, _Out_writes_opt_(NumSubresources) UINT *pNumRows, _Out_writes_opt_(NumSubresources) UINT64 *pRowSizeInBytes, UINT64 *pTotalBytes)
+{
+   d12_stub_report("ID3D12Device15::GetCopyableFootprints1");
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateShaderCacheSession(ID3D12Device15 * This, const D3D12_SHADER_CACHE_SESSION_DESC *pDesc, REFIID riid, void **ppvSession)
+{
+   d12_stub_report("ID3D12Device15::CreateShaderCacheSession");
+   if (ppvSession)
+      *ppvSession = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_ShaderCacheControl(ID3D12Device15 * This, D3D12_SHADER_CACHE_KIND_FLAGS Kinds, D3D12_SHADER_CACHE_CONTROL_FLAGS Control)
+{
+   d12_stub_report("ID3D12Device15::ShaderCacheControl");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommandQueue1(ID3D12Device15 * This, const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID CreatorID, REFIID riid, void **ppCommandQueue)
+{
+   d12_stub_report("ID3D12Device15::CreateCommandQueue1");
+   if (ppCommandQueue)
+      *ppCommandQueue = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateCommittedResource3(ID3D12Device15 * This, const D3D12_HEAP_PROPERTIES *pHeapProperties, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession, UINT32 NumCastableFormats, _In_opt_count_(NumCastableFormats) const DXGI_FORMAT *pCastableFormats, REFIID riidResource, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateCommittedResource3");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreatePlacedResource2(ID3D12Device15 * This, ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue, UINT32 NumCastableFormats, _In_opt_count_(NumCastableFormats) const DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreatePlacedResource2");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateReservedResource2(ID3D12Device15 * This, const D3D12_RESOURCE_DESC *pDesc, D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue, ID3D12ProtectedResourceSession *pProtectedSession, UINT32 NumCastableFormats, _In_opt_count_(NumCastableFormats) const DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource)
+{
+   d12_stub_report("ID3D12Device15::CreateReservedResource2");
+   if (ppvResource)
+      *ppvResource = NULL;
+   return E_NOTIMPL;
+}
+
+static inline void
+d12_stub_ID3D12Device15_CreateSampler2(ID3D12Device15 * This, const D3D12_SAMPLER_DESC2 *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::CreateSampler2");
+}
+
+#ifdef _WIN32
+static inline D3D12_RESOURCE_ALLOCATION_INFO *
+d12_stub_ID3D12Device15_GetResourceAllocationInfo3(ID3D12Device15 * This, D3D12_RESOURCE_ALLOCATION_INFO * RetVal, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC1 *pResourceDescs, _In_opt_count_(numResourceDescs) const UINT32 *pNumCastableFormats, _In_opt_count_(numResourceDescs) const DXGI_FORMAT *const *ppCastableFormats, _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1 *pResourceAllocationInfo1)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo3");
+   if (RetVal)
+      memset(RetVal, 0, sizeof(*RetVal));
+   return RetVal;
+}
+
+#else
+static inline D3D12_RESOURCE_ALLOCATION_INFO
+d12_stub_ID3D12Device15_GetResourceAllocationInfo3(ID3D12Device15 * This, UINT visibleMask, UINT numResourceDescs, _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC1 *pResourceDescs, _In_opt_count_(numResourceDescs) const UINT32 *pNumCastableFormats, _In_opt_count_(numResourceDescs) const DXGI_FORMAT *const *ppCastableFormats, _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1 *pResourceAllocationInfo1)
+{
+   d12_stub_report("ID3D12Device15::GetResourceAllocationInfo3");
+   D3D12_RESOURCE_ALLOCATION_INFO zero;
+   memset(&zero, 0, sizeof(zero));
+   return zero;
+}
+
+#endif
+
+static inline HRESULT
+d12_stub_ID3D12Device15_OpenExistingHeapFromAddress1(ID3D12Device15 * This, const void *pAddress, SIZE_T size, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::OpenExistingHeapFromAddress1");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateRootSignatureFromSubobjectInLibrary(ID3D12Device15 * This, UINT nodeMask, _In_reads_(blobLengthInBytes) const void *pLibraryBlob, SIZE_T blobLengthInBytes, LPCWSTR subobjectName, REFIID riid, void **ppvRootSignature)
+{
+   d12_stub_report("ID3D12Device15::CreateRootSignatureFromSubobjectInLibrary");
+   if (ppvRootSignature)
+      *ppvRootSignature = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_RegisterTrimNotificationCallback(ID3D12Device15 * This, D3D12_REGISTER_TRIM_NOTIFICATION *pData)
+{
+   d12_stub_report("ID3D12Device15::RegisterTrimNotificationCallback");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_UnregisterTrimNotificationCallback(ID3D12Device15 * This, DWORD CallbackCookie)
+{
+   d12_stub_report("ID3D12Device15::UnregisterTrimNotificationCallback");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateShaderResourceView(ID3D12Device15 * This, ID3D12Resource *pResource, const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateShaderResourceView");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateUnorderedAccessView(ID3D12Device15 * This, ID3D12Resource *pResource, ID3D12Resource *pCounterResource, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateUnorderedAccessView");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateConstantBufferView(ID3D12Device15 * This, const D3D12_CONSTANT_BUFFER_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateConstantBufferView");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateSampler2(ID3D12Device15 * This, const D3D12_SAMPLER_DESC2 *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateSampler2");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateRenderTargetView(ID3D12Device15 * This, ID3D12Resource *pResource, const D3D12_RENDER_TARGET_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateRenderTargetView");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateDepthStencilView(ID3D12Device15 * This, ID3D12Resource *pResource, const D3D12_DEPTH_STENCIL_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateDepthStencilView");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_TryCreateSamplerFeedbackUnorderedAccessView(ID3D12Device15 * This, ID3D12Resource *pTargetedResource, ID3D12Resource *pFeedbackResource, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+   d12_stub_report("ID3D12Device15::TryCreateSamplerFeedbackUnorderedAccessView");
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_CreateQueryHeap1(ID3D12Device15 * This, const D3D12_QUERY_HEAP_DESC *pDesc, D3D12_QUERY_HEAP_FLAGS Flags, REFIID riid, void **ppvHeap)
+{
+   d12_stub_report("ID3D12Device15::CreateQueryHeap1");
+   if (ppvHeap)
+      *ppvHeap = NULL;
+   return E_NOTIMPL;
+}
+
+static inline HRESULT
+d12_stub_ID3D12Device15_ResolveQueryData(ID3D12Device15 * This, ID3D12QueryHeap *pQueryHeap, D3D12_QUERY_TYPE Type, UINT StartIndex, UINT NumQueries, void *pResolvedQueryData)
+{
+   d12_stub_report("ID3D12Device15::ResolveQueryData");
+   return E_NOTIMPL;
+}
+
+#define D12_ID3D12Device15_DEFAULTS \
+   .QueryInterface = d12_stub_ID3D12Device15_QueryInterface, \
+   .AddRef = d12_stub_ID3D12Device15_AddRef, \
+   .Release = d12_stub_ID3D12Device15_Release, \
+   .GetPrivateData = d12_stub_ID3D12Device15_GetPrivateData, \
+   .SetPrivateData = d12_stub_ID3D12Device15_SetPrivateData, \
+   .SetPrivateDataInterface = d12_stub_ID3D12Device15_SetPrivateDataInterface, \
+   .SetName = d12_stub_ID3D12Device15_SetName, \
+   .GetNodeCount = d12_stub_ID3D12Device15_GetNodeCount, \
+   .CreateCommandQueue = d12_stub_ID3D12Device15_CreateCommandQueue, \
+   .CreateCommandAllocator = d12_stub_ID3D12Device15_CreateCommandAllocator, \
+   .CreateGraphicsPipelineState = d12_stub_ID3D12Device15_CreateGraphicsPipelineState, \
+   .CreateComputePipelineState = d12_stub_ID3D12Device15_CreateComputePipelineState, \
+   .CreateCommandList = d12_stub_ID3D12Device15_CreateCommandList, \
+   .CheckFeatureSupport = d12_stub_ID3D12Device15_CheckFeatureSupport, \
+   .CreateDescriptorHeap = d12_stub_ID3D12Device15_CreateDescriptorHeap, \
+   .GetDescriptorHandleIncrementSize = d12_stub_ID3D12Device15_GetDescriptorHandleIncrementSize, \
+   .CreateRootSignature = d12_stub_ID3D12Device15_CreateRootSignature, \
+   .CreateConstantBufferView = d12_stub_ID3D12Device15_CreateConstantBufferView, \
+   .CreateShaderResourceView = d12_stub_ID3D12Device15_CreateShaderResourceView, \
+   .CreateUnorderedAccessView = d12_stub_ID3D12Device15_CreateUnorderedAccessView, \
+   .CreateRenderTargetView = d12_stub_ID3D12Device15_CreateRenderTargetView, \
+   .CreateDepthStencilView = d12_stub_ID3D12Device15_CreateDepthStencilView, \
+   .CreateSampler = d12_stub_ID3D12Device15_CreateSampler, \
+   .CopyDescriptors = d12_stub_ID3D12Device15_CopyDescriptors, \
+   .CopyDescriptorsSimple = d12_stub_ID3D12Device15_CopyDescriptorsSimple, \
+   .GetResourceAllocationInfo = d12_stub_ID3D12Device15_GetResourceAllocationInfo, \
+   .GetCustomHeapProperties = d12_stub_ID3D12Device15_GetCustomHeapProperties, \
+   .CreateCommittedResource = d12_stub_ID3D12Device15_CreateCommittedResource, \
+   .CreateHeap = d12_stub_ID3D12Device15_CreateHeap, \
+   .CreatePlacedResource = d12_stub_ID3D12Device15_CreatePlacedResource, \
+   .CreateReservedResource = d12_stub_ID3D12Device15_CreateReservedResource, \
+   .CreateSharedHandle = d12_stub_ID3D12Device15_CreateSharedHandle, \
+   .OpenSharedHandle = d12_stub_ID3D12Device15_OpenSharedHandle, \
+   .OpenSharedHandleByName = d12_stub_ID3D12Device15_OpenSharedHandleByName, \
+   .MakeResident = d12_stub_ID3D12Device15_MakeResident, \
+   .Evict = d12_stub_ID3D12Device15_Evict, \
+   .CreateFence = d12_stub_ID3D12Device15_CreateFence, \
+   .GetDeviceRemovedReason = d12_stub_ID3D12Device15_GetDeviceRemovedReason, \
+   .GetCopyableFootprints = d12_stub_ID3D12Device15_GetCopyableFootprints, \
+   .CreateQueryHeap = d12_stub_ID3D12Device15_CreateQueryHeap, \
+   .SetStablePowerState = d12_stub_ID3D12Device15_SetStablePowerState, \
+   .CreateCommandSignature = d12_stub_ID3D12Device15_CreateCommandSignature, \
+   .GetResourceTiling = d12_stub_ID3D12Device15_GetResourceTiling, \
+   .GetAdapterLuid = d12_stub_ID3D12Device15_GetAdapterLuid, \
+   .CreatePipelineLibrary = d12_stub_ID3D12Device15_CreatePipelineLibrary, \
+   .SetEventOnMultipleFenceCompletion = d12_stub_ID3D12Device15_SetEventOnMultipleFenceCompletion, \
+   .SetResidencyPriority = d12_stub_ID3D12Device15_SetResidencyPriority, \
+   .CreatePipelineState = d12_stub_ID3D12Device15_CreatePipelineState, \
+   .OpenExistingHeapFromAddress = d12_stub_ID3D12Device15_OpenExistingHeapFromAddress, \
+   .OpenExistingHeapFromFileMapping = d12_stub_ID3D12Device15_OpenExistingHeapFromFileMapping, \
+   .EnqueueMakeResident = d12_stub_ID3D12Device15_EnqueueMakeResident, \
+   .CreateCommandList1 = d12_stub_ID3D12Device15_CreateCommandList1, \
+   .CreateProtectedResourceSession = d12_stub_ID3D12Device15_CreateProtectedResourceSession, \
+   .CreateCommittedResource1 = d12_stub_ID3D12Device15_CreateCommittedResource1, \
+   .CreateHeap1 = d12_stub_ID3D12Device15_CreateHeap1, \
+   .CreateReservedResource1 = d12_stub_ID3D12Device15_CreateReservedResource1, \
+   .GetResourceAllocationInfo1 = d12_stub_ID3D12Device15_GetResourceAllocationInfo1, \
+   .CreateLifetimeTracker = d12_stub_ID3D12Device15_CreateLifetimeTracker, \
+   .RemoveDevice = d12_stub_ID3D12Device15_RemoveDevice, \
+   .EnumerateMetaCommands = d12_stub_ID3D12Device15_EnumerateMetaCommands, \
+   .EnumerateMetaCommandParameters = d12_stub_ID3D12Device15_EnumerateMetaCommandParameters, \
+   .CreateMetaCommand = d12_stub_ID3D12Device15_CreateMetaCommand, \
+   .CreateStateObject = d12_stub_ID3D12Device15_CreateStateObject, \
+   .GetRaytracingAccelerationStructurePrebuildInfo = d12_stub_ID3D12Device15_GetRaytracingAccelerationStructurePrebuildInfo, \
+   .CheckDriverMatchingIdentifier = d12_stub_ID3D12Device15_CheckDriverMatchingIdentifier, \
+   .SetBackgroundProcessingMode = d12_stub_ID3D12Device15_SetBackgroundProcessingMode, \
+   .AddToStateObject = d12_stub_ID3D12Device15_AddToStateObject, \
+   .CreateProtectedResourceSession1 = d12_stub_ID3D12Device15_CreateProtectedResourceSession1, \
+   .GetResourceAllocationInfo2 = d12_stub_ID3D12Device15_GetResourceAllocationInfo2, \
+   .CreateCommittedResource2 = d12_stub_ID3D12Device15_CreateCommittedResource2, \
+   .CreatePlacedResource1 = d12_stub_ID3D12Device15_CreatePlacedResource1, \
+   .CreateSamplerFeedbackUnorderedAccessView = d12_stub_ID3D12Device15_CreateSamplerFeedbackUnorderedAccessView, \
+   .GetCopyableFootprints1 = d12_stub_ID3D12Device15_GetCopyableFootprints1, \
+   .CreateShaderCacheSession = d12_stub_ID3D12Device15_CreateShaderCacheSession, \
+   .ShaderCacheControl = d12_stub_ID3D12Device15_ShaderCacheControl, \
+   .CreateCommandQueue1 = d12_stub_ID3D12Device15_CreateCommandQueue1, \
+   .CreateCommittedResource3 = d12_stub_ID3D12Device15_CreateCommittedResource3, \
+   .CreatePlacedResource2 = d12_stub_ID3D12Device15_CreatePlacedResource2, \
+   .CreateReservedResource2 = d12_stub_ID3D12Device15_CreateReservedResource2, \
+   .CreateSampler2 = d12_stub_ID3D12Device15_CreateSampler2, \
+   .GetResourceAllocationInfo3 = d12_stub_ID3D12Device15_GetResourceAllocationInfo3, \
+   .OpenExistingHeapFromAddress1 = d12_stub_ID3D12Device15_OpenExistingHeapFromAddress1, \
+   .CreateRootSignatureFromSubobjectInLibrary = d12_stub_ID3D12Device15_CreateRootSignatureFromSubobjectInLibrary, \
+   .RegisterTrimNotificationCallback = d12_stub_ID3D12Device15_RegisterTrimNotificationCallback, \
+   .UnregisterTrimNotificationCallback = d12_stub_ID3D12Device15_UnregisterTrimNotificationCallback, \
+   .TryCreateShaderResourceView = d12_stub_ID3D12Device15_TryCreateShaderResourceView, \
+   .TryCreateUnorderedAccessView = d12_stub_ID3D12Device15_TryCreateUnorderedAccessView, \
+   .TryCreateConstantBufferView = d12_stub_ID3D12Device15_TryCreateConstantBufferView, \
+   .TryCreateSampler2 = d12_stub_ID3D12Device15_TryCreateSampler2, \
+   .TryCreateRenderTargetView = d12_stub_ID3D12Device15_TryCreateRenderTargetView, \
+   .TryCreateDepthStencilView = d12_stub_ID3D12Device15_TryCreateDepthStencilView, \
+   .TryCreateSamplerFeedbackUnorderedAccessView = d12_stub_ID3D12Device15_TryCreateSamplerFeedbackUnorderedAccessView, \
+   .CreateQueryHeap1 = d12_stub_ID3D12Device15_CreateQueryHeap1, \
+   .ResolveQueryData = d12_stub_ID3D12Device15_ResolveQueryData
+
 /* ---- ID3D12GraphicsCommandList: 60 methods ---- */
 static inline HRESULT
 d12_stub_ID3D12GraphicsCommandList_QueryInterface(ID3D12GraphicsCommandList * This, REFIID riid, void **ppvObject)

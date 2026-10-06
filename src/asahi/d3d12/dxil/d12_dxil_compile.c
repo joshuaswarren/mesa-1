@@ -7,6 +7,7 @@
  * SPIR-V, no dxc, no external compiler is involved at run time.
  */
 
+#include "d12_debug.h"
 #include "d12_dxil.h"
 #include "../d12_native_descriptor_core.h"
 
@@ -154,7 +155,7 @@ main(int argc, char **argv)
             return 1;
          }
          printf("DXBC->NIR OK\n");
-         if (getenv("D3D12AGX_PRINT_NIR"))
+         if (d12_debug()->print_nir)
             nir_print_shader(dn, stdout);
          return 0;
       }
@@ -192,24 +193,26 @@ main(int argc, char **argv)
    }
 
    /* 2. bitcode -> module */
-   struct d12_module mod;
-   if (!d12_dxil_module_parse(&mod, bc, bc_size)) {
+   struct d12_module *mod = d12_dxil_module_alloc();
+   if (!mod)
+      return 1;
+   if (!d12_dxil_module_parse(mod, bc, bc_size)) {
       fprintf(stderr, "module parse failed: %s\n",
-              mod.error ? mod.error : "unknown");
-      d12_dxil_module_finish(&mod);
+              mod->error ? mod->error : "unknown");
+      d12_dxil_module_free(mod);
       return 1;
    }
 
    printf("%s: %s shader, %u types, %u values, %u functions\n", path,
-          stage_name(stage), mod.num_types, mod.num_values,
-          mod.num_functions);
+          stage_name(stage), mod->num_types, mod->num_values,
+          mod->num_functions);
 
-   for (unsigned i = 0; print_nir && i < mod.num_functions; i++) {
+   for (unsigned i = 0; print_nir && i < mod->num_functions; i++) {
       printf("  fn %u: %-28s %s val=%u insts=%u%s\n", i,
-             mod.functions[i].name ? mod.functions[i].name : "(none)",
-             mod.functions[i].is_declaration ? "decl" : "DEF ",
-             mod.functions[i].value_index, mod.functions[i].num_insts,
-             (mod.has_patch_constant && i == mod.patch_constant_func)
+             mod->functions[i].name ? mod->functions[i].name : "(none)",
+             mod->functions[i].is_declaration ? "decl" : "DEF ",
+             mod->functions[i].value_index, mod->functions[i].num_insts,
+             (mod->has_patch_constant && i == mod->patch_constant_func)
                 ? "  <-- patch constant" : "");
    }
 
@@ -220,13 +223,13 @@ main(int argc, char **argv)
     * assignment stored on the root signature.
     */
    struct d12_binding_map map;
-   d12_binding_map_from_module(&mod, &map);
+   d12_binding_map_from_module(mod, &map);
 
    nir_shader *nir =
-      d12_dxil_to_nir(&mod, stage, &map, D12_NATIVE_DESCRIPTOR_GEN7, &error);
+      d12_dxil_to_nir(mod, stage, &map, D12_NATIVE_DESCRIPTOR_GEN7, &error);
    if (!nir) {
       fprintf(stderr, "DXIL->NIR failed: %s\n", error);
-      d12_dxil_module_finish(&mod);
+      d12_dxil_module_free(mod);
       return 1;
    }
 
@@ -298,7 +301,7 @@ main(int argc, char **argv)
 
       unsigned bindless_base = 0;
       NIR_PASS(_, nir, agx_nir_lower_tilebuffer, &tib, NULL, &bindless_base,
-               NULL, NULL, false, false, false);
+               NULL, NULL, false, false, false, false);
       /* Depth/stencil-ref writes become zs_emit, a coverage write
        * becomes demote_samples, and discards become sample_mask writes.
        * hk orders these the same way (hk_shader.c): zs_emit before the
@@ -337,7 +340,7 @@ main(int argc, char **argv)
        * different key, different PASSES.
        */
       NIR_PASS(_, nir, agx_nir_lower_vs_input_to_prolog);
-      NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs, false);
 
       /* Same constant lowering the driver does (see d12_pipeline.c). */
       struct agx_varyings_vs linked = {0};
@@ -453,7 +456,7 @@ main(int argc, char **argv)
              !strcmp(extra[i].name, "gs rast")) {
             struct agx_unlinked_uvs_layout euvs = {0};
             extra[i].s->info.stage = MESA_SHADER_VERTEX;
-            NIR_PASS(_, extra[i].s, agx_nir_lower_uvs, &euvs);
+            NIR_PASS(_, extra[i].s, agx_nir_lower_uvs, &euvs, false);
 
             struct agx_varyings_vs elinked = {0};
             agx_assign_uvs(&elinked, &euvs, 0, 0);
@@ -485,7 +488,7 @@ main(int argc, char **argv)
 
    if (!part.binary || !part.info.binary_size) {
       fprintf(stderr, "AGX compile produced no code\n");
-      d12_dxil_module_finish(&mod);
+      d12_dxil_module_free(mod);
       return 1;
    }
 
@@ -511,7 +514,7 @@ main(int argc, char **argv)
                     part.info.binary_size - part.info.main_offset, stdout);
 
    free(part.binary);
-   d12_dxil_module_finish(&mod);
+   d12_dxil_module_free(mod);
    free(data);
    return 0;
 }

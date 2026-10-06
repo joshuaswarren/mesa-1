@@ -9,16 +9,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* d3d12.h and d3d12umddi.h define
- * D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP as 27. Keep the portable
- * validation helper independent of Windows headers so host tests exercise
- * the same limit as descriptor creation. */
-#define D12_BUFFER_VIEW_MAX_ELEMENTS (UINT32_C(1) << 27)
+/* Each legacy native descriptor covers a bounded linear 2D window. */
+#define D12_TYPED_BUFFER_WINDOW_LOG2 27
+#define D12_TYPED_BUFFER_WINDOW_ELEMENTS                                       \
+   (UINT32_C(1) << D12_TYPED_BUFFER_WINDOW_LOG2)
+#define D12_TYPED_BUFFER_WINDOWS 4
+/* Keep the unqualified AGX3 path at its previous extent. */
+#define D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS D12_TYPED_BUFFER_WINDOW_ELEMENTS
+#define D12_LEGACY_TYPED_BUFFER_MAX_ELEMENTS                                   \
+   (D12_TYPED_BUFFER_WINDOWS * D12_TYPED_BUFFER_WINDOW_ELEMENTS)
 
 static inline bool
-d12_buffer_view_element_count_valid(uint32_t num_elements)
+d12_typed_buffer_window(uint32_t count, uint32_t stride_B, unsigned window,
+                        uint64_t *offset_B, uint32_t *window_count)
 {
-   return num_elements <= D12_BUFFER_VIEW_MAX_ELEMENTS;
+   const uint64_t first = (uint64_t)window * D12_TYPED_BUFFER_WINDOW_ELEMENTS;
+   if (!stride_B || window >= D12_TYPED_BUFFER_WINDOWS || first >= count)
+      return false;
+   const uint32_t remaining = count - first;
+   *offset_B = first * stride_B;
+   *window_count = remaining < D12_TYPED_BUFFER_WINDOW_ELEMENTS
+                      ? remaining
+                      : D12_TYPED_BUFFER_WINDOW_ELEMENTS;
+   return true;
 }
 
 /*

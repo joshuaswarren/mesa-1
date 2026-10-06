@@ -9,13 +9,25 @@
  */
 
 #include "d12_private.h"
+#include "drm-uapi/drm.h"
 
+#include "util/os_time.h"
 #include "util/u_thread.h"
+
+#include <errno.h>
 
 struct d12_fence_event_waiter {
    struct d12_fence_event_waiter *next;
    uint64_t value;
    HANDLE event;
+   /* Internal waiters are told under fence->lock instead of through an
+    * event; the multi-fence "any" wait uses this.  They stay on the list
+    * until their registrant removes them: the registrant's handle is the
+    * node's address, and a node freed by the fence could be reallocated
+    * for another waiter before the registrant looks for it. */
+   void (*notify)(void *cookie);
+   void *cookie;
+   bool fired;
 };
 
 static uint64_t
@@ -152,6 +164,39 @@ d12_placement_fence_wait(struct d12_placement_fence *fence, uint64_t value,
    return completed;
 }
 
+/*
+ * A wait that a command-queue worker may need to abandon at queue teardown.
+ * On Linux the teardown path raises the stop flag and then broadcasts the
+ * fence the worker is parked on (d12_fence_wake_waiters), so a plain
+ * condition wait is sufficient.  Windows keeps the bounded wait that the
+ * queue primitives also use, as insurance against the lost wakes observed
+ * on that platform's CONDITION_VARIABLE.
+ */
+static void
+d12_fence_cancelable_wait(struct d12_fence *fence)
+{
+#ifdef _WIN32
+   struct timespec deadline;
+   timespec_get(&deadline, TIME_UTC);
+   deadline.tv_nsec += 10 * 1000 * 1000;
+   if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+      deadline.tv_sec++;
+      deadline.tv_nsec -= 1000 * 1000 * 1000;
+   }
+   cnd_timedwait(&fence->changed, &fence->lock, &deadline);
+#else
+   cnd_wait(&fence->changed, &fence->lock);
+#endif
+}
+
+void
+d12_fence_wake_waiters(struct d12_fence *fence)
+{
+   mtx_lock(&fence->lock);
+   cnd_broadcast(&fence->changed);
+   mtx_unlock(&fence->lock);
+}
+
 static void
 d12_fence_signal_waiters_locked(struct d12_fence *fence, bool all)
 {
@@ -163,10 +208,69 @@ d12_fence_signal_waiters_locked(struct d12_fence *fence, bool all)
          continue;
       }
 
+      if (waiter->notify) {
+         if (!waiter->fired) {
+            waiter->fired = true;
+            waiter->notify(waiter->cookie);
+         }
+         link = &waiter->next;
+         continue;
+      }
+
       *link = waiter->next;
       d12_platform_signal_event(waiter->event);
       free(waiter);
    }
+}
+
+/* Registers an internal waiter.  Returns 1 when the value is already
+ * reached (or the fence destroyed) and nothing was registered, 0 when
+ * *handle identifies the waiter for d12_fence_notify_unregister, and -1
+ * when out of memory. */
+static int
+d12_fence_notify_register(struct d12_fence *fence, uint64_t value,
+                          void (*notify)(void *cookie), void *cookie,
+                          struct d12_fence_event_waiter **handle)
+{
+   struct d12_fence_event_waiter *waiter = calloc(1, sizeof(*waiter));
+   *handle = NULL;
+   if (!waiter)
+      return -1;
+   waiter->value = value;
+   waiter->notify = notify;
+   waiter->cookie = cookie;
+
+   mtx_lock(&fence->lock);
+   if (fence->destroyed ||
+       p_atomic_read(&fence->completed_value) >= value) {
+      mtx_unlock(&fence->lock);
+      free(waiter);
+      return 1;
+   }
+   waiter->next = fence->event_waiters;
+   fence->event_waiters = waiter;
+   mtx_unlock(&fence->lock);
+   *handle = waiter;
+   return 0;
+}
+
+/* Only the registrant frees an internal waiter, fired or not, so the
+ * handle is always on the list here. */
+static void
+d12_fence_notify_unregister(struct d12_fence *fence,
+                            struct d12_fence_event_waiter *handle)
+{
+   if (!handle)
+      return;
+   mtx_lock(&fence->lock);
+   struct d12_fence_event_waiter **link = &fence->event_waiters;
+   while (*link && *link != handle)
+      link = &(*link)->next;
+   assert(*link == handle);
+   if (*link == handle)
+      *link = handle->next;
+   mtx_unlock(&fence->lock);
+   free(handle);
 }
 
 static void
@@ -274,7 +378,7 @@ d12_fence_GetCompletedValue(ID3D12Fence *iface)
       }
    }
 
-   if (getenv("D3D12AGX_DUMP_SYNC"))
+   if (d12_debug()->dump_sync)
       mesa_logi("SYNC GetCompletedValue: fence %p -> %llu", (void *)fence,
                 (unsigned long long)point);
 
@@ -303,6 +407,28 @@ d12_fence_internal_unref(struct d12_fence *fence)
    free(fence);
 }
 
+static void
+d12_fence_signal_value_locked(struct d12_fence *fence, uint64_t value)
+{
+   if (fence->destroyed)
+      return;
+
+   uint64_t old = p_atomic_read(&fence->completed_value);
+
+   /*
+    * Registration checks the current value while holding this same lock,
+    * so an idempotent signal cannot make any existing waiter or ticket
+    * newly ready.  Avoid rescanning thousands of queued wait tickets on
+    * every iteration of an application's fence-rewind polling loop.
+    */
+   if (old != value) {
+      p_atomic_set(&fence->completed_value, value);
+      d12_fence_signal_waiters_locked(fence, false);
+      d12_fence_satisfy_tickets_locked(fence, false);
+      cnd_broadcast(&fence->changed);
+   }
+}
+
 HRESULT
 d12_fence_signal_value(struct d12_fence *fence, uint64_t value)
 {
@@ -318,24 +444,159 @@ d12_fence_signal_value(struct d12_fence *fence, uint64_t value)
    }
 
    mtx_lock(&fence->lock);
-   if (!fence->destroyed) {
-      uint64_t old = p_atomic_read(&fence->completed_value);
-
-      /*
-       * Registration checks the current value while holding this same lock,
-       * so an idempotent signal cannot make any existing waiter or ticket
-       * newly ready.  Avoid rescanning thousands of queued wait tickets on
-       * every iteration of an application's fence-rewind polling loop.
-       */
-      if (old != value) {
-         p_atomic_set(&fence->completed_value, value);
-         d12_fence_signal_waiters_locked(fence, false);
-         d12_fence_satisfy_tickets_locked(fence, false);
-         cnd_broadcast(&fence->changed);
-      }
-   }
+   d12_fence_signal_value_locked(fence, value);
    mtx_unlock(&fence->lock);
    return S_OK;
+}
+
+void
+d12_fence_pending_signal_add(struct d12_fence *fence,
+                             struct d12_fence_pending_signal *pending,
+                             struct d12_queue *queue, uint64_t point,
+                             uint64_t value)
+{
+   pending->next = NULL;
+   pending->queue_next = NULL;
+   pending->fence = fence;
+   pending->queue = queue;
+   pending->point = point;
+   pending->value = value;
+   pending->published = false;
+
+   /* Scheduling holds queue->lock. Keep Signals in queue order across
+    * fences: a direct wait on fence B must also publish earlier fence A. */
+   if (queue->signal_tail)
+      queue->signal_tail->queue_next = pending;
+   else
+      queue->signal_head = pending;
+   queue->signal_tail = pending;
+   pending->queue_registered = true;
+   if (fence->shared_syncobj)
+      return;
+
+   mtx_lock(&fence->lock);
+   struct d12_fence_pending_signal **link = &fence->pending_signals;
+   while (*link)
+      link = &(*link)->next;
+   *link = pending;
+   pending->registered = true;
+   cnd_broadcast(&fence->changed);
+   mtx_unlock(&fence->lock);
+}
+
+/* Called with queue->lock held, so retirement cannot free the record. */
+void
+d12_fence_pending_signal_publish(struct d12_fence_pending_signal *pending)
+{
+   struct d12_fence *fence = pending->fence;
+   if (fence->shared_syncobj) {
+      if (!pending->published) {
+         pending->published = true;
+         d12_fence_signal_value(fence, pending->value);
+      }
+      return;
+   }
+
+   mtx_lock(&fence->lock);
+   if (!pending->published) {
+      pending->published = true;
+      d12_fence_signal_value_locked(fence, pending->value);
+   }
+   mtx_unlock(&fence->lock);
+}
+
+void
+d12_fence_pending_signal_retire(struct d12_fence *fence,
+                                struct d12_fence_pending_signal *pending,
+                                bool completed)
+{
+   if (!pending->queue_registered)
+      return;
+   struct d12_queue *queue = pending->queue;
+   if (completed)
+      d12_queue_publish_pending_signals(queue, pending->point);
+
+   /* Lock order is queue then fence, as in scheduling and publication. */
+   mtx_lock(&queue->lock);
+   struct d12_fence_pending_signal **queue_link = &queue->signal_head;
+   struct d12_fence_pending_signal *previous = NULL;
+   while (*queue_link && *queue_link != pending) {
+      previous = *queue_link;
+      queue_link = &(*queue_link)->queue_next;
+   }
+   if (*queue_link == pending)
+      *queue_link = pending->queue_next;
+   if (queue->signal_tail == pending)
+      queue->signal_tail = previous;
+   pending->queue_registered = false;
+   pending->queue_next = NULL;
+
+   mtx_lock(&fence->lock);
+   if (pending->registered) {
+      struct d12_fence_pending_signal **link = &fence->pending_signals;
+      while (*link && *link != pending)
+         link = &(*link)->next;
+      if (*link == pending)
+         *link = pending->next;
+      pending->registered = false;
+      pending->next = NULL;
+   }
+   cnd_broadcast(&fence->changed);
+   mtx_unlock(&fence->lock);
+   mtx_unlock(&queue->lock);
+}
+
+/* The first unpublished GPU signal a wait for value can ride on. */
+static struct d12_fence_pending_signal *
+d12_fence_find_pending_locked(struct d12_fence *fence, uint64_t value)
+{
+   for (struct d12_fence_pending_signal *p = fence->pending_signals; p;
+        p = p->next) {
+      if (!p->published && p->value >= value)
+         return p;
+   }
+   return NULL;
+}
+
+/*
+ * Wait for a pending GPU signal's timeline point from the calling thread.
+ * Called and returns with fence->lock held; the lock is dropped around the
+ * kernel wait.  The waiter is counted on the queue across the wait so its
+ * syncobj cannot be destroyed (and the handle reused) underneath it.
+ * Returns false when the kernel wait failed, in which case the caller must
+ * not retry the same record without sleeping: the retirement worker will
+ * either publish or unlink it, and both broadcast fence->changed.
+ */
+static bool
+d12_fence_wait_pending_locked(struct d12_fence *fence,
+                              struct d12_fence_pending_signal *pending)
+{
+   struct d12_queue *queue = pending->queue;
+   const uint64_t point = pending->point;
+   const uint64_t value = pending->value;
+
+   d12_queue_direct_wait_begin(queue);
+   mtx_unlock(&fence->lock);
+
+   const int64_t start = d12_debug()->dump_sync ? os_time_get_nano() : 0;
+   const bool reached = d12_queue_wait_timeline(queue, point);
+   if (d12_debug()->dump_sync) {
+      mesa_logi("SYNC wait direct: fence %p value %llu queue %p point %llu "
+                "waited %lld us%s",
+                (void *)fence, (unsigned long long)value, (void *)queue,
+                (unsigned long long)point,
+                (long long)(os_time_get_nano() - start) / 1000,
+                reached ? "" : " (failed)");
+   }
+
+   if (reached)
+      d12_queue_publish_pending_signals(queue, point);
+
+   /* Teardown may free the queue as soon as this returns; it takes
+    * queue->lock, so it is not called under fence->lock. */
+   d12_queue_direct_wait_end(queue);
+   mtx_lock(&fence->lock);
+   return reached;
 }
 
 bool
@@ -354,26 +615,43 @@ d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
          if (cancel && p_atomic_read(cancel))
             return false;
 
-         if (!cancel) {
-            uint32_t handle = fence->shared_syncobj;
-            uint64_t point = value;
-            if (fence->device->sync->timeline_wait(
-                   fence->device->sync, &handle, &point, 1, INT64_MAX, 0,
-                   NULL))
-               return false;
-         } else {
-            const struct timespec pause = {.tv_nsec = 1000 * 1000};
-            thrd_sleep(&pause, NULL);
-         }
+         /* A cancelable wait is bounded so the stop flag is re-read; it
+          * still blocks in the kernel rather than sleeping and polling.
+          * Provider timeouts are absolute CLOCK_MONOTONIC deadlines.  The
+          * point may not have been submitted by the other process yet: a
+          * plain timeline wait on DRM refuses such a point outright
+          * (EINVAL, not a timeout), which would let a queue Wait fall
+          * through before its signal; wait for the submission as well. */
+         uint32_t handle = fence->shared_syncobj;
+         uint64_t point = value;
+         const int64_t timeout_ns =
+            cancel ? os_time_get_nano() + 10 * 1000 * 1000 : INT64_MAX;
+         int ret = fence->device->sync->timeline_wait(
+            fence->device->sync, &handle, &point, 1, timeout_ns,
+            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
+         if (ret && !(cancel && (ret == -ETIME || errno == ETIME)))
+            return false;
       }
    }
 
    bool completed = true;
+   struct d12_fence_pending_signal *failed = NULL;
 
    mtx_lock(&fence->lock);
    while (!fence->destroyed &&
           p_atomic_read(&fence->completed_value) < value) {
       if (!cancel) {
+         /* A value pending on a queue Signal is waited for on the queue's
+          * timeline directly rather than through the retirement worker's
+          * hop; anything else (a CPU Signal, a Signal not yet scheduled
+          * behind a queue Wait) arrives through the condition variable. */
+         struct d12_fence_pending_signal *pending =
+            d12_fence_find_pending_locked(fence, value);
+         if (pending && pending != failed) {
+            if (!d12_fence_wait_pending_locked(fence, pending))
+               failed = pending;
+            continue;
+         }
          cnd_wait(&fence->changed, &fence->lock);
          continue;
       }
@@ -383,17 +661,7 @@ d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
          break;
       }
 
-      /* Queue destruction must be able to cancel a worker which is parked
-       * on another object's condition variable.  A short timed wait keeps
-       * that path bounded without polling during normal operation. */
-      struct timespec deadline;
-      timespec_get(&deadline, TIME_UTC);
-      deadline.tv_nsec += 10 * 1000 * 1000;
-      if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
-         deadline.tv_sec++;
-         deadline.tv_nsec -= 1000 * 1000 * 1000;
-      }
-      cnd_timedwait(&fence->changed, &fence->lock, &deadline);
+      d12_fence_cancelable_wait(fence);
    }
    mtx_unlock(&fence->lock);
 
@@ -451,6 +719,8 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
                       const uint32_t *cancel)
 {
    struct d12_fence *fence = ticket->fence;
+   if (p_atomic_read(&ticket->satisfied))
+      return true;
    if (fence->shared_syncobj) {
       bool completed = d12_fence_wait_value(fence, ticket->value, cancel);
       if (completed)
@@ -459,6 +729,7 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
    }
 
    bool completed = true;
+   struct d12_fence_pending_signal *failed = NULL;
 
    mtx_lock(&fence->lock);
    while (!p_atomic_read(&ticket->satisfied) && !fence->destroyed) {
@@ -468,18 +739,18 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
       }
 
       if (!cancel) {
+         struct d12_fence_pending_signal *pending =
+            d12_fence_find_pending_locked(fence, ticket->value);
+         if (pending && pending != failed) {
+            if (!d12_fence_wait_pending_locked(fence, pending))
+               failed = pending;
+            continue;
+         }
          cnd_wait(&fence->changed, &fence->lock);
          continue;
       }
 
-      struct timespec deadline;
-      timespec_get(&deadline, TIME_UTC);
-      deadline.tv_nsec += 10 * 1000 * 1000;
-      if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
-         deadline.tv_sec++;
-         deadline.tv_nsec -= 1000 * 1000 * 1000;
-      }
-      cnd_timedwait(&fence->changed, &fence->lock, &deadline);
+      d12_fence_cancelable_wait(fence);
    }
    mtx_unlock(&fence->lock);
    return completed;
@@ -563,48 +834,134 @@ d12_fence_SetEventOnCompletion(ID3D12Fence *iface, UINT64 value,
 struct d12_fence_multi_waiter {
    struct d12_device *device;
    struct d12_fence **fences;
-   uint64_t *values;
+   struct d12_fence_ticket *tickets;
    unsigned count;
    bool wait_all;
    HANDLE event;
    thrd_t thread;
 };
 
+struct d12_fence_any_waiter {
+   mtx_t lock;
+   cnd_t changed;
+   bool fired;
+};
+
+static void
+d12_fence_any_notify(void *cookie)
+{
+   struct d12_fence_any_waiter *any = cookie;
+   mtx_lock(&any->lock);
+   any->fired = true;
+   cnd_broadcast(&any->changed);
+   mtx_unlock(&any->lock);
+}
+
 static int
 d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
 {
-   const struct timespec pause = {.tv_nsec = 1000 * 1000};
-
-   for (;;) {
-      bool any = false;
-      bool all = true;
-
-      for (unsigned i = 0; i < w->count; i++) {
-         struct d12_fence *fence = w->fences[i];
-         mtx_lock(&fence->lock);
-         bool destroyed = fence->destroyed;
-         mtx_unlock(&fence->lock);
-         bool reached = destroyed ||
-                        d12_fence_GetCompletedValue(&fence->iface) >=
-                           w->values[i];
-         any |= reached;
-         all &= reached;
-      }
-
-      if ((w->wait_all && all) || (!w->wait_all && any))
-         return 0;
-
-      thrd_sleep(&pause, NULL);
+   if (w->wait_all) {
+      /* Tickets are registered for every fence before the asynchronous
+       * worker starts, so legal CPU rewinds cannot lose completion. */
+      for (unsigned i = 0; i < w->count; i++)
+         (void)d12_fence_ticket_wait(&w->tickets[i], NULL);
+      return 0;
    }
+
+   /* Wait for any: park on one condition variable that every fence's
+    * internal waiter notifies.  Registration is checked against the current
+    * value under each fence's lock, so a value reached before or after the
+    * registration both fire. */
+   struct d12_fence_any_waiter any = {.fired = false};
+   if (mtx_init(&any.lock, mtx_plain) != thrd_success)
+      return -1;
+   if (cnd_init(&any.changed) != thrd_success) {
+      mtx_destroy(&any.lock);
+      return -1;
+   }
+
+   struct d12_fence_event_waiter **handles =
+      calloc(w->count, sizeof(*handles));
+   if (!handles) {
+      cnd_destroy(&any.changed);
+      mtx_destroy(&any.lock);
+      return -1;
+   }
+
+   /* A shared fence's value moves in another process; its cached value
+    * only refreshes through GetCompletedValue, so such fences are polled
+    * (refreshed before registration and on a bounded wait) as the
+    * cancelable wait above does.  Local fences notify. */
+   bool any_shared = false;
+   bool reached = false;
+   int ret = 0;
+   for (unsigned i = 0; i < w->count && !reached && !ret; i++) {
+      if (p_atomic_read(&w->tickets[i].satisfied)) {
+         reached = true;
+         break;
+      }
+      if (w->fences[i]->shared_syncobj) {
+         any_shared = true;
+         if (d12_fence_GetCompletedValue(&w->fences[i]->iface) >=
+             w->tickets[i].value) {
+            reached = true;
+            break;
+         }
+      }
+      ret = d12_fence_notify_register(w->fences[i], w->tickets[i].value,
+                                      d12_fence_any_notify, &any,
+                                      &handles[i]);
+      reached = ret > 0 || p_atomic_read(&w->tickets[i].satisfied);
+      if (ret > 0)
+         ret = 0;
+   }
+
+   while (!reached && !ret) {
+      mtx_lock(&any.lock);
+      if (!any.fired) {
+         if (any_shared) {
+            struct timespec deadline;
+            timespec_get(&deadline, TIME_UTC);
+            deadline.tv_nsec += 1000 * 1000;
+            if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+               deadline.tv_sec++;
+               deadline.tv_nsec -= 1000 * 1000 * 1000;
+            }
+            cnd_timedwait(&any.changed, &any.lock, &deadline);
+         } else {
+            cnd_wait(&any.changed, &any.lock);
+         }
+      }
+      reached = any.fired;
+      mtx_unlock(&any.lock);
+      if (reached || !any_shared)
+         continue;
+      for (unsigned i = 0; i < w->count && !reached; i++) {
+         if (w->fences[i]->shared_syncobj &&
+             d12_fence_GetCompletedValue(&w->fences[i]->iface) >=
+                w->tickets[i].value)
+            reached = true;
+      }
+   }
+
+   /* Every registration is removed before the cookie goes out of scope. */
+   for (unsigned i = 0; i < w->count; i++)
+      d12_fence_notify_unregister(w->fences[i], handles[i]);
+   free(handles);
+   cnd_destroy(&any.changed);
+   mtx_destroy(&any.lock);
+   return ret;
 }
 
 static void
 d12_fence_multi_waiter_destroy(struct d12_fence_multi_waiter *w)
 {
-   for (unsigned i = 0; i < w->count; i++)
+   for (unsigned i = 0; i < w->count; i++) {
+      d12_fence_ticket_fini(&w->tickets[i]);
       d12_fence_internal_unref(w->fences[i]);
+   }
 
-   free(w->values);
+   free(w->tickets);
    free(w->fences);
    free(w);
 }
@@ -641,9 +998,9 @@ d12_fence_set_event_multiple(struct d12_device *device,
       return E_OUTOFMEMORY;
 
    w->fences = calloc(count, sizeof(*w->fences));
-   w->values = calloc(count, sizeof(*w->values));
-   if (!w->fences || !w->values) {
-      free(w->values);
+   w->tickets = calloc(count, sizeof(*w->tickets));
+   if (!w->fences || !w->tickets) {
+      free(w->tickets);
       free(w->fences);
       free(w);
       return E_OUTOFMEMORY;
@@ -670,7 +1027,7 @@ d12_fence_set_event_multiple(struct d12_device *device,
 
       d12_fence_internal_ref(fence);
       w->fences[i] = fence;
-      w->values[i] = values[i];
+      d12_fence_ticket_init(fence, &w->tickets[i], values[i]);
    }
 
    if (!event) {
@@ -749,7 +1106,8 @@ d12_fence_create_internal(struct d12_device *device, UINT64 initial_value,
       return E_FAIL;
    }
 
-   fence->iface.lpVtbl = (ID3D12FenceVtbl *)&d12_fence_vtbl;
+   fence->iface.lpVtbl = (ID3D12FenceVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_FENCE, &d12_fence_vtbl);
    fence->refcount = 1;
    fence->lifetime_refcount = 1;
    fence->device = device;
@@ -810,7 +1168,8 @@ d12_fence_create_shared_handle(
    if (FAILED(hr))
       return E_NOTIMPL;
 
-   if (fence_iface->lpVtbl != &d12_fence_vtbl) {
+   if (!d12_api_trace_vtbl_matches(D12_API_TRACE_FENCE, fence_iface->lpVtbl,
+                                  &d12_fence_vtbl)) {
       ID3D12Fence_Release(fence_iface);
       return DXGI_ERROR_INVALID_CALL;
    }

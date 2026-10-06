@@ -208,9 +208,6 @@ struct agx3_g17p_rt0_bg_program_desc {
    bool staging_known;
    enum agx3_g17p_rt0_bg_op op;
    struct agx_ioto_g17p_imageblock imageblock;
-   /* v51x: CPU copy of the clear_value_va bytes; non-NULL requests the
-    * LDIMM clear-value form (CLEAR only). */
-   const void *clear_value_cpu;
 };
 
 struct agx3_g17p_rt0_bg_program {

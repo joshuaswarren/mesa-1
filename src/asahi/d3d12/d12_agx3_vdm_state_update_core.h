@@ -114,6 +114,13 @@ bool d12_agx3_decode_vdm_state_update(
    enum agx_chip chip, const void *bytes, uint32_t size,
    struct d12_agx3_vdm_state_update_info *info);
 
+struct agx_g17p_vertex_compile_info;
+
+/* Shader-only final-UVS producer; no active context selector is fabricated. */
+bool d12_agx3_g17p_vertex_program_info(
+   enum agx_chip chip, const struct agx_g17p_vertex_compile_info *compiler_info,
+   struct d12_agx3_vdm_state_update_program_info *program);
+
 #ifdef __cplusplus
 }
 #endif

@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "d12_test_contract.h"
 
 static int failures = 0;
 
@@ -89,8 +90,9 @@ main(int argc, char **argv)
    ID3D12Device *dev = NULL;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev);
+   TEST_OBJECT(hr, dev, "checked D3D12CreateDevice dev");
    CHECK(hr == S_OK && dev, "D3D12CreateDevice");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    D3D12_ROOT_PARAMETER param = {
@@ -100,16 +102,16 @@ main(int argc, char **argv)
    D3D12_ROOT_SIGNATURE_DESC rsd = {.NumParameters = 1, .pParameters = &param};
 
    ID3DBlob *blob = NULL;
-   D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob,
-                               NULL);
+   TEST_OBJECT(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob,
+                               NULL), blob, "checked D3D12SerializeRootSignature blob");
    ID3D12RootSignature *root_sig = NULL;
-   ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(blob),
+   TEST_OBJECT(ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(blob),
                                     ID3D10Blob_GetBufferSize(blob),
                                     &IID_ID3D12RootSignature,
-                                    (void **)&root_sig);
+                                    (void **)&root_sig), root_sig, "checked ID3D12Device_CreateRootSignature root_sig");
    ID3D10Blob_Release(blob);
 
-   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_UPLOAD};
+   D3D12_HEAP_PROPERTIES heap = D12_TEST_UMA_HEAP;
    D3D12_RESOURCE_DESC bd = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
       .Width = sizeof(struct result) * N,
@@ -118,18 +120,20 @@ main(int argc, char **argv)
       .MipLevels = 1,
       .SampleDesc = {.Count = 1},
       .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
    };
    ID3D12Resource *buf = NULL;
    hr = ID3D12Device_CreateCommittedResource(dev, &heap, D3D12_HEAP_FLAG_NONE,
                                              &bd, D3D12_RESOURCE_STATE_COMMON,
                                              NULL, &IID_ID3D12Resource,
                                              (void **)&buf);
+   TEST_OBJECT(hr, buf, "checked ID3D12Device_CreateCommittedResource buf");
    CHECK(hr == S_OK && buf, "create the result buffer");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    struct result *map = NULL;
-   ID3D12Resource_Map(buf, 0, NULL, (void **)&map);
+   TEST_CALL(d12_test_map(buf, false, (void **)&map), "checked CPU initialization map buf");
    memset(map, 0xEE, sizeof(struct result) * N);
 
    D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {
@@ -140,41 +144,44 @@ main(int argc, char **argv)
    hr = ID3D12Device_CreateComputePipelineState(dev, &pd,
                                                 &IID_ID3D12PipelineState,
                                                 (void **)&pso);
+   TEST_OBJECT(hr, pso, "checked ID3D12Device_CreateComputePipelineState pso");
    CHECK(hr == S_OK && pso, "compile a shader using eight wave operations");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12CommandAllocator *alloc = NULL;
    ID3D12GraphicsCommandList *list = NULL;
-   ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+   TEST_OBJECT(ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                        &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
-   ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                       (void **)&alloc), alloc, "checked ID3D12Device_CreateCommandAllocator alloc");
+   TEST_OBJECT(ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                   alloc, NULL,
                                   &IID_ID3D12GraphicsCommandList,
-                                  (void **)&list);
+                                  (void **)&list), list, "checked ID3D12Device_CreateCommandList list");
 
    ID3D12GraphicsCommandList_SetComputeRootSignature(list, root_sig);
    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(
       list, 0, ID3D12Resource_GetGPUVirtualAddress(buf));
    ID3D12GraphicsCommandList_SetPipelineState(list, pso);
+   ID3D12Resource_Unmap(buf, 0, NULL);map = NULL;
+   d12_test_transition(list, buf, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
    ID3D12GraphicsCommandList_Dispatch(list, N / 64, 1, 1);
+   d12_test_transition(list, buf, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
    hr = ID3D12GraphicsCommandList_Close(list);
    CHECK(hr == S_OK, "record the dispatch");
+   if (hr != S_OK) return 1;
 
    ID3D12CommandQueue *queue = NULL;
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE};
-   ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
+   TEST_OBJECT(ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
+                                   (void **)&queue), queue, "checked ID3D12Device_CreateCommandQueue queue");
    ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
+   TEST_OBJECT(ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                            (void **)&fence), fence, "checked ID3D12Device_CreateFence fence");
 
-   ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
-   ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
-   ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1, "GPU dispatch complete");
+   TEST_CALL(d12_test_submit_closed(dev, list, queue, fence, 1), "GPU dispatch complete");
+   TEST_CALL(d12_test_map(buf, true, (void **)&map), "map actual fenced buf bytes");
+
 
    const uint32_t width = map[0].width;
    printf("       reported wave width: %u\n", width);
@@ -222,7 +229,7 @@ main(int argc, char **argv)
    CHECK(bad_first == 0, "WaveReadLaneFirst read lane 0's value");
    CHECK(bad_vote == 0, "WaveActiveAnyTrue and WaveActiveAllTrue both hold");
 
-   ID3D12Resource_Unmap(buf, 0, NULL);
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(buf, 0, &empty); }
    ID3D12Fence_Release(fence);
    ID3D12CommandQueue_Release(queue);
    ID3D12GraphicsCommandList_Release(list);

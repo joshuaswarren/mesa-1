@@ -1,0 +1,114 @@
+[
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_geometry_shader_dxbc",
+    "category": "d3d12_geometry_shader",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_geometry_shader.c",
+    "gs_source_sha256": "a5ad6c0da00033f4996bde63adf286926bdf26cc9b5f07a273a22b62225a3586"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_geometry_shader_dxil",
+    "category": "d3d12_geometry_shader",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_geometry_shader.c",
+    "gs_source_sha256": "a5ad6c0da00033f4996bde63adf286926bdf26cc9b5f07a273a22b62225a3586"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_layered_rendering_dxbc",
+    "category": "d3d12_geometry_shader",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_geometry_shader.c",
+    "gs_source_sha256": "a5ad6c0da00033f4996bde63adf286926bdf26cc9b5f07a273a22b62225a3586"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_layered_rendering_dxil",
+    "category": "d3d12_geometry_shader",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_geometry_shader.c",
+    "gs_source_sha256": "a5ad6c0da00033f4996bde63adf286926bdf26cc9b5f07a273a22b62225a3586"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_ps_layer_dxbc",
+    "category": "d3d12_geometry_shader",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_geometry_shader.c",
+    "gs_source_sha256": "a5ad6c0da00033f4996bde63adf286926bdf26cc9b5f07a273a22b62225a3586"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_ps_layer_dxil",
+    "category": "d3d12_geometry_shader",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_geometry_shader.c",
+    "gs_source_sha256": "a5ad6c0da00033f4996bde63adf286926bdf26cc9b5f07a273a22b62225a3586"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_clip_distance_dxbc",
+    "category": "d3d12_clip_cull_distance",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_clip_cull_distance.c",
+    "gs_source_sha256": "7ec8285237ed0c90991177a9400e3e0e2c9c4abfcd137046222681a019de9966"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_clip_distance_dxil",
+    "category": "d3d12_clip_cull_distance",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_clip_cull_distance.c",
+    "gs_source_sha256": "7ec8285237ed0c90991177a9400e3e0e2c9c4abfcd137046222681a019de9966"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_view_instancing",
+    "category": "d3d12_pso",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_pso.c",
+    "gs_source_sha256": "65151af0294d6355061c60afc25718d3268b5f4458db070bdb77b3d34ae00ca4"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_shader_io_mismatch",
+    "category": "d3d12_pso",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_pso.c",
+    "gs_source_sha256": "65151af0294d6355061c60afc25718d3268b5f4458db070bdb77b3d34ae00ca4"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_gs_topology_mismatch_dxbc",
+    "category": "d3d12_pso",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_pso.c",
+    "gs_source_sha256": "65151af0294d6355061c60afc25718d3268b5f4458db070bdb77b3d34ae00ca4"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_gs_topology_mismatch_dxil",
+    "category": "d3d12_pso",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_pso.c",
+    "gs_source_sha256": "65151af0294d6355061c60afc25718d3268b5f4458db070bdb77b3d34ae00ca4"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_root_signature_embedded",
+    "category": "d3d12_root_signature",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_root_signature.c",
+    "gs_source_sha256": "78b06ef4a529da921a27086a4325e1b54b41c65f3651846c2ffe65503e38833b"
+  },
+  {
+    "corpus": "vkd3d-proton-tests",
+    "test": "test_primitive_id_read_tess_geom",
+    "category": "d3d12_pso",
+    "input": "vkd3d-proton/tests/d3d12_tests.h",
+    "gs_source": "d3d12_pso.c",
+    "gs_source_sha256": "65151af0294d6355061c60afc25718d3268b5f4458db070bdb77b3d34ae00ca4"
+  }
+]

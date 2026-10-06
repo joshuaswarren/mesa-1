@@ -236,6 +236,39 @@ test_hardware_command_spans_skip_attachment_commands(void)
    assert(!hk_drm_next_command_span(buffer, size, 0, 1, &span));
 }
 
+static void
+test_legacy_kernel_command_boundaries(void)
+{
+   uint8_t buffer[1024] = {0};
+   size_t size = 0;
+   append_command(buffer, &size, DRM_ASAHI_CMD_RENDER,
+                  hk_drm_render_command_size(false, false));
+   const size_t compute_offset = size;
+   append_command(buffer, &size, DRM_ASAHI_CMD_COMPUTE,
+                  sizeof(struct drm_asahi_cmd_compute));
+
+   /* The legacy kernel's Reader::read_up_to consumes min(sizeof(T), size).
+    * Its next header must be the compute command, not a resource-spec tail.
+    * Pin the old kernel's size independently of the extended C structure. */
+   struct drm_asahi_cmd_header header;
+   memcpy(&header, buffer, sizeof(header));
+   const size_t consumed = header.size < 240 ? header.size : 240;
+   const size_t next = sizeof(header) + consumed;
+   assert(next == compute_offset);
+   memcpy(&header, buffer + next, sizeof(header));
+   assert(header.cmd_type == DRM_ASAHI_CMD_COMPUTE);
+   assert(next + sizeof(header) + header.size == size);
+
+   struct hk_drm_command_span span;
+   assert(hk_drm_next_command_span(buffer, size, 0, 2, &span));
+   assert(span.end_offset == size);
+   assert(span.render_count == 1 && span.compute_count == 1);
+
+   assert(hk_drm_render_command_size(true, false) == 256);
+   assert(hk_drm_render_command_size(false, true) == 272);
+   assert(hk_drm_render_command_size(true, true) == 272);
+}
+
 int
 main(void)
 {
@@ -247,6 +280,7 @@ main(void)
    test_g17p_inactive_zls_uses_neutral_depth();
    test_fragment_attachment_ranges();
    test_hardware_command_spans_skip_attachment_commands();
+   test_legacy_kernel_command_boundaries();
    puts("Honeykrisp DRM render resource specs: all checks passed");
    return 0;
 }

@@ -498,6 +498,44 @@ SM 6.9 cooperative matrix. Skip until something needs it.
 
 ## 5. The real conformance number — FIRST MEASUREMENT, 2026-08-04
 
+**2026-10-05 update:** the DXBC front end now exists. On the refactor base
+`c4518ba3ce5`, the same 63 shader registrations measure 57 pass / 6 fail on
+M1 Pro and M2; t-1108 takes both to 58 pass / 5 fail, equal to the current
+vkd3d-proton control. The August measurements below remain historical.
+See [shader-gaps.md](shader-gaps.md) for the per-registration limitations,
+DXVK opcode audit, and distinction between translation and execution.
+
+**Command-side reassessment, 2026-10-05 UTC (t-1110):** the historical
+counts below are not a baseline for the refactored driver. Native M1 Pro
+(G13S) and M2 (G14G) measurements of the same 96 registrations give identical
+results on both machines. Tuples are PASS / FAIL / CRASH / SKIP; a partial
+subtest skip is SKIP and an outstanding todo is FAIL.
+
+| file | d3d12agx `c4518ba3ce5` | d3d12agx `2f6523f03b4` | vkd3d-proton `31d1f89ca5b3` |
+|---|---:|---:|---:|
+| `d3d12_command.c` | 32/4/0/4 | 32/4/0/4 | 31/1/0/8 |
+| `d3d12_pso.c` | 22/2/0/5 | 23/1/0/5 | 21/4/0/4 |
+| `d3d12_query.c` | 11/0/0/0 | 11/0/0/0 | 9/2/0/0 |
+| `d3d12_streamout.c` | 4/0/0/0 | 4/0/0/0 | 4/0/0/0 |
+| `d3d12_geometry_shader.c` | 4/0/0/2 | 4/0/0/2 | 6/0/0/0 |
+| `d3d12_mesh_shader.c` | 0/0/0/6 | 0/0/0/6 | 0/0/0/6 |
+| total | 73/6/0/17 | 74/5/0/17 | 71/7/0/18 |
+
+The separate eight-function root-signature slice improves from 7/1/0/0 to
+8/0/0/0; the reference remains 7/1/0/0. Query and SO heaps already existed
+in the base. The new execution-time timestamp, multi-fence rewind, and dynamic
+SO-topology probes expose defects the existing corpus did not distinguish.
+Those live probes pass on both Macs. The frozen suites remain 11/17 and the
+270-shader compile passset is unchanged.
+
+These numbers do not qualify the Neo, full pipeline-statistics accuracy,
+or mesh execution. The two GS-file partial skips are the *without-GS*
+layer/viewport-index subtests; their GS paths execute successfully. Mesh
+capability remains unadvertised. Pipeline statistics still include inherited
+recording-time estimates and require GPU instrumentation before claiming full
+correctness. Evidence and exact commands are in the t-1110 worker report and
+`<aurora-ctl>/reports/d3d12-t1110-20261005/`.
+
 **185 of 557** vkd3d-proton D3D12 test functions complete with zero
 failures against `libd3d12agx.so`. Of those, **10 execute with nothing
 skipped at all**; the other 163 pass in part because a feature check

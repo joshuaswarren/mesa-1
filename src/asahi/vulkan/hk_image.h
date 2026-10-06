@@ -78,10 +78,6 @@ struct hk_image {
 
    uint8_t plane_count;
    struct hk_image_plane planes[3];
-
-   /* HK_G17P_RT_PAD (v51f placement diagnostic): bytes of unused tail added
-    * to the memory requirement of an eligible colour render target. */
-   uint32_t g17p_rt_pad_B;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)

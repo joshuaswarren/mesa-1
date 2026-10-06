@@ -61,10 +61,10 @@ struct hk_physical_device {
 
    simple_mtx_t debug_compile_lock;
 
-   /* G17P tessellates with its hardware tessellator instead of the software
-    * tessellator every other generation uses (HK_G17P_NATIVE_TESS=1). This
-    * changes how evaluation shaders are compiled. */
-   bool g17p_native_tess;
+   /* Whether any [SU]SCALED format has sampled-image (or input-attachment)
+    * features. Only then can a valid application descriptor carry a nonzero
+    * hk_sampled_image_descriptor_sw::scaled_conversion kind. */
+   bool scaled_sampling;
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_physical_device, vk.base, VkPhysicalDevice,

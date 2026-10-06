@@ -121,11 +121,6 @@ struct ra_ctx {
    BITSET_WORD *low_gpr;
    unsigned tile_gpr_limit;
 
-   /* AGX_G17P_SPREAD_TEMPS (v52b): next scalar temporary starts searching
-    * here. Reset per block. Only set for memory-free loop-body blocks. */
-   unsigned spread_cursor;
-   bool spread_block;
-
    /* SSA values read by G17P's seven-bit texture COPY/CEM source fields. */
    BITSET_WORD *texture_gpr;
 
@@ -347,60 +342,16 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
    return max_demand;
 }
 
-/*
- * Diagnostic (AGX_G17P_BAN_REGS="lo:hi", HALF-register units): keep the
- * allocator off a range of GPRs where it has any choice.
- *
- * Bug #1's clean and dirty allocations differ in two places at once -- the last
- * sample's destination and its texture-handle pair move together when the
- * register ceiling changes, so the ceiling cannot separate them. This can:
- * banning one range at a time moves exactly one of them.
- *
- * Best effort by construction. The scan below runs once honouring the ban and,
- * if that finds nothing, again ignoring it, so a banned range can never turn a
- * successful allocation into a spill and change the shader for unrelated
- * reasons.
- */
-static bool
-agx_reg_banned(enum ra_class cls, unsigned reg, unsigned count)
-{
-   static int lo = -2, hi = -2;
-
-   if (cls != RA_GPR)
-      return false;
-
-   if (lo == -2) {
-      const char *v = getenv("AGX_G17P_BAN_REGS");
-      lo = hi = -1;
-      if (v && v[0]) {
-         lo = atoi(v);
-         const char *colon = strchr(v, ':');
-         hi = colon ? atoi(colon + 1) : lo;
-      }
-   }
-
-   if (lo < 0)
-      return false;
-
-   /* Overlap between [reg, reg+count) and [lo, hi]. */
-   return (int)(reg + count - 1) >= lo && (int)reg <= hi;
-}
-
 static bool
 find_regs_simple(struct ra_ctx *rctx, enum ra_class cls, unsigned count,
                  unsigned align, unsigned minimum, unsigned limit,
                  unsigned *out)
 {
-   for (unsigned pass = 0; pass < 2; ++pass) {
-      for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
-           reg += align) {
-         if (pass == 0 && agx_reg_banned(cls, reg, count))
-            continue;
-
-         if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
-            *out = reg;
-            return true;
-         }
+   for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
+        reg += align) {
+      if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
+         *out = reg;
+         return true;
       }
    }
 
@@ -1217,21 +1168,7 @@ try_coalesce_with(struct ra_ctx *rctx, agx_index ssa, unsigned count,
    return true;
 }
 
-static unsigned
-spread_floor_halves(void)
-{
-   static int floor = -1;
-   if (floor < 0) {
-      const char *v = getenv("AGX_G17P_SPREAD_TEMPS_FLOOR");
-      const int parsed = v && v[0] ? atoi(v) : 24;
-      floor = parsed >= 0 && parsed <= 256 ? parsed : 24;
-   }
-   return (unsigned)floor;
-}
-
 /*
- * AGX_G17P_BANK_COALESCE (default on; =0 restores the previous choice).
- *
  * A destination with a G17P bank constraint (e.g. a colour tile-store payload,
  * limited to the tile-store bank by agx3_tile_store_bank()) used to skip every
  * affinity heuristic and take the lowest free region. For the ordinary packed
@@ -1250,8 +1187,7 @@ static bool
 pick_bank_affinity(struct ra_ctx *rctx, agx_instr *I, unsigned d,
                    unsigned count, unsigned align, unsigned *out)
 {
-   if (rctx->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
-       !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_BANK_COALESCE))
+   if (rctx->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
       return false;
 
    const enum ra_class cls = ra_class_for_index(I->dest[d]);
@@ -1487,33 +1423,6 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
          if (base + count <= rctx->bound[cls] &&
              !BITSET_TEST_COUNT(rctx->used_regs[cls], base, count))
             return base;
-      }
-   }
-
-   /* AGX_G17P_SPREAD_TEMPS (v52b, default off). Apple's G17P throughput
-    * loops place successive temporaries in different registers (x<<13 in r3,
-    * x>>17 in r6, x<<1 in r5, c+i in r3) where lowest-free allocation reuses
-    * one register (r4 or r5) for all of them. For scalar values only, rotate
-    * the search start through registers already below the high-water mark,
-    * so the register count, and with it occupancy, is not raised by this
-    * choice; fall back to the lowest free register otherwise. */
-   if (cls == RA_GPR && count <= 2 && rctx->spread_block) {
-      /* The rotation stays below the current high-water mark, raised to a
-       * small floor (AGX_G17P_SPREAD_TEMPS_FLOOR halves, default 24) so a
-       * compact loop has room to spread; the throughput FS main otherwise
-       * uses 16 halves. */
-      const unsigned floor = spread_floor_halves();
-      const unsigned high = MIN2(MAX2(*(rctx->count[RA_GPR]), floor),
-                                 rctx->bound[RA_GPR]);
-      const unsigned slots = high / align;
-      for (unsigned i = 0; slots && i < slots; ++i) {
-         const unsigned reg =
-            ((rctx->spread_cursor / align + i) % slots) * align;
-         if (reg + count > high || agx_reg_banned(cls, reg, count) ||
-             BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count))
-            continue;
-         rctx->spread_cursor = reg + count;
-         return reg;
       }
    }
 
@@ -2030,6 +1939,39 @@ agx3_tile_store_bank(agx_context *ctx)
           : raw32_bank || mrt_bank || sample_bank ? 32 : 16;
 }
 
+/* The packer places dynamic cube CEM scratch above every allocated operand.
+ * Reserve that storage before spilling/RA, including the extra packed layer
+ * word used by bias+minimum. Cube-array face staging has a seven-bit limit.
+ * Keep the allocation budget aligned to the largest SSA vector, so rounding
+ * demand for live-range splitting cannot exceed the reduced file. */
+static unsigned
+agx3_cube_register_budget(agx_context *ctx)
+{
+   unsigned budget = AGX3B_NUM_REGS;
+   unsigned alignment = 8;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         alignment = MAX2(alignment,
+                         util_next_power_of_two(agx_index_size_16(I->dest[d])));
+      if (I->op != AGX_OPCODE_TEXTURE_SAMPLE || I->nr_srcs != 6 ||
+          (I->dim != AGX_DIM_CUBE && I->dim != AGX_DIM_CUBE_ARRAY))
+         continue;
+
+      const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
+      const bool register_lod = bias_min ||
+         ((I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE);
+      if (!register_lod && I->src[3].type == AGX_INDEX_IMMEDIATE &&
+          I->src[4].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
+      budget = MIN2(budget, I->dim == AGX_DIM_CUBE_ARRAY ? 112 :
+                    AGX3B_NUM_REGS - 8 - (bias_min ? 2 : 0));
+   }
+   return ROUND_DOWN_TO(budget, alignment);
+}
+
 void
 agx_ra(agx_context *ctx)
 {
@@ -2094,34 +2036,10 @@ agx_ra(agx_context *ctx)
          MIN2(max_possible_regs, ROUND_DOWN_TO(AGX3D_NUM_REGS, alignment));
    }
 
-   /* A cube-array sample whose texture or sampler descriptor is a register
-    * publishes CEM's face through agx3_tex_stage_cube_array_layer(), which
-    * names it in the seven-bit f30 operand. The plain cube's cube_z and
-    * cube_lod forms carry an eighth bit and reach half 255; this one stops
-    * at half 127. The packer reserves the CEM scratch immediately ABOVE
-    * whatever this allocation used, so a shader that reaches half 126 puts
-    * the face at half 128 and the entire pipeline is refused -- measured as
-    * VK_ERROR_FEATURE_NOT_PRESENT with "cube staging face=half128" on
-    * dEQP-VK.pipeline.*.image.*.view_type.cube_array.*.count_8.*, where the
-    * GLSL sampler array is indexed by a loop counter.
-    *
-    * Budget the scratch inside the file instead. The bound must survive the
-    * ROUND_DOWN_TO(reg_file_alignment) below, which is 8 or 16 halves, so
-    * use a multiple of both: the scratch then ends at half 126 at the
-    * latest. Shaders of this exact shape lose the halves above 112 and spill
-    * instead; every other shader keeps the full file.
-    */
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      agx_foreach_instr_global(ctx, I) {
-         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-             I->dim == AGX_DIM_CUBE_ARRAY && I->nr_srcs == 6 &&
-             (I->src[3].type != AGX_INDEX_IMMEDIATE ||
-              I->src[4].type != AGX_INDEX_IMMEDIATE)) {
-            max_possible_regs = MIN2(max_possible_regs, 112);
-            break;
-         }
-      }
-   }
+   /* Match the CEM scratch extent reserved by agx3_pack_binary. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      max_possible_regs = MIN2(max_possible_regs,
+                               agx3_cube_register_budget(ctx));
 
    /* A multisample-array read packs its normalized layer beside another
     * operand, and the packer reserves one transient word for it immediately
@@ -2291,11 +2209,15 @@ agx_ra(agx_context *ctx)
    const unsigned tile_gpr_limit = agx3_tile_store_bank(ctx);
 
    agx_foreach_instr_global(ctx, I) {
-      /* Native G17P sinc and its fused quadrant selects use the bounded
-       * seven-bit operand forms. Constrain only these SSA webs. */
+      /* The G17P funop encoder and fused quadrant selects use the bounded
+       * seven-bit operand forms. Constrain only their SSA webs; unrelated
+       * values retain the complete register file. */
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           (I->op == AGX_OPCODE_SINC_AGX3 ||
-           I->op == AGX_OPCODE_BITTEST_SELECT_AGX3)) {
+           I->op == AGX_OPCODE_BITTEST_SELECT_AGX3 ||
+           (I->op == AGX_OPCODE_TRUNC && I->nr_dests == 1 &&
+            I->dest[0].size == AGX_SIZE_32) ||
+           I->op == AGX_OPCODE_DFDX || I->op == AGX_OPCODE_DFDY)) {
          agx_foreach_ssa_src(I, s)
             BITSET_SET(texture_gpr, I->src[s].value);
          agx_foreach_ssa_dest(I, d)
@@ -2451,37 +2373,6 @@ agx_ra(agx_context *ctx)
    if (agx_compiler_debug & AGX_DBG_DEMAND)
       max_regs = ALIGN_POT(MAX2(demand, 12), reg_file_alignment);
 
-   /* Diagnostic (AGX_G17P_MAX_REGS=<n>): force the allocator's register
-    * ceiling to a specific value, and (AGX_G17P_TRACE_REGS=1) print what the
-    * default rounding chose.
-    *
-    * `max_regs` is the one line AGX_DBG_DEMAND changes, and on G17P the bound
-    * it is compared against comes from a G13G-era occupancy table used
-    * unconditionally (agx_performance.c). Both the tight bound (DEMAND) and
-    * the maximal bound (spill/is_helper) leave the array-shadow defect absent
-    * while the occupancy-rounded default reproduces it, so the ceiling itself
-    * is the variable. This sweeps it. */
-   {
-      static int forced = -2;
-      if (forced == -2) {
-         const char *v = getenv("AGX_G17P_MAX_REGS");
-         forced = (v && v[0]) ? atoi(v) : -1;
-      }
-      if (forced > 0) {
-         unsigned want = ALIGN_POT(MAX2((unsigned)forced, 12u),
-                                   reg_file_alignment);
-         max_regs = MIN2(want, max_possible_regs);
-      }
-   }
-
-   if (getenv("AGX_G17P_TRACE_REGS")) {
-      fprintf(stderr,
-              "G17Pregs stage=%u demand=%u max_regs=%u max_possible=%u "
-              "align=%u\n",
-              (unsigned)ctx->stage, demand, max_regs, max_possible_regs,
-              reg_file_alignment);
-   }
-
    /* ...but not too tightly */
    assert((max_regs % reg_file_alignment) == 0 && "occupancy limits aligned");
    assert(max_regs >= (6 * 2) && "space for vertex shader preloading");
@@ -2492,45 +2383,10 @@ agx_ra(agx_context *ctx)
    /* Assign registers in dominance-order. This coincides with source-order due
     * to a NIR invariant, so we do not need special handling for this.
     */
-   /* AGX_G17P_SPREAD_TEMPS (v52b): memory-free loop-body blocks, found as
-    * the source-order interval from a loop header to its back edge. */
-   const bool spread = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-                       (agx_get_alu_flags() & AGX_ALU_G17P_SPREAD_TEMPS);
-   bool *spread_blocks = NULL;
-   if (spread) {
-      spread_blocks = rzalloc_array(ctx, bool, ctx->num_blocks + 1);
-      agx_foreach_block(ctx, block) {
-         agx_foreach_successor(block, succ) {
-            if (succ->loop_header && succ->index <= block->index) {
-               for (unsigned i = succ->index; i <= block->index; ++i)
-                  spread_blocks[i] = true;
-            }
-         }
-      }
-      agx_foreach_block(ctx, block) {
-         agx_foreach_instr_in_block(block, I) {
-            if (I->op == AGX_OPCODE_DEVICE_LOAD ||
-                I->op == AGX_OPCODE_DEVICE_STORE ||
-                I->op == AGX_OPCODE_ATOMIC ||
-                I->op == AGX_OPCODE_LOCAL_LOAD ||
-                I->op == AGX_OPCODE_LOCAL_STORE ||
-                I->op == AGX_OPCODE_TEXTURE_LOAD ||
-                I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
-                I->op == AGX_OPCODE_IMAGE_LOAD ||
-                I->op == AGX_OPCODE_IMAGE_WRITE ||
-                I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_SPLIT ||
-                I->op == AGX_OPCODE_EXPORT)
-               spread_blocks[block->index] = false;
-         }
-      }
-   }
-
    agx_foreach_block(ctx, block) {
       agx_ra_assign_local(&(struct ra_ctx){
          .shader = ctx,
          .block = block,
-         .spread_block = spread_blocks && block->index <= ctx->num_blocks &&
-                         spread_blocks[block->index],
          .src_to_collect_phi = src_to_collect_phi,
          .phi_web = phi_web,
          .ncomps = ncomps,

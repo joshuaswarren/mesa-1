@@ -234,12 +234,15 @@ agx_disk_cache_init(struct agx_screen *screen)
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
 
-   char timestamp[BLAKE3_HEX_LEN];
+   char timestamp[BLAKE3_HEX_LEN + 32];
    _mesa_sha1_format(timestamp, id_sha1);
+   /* Selectable compiler paths must never share persistent shader entries. */
+   const size_t prefix_length = strlen(timestamp);
+   snprintf(timestamp + prefix_length, sizeof(timestamp) - prefix_length,
+            "-fs%08x-g18ms%u", agx_get_fs_structure_flags(),
+            (unsigned)agx_g18_msaa4_enabled());
 
-   /* dev.debug is 32 bits wide; codegen flags change emitted binaries. */
-   uint64_t driver_flags =
-      screen->dev.debug | ((uint64_t)agx_get_codegen_flags() << 32);
+   uint64_t driver_flags = screen->dev.debug;
    screen->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
 #endif
 }

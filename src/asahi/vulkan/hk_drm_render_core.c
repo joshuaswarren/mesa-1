@@ -90,25 +90,7 @@ hk_drm_render_resource_specs_pack(
    const uint32_t high = cmd->bg_eot_rsrc_spec_hi |
                          cmd->bg_eot_partial_rsrc_spec_hi |
                          cmd->bg_rsrc_spec_hi | cmd->bg_partial_rsrc_spec_hi;
-   /*
-    * DIAGNOSTIC OVERRIDE, not a fix. Every asahi kernel tree checked defines
-    * DRM_ASAHI_RENDER_RSRC_SPEC_HI in its UAPI but omits it from the render
-    * flag whitelist in queue/render.rs, so a submit that sets it is rejected
-    * with EINVAL ("Invalid flags (0x12)") before reaching the GPU.
-    *
-    * Setting AGX_NO_RSRC_SPEC_HI=1 suppresses the flag so the submit can get
-    * past that check. The high dwords still travel in the payload but the
-    * kernel will ignore them, so the resource specs are truncated to 32 bits
-    * and the render is NOT expected to be correct -- this exists only to
-    * establish whether the flag is what the validation is rejecting.
-    *
-    * Delete this once the kernel whitelists the flag.
-    */
-   static int suppress = -1;
-   if (suppress < 0)
-      suppress = getenv("AGX_NO_RSRC_SPEC_HI") != NULL;
-
-   if (high && !suppress)
+   if (high)
       cmd->flags |= DRM_ASAHI_RENDER_RSRC_SPEC_HI;
    else
       cmd->flags &= ~DRM_ASAHI_RENDER_RSRC_SPEC_HI;
@@ -123,6 +105,19 @@ hk_drm_submit_command_limit(bool batch_enabled, uint32_t kernel_limit)
       return 1;
 
    return userspace_limit < kernel_limit ? userspace_limit : kernel_limit;
+}
+
+uint16_t
+hk_drm_render_command_size(bool g17p, bool exact_prior)
+{
+   if (exact_prior)
+      return sizeof(struct drm_asahi_cmd_render_with_prior);
+
+   /* Legacy kernels consume only the fields they know, without skipping an
+    * appended tail. Even zero G17P resource-specifier high words would then
+    * be parsed as another command. Keep their original packet boundary. */
+   return g17p ? sizeof(struct drm_asahi_cmd_render)
+               : offsetof(struct drm_asahi_cmd_render, bg_eot_rsrc_spec_hi);
 }
 
 void

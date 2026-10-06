@@ -38,5 +38,9 @@ enum d12_query_core_command_type {
 bool d12_query_core_heap_supported(uint32_t heap_type);
 bool d12_query_core_type_matches(uint32_t heap_type, uint32_t query_type);
 bool d12_query_core_is_timestamp_heap(uint32_t heap_type);
-bool d12_query_core_timestamp_command_compatible(uint32_t heap_type,
-                                                 uint32_t command_type);
+bool d12_query_core_command_compatible(uint32_t heap_type,
+                                        uint32_t command_type);
+bool d12_query_core_resolve_range_valid(uint32_t heap_count, uint32_t first,
+                                        uint32_t count, uint32_t stride,
+                                        uint64_t destination_size,
+                                        uint64_t destination_offset);

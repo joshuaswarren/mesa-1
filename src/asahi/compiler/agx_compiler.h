@@ -46,6 +46,8 @@ enum agx_index_type {
    AGX_INDEX_UNIFORM = 3,
    AGX_INDEX_REGISTER = 4,
    AGX_INDEX_UNDEF = 5,
+   /* Post-RA value in the sampler-private file, independent of GPRs. */
+   AGX_INDEX_RESOURCE = 6,
 };
 
 enum agx_size { AGX_SIZE_16 = 0, AGX_SIZE_32 = 1, AGX_SIZE_64 = 2 };
@@ -473,7 +475,15 @@ typedef struct {
    bool agx3_tex_coord_component : 1;
    bool agx3_tex_coord_start : 1;
    bool agx3_tex_coords_staged : 1;
+
 } agx_instr;
+
+static inline uint32_t
+agx_texture_resource(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->nr_srcs &&
+          I->src[0].type == AGX_INDEX_RESOURCE ? I->src[0].value : 0;
+}
 
 static inline bool
 agx_is_vertex_store(const agx_instr *I)
@@ -512,8 +522,8 @@ typedef struct agx_block {
    bool divergent;
 
    /* Some enclosing if or loop may diverge within the subgroup (NIR
-    * divergence analysis). Equal to divergent unless AGX_G17P_UNIFORM_CF_HINTS
-    * is set; used only for register-cache discard hints.
+    * divergence analysis on AGX3; equal to divergent on AGX2). Used only for
+    * register-cache discard hints.
     */
    bool cf_divergent;
 
@@ -627,8 +637,6 @@ typedef struct {
    /* AGX_G17P_SHARED_RHW: the centre-interpolated projective 1/W computed in
     * the entry block by the first perspective input load, reused by later
     * loads instead of a fresh RHW f32interp + f32rcp pair. Null until then. */
-   agx_index agx3_shared_rcp_w;
-   unsigned agx3_shared_rhw_cf;
 
    /* Beginning of our stack allocation used for spilling, below that is
     * NIR-level scratch.
@@ -1120,7 +1128,9 @@ agx_builder_insert(agx_cursor *cursor, agx_instr *I)
    UNREACHABLE("Invalid cursor option");
 }
 
-bool agx_vertex_tex_uniforms(const agx_context *ctx);
+bool agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx,
+                                       const agx_instr *I, agx_index texture,
+                                       agx_index sampler);
 bool agx_instr_accepts_uniform(enum agx_isa_encoding encoding,
                                enum agx_opcode op, unsigned src_index,
                                unsigned value, enum agx_size size);
@@ -1138,6 +1148,7 @@ void agx_lower_divergent_shuffle(agx_context *ctx);
 void agx_lower_pseudo(agx_context *ctx);
 void agx_lower_spill(agx_context *ctx);
 void agx3_split_vector_stack_access(agx_context *ctx);
+bool agx3_lower_texture_publications(agx_context *ctx);
 void agx_lower_uniform_sources(agx_context *ctx);
 void agx_lower_agx3_fma_sources(agx_context *ctx);
 void agx_lower_agx3_immediates(agx_context *ctx);
@@ -1150,6 +1161,9 @@ void agx_ilp_schedule(agx_context *ctx);
 bool agx3_lower_uniform_program(agx_context *ctx);
 /* Success/refusal, not a progress flag. Call only for AGX3B preambles. */
 bool agx3_lower_cprog_inputs(agx_context *ctx);
+bool agx3_cprog_spill_provenance(const agx_context *ctx);
+bool agx3_cprog_certify_static_spill(const agx_context *ctx,
+                                      bool imports_only_before_ra);
 bool agx3_lower_uniform_half_exports(agx_context *ctx);
 bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
 /* UVSW carries the UVS index and the staging address in two independent
@@ -1273,10 +1287,15 @@ void agx_compute_liveness(agx_context *ctx);
 void agx_liveness_ins_update(struct u_sparse_bitset *live, agx_instr *I);
 
 bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
+bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
+bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
+                                          unsigned allocated);
+agx_block *agx_reconverged_mrt_tail(agx_context *ctx);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
 bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
+void agx_lower_agx3_fma_sources(agx_context *ctx);
 void agx_lower_agx3_half_converts(agx_context *ctx);
 bool agx_lower_agx3_cf_constants(agx_context *ctx);
 bool agx_lower_agx3_half_iadd_constants(agx_context *ctx);

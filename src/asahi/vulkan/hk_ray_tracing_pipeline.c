@@ -1606,19 +1606,6 @@ hk_compile_ray_tracing_pipeline(
 
    _mesa_hash_table_destroy(compiler.functions, NULL);
 
-   /* One diagnostic knob, because the megakernel has no source an application
-    * can point at: HK_RT_PRINT_MEGAKERNEL=1 dumps the shader that every later
-    * failure is about. */
-   if (debug_get_bool_option("HK_RT_PRINT_MEGAKERNEL", false)) {
-      fprintf(stderr,
-              "hk: ray tracing megakernel, %u stages, %u groups, recursion %u, "
-              "scratch %u\n",
-              pipeline->stage_count, pipeline->group_count,
-              create_info->maxPipelineRayRecursionDepth,
-              b->shader->scratch_size);
-      nir_print_shader(b->shader, stderr);
-   }
-
    /* hk_lower_nir() gates hk_nir_lower_ray_queries on `info.ray_queries > 0`
     * (`hk_shader.c:1783`), and info.ray_queries is only ever set by
     * nir_shader_gather_info() -- which hk calls in exactly one place,

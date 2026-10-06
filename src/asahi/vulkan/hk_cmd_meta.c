@@ -98,11 +98,14 @@ hk_device_finish_meta(struct hk_device *dev)
 }
 
 void
-hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
-              VkPipelineBindPoint bind_point)
+hk_meta_begin_site(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                   VkPipelineBindPoint bind_point, const char *site)
 {
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    save->in_meta = cmd->in_meta;
+   save->prof_site = cmd->prof_site;
+   if (!cmd->in_meta)
+      cmd->prof_site = site;
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       save->dynamic = cmd->vk.dynamic_graphics_state;
@@ -223,6 +226,7 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 
    memcpy(desc->root.push, save->push, sizeof(save->push));
    cmd->in_meta = save->in_meta;
+   cmd->prof_site = save->prof_site;
 }
 
 void
@@ -2563,6 +2567,8 @@ hk_g17p_copy_buffer_to_image_supported(
        * R32_UINT/R16_UINT color view, not a depth fragment output. Query the
        * format the graphics copy actually renders, preserving every bit. */
       if (region->imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT) {
+         /* The depth plane of a split depth/stencil image. */
+         plane_vk_format = hk_depth_stencil_plane_format(plane_vk_format, 0);
          if (plane_vk_format == VK_FORMAT_D32_SFLOAT)
             plane_vk_format = VK_FORMAT_R32_UINT;
          else if (plane_vk_format == VK_FORMAT_D16_UNORM)
@@ -3618,6 +3624,20 @@ hk_xfer_copybuffertoimage2(VkCommandBuffer commandBuffer,
          hk_g17p_copy_uncompressed_buffer_to_image(
             cmd, src_buffer, dst_image, pCopyBufferToImageInfo);
          hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+         return;
+      }
+      /* The raw path takes all regions or none. A depth/stencil upload
+       * whose depth plane is compressed mixes a graphics-only region with a
+       * raw stencil region, so route each region on its own. */
+      if (pCopyBufferToImageInfo->regionCount > 1) {
+         for (uint32_t r = 0; r < pCopyBufferToImageInfo->regionCount; ++r) {
+            VkCopyBufferToImageInfo2 one = *pCopyBufferToImageInfo;
+            one.regionCount = 1;
+            one.pRegions = &pCopyBufferToImageInfo->pRegions[r];
+            hk_xfer_copybuffertoimage2(commandBuffer, &one);
+            if (vk_command_buffer_has_error(&cmd->vk))
+               return;
+         }
          return;
       }
       if (!hk_g17p_copy_buffer_to_image_supported(

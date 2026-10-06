@@ -6,7 +6,6 @@
  */
 
 #pragma once
-#include "hk_ordinary_descriptor.h"
 
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir.h"
@@ -67,26 +66,6 @@ hk_tess_info_merge(struct hk_tess_info a, struct hk_tess_info b)
    return out;
 }
 
-/*
- * Whether an evaluation shader's own domain is one Apple's G17P tessellation
- * state record can express. The record carries a single patch-type bit for
- * triangles and quads (docs/G17P_TESSELLATION_ABI.md 8.2); there is no
- * isoline encoding and no point-mode encoding, so those domains keep the
- * software tessellator even when the native path is selected.
- *
- * Vulkan lets either tessellation stage carry the execution modes, so a
- * control shader can still introduce point mode for an evaluation shader
- * that did not declare it. That case is caught at draw time; this predicate
- * only decides which evaluation-shader lowering to compile.
- */
-static inline bool
-hk_g17p_tes_domain_is_native(const struct shader_info *info)
-{
-   return !info->tess.point_mode &&
-          (info->tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES ||
-           info->tess._primitive_mode == TESS_PRIMITIVE_QUADS);
-}
-
 struct hk_shader_info {
    union {
       struct {
@@ -123,15 +102,6 @@ struct hk_shader_info {
          uint8_t tcs_nr_patch_outputs;
 
          struct hk_tess_info info;
-
-         /* Evaluation shaders only: this shader's own domain is one the G17P
-          * hardware tessellator can express (triangles or quads, no point
-          * mode) and the device is running the native path, so the hardware
-          * variant was lowered with poly_nir_lower_tes_native(). An isoline
-          * or point-mode evaluation shader keeps the software lowering even
-          * with HK_G17P_NATIVE_TESS=1, because Apple's tessellation state
-          * record has no encoding for either. */
-         bool g17p_native_domain;
       } tess;
 
       struct poly_gs_info gs;
@@ -162,10 +132,6 @@ struct hk_shader_info {
     */
    bool agx3_combined_sampler_valid;
    bool agx3_uses_root;
-   /* Diagnostic HK_G17P_APPLE_CS / HK_G17P_APPLE_FS (hk_g17p_apple_override.c):
-    * this variant executes Apple's machine code. Never set otherwise. */
-   bool g17p_apple_cs;
-   bool g17p_apple_fs;
    /* Actual uniform address selected after stage and resource lowering. */
    unsigned agx3_root_uniform;
    bool agx3_txf_texture_valid;
@@ -181,9 +147,14 @@ struct hk_shader_info {
 
    /* XXX: is there a less goofy way to do this? I really don't want dynamic
     * allocation here.
+    *
+    * nir_gather_xfb_info() emits at most one output per component of a
+    * captured slot, and vertex-pipeline outputs occupy the slots below
+    * VARYING_SLOT_VAR31 + 1. Sixty-four entries overflowed into the next
+    * variant (a CTS vertex shader captures 94 outputs).
     */
    nir_xfb_info xfb_info;
-   nir_xfb_output_info xfb_outputs[64];
+   nir_xfb_output_info xfb_outputs[4 * (VARYING_SLOT_VAR31 + 1)];
 };
 
 /*
@@ -258,12 +229,6 @@ struct hk_shader {
    void *g17p_mono_nir;
    size_t g17p_mono_nir_size;
    struct agx_shader_key g17p_mono_key;
-
-   /* v56e HK_G17P_LAZY_GENERIC: a generic ordinary-descriptor variant whose
-    * backend compile is deferred (on first selection, or on a background
-    * queue). NULL when the variant was compiled eagerly. Every consumer of a
-    * variant's compiled state goes through hk_shader_ensure_compiled(). */
-   struct hk_lazy_compile *lazy;
 };
 
 enum hk_vs_variant {
@@ -274,13 +239,6 @@ enum hk_vs_variant {
    HK_VS_VARIANT_SW,
 
    HK_VS_VARIANTS,
-
-   /* v96 (G17P, HK_G17P_ORDINARY_VS_VARIANTS): the hardware vertex shader
-    * specialised for ordinary descriptors, selected per draw like the
-    * fragment ordinary variants. Allocated only when the API vertex shader
-    * has g17p_ordinary_variants; the two variants above stay the complete
-    * generic programs. */
-   HK_VS_VARIANT_HW_ORDINARY = HK_VS_VARIANTS,
 };
 
 enum hk_gs_variant {
@@ -380,69 +338,24 @@ struct hk_api_shader {
 
    /* Dynamic G17P sample-rate/coverage shaders have native 1x/2x/4x binaries. */
    bool g17p_sample_variants;
-   /* Generic and independently allocated ordinary fragment programs. */
-   bool g17p_ordinary_variants;
-
-   /* v57d (ordinary variants only): the last draw's variant (0 none,
-    * 1 generic, 2 ordinary) for bind-time prediction, and the
-    * HK_G17P_ORDINARY_VARIANT_TRACE counters. */
-   unsigned g17p_last_draw_ordinary;
-   uint32_t g17p_trace_id;
-   uint64_t g17p_trace_draws[2];
-   uint64_t g17p_trace_reason_draws[16];
-   uint64_t g17p_trace_wait_ns;
-   uint64_t g17p_trace_last_print_ns;
-   /* v57d: a region whose guard stays a runtime branch (a vertex shader
-    * under HK_G17P_ORDINARY_VS, or a fragment without variants) keeps its
-    * requirement list here so HK_G17P_ORDINARY_VARIANT_TRACE=3 can evaluate
-    * on the CPU which arm the GPU guard should take. Not serialized. */
-   struct hk_ordinary_descriptor_requirements *g17p_guard_requirements;
 
    struct hk_shader variants[];
 };
 
 void hk_shader_binary_cache_finish(struct hk_device *dev);
-/* v57d HK_G17P_ORDINARY_VARIANT_TRACE (hk_cmd_draw.c). */
-uint32_t hk_ordinary_trace_id(struct hk_api_shader *obj);
-void hk_ordinary_trace_final(struct hk_api_shader *obj);
-
-/* v56e: compile a lazily deferred variant now (waiting for its background
- * job if one is queued). VK_SUCCESS immediately for an eager variant. */
-VkResult hk_shader_ensure_compiled(struct hk_device *dev, struct hk_shader *s);
-bool hk_shader_is_compiled(const struct hk_shader *s);
-/* Diagnostic HK_G17P_ORDINARY_FORCE_GENERIC=1: select the generic variant for
- * every draw (the lazy-path correctness gate). */
-bool hk_g17p_ordinary_force_generic(void);
-void hk_lazy_compile_finish(struct hk_device *dev);
 bool hk_shader_ensure_link_ht_locked(struct hk_shader *shader);
 
 static inline unsigned
 hk_api_num_variants(const struct hk_api_shader *obj)
 {
-   if (obj->g17p_ordinary_variants) {
-      if (obj->vk.stage == MESA_SHADER_VERTEX)
-         return HK_VS_VARIANTS + 1;
-      assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
-      return obj->g17p_sample_variants ? 6 : 2;
-   }
    return obj->g17p_sample_variants ? 3 : hk_num_variants(obj->vk.stage);
 }
 
 static inline size_t
-hk_api_shader_size(mesa_shader_stage stage, bool samples, bool ordinary)
+hk_api_shader_size(mesa_shader_stage stage, bool samples)
 {
-   unsigned count = ordinary ? (stage == MESA_SHADER_VERTEX ? HK_VS_VARIANTS + 1 :
-                                samples ? 6 : 2) :
-                    samples ? 3 : hk_num_variants(stage);
-   return sizeof(struct hk_api_shader) + count * sizeof(struct hk_shader) +
-          (ordinary ? sizeof(struct hk_ordinary_descriptor_requirements) : 0);
-}
-
-static inline struct hk_ordinary_descriptor_requirements *
-hk_api_ordinary_requirements(struct hk_api_shader *obj)
-{
-   assert(obj->g17p_ordinary_variants);
-   return (void *)&obj->variants[hk_api_num_variants(obj)];
+   unsigned count = samples ? 3 : hk_num_variants(stage);
+   return sizeof(struct hk_api_shader) + count * sizeof(struct hk_shader);
 }
 
 #define hk_foreach_variant(api_shader, var)                                    \
@@ -456,22 +369,7 @@ hk_variant_name(struct hk_api_shader *obj, struct hk_shader *variant)
    unsigned i = variant - obj->variants;
    assert(i < hk_api_num_variants(obj));
 
-   if (obj->g17p_ordinary_variants && obj->vk.stage == MESA_SHADER_VERTEX) {
-      static const char *names[] = {"Hardware, generic descriptors", "Software",
-                                    "Hardware, ordinary descriptors"};
-      assert(i < ARRAY_SIZE(names));
-      return names[i];
-   } else if (obj->g17p_ordinary_variants) {
-      if (obj->g17p_sample_variants) {
-         static const char *names[] = {
-            "1 sample, generic descriptors", "2 samples, generic descriptors",
-            "4 samples, generic descriptors", "1 sample, ordinary descriptors",
-            "2 samples, ordinary descriptors", "4 samples, ordinary descriptors",
-         };
-         return names[i];
-      }
-      return i ? "Ordinary descriptors" : "Generic descriptors";
-   } else if (obj->g17p_sample_variants) {
+   if (obj->g17p_sample_variants) {
       static const char *names[] = {"1 sample", "2 samples", "4 samples"};
       return names[i];
    } else if (hk_api_num_variants(obj) == 1) {
@@ -513,9 +411,6 @@ hk_fs_variant(struct hk_api_shader *obj, unsigned samples)
    assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
    if (obj->g17p_sample_variants)
       assert(samples == 0 || samples == 1 || samples == 2 || samples == 4);
-   if (obj->g17p_ordinary_variants)
-      return &obj->variants[obj->g17p_sample_variants && samples > 1 ?
-                            util_logbase2(samples) : 0];
    if (!obj->g17p_sample_variants)
       return hk_only_variant(obj);
 
@@ -625,8 +520,9 @@ hk_g17p_native_cprog_qualified(const struct agx_shader_info *info)
    return info->has_preamble && info->preamble_size &&
           info->agx3_preamble_staging_known && info->nr_preamble_gprs &&
           info->nr_preamble_gprs <= 256 &&
-          info->preamble_scratch_size ==
-             info->agx3_preamble_inputs.storage_bytes &&
+          (info->preamble_scratch_size ==
+              info->agx3_preamble_inputs.storage_bytes ||
+           agx3_cprog_static_spill_info_valid(info)) &&
           (!!info->agx3_preamble_inputs.count ==
            info->agx3_preamble_tps_inputs);
 }

@@ -72,6 +72,8 @@ libasahi_agx_files = files(
   'agx3_zs_core.c',
   'agx3_rt_core.c',
   'agx3_slot_core.c',
+  'agx3_resource_ir.c',
+  'agx3_lower_texture_publications.c',
   'agx3_fixed_dependencies.c',
   'agx3_alu_core.c',
   'agx3_funop_core.c',
@@ -153,6 +155,19 @@ libasahi_compiler = static_library(
 
 if with_tests
   test(
+    'agx_texture_min_lod',
+    executable(
+      'agx_texture_min_lod_test',
+      files('test/test-texture-min-lod.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+      link_with : [libasahi_compiler, libpoly_nir],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_subgroup_core',
     executable(
       'agx3_subgroup_core_test',
@@ -219,6 +234,26 @@ if with_tests
       include_directories : [inc_include, inc_src],
       dependencies : [idep_mesautil],
       link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_staging',
+    executable(
+      'agx3_staging_test',
+      files('test/test-agx3-staging.c'),
+      include_directories : include_directories('.'),
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_resource_ir',
+    executable(
+      'agx3_resource_ir_test',
+      files('test/test-agx3-resource-ir.c', 'agx3_resource_ir.c', 'agx3_slot_core.c'),
+      include_directories : include_directories('.'),
     ),
     suite : ['asahi'],
   )
@@ -730,8 +765,20 @@ if with_tests
          'test/test-lower-parallel-copy.cpp',
          'test/test-lower-spill.cpp',
          'test/test-repair-ssa.cpp',
+         'test/test-preamble-image-payload.cpp',
+         'test/test-preamble-share-values.cpp',
+         'test/test-cprog-cleanup.cpp',
+         'test/test-preamble-half-exports.cpp',
+         'test/test-demote-early-kill.cpp',
+         'test/test-signed-zero-fma.cpp',
+         'test/test-negated-minifloat.cpp',
+         'test/test-dual-absolute-select.cpp',
+         'test/test-native-form-regressions.cpp',
+         'test/test-inline-mrt.cpp',
+         'test/test-mrt-terminal-tail.cpp',
          'test/test-agx3-pack-binary.cpp',
          'test/test-agx3-lower-uniform-program.cpp',
+         'test/test-agx3-cprog-spill-certificate.cpp',
          'test/test-agx3-sr.cpp',
          'test/test-agx3-uniform-alu.cpp',
          'test/test-agx3-integer-fusion.cpp',

@@ -7021,6 +7021,13 @@ typedef struct nir_opt_preamble_options {
     */
    nir_instr_filter_cb avoid_instr_cb;
 
+   /* Give candidates that compute the same value one storage slot. Equal
+    * movable expressions in blocks that do not dominate each other (for
+    * example the two arms of an if, or two guarded uses of one descriptor)
+    * survive CSE, and would otherwise each consume preamble storage.
+    */
+   bool share_equal_values;
+
    const void *cb_data;
 } nir_opt_preamble_options;
 

@@ -388,6 +388,8 @@ gather_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_component_mask_t mask = nir_def_components_read(&intr->def);
 
    u_foreach_bit(c, mask) {
+      assert(base + c < AGX_MAX_ATTRIBS * 4 &&
+             "attribute slot beyond component mask capacity");
       BITSET_SET(comps_read, base + c);
    }
 
@@ -974,7 +976,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    unsigned rt_spill = key->link.rt_spill_base;
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,
             write_samples, &force_translucent, key->preserve_zero_mask,
-            key->lower_srgb, key->lower_r11g11b10);
+            key->lower_srgb, key->lower_r11g11b10, key->g17p_tile_formats);
    const bool native_spills = key->native_spills && agx_tilebuffer_spills(&tib);
    const unsigned spill_generation = native_spills
       ? (key->native_spill_generation ? key->native_spill_generation : 9) : 0;
@@ -1191,7 +1193,7 @@ unit_bound(nir_shader *s, struct hash_table *ht, nir_scalar v, double *lo,
 }
 
 bool
-agx_nir_fs_colour_outputs_unit_range(nir_shader *s, bool exact_constants)
+agx_nir_fs_colour_outputs_unit_range(nir_shader *s)
 {
    if (s->info.stage != MESA_SHADER_FRAGMENT)
       return false;
@@ -1220,14 +1222,6 @@ agx_nir_fs_colour_outputs_unit_range(nir_shader *s, bool exact_constants)
                double lo, hi;
                nir_scalar chan = nir_scalar_chase_movs(nir_get_scalar(vec, c));
                any = true;
-               /* An exact constant needs no rounding margin: fsat(k) == k
-                * for every k in [0, 1], including 1.0 (v52). */
-               if (exact_constants && nir_scalar_is_const(chan)) {
-                  const double k = nir_scalar_as_float(chan);
-                  if (!(k >= 0.0 && k <= 1.0))
-                     all = false;
-                  continue;
-               }
                /* Margin covers f16/f32 rounding of each bounded step. */
                if (!unit_bound(s, ht, nir_get_scalar(vec, c), &lo, &hi, 0) ||
                    lo < 0.0 || hi > 0.99)
@@ -1784,6 +1778,16 @@ agx_nir_fs_prolog(nir_builder *b, const void *key_)
 
    if (key->polygon_stipple) {
       NIR_PASS(_, b->shader, agx_nir_lower_poly_stipple);
+   }
+
+   /* A read-only early-reject prolog has no coverage to change: it only asks
+    * the depth/stencil unit to test the complete incoming mask.  Ordinarily a
+    * prolog runs tests while lowering its API-mask or cull-distance demotes;
+    * make the all-live form explicit so a later shader-part discard can stay
+    * deferred without also deferring rejection. */
+   if (key->run_zs_tests && !b->shader->info.fs.uses_discard) {
+      nir_def *all = nir_imm_intN_t(b, 0xff, 16);
+      nir_sample_mask_agx(b, all, all);
    }
 
    /* Then, lower the prolog */

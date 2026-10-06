@@ -372,9 +372,9 @@ agx3_alu_fcmp_bool16_gpu1(uint16_t dest, uint16_t src0,
 }
 
 bool
-agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+agx3_alu_sqrt_step_source_modifiers(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache,
-                       uint16_t wait_mask, bool src_abs,
+                       uint16_t wait_mask, bool src_abs, bool src_neg,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
@@ -388,14 +388,24 @@ agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     * separate move. Witnessed as a single-field difference against the plain
     * control; see agx3_alu_core.h for the byte pair. */
    const struct agx3_field_kv base[] = {{9,2},{10,2},{25,2},{26,2}};
-   struct agx3_field_kv fields[12] = {
+   struct agx3_field_kv fields[13] = {
       {2,dest},{18,src},{11,dest_cache},
       {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
-      {30,src_abs},
+      {30,src_abs}, {31,src_neg},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[6+i] = (struct agx3_field_kv){35+i,!!(wait_mask & (1u<<i))};
-   return agx3_bind_compose(enc,"f32sqrtstep",0,base,4,fields,12,out,len);
+      fields[7+i] = (struct agx3_field_kv){35+i,!!(wait_mask & (1u<<i))};
+   return agx3_bind_compose(enc,"f32sqrtstep",0,base,4,fields,13,out,len);
+}
+
+bool
+agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, bool src_abs,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_sqrt_step_source_modifiers(enc, dest, src, hint, dest_cache,
+                                             wait_mask, src_abs, false, out, len);
 }
 
 bool
@@ -1836,20 +1846,8 @@ agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
    const uint16_t src[] = {reg, reg};
    const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
 
-   /* Diagnostic (AGX_G17P_CARRIER_NO_S6=1): drop the specimen's slot-6 bit
-    * from the carrier's wait mask.
-    *
-    * Every retire carrier waits slot 6 in addition to whatever it was asked to
-    * retire. That matters when reading AGX_G17P_SINGLE_WAIT=2, which is worth
-    * 26x on bug #1: the win could be "the wait moved off the BITOP" or simply
-    * "the carrier also synchronises slot 6". This knob separates them. */
-   static int no_s6 = -1;
-   if (no_s6 < 0) {
-      const char *v = getenv("AGX_G17P_CARRIER_NO_S6");
-      no_s6 = (v && v[0] && v[0] != '0') ? 1 : 0;
-   }
-
-   const uint16_t extra = no_s6 ? 0 : (UINT16_C(1) << 5);
+   /* Every retire carrier also waits slot 6, as the witnessed specimen does. */
+   const uint16_t extra = UINT16_C(1) << 5;
    return agx3_alu_bit_reg(enc, AGX3_ALU_BAND, reg, src, hints,
                            wait_mask | extra, out, len);
 }
@@ -3970,10 +3968,38 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
     * absolute value -- the shape is fcmpsel [d16 s0=32:reg.abs s1=32:reg
     * s2=16:reg s3=16:imm0], which is what a half-precision `(abs(a) < b) ?
     * c : 0.0` compiles to. */
-   if (abs_compare &&
-       (compare_zero ||
-        (condition > 2 && compare_abs[0] == compare_abs[1])))
+   if (abs_compare && compare_zero)
       return false;
+
+   /* Ordered GE/LE with two absolute comparators needs the general fsel
+    * endpoint selector. Preserve the already-normalized operands and the
+    * native wait directly; no extra instructions or temporary registers. */
+   if (compare_abs[0] && compare_abs[1] && condition > 2) {
+      const struct agx3_fsel_desc d = {
+         .dest = dest,
+         .dest_16 = dest_16,
+         .dest_cache = dest_cache,
+         .cmp0 = src[0],
+         .cmp0_hint = hints[0],
+         .cmp0_abs = compare_abs[0],
+         .cmp1 = src[1],
+         .cmp1_hint = hints[1],
+         .cmp1_abs = compare_abs[1],
+         .cmp1_neg = negate_second,
+         .sel0_kind = immediate[0] ? AGX3_FSEL_SEL_IMMEDIATE
+                                  : AGX3_FSEL_SEL_REGISTER,
+         .sel1_kind = immediate[1] ? AGX3_FSEL_SEL_IMMEDIATE
+                                  : AGX3_FSEL_SEL_REGISTER,
+         .sel0 = src[2],
+         .sel1 = src[3],
+         .sel0_hint = hints[2],
+         .sel1_hint = hints[3],
+         .sel_16 = dest_16,
+         .condition = condition,
+         .wait_mask = wait_mask,
+      };
+      return agx3_alu_fcmp_select(enc, &d, out, len);
+   }
 
    /* f65 negates the SECOND compare source. Apple's applegpu_g17p output for
     * `select(x, y, a < -b)` differs from `select(x, y, a < b)` in exactly that

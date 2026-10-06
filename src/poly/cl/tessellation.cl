@@ -114,28 +114,6 @@ poly_tes_in_address(constant struct poly_tess_params *p, uint raw_id, uint vtx_i
                                p->tcs_per_vertex_outputs);
 }
 
-/*
- * Address of a tessellation evaluation input when a hardware tessellator
- * drives the evaluation shader directly. It draws every instance's patches as
- * one run, in the order the TCS dispatch unrolled them, starting from
- * patch_start.
- */
-uintptr_t
-poly_tes_native_in_address(constant struct poly_tess_params *p, uint patch_id,
-                           uint vtx_id, gl_varying_slot location)
-{
-   return poly_tcs_out_address(p, patch_id - p->patch_start, vtx_id, location,
-                               p->tcs_patch_constants, p->output_patch_size,
-                               p->tcs_per_vertex_outputs);
-}
-
-/* gl_PrimitiveID of the patch a hardware tessellator names. */
-uint
-poly_tes_native_patch_id(constant struct poly_tess_params *p, uint patch_id)
-{
-   return (patch_id - p->patch_start) % p->patches_per_instance;
-}
-
 float4
 poly_tess_level_outer_default(constant struct poly_tess_params *p)
 {

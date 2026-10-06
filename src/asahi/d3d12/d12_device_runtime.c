@@ -134,6 +134,9 @@ d12_device_create_d3dkmt_runtime(
    device = calloc(1, sizeof(*device));
    if (!device)
       return E_OUTOFMEMORY;
+   /* The DDI runtime submits through D3DKMT, which consumes an exact
+    * allocation list for every submission. */
+   device->submit_read_set = true;
 
    device->dev.fd = -1;
    if (!agx_d3dkmt_open_runtime_device(&device->dev, runtime_device)) {
@@ -371,8 +374,8 @@ d12_device_runtime_rotate_resource_identities(
       }
    }
 
-   for (struct d12_descriptor_heap *heap = device->descriptor_heaps; heap;
-        heap = heap->registry_next) {
+   struct d12_descriptor_heap *heap;
+   d12_descriptor_registry_foreach(device, heap, heap_index) {
       uint8_t *textures =
          heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
       uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;
@@ -1911,29 +1914,26 @@ d12_device_runtime_pipeline_state_create_graphics(
       map = &((struct d12_root_signature *)frontend->root_signature)->map;
 
    return d12_pipeline_state_create_graphics(
-      device, frontend->vertex_shader.data, frontend->vertex_shader.size,
+      device, frontend->vertex_shader.data, frontend->vertex_shader.size, false,
       frontend->pixel_shader.data, frontend->pixel_shader.size,
       frontend->geometry_shader.data, frontend->geometry_shader.size,
       frontend->hull_shader.data, frontend->hull_shader.size,
       frontend->domain_shader.data, frontend->domain_shader.size, rt_format,
       frontend->num_render_targets, rtv_formats, frontend->sample_count,
-      frontend->sample_mask, &depth_stencil,
-      (DXGI_FORMAT)frontend->dsv_format, &rasterizer,
-      frontend->rasterizer.depth_bias,
+      frontend->sample_mask, &depth_stencil, (DXGI_FORMAT)frontend->dsv_format,
+      &rasterizer, frontend->rasterizer.depth_bias,
       frontend->depth_stencil.front_enable != 0,
       frontend->depth_stencil.back_enable != 0,
       frontend->depth_stencil.front_face_stencil_read_mask,
       frontend->depth_stencil.front_face_stencil_write_mask,
       frontend->depth_stencil.back_face_stencil_read_mask,
-      frontend->depth_stencil.back_face_stencil_write_mask,
-      &blend, &input_layout,
+      frontend->depth_stencil.back_face_stencil_write_mask, &blend,
+      &input_layout,
       frontend->stream_output.declaration_count ? &stream_output : NULL,
       (D3D12_PRIMITIVE_TOPOLOGY_TYPE)frontend->primitive_topology_type,
-      (D3D12_INDEX_BUFFER_STRIP_CUT_VALUE)
-         frontend->index_buffer_strip_cut_value,
+      (D3D12_INDEX_BUFFER_STRIP_CUT_VALUE)frontend->index_buffer_strip_cut_value,
       (D3D12_PIPELINE_STATE_FLAGS)frontend->pipeline_flags, map,
-      &IID_ID3D12PipelineState,
-      out_pipeline_state);
+      &IID_ID3D12PipelineState, out_pipeline_state);
 }
 
 void
