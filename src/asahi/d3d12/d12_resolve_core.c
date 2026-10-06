@@ -356,6 +356,43 @@ d12_resolve_core_resource_compatible(uint32_t resource_format,
    if (resource_format == resolve_format)
       return true;
 
+   /* The native runtime accepts casting inside a format family. The
+    * resolve format supplies the interpretation, including SRGB decode and
+    * encode. A typed allocation does not override that explicit view. */
+   static const struct {
+      uint32_t first, last;
+   } families[] = {
+      {D12_RESOLVE_CORE_FORMAT_R32G32B32A32_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R32G32B32A32_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R16G16B16A16_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R16G16B16A16_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R32G32_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R32G32_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R10G10B10A2_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R10G10B10A2_UINT},
+      {D12_RESOLVE_CORE_FORMAT_R8G8B8A8_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R8G8B8A8_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R16G16_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R16G16_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R32_TYPELESS, D12_RESOLVE_CORE_FORMAT_R32_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R8G8_TYPELESS,
+       D12_RESOLVE_CORE_FORMAT_R8G8_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R16_TYPELESS, D12_RESOLVE_CORE_FORMAT_R16_SINT},
+      {D12_RESOLVE_CORE_FORMAT_R8_TYPELESS, D12_RESOLVE_CORE_FORMAT_R8_SINT},
+   };
+   for (unsigned i = 0; i < sizeof(families) / sizeof(families[0]); ++i) {
+      if (resource_format >= families[i].first &&
+          resource_format <= families[i].last) {
+         resource_format = families[i].first;
+         break;
+      }
+   }
+   if (resource_format == D12_RESOLVE_CORE_FORMAT_B8G8R8A8_UNORM ||
+       resource_format == D12_RESOLVE_CORE_FORMAT_B8G8R8A8_UNORM_SRGB)
+      resource_format = D12_RESOLVE_CORE_FORMAT_B8G8R8A8_TYPELESS;
+   if (resource_format == D12_RESOLVE_CORE_FORMAT_B8G8R8X8_UNORM)
+      resource_format = D12_RESOLVE_CORE_FORMAT_B8G8R8X8_TYPELESS;
+
    switch (resource_format) {
    case D12_RESOLVE_CORE_FORMAT_R32G32B32A32_TYPELESS:
       return resolve_format >= D12_RESOLVE_CORE_FORMAT_R32G32B32A32_FLOAT &&
