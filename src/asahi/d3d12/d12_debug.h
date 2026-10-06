@@ -48,6 +48,10 @@ struct d12_debug_flags {
    /* D3D12AGX_SUBMIT_INLINE_ALWAYS: submit from the calling thread even
     * while earlier submissions are in flight (the pre-t-1185 shape). */
    bool submit_inline_always;
+   /* D3D12AGX_G17P_DISPATCH_NO_BARRIER: native G17P API dispatches drop
+    * the trailing weak barrier word; the strong flush still follows at the
+    * next barrier and at the segment end. Experimental, Neo only. */
+   bool g17p_dispatch_no_barrier;
 
    /* Qualification opt-ins consumed by the G17P admission gates in
     * d12_cmd.c. Each is true only when the variable is exactly "1". */

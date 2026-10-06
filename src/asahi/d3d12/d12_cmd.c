@@ -6891,6 +6891,30 @@ d12_g17p_txf_physical_enabled(const struct agx_device *dev)
 
 /* Monolithic native compute, including bounded indexed txf. Indirect,
  * API samplers, preamble and legacy scratch retain their own guards. */
+/* Bookkeeping after a native G17P API launch was appended with its
+ * trailing barrier word. A weak word is owed the strong flush at the next
+ * barrier, which rewrites it in place while it is still the last thing in
+ * the stream. D3D12AGX_G17P_DISPATCH_NO_BARRIER drops the weak word instead,
+ * so consecutive launches are not ordered against each other (D3D12 orders
+ * dispatches only across barriers) and the flush appends a strong word of
+ * its own: the experiment for the G17P per-launch GPU cost. */
+static void
+d12_g17p_api_dispatch_appended(struct d12_cmd_list *list,
+                               uint8_t barrier_flags)
+{
+   if (barrier_flags != 0)
+      return;
+   struct d12_segment *seg = &list->segments[list->segment_count - 1];
+   seg->cdm_flush_pending = true;
+   if (d12_debug()->g17p_dispatch_no_barrier) {
+      list->stream_cur -= AGX3_CDM_BARRIER_SIZE;
+      seg->g17p_weak_barrier_end = 0;
+   } else {
+      seg->g17p_weak_barrier_end =
+         list->stream_cur - d12_list_stream_map(list);
+   }
+}
+
 static bool
 d12_list_append_g17p_pso(struct d12_cmd_list *list,
                         const struct d12_pipeline_state *pso,
@@ -7076,12 +7100,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
              &pc->launch, &grid, barrier_flags, &sink))
          goto fail;
       list->stream_cur += sink.length;
-      if (barrier_flags == 0) {
-         struct d12_segment *seg = &list->segments[list->segment_count - 1];
-         seg->cdm_flush_pending = true;
-         seg->g17p_weak_barrier_end =
-            list->stream_cur - d12_list_stream_map(list);
-      }
+      d12_g17p_api_dispatch_appended(list, barrier_flags);
       return true;
    }
 
@@ -7152,12 +7171,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
           &generated.launch, &grid, barrier_flags, &sink))
       goto fail;
    list->stream_cur += sink.length;
-   if (barrier_flags == 0) {
-      struct d12_segment *seg = &list->segments[list->segment_count - 1];
-      seg->cdm_flush_pending = true;
-      seg->g17p_weak_barrier_end =
-         list->stream_cur - d12_list_stream_map(list);
-   }
+   d12_g17p_api_dispatch_appended(list, barrier_flags);
    return true;
 
 fail:
