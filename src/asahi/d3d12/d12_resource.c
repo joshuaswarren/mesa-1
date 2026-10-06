@@ -1826,9 +1826,20 @@ d12_resource_compute_texture_layout(
    const bool writeable_image =
       interop_layout ||
       (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+   /* Render targets and depth buffers are twiddled. AGX renders through
+    * the tile buffer and stores whole tiles, so a linear target pays a
+    * strided store per row and a strided load on every partial render,
+    * and the G17P native background/end-of-tile programs admit only
+    * tiled targets (a linear one refuses to record). Only an explicit
+    * ROW_MAJOR layout keeps a renderable surface linear. */
+   const bool render_attachment =
+      desc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR &&
+      (desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                      D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
    const bool linear_ok =
       !gpu_tiled && !is_3d && levels == 1 && samples == 1 &&
-      desc->DepthOrArraySize == 1 && !blocked && !writeable_image;
+      desc->DepthOrArraySize == 1 && !blocked && !writeable_image &&
+      !render_attachment;
    uint32_t linear_stride_B = 0;
 
    if (linear_ok) {
