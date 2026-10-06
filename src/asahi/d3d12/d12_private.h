@@ -422,6 +422,9 @@ struct d12_device {
     * the main interface. */
    ID3D12DeviceConfiguration1 iface_config1;
    uint32_t refcount;
+   /* Weak per-adapter registry; final Release removes the entry. */
+   bool singleton;
+   struct d12_device *singleton_next;
    struct d12_private_data_store private_data;
 
    /* The real GPU. Owned: closed on final release. */
@@ -2918,6 +2921,25 @@ HRESULT d12_pipeline_state_create_graphics(
 
 void d12_device_add_ref(struct d12_device *device);
 void d12_device_release(struct d12_device *device);
+HRESULT d12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level,
+                         REFIID iid, void **out, bool singleton);
+/* Stateless configuration methods shared by device and factory tear-offs. */
+D12_AGGREGATE_RETURN(D3D12_DEVICE_CONFIGURATION_DESC) STDMETHODCALLTYPE
+d12_config_GetDesc(ID3D12DeviceConfiguration1 *iface
+                  D12_AGGREGATE_OUT(D3D12_DEVICE_CONFIGURATION_DESC));
+HRESULT STDMETHODCALLTYPE d12_config_GetEnabledExperimentalFeatures(
+   ID3D12DeviceConfiguration1 *iface, GUID *guids, UINT count);
+HRESULT STDMETHODCALLTYPE d12_config_SerializeVersionedRootSignature(
+   ID3D12DeviceConfiguration1 *iface,
+   const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob,
+   ID3DBlob **error_blob);
+HRESULT STDMETHODCALLTYPE d12_config_CreateVersionedRootSignatureDeserializer(
+   ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
+   REFIID iid, void **out);
+HRESULT STDMETHODCALLTYPE
+d12_config_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary(
+   ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
+   LPCWSTR name, REFIID iid, void **out);
 HRESULT d12_device_backend_init(struct d12_device *device,
                                 D3D_FEATURE_LEVEL feature_level);
 void d12_device_backend_cleanup(struct d12_device *device);

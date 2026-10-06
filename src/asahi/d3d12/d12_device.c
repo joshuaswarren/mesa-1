@@ -21,6 +21,10 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 
+/* Serialize singleton lookup against final Release, without owning a ref. */
+static simple_mtx_t d12_singleton_lock = SIMPLE_MTX_INITIALIZER;
+static struct d12_device *d12_singletons;
+
 /*
  * Report an unimplemented COM method. Logged once per method so a test
  * suite run produces a readable list of what is missing rather than a
@@ -113,7 +117,18 @@ static ULONG STDMETHODCALLTYPE
 d12_device_Release(ID3D12Device2 *iface)
 {
    struct d12_device *device = d12_device_from_iface(iface);
+   if (device->singleton)
+      simple_mtx_lock(&d12_singleton_lock);
    uint32_t refs = p_atomic_dec_return(&device->refcount);
+   if (device->singleton) {
+      if (!refs) {
+         struct d12_device **entry = &d12_singletons;
+         while (*entry != device)
+            entry = &(*entry)->singleton_next;
+         *entry = device->singleton_next;
+      }
+      simple_mtx_unlock(&d12_singleton_lock);
+   }
 
    if (refs == 0) {
       mesa_logi("closing device %s", device->dev.name);
@@ -4781,8 +4796,8 @@ d12_device_config1_Release(ID3D12DeviceConfiguration1 *iface)
       (ID3D12Device2 *)&d12_device_from_config1(iface)->iface);
 }
 
-static D12_AGGREGATE_RETURN(D3D12_DEVICE_CONFIGURATION_DESC) STDMETHODCALLTYPE
-d12_device_config1_GetDesc(
+D12_AGGREGATE_RETURN(D3D12_DEVICE_CONFIGURATION_DESC) STDMETHODCALLTYPE
+d12_config_GetDesc(
    ID3D12DeviceConfiguration1 *iface
    D12_AGGREGATE_OUT(D3D12_DEVICE_CONFIGURATION_DESC))
 {
@@ -4796,8 +4811,8 @@ d12_device_config1_GetDesc(
    D12_RETURN_AGGREGATE(desc);
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_GetEnabledExperimentalFeatures(
+HRESULT STDMETHODCALLTYPE
+d12_config_GetEnabledExperimentalFeatures(
    ID3D12DeviceConfiguration1 *iface, GUID *guids, UINT count)
 {
    (void)iface;
@@ -4805,8 +4820,8 @@ d12_device_config1_GetEnabledExperimentalFeatures(
    return count == 0 ? S_OK : E_INVALIDARG;
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_SerializeVersionedRootSignature(
+HRESULT STDMETHODCALLTYPE
+d12_config_SerializeVersionedRootSignature(
    ID3D12DeviceConfiguration1 *iface,
    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob,
    ID3DBlob **error_blob)
@@ -4829,8 +4844,8 @@ d12_device_config1_SerializeVersionedRootSignature(
    return *blob ? S_OK : E_OUTOFMEMORY;
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_CreateVersionedRootSignatureDeserializer(
+HRESULT STDMETHODCALLTYPE
+d12_config_CreateVersionedRootSignatureDeserializer(
    ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
    REFIID riid, void **out)
 {
@@ -4839,8 +4854,8 @@ d12_device_config1_CreateVersionedRootSignatureDeserializer(
                                                            out);
 }
 
-static HRESULT STDMETHODCALLTYPE
-d12_device_config1_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary(
+HRESULT STDMETHODCALLTYPE
+d12_config_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary(
    ID3D12DeviceConfiguration1 *iface, const void *src, SIZE_T size,
    LPCWSTR subobject_name, REFIID riid, void **out)
 {
@@ -4853,15 +4868,15 @@ static const ID3D12DeviceConfiguration1Vtbl d12_device_config1_vtbl = {
    .QueryInterface = d12_device_config1_QueryInterface,
    .AddRef = d12_device_config1_AddRef,
    .Release = d12_device_config1_Release,
-   .GetDesc = d12_device_config1_GetDesc,
+   .GetDesc = d12_config_GetDesc,
    .GetEnabledExperimentalFeatures =
-      d12_device_config1_GetEnabledExperimentalFeatures,
+      d12_config_GetEnabledExperimentalFeatures,
    .SerializeVersionedRootSignature =
-      d12_device_config1_SerializeVersionedRootSignature,
+      d12_config_SerializeVersionedRootSignature,
    .CreateVersionedRootSignatureDeserializer =
-      d12_device_config1_CreateVersionedRootSignatureDeserializer,
+      d12_config_CreateVersionedRootSignatureDeserializer,
    .CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary =
-      d12_device_config1_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary,
+      d12_config_CreateVersionedRootSignatureDeserializerFromSubobjectInLibrary,
 };
 
 /* The generated C interfaces repeat every inherited function pointer with a
@@ -5312,12 +5327,14 @@ d12_device_backend_cleanup(struct d12_device *device)
    agx_bg_eot_cleanup(&device->bg_eot);
 }
 
-static HRESULT
-d12_export_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
-                  REFIID riid, void **out)
+HRESULT
+d12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
+                  REFIID riid, void **out, bool singleton)
 {
    if (out)
       *out = NULL;
+   if (!riid)
+      return E_INVALIDARG;
 
    struct d12_device *device = calloc(1, sizeof(*device));
    if (!device)
@@ -5332,14 +5349,40 @@ d12_export_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_featur
    d12_core_caps_init_agx(&device->caps, &device->dev);
    const bool supported = d12_core_caps_supports_feature_level(
       &device->caps, minimum_feature_level);
-   if (!supported || !out) {
-      const HRESULT result = supported ? S_FALSE : E_INVALIDARG;
+   if (!supported) {
       d12_platform_close_device(device);
       free(device);
-      return result;
+      return E_INVALIDARG;
    }
    const D3D_FEATURE_LEVEL max_fl =
       (D3D_FEATURE_LEVEL)device->caps.max_feature_level;
+
+   if (singleton) {
+      simple_mtx_lock(&d12_singleton_lock);
+      for (struct d12_device *existing = d12_singletons; existing;
+           existing = existing->singleton_next) {
+         if (existing->adapter_luid.LowPart != device->adapter_luid.LowPart ||
+             existing->adapter_luid.HighPart != device->adapter_luid.HighPart)
+            continue;
+         HRESULT hr = d12_device_is_removed(existing)
+                         ? DXGI_ERROR_DEVICE_REMOVED
+                         : out ? d12_device_QueryInterface(
+                                    (ID3D12Device2 *)&existing->iface, riid, out)
+                               : S_FALSE;
+         simple_mtx_unlock(&d12_singleton_lock);
+         d12_platform_close_device(device);
+         free(device);
+         return hr;
+      }
+   }
+
+   if (!out) {
+      if (singleton)
+         simple_mtx_unlock(&d12_singleton_lock);
+      d12_platform_close_device(device);
+      free(device);
+      return S_FALSE;
+   }
 
 #ifdef D12_PLATFORM_D3DKMT
    device->submit_read_set = true;
@@ -5352,6 +5395,8 @@ d12_export_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_featur
    HRESULT hr = d12_device_backend_init(device, max_fl);
    if (FAILED(hr)) {
       mesa_loge("D3D12CreateDevice: native backend initialization failed");
+      if (singleton)
+         simple_mtx_unlock(&d12_singleton_lock);
       d12_platform_close_device(device);
       free(device);
       return hr;
@@ -5362,6 +5407,22 @@ d12_export_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_featur
              device->feature_level);
 
    hr = d12_device_QueryInterface((ID3D12Device2 *)&device->iface, riid, out);
+   if (singleton) {
+      if (SUCCEEDED(hr)) {
+         device->singleton = true;
+         device->singleton_next = d12_singletons;
+         d12_singletons = device;
+      }
+      /* Drop the construction ref while lookup is still excluded. */
+      uint32_t refs = p_atomic_dec_return(&device->refcount);
+      simple_mtx_unlock(&d12_singleton_lock);
+      if (!refs) {
+         d12_device_backend_cleanup(device);
+         d12_platform_close_device(device);
+         free(device);
+      }
+      return hr;
+   }
    /* Drop the construction ref; QueryInterface holds the caller's. */
    d12_device_Release((ID3D12Device2 *)&device->iface);
    return hr;
@@ -5461,15 +5522,6 @@ d12_export_D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T
 }
 
 PUBLIC HRESULT WINAPI
-D3D12GetInterface(REFCLSID rclsid, REFIID riid, void **out)
-{
-   d12_stub_report("D3D12GetInterface");
-   if (out)
-      *out = NULL;
-   return E_NOINTERFACE;
-}
-
-PUBLIC HRESULT WINAPI
 D3D12EnableExperimentalFeatures(UINT num_features, const IID *iids,
                                 void *configs, UINT *configs_sizes)
 {
@@ -5495,7 +5547,7 @@ D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level, RE
    const bool trace = d12_api_trace_enabled();
    if (trace)
       d12_api_trace_call("D3D12CreateDevice", NULL, "adapter=%p, minimum_feature_level=0x%x, riid=%s, out=%p", (const void *)adapter, (unsigned)minimum_feature_level, d12_api_trace_guid(riid, g0), (const void *)out);
-   HRESULT hr = d12_export_D3D12CreateDevice(adapter, minimum_feature_level, riid, out);
+   HRESULT hr = d12_create_device(adapter, minimum_feature_level, riid, out, true);
    if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
       d12_api_trace_hresult("D3D12CreateDevice", NULL, hr, trace ? NULL : "adapter=%p, minimum_feature_level=0x%x, riid=%s, out=%p", (const void *)adapter, (unsigned)minimum_feature_level, d12_api_trace_guid(riid, g0), (const void *)out);
    return hr;

@@ -62,6 +62,7 @@ libd3d12agx_files = files(
   'd12_resource.c',
   'd12_root_sig.c',
   'd12_shader_cache.c',
+  'd12_sdk.c',
   'd12_texture_copy_math.c',
   'd12_viewport_math.c',
   'd12_write_set_core.c',
@@ -327,6 +328,16 @@ executable(
   dependencies : [dep_dxheaders_d12],
   link_with : [libd3d12agx],
 )
+
+# Native concurrency checks for global and independent device lifetimes.
+if host_machine.system() != 'windows'
+  executable(
+    'd3d12agx_sdk_factory_live',
+    files('tests/sdk_factory_live.c'),
+    dependencies : [dep_dxheaders_d12, dependency('threads')],
+    link_with : [libd3d12agx],
+  )
+endif
 
 # Live queue/fence contract: GPU and CPU Signal ordering, multi-fence waits,
 # cross-queue Wait, and queue release with parked waiters.
