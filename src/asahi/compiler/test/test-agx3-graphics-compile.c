@@ -7111,7 +7111,8 @@ build_fs_vkcube_fragment_main(void)
 /* Strict compiler oracle for the complete stock-vkcube instruction family.
  * The sampler group inside this 506-byte main is the fixed-bank
  * sequence pinned independently by Implicit2DRebasesMaterializedCoordinates;
- * the rest prevents its derivative, rsqrt, transcendental, select, and export
+ * f27 discards this publication at its single last consumer.
+ * The rest prevents its derivative, rsqrt, transcendental, select, and export
  * neighbourhood from silently changing around that transaction. */
 static const uint8_t g17p_vkcube_fragment_main[] = {
    0x2f, 0x05, 0x54, 0x00, 0x03, 0x00, 0x04, 0x02, 0x10, 0x00, 0xaf, 0x00,
@@ -7138,7 +7139,7 @@ static const uint8_t g17p_vkcube_fragment_main[] = {
    0x1e, 0x05, 0x80, 0x02, 0x09, 0x01, 0x1e, 0x01, 0x80, 0x02, 0xaf, 0x01,
    0x54, 0x00, 0x03, 0x00, 0xb0, 0x40, 0x00, 0x00, 0x09, 0x01, 0x19, 0x07,
    0x0b, 0x08, 0x29, 0x04, 0x1b, 0x0a, 0x29, 0x04, 0x87, 0x02, 0x54, 0x00,
-   0x06, 0x00, 0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x00, 0x00, 0x01, 0x00,
+   0x06, 0x00, 0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x00, 0x00, 0x01, 0x00,
    0x10, 0x00, 0x01, 0x00, 0x02, 0x01, 0x2a, 0x81, 0x00, 0x02, 0x19, 0x81,
    0x15, 0x09, 0x00, 0x20, 0x29, 0x81, 0x11, 0x0b, 0x39, 0x81, 0x11, 0x0d,
    0x79, 0x01, 0x19, 0x0f, 0x0c, 0xae, 0x02, 0xbc, 0x1e, 0x00, 0x0a, 0x0b,
@@ -7730,13 +7731,12 @@ g17p_sample_group_protocol(const struct agx_shader_part *part)
                incorrectly_terminated_first |=
                   binary_contains(part, candidate, length);
 
-               /* The second in-flight sample stages into sampler-private
-                * group 8, as Apple's own consecutive samples do (see the
-                * staging-group note in agx3_pack_binary.c); it must not
-                * restage bank 0 while the first SMP still reads it. */
+               /* Both samples consume the same published coordinates.
+                * The packer shares that immutable publication in bank 0;
+                * no second staging write needs an independent bank. */
                d.texture = 1;
                d.sampler = 1;
-               d.coord = 8;
+               d.coord = 0;
                d.final = true;
                d.sample_group_end = true;
                if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
@@ -7748,6 +7748,9 @@ g17p_sample_group_protocol(const struct agx_shader_part *part)
       }
    }
 
+   if (!first || !final || incorrectly_terminated_first)
+      fprintf(stderr, "SMP group: first=%u final=%u premature=%u\n",
+              first, final, incorrectly_terminated_first);
    return first && final && !incorrectly_terminated_first;
 }
 
