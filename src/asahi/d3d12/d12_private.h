@@ -2353,6 +2353,12 @@ struct d12_cmd_list {
    unsigned render_pass_segments;
    uint8_t render_pass_applied_rts;
    bool render_pass_applied_depth, render_pass_applied_stencil;
+   /* The last declared pass suspended (SUSPENDING_PASS); the next pass
+    * must resume it with the same attachment shape. */
+   bool render_pass_suspended;
+   bool render_pass_suspending;
+   unsigned render_pass_suspended_rt_count;
+   bool render_pass_suspended_has_ds;
    struct d12_render_pass_plan render_pass_rt_plan[AGX_MAX_RENDER_TARGETS];
    float render_pass_rt_clear[AGX_MAX_RENDER_TARGETS][4];
    struct d12_render_pass_plan render_pass_depth_plan;

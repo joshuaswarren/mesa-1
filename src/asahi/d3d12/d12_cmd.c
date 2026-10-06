@@ -1028,6 +1028,10 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->g17p_bind_cache.indices_valid = false;
    list->g17p_bind_cache.segment = ~0u;
    list->render_pass_active = false;
+   list->render_pass_suspended = false;
+   list->render_pass_suspending = false;
+   list->render_pass_suspended_rt_count = 0;
+   list->render_pass_suspended_has_ds = false;
    d12_list_reset_api_state(list);
 
    list->uses_heap = false;
@@ -13539,6 +13543,10 @@ d12_list_Close(ID3D12GraphicsCommandList6 *iface)
        list->state != D12_LIST_ERROR)
       return E_FAIL;
 
+   if (list->render_pass_active) {
+      list->state = D12_LIST_ERROR;
+      list->record_error = E_FAIL;
+   }
    bool errored = list->state == D12_LIST_ERROR;
    if (errored)
       list->had_error = true;
@@ -15066,6 +15074,12 @@ d12_list_ClearRenderTargetView(ID3D12GraphicsCommandList6 *iface,
    if (list->state != D12_LIST_RECORDING)
       return;
 
+   if (list->render_pass_active) {
+      list->state = D12_LIST_ERROR;
+      list->record_error = E_FAIL;
+      return;
+   }
+
    if (num_rects && !rects) {
       mesa_loge("ClearRenderTargetView: null rectangle array");
       list->state = D12_LIST_ERROR;
@@ -15727,6 +15741,24 @@ d12_pack_clear_uav_uint(DXGI_FORMAT format, const UINT values[4],
       *packed_size_B = sizeof(uint32_t);
       return true;
 
+   case DXGI_FORMAT_A8_UNORM: {
+      const uint8_t byte = values[3];
+      memcpy(packed, &byte, sizeof(byte));
+      *packed_size_B = sizeof(byte);
+      return true;
+   }
+
+   case DXGI_FORMAT_R16_FLOAT:
+   case DXGI_FORMAT_R16_UNORM:
+   case DXGI_FORMAT_R16_UINT:
+   case DXGI_FORMAT_R16_SNORM:
+   case DXGI_FORMAT_R16_SINT: {
+      const uint16_t half = values[0];
+      memcpy(packed, &half, sizeof(half));
+      *packed_size_B = sizeof(half);
+      return true;
+   }
+
    case DXGI_FORMAT_R16G16_FLOAT:
    case DXGI_FORMAT_R16G16_UNORM:
    case DXGI_FORMAT_R16G16_UINT:
@@ -15759,6 +15791,13 @@ d12_pack_clear_uav_uint(DXGI_FORMAT format, const UINT values[4],
              ((values[3] & 0xffu) << 24);
       memcpy(packed, &word, sizeof(word));
       *packed_size_B = sizeof(uint32_t);
+      return true;
+
+   case DXGI_FORMAT_B8G8R8A8_UNORM:
+      word = (values[2] & 0xffu) | ((values[1] & 0xffu) << 8) |
+             ((values[0] & 0xffu) << 16) | ((values[3] & 0xffu) << 24);
+      memcpy(packed, &word, sizeof(word));
+      *packed_size_B = sizeof(word);
       return true;
 
    case DXGI_FORMAT_R11G11B10_FLOAT:
@@ -15808,7 +15847,9 @@ d12_pack_clear_uav_float(DXGI_FORMAT format, const FLOAT values[4],
    if (!blocksize_B || blocksize_B > 16)
       return false;
 
-   util_format_pack_rgba(pipe, packed, values, 1);
+   const float alpha_as_red[4] = {values[3], 0, 0, 0};
+   util_format_pack_rgba(
+      pipe, packed, format == DXGI_FORMAT_A8_UNORM ? alpha_as_red : values, 1);
    *packed_size_B = blocksize_B;
    return true;
 }
@@ -16682,6 +16723,7 @@ d12_cmd_list_end_render_pass(struct d12_cmd_list *list)
     * before closing, and the render keeps the end traffic it declared. */
    list->render_pass_active = false;
    d12_list_close_cdm(list);
+   list->render_pass_suspended = list->render_pass_suspending;
    memset(list->render_pass_rt_plan, 0, sizeof(list->render_pass_rt_plan));
    memset(list->render_pass_rt_clear, 0, sizeof(list->render_pass_rt_clear));
    list->render_pass_depth_plan = (struct d12_render_pass_plan){0};
@@ -16816,13 +16858,14 @@ d12_list_BeginRenderPass(
    if (list->state != D12_LIST_RECORDING)
       return;
 
-   /* SUSPENDING/RESUMING split one logical pass across command lists. The
-    * access types already say PRESERVE at the seam, so the tile traffic is
-    * correct without recognising the flags; nothing here keeps a tile
-    * resident across a submit boundary anyway. UAV writes need no special
-    * handling because a fragment shader writes them exactly as it does
-    * outside a pass. */
-   (void)flags;
+   const bool resuming = flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS;
+   if (list->render_pass_suspended &&
+       (!resuming || rt_count != list->render_pass_suspended_rt_count ||
+        (ds != NULL) != list->render_pass_suspended_has_ds)) {
+      list->state = D12_LIST_ERROR;
+      list->record_error = E_INVALIDARG;
+      return;
+   }
 
    if (rt_count > AGX_MAX_RENDER_TARGETS || (rt_count && !rts)) {
       mesa_loge("BeginRenderPass: invalid render-target count %u", rt_count);
@@ -16896,11 +16939,17 @@ d12_list_BeginRenderPass(
       return;
    }
 
-   (void)d12_cmd_list_begin_render_pass(
-      list, rt_count, rtvs, plans, clears,
-      ds ? (const struct d12_rtv *)ds->cpuDescriptor.ptr : NULL,
-      ds ? &depth_plan : NULL, ds ? &stencil_plan : NULL, depth_clear,
-      stencil_clear);
+   if (d12_cmd_list_begin_render_pass(
+          list, rt_count, rtvs, plans, clears,
+          ds ? (const struct d12_rtv *)ds->cpuDescriptor.ptr : NULL,
+          ds ? &depth_plan : NULL, ds ? &stencil_plan : NULL, depth_clear,
+          stencil_clear)) {
+      list->render_pass_suspended = false;
+      list->render_pass_suspending =
+         flags & D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS;
+      list->render_pass_suspended_rt_count = rt_count;
+      list->render_pass_suspended_has_ds = ds != NULL;
+   }
 }
 
 static void STDMETHODCALLTYPE
