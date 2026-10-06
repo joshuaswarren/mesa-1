@@ -780,6 +780,12 @@ static float view_min_lod;
 #elif G17P_TEXTURE_MIN_LOD == 3
 #include "g17p_vulkan_min_lod_txl_frag.h"
 #define G17P_FRAG_SPV g17p_vulkan_min_lod_txl_frag_spv
+#elif G17P_TEXTURE_MIN_LOD == 5
+#include "g17p_vulkan_min_lod_txf0_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_min_lod_txf0_frag_spv
+#elif G17P_TEXTURE_MIN_LOD == 6
+#include "g17p_vulkan_min_lod_txf1_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_min_lod_txf1_frag_spv
 #else
 #include "g17p_vulkan_min_lod_txd_frag.h"
 #define G17P_FRAG_SPV g17p_vulkan_min_lod_txd_frag_spv
@@ -2407,12 +2413,20 @@ verify_readback(const uint8_t *map)
 #elif G17P_TEXTURE_MIN_LOD
    /* 64 texels over 32 pixels gives implicit/gradient LOD1; txb subtracts
     * one and txl requests zero. Clamping to two must select blue instead. */
+#if G17P_TEXTURE_MIN_LOD >= 5
+   const unsigned level = G17P_TEXTURE_MIN_LOD - 5;
+   const bool oob = level < (unsigned)view_min_lod;
+   const uint8_t expected[4] = { !oob && level == 0 ? 255 : 0,
+                                 !oob && level == 1 ? 255 : 0,
+                                 0, oob ? 0 : 255 };
+#else
    const unsigned level = view_min_lod == 2 ? 2 :
                           (G17P_TEXTURE_MIN_LOD == 1 ||
                            G17P_TEXTURE_MIN_LOD == 4) ? 1 : 0;
    const uint8_t expected[4] = {level == 0 ? 255 : 0,
                                 level == 1 ? 255 : 0,
                                 level == 2 ? 255 : 0, 255};
+#endif
 #elif G17P_TEXEL_FETCH_LOD
    /* Mip 2 is blue. Mip 0 red and mip 1 green are exact negative controls
     * for a dropped or mis-typed integer level. */
@@ -3534,9 +3548,16 @@ main(void)
 #endif
 #if G17P_TEXTURE_MIN_LOD
    const char *clamp = getenv("G17P_VIEW_MIN_LOD");
+#if G17P_TEXTURE_MIN_LOD >= 5
+   if (clamp && strcmp(clamp, "0") && strcmp(clamp, "0.5") &&
+       strcmp(clamp, "1") && strcmp(clamp, "1.5") && strcmp(clamp, "2"))
+      die("G17P_VIEW_MIN_LOD must be 0, 0.5, 1, 1.5, or 2");
+   view_min_lod = clamp ? strtof(clamp, NULL) : 2.0f;
+#else
    if (clamp && strcmp(clamp, "0") && strcmp(clamp, "2"))
       die("G17P_VIEW_MIN_LOD must be 0 or 2");
    view_min_lod = clamp && !strcmp(clamp, "0") ? 0.0f : 2.0f;
+#endif
    VkPhysicalDeviceImageViewMinLodFeaturesEXT min_lod_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT,
    };

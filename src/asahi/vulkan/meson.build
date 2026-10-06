@@ -108,6 +108,7 @@ hk_files = files(
   'hk_sampler.c',
   'hk_sampler.h',
   'hk_shader.c',
+  'hk_nir_lower_image_view_min_lod.c',
   'hk_shader.h',
   'hk_sync.c',
   'hk_sync.h',
@@ -267,6 +268,20 @@ if with_tests
   )
 
 
+
+  test(
+    'hk_nir_image_view_min_lod',
+    executable(
+      'hk_nir_image_view_min_lod_test',
+      files('tests/test-hk-nir-image-view-min-lod.c',
+            'hk_nir_lower_image_view_min_lod.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
 
   test(
     'hk_nir_robust_image',
@@ -1380,7 +1395,8 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    foreach mode, op : {'1': 'tex', '2': 'txb', '3': 'txl', '4': 'txd'}
+    foreach mode, op : {'1': 'tex', '2': 'txb', '3': 'txl', '4': 'txd',
+                        '5': 'txf0', '6': 'txf1'}
       executable(
         'g17p-vulkan-min-lod-' + op,
         files('tests/g17p_offscreen_triangle.c'),
