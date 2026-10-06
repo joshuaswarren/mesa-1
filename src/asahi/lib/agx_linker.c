@@ -50,6 +50,7 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
     * Preserve the previous tile value while executing the other side effects.
     */
    key->preserve_zero_mask = g17p || chip == AGX_CHIP_G18G;
+   key->sample_loop_mrt = chip == AGX_CHIP_G18G && key->nr_samples > 1;
    /* Both AGX3 tile interfaces move packed bytes. The RGB transfer function
     * belongs around blending; alpha remains linear. R11G11B10 is explicitly
     * packed into one raw tile word, with a matching R32_UINT store PBE. */
@@ -57,10 +58,10 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
    key->lower_r11g11b10 = g17p || chip == AGX_CHIP_G18G;
    if (chip == AGX_CHIP_G18G &&
        (key->nr_samples == 1 || key->nr_samples == 2 || key->nr_samples == 4)) {
-      /* Match the render-pass layout. Native331's sixteen-byte samples
-       * retain 32x32 at 2x and 32x16 at 4x: 32 KiB and 2048 raster samples.
-       * The single-sample MRT layout keeps its 1024-raster-sample limit. */
-      key->max_bytes_per_tile = 32768;
+      /* Match the render-pass layout. Native G18's 48-byte MS samples
+       * retain 32x32 at 2x and 32x16 at 4x: 96 KiB and 2048 raster samples.
+       * Single-sample MRT keeps its previous byte and raster limits. */
+      key->max_bytes_per_tile = key->nr_samples == 1 ? 32768 : 98304;
       key->max_samples_per_tile = key->nr_samples == 1 ? 1024 : 2048;
    }
 }

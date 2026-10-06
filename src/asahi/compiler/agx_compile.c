@@ -8734,29 +8734,56 @@ agx3_sink_vertex_outputs(agx_context *ctx)
 static bool
 agx3_order_g18_msaa_tile_ops(agx_context *ctx)
 {
-   /* Native454: RGBA32 MS reloads retain ascending loads and descending
-    * stores within each complete sample. Only move stores within their
-    * existing block, after every value definition in that group. */
+   /* Native454/513: RGBA32 and scalar32 MS tile accesses use sixteen- and
+    * four-byte partitions respectively. Retain complete sample groups;
+    * only move stores within their block, after every group definition. */
    BITSET_DECLARE(offsets, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
-   unsigned stores = 0;
+   unsigned stores = 0, loads = 0;
+   unsigned tile_stride = 0;
+   agx_index coverage = agx_null();
+   bool common_coverage = true;
    agx_foreach_instr_global(ctx, I) {
       if (I->op != AGX_OPCODE_ST_TILE && I->op != AGX_OPCODE_LD_TILE)
          continue;
-      if (I->format != AGX_FORMAT_I32 || I->mask != 15 ||
-          I->explicit_coords || (I->pixel_offset % 16) ||
+      const unsigned stride = I->mask == 1 ? 4 : I->mask == 15 ? 16 : 0;
+      if (I->format != AGX_FORMAT_I32 || !stride ||
+          (tile_stride && tile_stride != stride) ||
+          I->explicit_coords || (I->pixel_offset % stride) ||
           I->pixel_offset >= AGX_G17P_MAX_BYTES_PER_SAMPLE)
          AGX3_ORDER_REFUSE();
+      tile_stride = stride;
       if (I->op == AGX_OPCODE_ST_TILE) {
          BITSET_SET(offsets, I->pixel_offset);
          stores++;
+         if (agx_is_null(coverage))
+            coverage = I->src[1];
+         else
+            common_coverage &= agx_is_equiv(coverage, I->src[1]);
+      } else {
+         loads++;
       }
    }
    const unsigned partitions = __bitset_count(offsets, ARRAY_SIZE(offsets));
+   /* Pixel-shaded pure stores can broadcast one colour per target through
+    * a common coverage mask. Keep tile reads on the per-sample path. */
+   const bool broadcast = partitions >= 2 && stores == partitions && !loads &&
+                          common_coverage && list_length(&ctx->blocks) == 1;
    if (!partitions || partitions > AGX_MAX_RTS ||
-       stores != partitions * ctx->key->fs.nr_samples)
+       (!broadcast && stores != partitions * ctx->key->fs.nr_samples))
       AGX3_ORDER_REFUSE();
+   if (broadcast) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_ST_TILE || I->op == AGX_OPCODE_STOP)
+            continue;
+         if ((I->op == AGX_OPCODE_WAIT_PIX ||
+              I->op == AGX_OPCODE_SIGNAL_PIX) && I->writeout == 12)
+            continue;
+         if (!agx_opcodes_info[I->op].can_eliminate)
+            AGX3_ORDER_REFUSE();
+      }
+   }
    for (unsigned i = 0; i < partitions; ++i) {
-      if (!BITSET_TEST(offsets, 16 * i))
+      if (!BITSET_TEST(offsets, tile_stride * i))
          AGX3_ORDER_REFUSE();
    }
    agx_foreach_block(ctx, block) {
@@ -8780,7 +8807,8 @@ agx3_order_g18_msaa_tile_ops(agx_context *ctx)
             }
          }
          for (unsigned i = base; i < base + partitions; ++i) {
-            if (group[i]->pixel_offset != 16 * (partitions - 1 - (i - base)))
+            if (group[i]->pixel_offset !=
+                tile_stride * (partitions - 1 - (i - base)))
                AGX3_ORDER_REFUSE();
             list_del(&group[i]->link);
             list_addtail(&group[i]->link, anchor);

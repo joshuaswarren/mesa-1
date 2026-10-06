@@ -20,6 +20,11 @@
 /* Software border query for an unfiltered gather, rather than interpolation. */
 #define AGX_TEXTURE_FLAG_BORDER_UNFILTERED (1 << 3)
 
+/* Bound buffer metadata in backend2: [texel count, RGB32, address lo, address
+ * hi], all uint32. The address includes the view offset. Buffer lowering
+ * consumes this before backend2 can represent offsets for a native 2D fetch. */
+#define AGX_TEXTURE_FLAG_BUFFER_METADATA (1 << 4)
+
 /* Texel buffers lowered to (at most) 16384x16384 2D textures */
 #define AGX_TEXTURE_BUFFER_WIDTH      16384
 #define AGX_TEXTURE_BUFFER_MAX_HEIGHT 16384

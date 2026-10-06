@@ -97,7 +97,9 @@ bool agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
                      uint16_t wait_mask, uint8_t out[AGX3_TILE_MAX_LENGTH],
                      uint8_t *len);
 
-/* agx3_tile_store with AGX3b f13 chosen by the caller; AGX3c always sets it.
+/* agx3_tile_store with f13 chosen by the caller for AGX3b and the explicit
+ * C/D register-sample path. The latter uses the data operand's last-use bit;
+ * legacy C/D whole-pixel stores keep f13 set.
  * Apple's AGX3b fragments set f13 on the leading stores of colour
  * transactions wider than five targets, see agx3_g17p_mrt_protocol(). */
 bool agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,

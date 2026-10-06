@@ -239,6 +239,39 @@ libagx_image_texel_address(constant const struct agx_pbe_packed *ptr,
              (uint64_t)total_sa * bytes_per_sample_B;
 }
 
+/* Software view metadata, independent of the native texture/PBE packet:
+ * base: address lo/hi, linear row pitch B (zero if tiled), tiled stride el;
+ * layout: tile width/height el, layer stride B lo/hi. Tile coordinates count
+ * pixels; MS samples are interleaved within each pixel. Runtime validation
+ * restricts MS to tiled raw32-lane storage. The caller applied image robustness. */
+uint64_t
+libagx_bound_image_texel_address(uint4 base, uint4 layout, uint4 coord,
+                                uint samples, uint sample_idx,
+                                uint bytes_per_texel, bool is_1d,
+                                bool is_layered)
+{
+   const uint64_t address = (uint64_t)base.x | ((uint64_t)base.y << 32);
+   const uint64_t layer_stride =
+      (uint64_t)layout.z | ((uint64_t)layout.w << 32);
+   uint64_t offset;
+
+   if (is_1d) {
+      offset = (uint64_t)coord.x * bytes_per_texel;
+   } else if (base.z) {
+      offset = (uint64_t)coord.y * base.z +
+               (uint64_t)coord.x * bytes_per_texel;
+   } else {
+      const uint64_t pixel = libagx_twiddle_coordinates_gen9(
+         convert_ushort2(coord.xy), layout.x, layout.y, base.w);
+      offset = (pixel * samples + sample_idx) * bytes_per_texel;
+   }
+
+   if (is_layered)
+      offset += (uint64_t)coord[is_1d ? 1 : 2] * layer_stride;
+
+   return address + offset;
+}
+
 uint64_t
 libagx_image_texel_address_gen9(
    constant const struct agx_pbe_gen9_packed *ptr,

@@ -1423,15 +1423,14 @@ agx_gallium_tilebuffer_layout(const struct agx_device *dev,
                               const enum pipe_format *formats,
                               uint8_t nr_cbufs, uint8_t nr_samples, bool layered)
 {
-   /* Native331 retains 32x32 at 2x and 32x16 at 4x for sixteen-byte
-    * samples. Both need the complete 32-KiB imageblock and 2048 raster
-    * samples; retain the existing 1024-sample limit at 1x. */
+   /* Native G18 retains three RGBA32 targets at 2x/4x: 96 KiB and 2048
+    * raster samples, with the existing 32-KiB/1024-sample limits at 1x. */
    const bool g18_native = dev->chip == AGX_CHIP_G18G &&
       (nr_samples == 1 || (agx_g18_msaa4_enabled() &&
                           (nr_samples == 2 || nr_samples == 4)));
    return agx_build_tilebuffer_layout_with_limits(
       formats, nr_cbufs, nr_samples, layered, 0,
-      g18_native ? 32768 : 0,
+      g18_native ? (nr_samples == 1 ? 32768 : 98304) : 0,
       g18_native ? (nr_samples == 1 ? 1024 : 2048) : 0);
 }
 
@@ -1598,6 +1597,9 @@ static bool
 agx_g18_msaa4_tile_layout(const struct agx_device *dev,
                           const struct agx_tilebuffer_layout *tib)
 {
+   if (agx_g18_msaa4(dev) && agx_g18g_ms_mrt_mask(tib))
+      return true;
+
    if (!agx_g18_msaa4(dev) ||
        (tib->nr_samples != 2 && tib->nr_samples != 4) ||
        (tib->sample_size_B != 8 && tib->sample_size_B != 16) ||
@@ -1619,6 +1621,40 @@ agx_g18_msaa4_tile_layout(const struct agx_device *dev,
          return false;
    }
    return true;
+}
+
+static bool
+agx_g18_msaa_color_surfaces(const struct agx_batch *batch)
+{
+   const struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   unsigned mask = agx_g18g_ms_mrt_mask(&batch->tilebuffer_layout);
+   if (!mask) {
+      if (batch->key.nr_cbufs != 1)
+         return false;
+      mask = 1;
+   }
+   for (unsigned rt = 0; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
+      const struct pipe_surface *surf = &batch->key.cbufs[rt];
+      if (!(mask & BITFIELD_BIT(rt))) {
+         if (surf->texture)
+            return false;
+         continue;
+      }
+      if (!surf->texture || !agx_g18_msaa4_storage(
+             dev, agx_resource(surf->texture), surf->format))
+         return false;
+   }
+   return true;
+}
+
+static bool
+agx_g18_native_ms_spills(const struct agx_batch *batch)
+{
+   const struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   const struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
+   return dev->chip == AGX_CHIP_G18G && !tib->layered &&
+          (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+          agx_tilebuffer_spills(tib);
 }
 
 /* The Gen9 path proven by Honeykrisp resolves a 2x/4x colour tile directly
@@ -1706,11 +1742,11 @@ target_is_array(enum pipe_texture_target target)
 }
 
 static bool
-agx_batch_upload_pbe(struct agx_batch *batch,
+agx_batch_upload_pbe_internal(struct agx_batch *batch,
                      struct agx_gallium_pbe_descriptor *out,
                      struct pipe_image_view *view, bool block_access,
                      bool arrays_as_2d, bool force_2d_array, bool emrt,
-                     bool native_storage_write)
+                     bool native_storage_write, uint8_t *native_emrt)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
    const enum agx_descriptor_generation descriptor_generation =
@@ -1923,6 +1959,38 @@ agx_batch_upload_pbe(struct agx_batch *batch,
       }
    }
 
+   if (native_emrt) {
+      /* Keep software addressing out of the Gen10 packet. The shader reads
+       * this private tail through the same96-byte eMRT ABI as Gen9, while
+       * the texture and PBE themselves retain their Gen10 encodings. */
+      if (dev->chip != AGX_CHIP_G18G || !emrt || block_access ||
+          native_storage_write || cfg.extended || tex->layout.compressed ||
+          cfg.level_offset_sw || !cfg.aligned_width_msaa_sw ||
+          !util_is_power_of_two_nonzero(cfg.tile_width_sw) ||
+          !util_is_power_of_two_nonzero(cfg.tile_height_sw) ||
+          util_logbase2(cfg.tile_width_sw) > 15 ||
+          util_logbase2(cfg.tile_height_sw) > 15 ||
+          !cfg.layer_stride_sw || (cfg.layer_stride_sw & 127) ||
+          (cfg.layer_stride_sw >> 7) > 0x7ffffffu ||
+          (cfg.sample_count_log2_sw != 1 && cfg.sample_count_log2_sw != 2))
+         return false;
+
+      uint64_t sw = ((uint64_t)util_logbase2(cfg.tile_width_sw) << 27) |
+                    ((uint64_t)util_logbase2(cfg.tile_height_sw) << 31) |
+                    ((uint64_t)(cfg.layer_stride_sw >> 7) << 35) |
+                    ((uint64_t)cfg.sample_count_log2_sw << 62);
+      uint32_t width = cfg.aligned_width_msaa_sw;
+      memcpy(native_emrt + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &sw, sizeof(sw));
+      memcpy(native_emrt + AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET,
+             &width, sizeof(width));
+      cfg.aligned_width_msaa_sw = 0;
+      cfg.sample_count_log2_sw = 0;
+      /* These log2-encoded dimensions have neutral semantic value1. */
+      cfg.tile_width_sw = 1;
+      cfg.tile_height_sw = 1;
+      cfg.layer_stride_sw = 0;
+   }
+
    const bool packed = dev->chip == AGX_CHIP_G18G
       ? agx_gallium_pack_g18_native_pbe(out, &cfg)
       : agx_gallium_pack_native_pbe(descriptor_generation, out, &cfg);
@@ -1948,6 +2016,17 @@ agx_batch_upload_pbe(struct agx_batch *batch,
               out->opaque[4], out->opaque[5], out->opaque[6], out->opaque[7]);
    }
    return packed;
+}
+
+static bool
+agx_batch_upload_pbe(struct agx_batch *batch,
+                     struct agx_gallium_pbe_descriptor *out,
+                     struct pipe_image_view *view, bool block_access,
+                     bool arrays_as_2d, bool force_2d_array, bool emrt,
+                     bool native_storage_write)
+{
+   return agx_batch_upload_pbe_internal(batch, out, view, block_access,
+      arrays_as_2d, force_2d_array, emrt, native_storage_write, NULL);
 }
 
 /* Likewise constant buffers, textures, and samplers are handled in a common
@@ -2149,6 +2228,39 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* Gallium's software image handle carries a byte offset into texture_base.
+ * Native SMP and IMGWCI index the same table in descriptor units. Keep the
+ * byte handle for descriptor crawls and replace only the image load/store use.
+ * Reads take a zero-extended 64-bit index; stores retain the 32-bit index ABI
+ * and explicit heap. Already-native 64-bit read handles need no conversion.
+ */
+static bool
+agx_nir_lower_g18_image_index(nir_builder *b, nir_intrinsic_instr *intr,
+                             void *data)
+{
+   const bool store = intr->intrinsic == nir_intrinsic_bindless_image_store;
+   if (!store && intr->intrinsic != nir_intrinsic_bindless_image_load &&
+       intr->intrinsic != nir_intrinsic_bindless_image_sparse_load)
+      return false;
+
+   nir_intrinsic_instr *handle =
+      nir_def_as_intrinsic_or_null(intr->src[0].ssa);
+   if (!handle || handle->intrinsic != nir_intrinsic_bindless_image_agx ||
+       nir_src_bit_size(handle->src[0]) != 32)
+      return false;
+
+   const unsigned descriptor_size = *(const unsigned *)data;
+   assert(descriptor_size == AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE);
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *index = nir_ushr_imm(b, handle->src[0].ssa,
+                                util_logbase2(descriptor_size));
+   nir_def *native = nir_bindless_image_agx(
+      b, store ? index : nir_u2u64(b, index),
+      .desc_set = store ? nir_intrinsic_desc_set(handle) : 0);
+   nir_src_rewrite(&intr->src[0], native);
+   return true;
+}
+
 /*
  * Compile a NIR shader. The only lowering left at this point is sysvals. The
  * shader key should have already been applied. agx_compile_variant may call
@@ -2229,6 +2341,11 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
+      if (dev->chip == AGX_CHIP_G18G) {
+         NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+                  agx_nir_lower_g18_image_index, nir_metadata_control_flow,
+                  (void *)&texture_descriptor_size);
+      }
       /* Lowered geometry/tessellation programs retain their API stage for
        * descriptor and sysval ownership. Their native vertex/compute programs
        * still require the same resource prefix as ordinary VS/CS sampling. */
@@ -2852,13 +2969,27 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    else
       NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
 
+   /* Keep API image bindings alive after atomics/stores become global memory
+    * operations. Each lowering supplies the required image robustness. */
+   unsigned nr_images = BITSET_LAST_BIT(nir->info.images_used);
+   so->info.image_address_mask = 0;
+   if (dev->chip == AGX_CHIP_G18G) {
+      NIR_PASS(_, nir, agx_nir_lower_bound_image_atomics);
+      NIR_PASS(_, nir, agx_nir_lower_bound_ms_image_stores);
+   }
+
    /* We need to lower binding tables before calling agx_preprocess_nir, since
     * that does texture lowering that needs to know the binding model.
     */
    struct agx_lower_bindings_options binding_options = {
       .uses_bindless_samplers = &so->uses_bindless_samplers,
+      .image_address_mask = dev->chip == AGX_CHIP_G18G
+                              ? &so->info.image_address_mask : NULL,
       .g17p_plain_txf_crawl = dev->chip == AGX_CHIP_G17P,
       .table_index_crawls = agx_chip_m5_paths(dev->chip),
+      .native_buffer_metadata =
+         agx_gallium_descriptor_generation(dev->chip) ==
+         AGX_DESCRIPTOR_GENERATION_10,
       .g17p_native_sampler_handles =
          dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip),
       .bindful_sampler_count =
@@ -2870,7 +3001,8 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
 
    /* We need to do some I/O lowering before lowering textures */
    so->info.nr_bindful_textures = BITSET_LAST_BIT(nir->info.textures_used);
-   so->info.nr_bindful_images = BITSET_LAST_BIT(nir->info.images_used);
+   so->info.nr_bindful_images = MAX2(nr_images,
+                                    BITSET_LAST_BIT(nir->info.images_used));
    so->info.writes_images = agx_shader_writes_images(nir);
    so->info.reads_image_sideband = agx_shader_reads_image_sideband(nir);
 
@@ -3771,6 +3903,13 @@ agx_update_fs(struct agx_batch *batch)
    };
    agx_fs_epilog_apply_device_policy(dev->chip, &link_key.epilog.fs);
 
+   if (agx_g18_native_ms_spills(batch)) {
+      link_key.epilog.fs.native_spills = true;
+      link_key.epilog.fs.native_spill_generation = 10;
+      /* Native fragment programs already bind their texture heap at u0:u1. */
+      link_key.epilog.fs.emrt_heap_base = 0;
+   }
+
    /* Both colour parts have already been expanded over these samples. A
     * shader with memory writes retains the external-loop refusal until its
     * side effects can be predicated on each sample's live coverage. */
@@ -4153,7 +4292,7 @@ agx_nr_tex_descriptors(struct agx_batch *batch, struct agx_compiled_shader *cs)
    bool spilled_rt = cs->stage == MESA_SHADER_FRAGMENT &&
                      agx_tilebuffer_spills(&batch->tilebuffer_layout);
    if (spilled_rt)
-      n += (batch->key.nr_cbufs * 2);
+      n += batch->key.nr_cbufs * (agx_g18_native_ms_spills(batch) ? 3 : 2);
 
    return n;
 }
@@ -4194,21 +4333,34 @@ agx_pbe_descriptor_at(void *base, unsigned stride, unsigned index)
 
 static void
 agx_upload_spilled_rt_descriptors(void *out, struct agx_batch *batch,
-                                  enum agx_descriptor_generation generation)
+                                  enum agx_descriptor_generation generation,
+                                  unsigned heap_base, bool native_spills)
 {
    const unsigned stride = agx_gallium_texture_descriptor_size(generation);
+   const unsigned slots = native_spills ? 3 : 2;
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   assert(!native_spills || (agx_g18_native_ms_spills(batch) && stride == 32));
 
    for (unsigned rt = 0; rt < batch->key.nr_cbufs; ++rt) {
+      uint8_t *entry = (uint8_t *)out + stride * slots * rt;
+      if (native_spills)
+         memset(entry, 0, AGX_G17P_EMRT_DESCRIPTOR_SIZE);
       struct agx_gallium_texture_descriptor *texture =
-         agx_texture_descriptor_at(out, stride, 2 * rt);
+         agx_texture_descriptor_at(out, stride, slots * rt);
       struct agx_gallium_pbe_descriptor *pbe =
-         agx_pbe_descriptor_at(out, stride, (2 * rt) + 1);
+         agx_pbe_descriptor_at(out, stride, (slots * rt) + 1);
 
       const struct pipe_surface *surf = &batch->key.cbufs[rt];
       if (!surf->texture)
          continue;
 
       struct agx_resource *rsrc = agx_resource(surf->texture);
+      if (native_spills &&
+          (surf->level || surf->first_layer != surf->last_layer ||
+           !agx_g18_msaa4_storage(dev, rsrc, surf->format))) {
+         agx_native_descriptor_rejected(batch, "G18G spilled-RT storage");
+         return;
+      }
       struct pipe_image_view view = image_view_for_surface(surf);
       struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
       sampler_view.target = PIPE_TEXTURE_2D_ARRAY;
@@ -4220,13 +4372,92 @@ agx_upload_spilled_rt_descriptors(void *out, struct agx_batch *batch,
             return;
          }
 
-      if (!agx_batch_upload_pbe(batch, pbe, &view, false, false, true, true,
-                                false))
+      if (!agx_batch_upload_pbe_internal(batch, pbe, &view, false, false,
+                                         true, true, false,
+                                         native_spills ? entry : NULL))
          {
             agx_native_descriptor_rejected(batch, "spilled-RT PBE");
             return;
          }
+
+      if (native_spills) {
+         uint32_t index = heap_base + slots * rt;
+         memcpy(entry + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET, &index, sizeof(index));
+         memcpy(entry + AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET, &index, sizeof(index));
+         if (dev->debug & AGX_DBG_FAULTTRACE) {
+            uint64_t sw;
+            uint32_t width;
+            memcpy(&sw, entry + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, sizeof(sw));
+            memcpy(&width, entry + AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET, sizeof(width));
+            fprintf(stderr, "G18_EMRT rt=%u heap=%u pbe=%u samples=%u "
+                    "sw=%016llx aligned_width=%u layer=%u\n", rt, index,
+                    index + 1, rsrc->base.nr_samples,
+                    (unsigned long long)sw, width, surf->first_layer);
+         }
+      }
    }
+}
+
+/* The native PBE has no software atomic address fields. Describe the actual
+ * uncompressed view allocation separately, after resource legalization. */
+static bool
+agx_image_address_metadata(uint32_t out[9], const struct pipe_image_view *view)
+{
+   struct agx_resource *rsrc = agx_resource(view->resource);
+   const struct ail_layout *layout = &rsrc->layout;
+   const bool buffer = rsrc->base.target == PIPE_BUFFER;
+   const unsigned level = buffer ? 0 : view->u.tex.level;
+   const unsigned layer = buffer ? 0 : view->u.tex.first_layer;
+   const unsigned samples = util_res_sample_count(&rsrc->base);
+   const unsigned bytes = util_format_get_blocksize(view->format);
+
+   /* Bound atomics are raw32. MS stores additionally use two/four raw32
+    * lanes; normalized/packed formats need their own conversion lowering. */
+   if (samples > 1) {
+      switch (view->format) {
+      case PIPE_FORMAT_R32_FLOAT:
+      case PIPE_FORMAT_R32_SINT:
+      case PIPE_FORMAT_R32_UINT:
+      case PIPE_FORMAT_R32G32_FLOAT:
+      case PIPE_FORMAT_R32G32_SINT:
+      case PIPE_FORMAT_R32G32_UINT:
+      case PIPE_FORMAT_R32G32B32A32_FLOAT:
+      case PIPE_FORMAT_R32G32B32A32_SINT:
+      case PIPE_FORMAT_R32G32B32A32_UINT:
+         break;
+      default:
+         return false;
+      }
+   }
+
+   if (layout->compressed || layout->sample_count_sa != samples ||
+       (samples != 1 &&
+        ((samples != 2 && samples != 4) || buffer || level != 0 ||
+         layout->levels != 1 || layout->tiling != AIL_TILING_GPU)) ||
+       (samples == 1 && bytes != 4) ||
+       util_format_get_blockwidth(layout->format) != 1 ||
+       util_format_get_blockheight(layout->format) != 1 ||
+       (!buffer && util_format_get_blocksize(layout->format) != bytes) ||
+       (!buffer && layout->tiling != AIL_TILING_LINEAR &&
+                   layout->tiling != AIL_TILING_GPU))
+      return false;
+
+   uint64_t address = agx_map_texture_gpu(rsrc, layer);
+   address += buffer ? view->u.buf.offset : ail_get_level_offset_B(layout, level);
+   const bool linear = buffer || layout->tiling == AIL_TILING_LINEAR;
+   out[0] = address;
+   out[1] = address >> 32;
+   out[2] = buffer ? 4 : linear ? ail_get_linear_stride_B(layout, level) : 0;
+   /* The address helper takes an aligned pixel pitch, while stride_el is the
+    * logical width. Match the tile-row rounding used by CPU/GPU copies. */
+   out[3] = linear ? 0 :
+      align(layout->stride_el[level], layout->tilesize_el[level].width_el);
+   out[4] = linear ? 1 : layout->tilesize_el[level].width_el;
+   out[5] = linear ? 1 : layout->tilesize_el[level].height_el;
+   out[6] = layout->layer_stride_B;
+   out[7] = layout->layer_stride_B >> 32;
+   out[8] = samples;
+   return true;
 }
 
 static void
@@ -4234,6 +4465,33 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
                     mesa_shader_stage stage)
 {
    struct agx_context *ctx = batch->ctx;
+   struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
+
+   /* Refresh the whole software table, including unbound entries, whenever
+    * image/sampler-view state changes. Allocation padding is not view size. */
+   memset(unif->texture_buffer_size, 0, sizeof(unif->texture_buffer_size));
+   memset(unif->image_buffer_size, 0, sizeof(unif->image_buffer_size));
+   memset(unif->texture_buffer_rgb32, 0, sizeof(unif->texture_buffer_rgb32));
+   memset(unif->texture_buffer_address, 0, sizeof(unif->texture_buffer_address));
+   memset(unif->image_address_metadata, 0, sizeof(unif->image_address_metadata));
+   for (unsigned i = 0; i < ctx->stage[stage].texture_count; ++i) {
+      struct agx_sampler_view *view = ctx->stage[stage].textures[i];
+      if (view && view->base.target == PIPE_BUFFER) {
+         unif->texture_buffer_size[i] =
+            agx_texture_buffer_size_el(view->format, view->base.u.buf.size);
+         unif->texture_buffer_rgb32[i] =
+            ail_pixel_format[view->format].channels ==
+            AGX_CHANNELS_R32G32B32_EMULATED;
+         unif->texture_buffer_address[i] =
+            agx_map_texture_gpu(view->rsrc, 0) + view->base.u.buf.offset;
+      }
+   }
+   u_foreach_bit(i, ctx->stage[stage].image_mask) {
+      const struct pipe_image_view *view = &ctx->stage[stage].images[i];
+      if (view->resource && view->resource->target == PIPE_BUFFER)
+         unif->image_buffer_size[i] =
+            agx_texture_buffer_size_el(view->format, view->u.buf.size);
+   }
 
    /* This can occur for meta shaders */
    if (!cs->so) {
@@ -4333,9 +4591,25 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
       struct pipe_image_view *view = &ctx->stage[stage].images[i];
       agx_batch_track_image(batch, view);
 
-      /* msaa163 P13: no grounded G18G multisample image access or MS PBE. */
+      if (cs->so->info.image_address_mask & BITFIELD64_BIT(i)) {
+         uint32_t metadata[9];
+         if (!agx_image_address_metadata(metadata, view) ||
+             (view->resource->nr_samples > 1 && !agx_g18_msaa4(dev))) {
+            agx_native_descriptor_rejected(batch, "G18G raw image layout");
+            return;
+         }
+         memcpy(unif->image_address_metadata[i], metadata, sizeof(metadata));
+      }
+
+      /* Reads use the native MS texture/fetch path. Bound global atomics and
+       * raw MS stores use the validated software metadata above. Neither
+       * path consumes a PBE; ordinary image writes and sideband users still
+       * require their own native encoding proof. */
       if (agx_g18_msaa4(dev) && view->resource &&
-          view->resource->nr_samples > 1) {
+          view->resource->nr_samples > 1 &&
+          (cs->so->info.writes_images || cs->so->info.reads_image_sideband ||
+           !agx_g18_msaa4_storage(dev, agx_resource(view->resource),
+                                 view->format))) {
          agx_native_descriptor_rejected(batch, "G18G multisample image");
          return;
       }
@@ -4396,7 +4670,9 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
          (uint8_t *)T_tex.cpu +
          (descriptor_size * agx_nr_tex_descriptors_without_spilled_rts(cs));
 
-      agx_upload_spilled_rt_descriptors(out, batch, descriptor_generation);
+      agx_upload_spilled_rt_descriptors(out, batch, descriptor_generation,
+         agx_nr_tex_descriptors_without_spilled_rts(cs),
+         agx_g18_native_ms_spills(batch));
    }
 
    batch->texture_count[stage] = nr_tex_descriptors;
@@ -6195,7 +6471,10 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
    const bool no_color = batch->key.nr_cbufs == 0;
    const unsigned word_mask = dev->chip == AGX_CHIP_G18G
                                 ? agx_g18g_word_mrt_mask(&key->tib) : 0;
-   const unsigned target_mask = no_color ? 0 : word_mask ? word_mask : 1;
+   const unsigned ms_mask = dev->chip == AGX_CHIP_G18G
+                              ? agx_g18g_ms_mrt_mask(&key->tib) : 0;
+   const unsigned mrt_mask = word_mask | ms_mask;
+   const unsigned target_mask = no_color ? 0 : mrt_mask ? mrt_mask : 1;
    const unsigned targets = util_bitcount(target_mask);
    const unsigned slot_count = util_last_bit(target_mask);
    const unsigned first_rt = target_mask ? ffs(target_mask) - 1 : 0;
@@ -6233,9 +6512,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       agx_g18_msaa4_tile_layout(dev, &key->tib) &&
       agx_g18_msaa4_zs_surface(dev, &batch->key.zsbuf) &&
       (no_color ? batch->key.zsbuf.texture != NULL
-                : targets == 1 && surf->texture &&
-                     agx_g18_msaa4_storage(dev, agx_resource(surf->texture),
-                                            surf->format)) &&
+                : agx_g18_msaa_color_surfaces(batch)) &&
       (!batch->key.resolve || has_resolve) &&
       (no_color || !store || key->multisample_store || has_resolve);
    const bool resolve_store =
@@ -6243,7 +6520,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
    if ((no_color ? surf->texture || op != AGX_BG_EOT_NONE ||
                       key->tib.sample_size_B != (msaa4 ? 8 : 0)
                  : !surf->texture ||
-                      (key->tib.sample_size_B != 8 && !word_mask &&
+                      (key->tib.sample_size_B != 8 && !mrt_mask &&
                        !agx_g18g_wide_sample_tile(dev, &key->tib)) ||
                       (store ? op != AGX_EOT_STORE
                              : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD))) ||
@@ -6271,7 +6548,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       key->reserved_preamble = clear_base + 8 * slot_count;
 
    struct agx_bg_eot_key shader_key = *key;
-   if (store && word_mask) {
+   if (store && mrt_mask) {
       /* The native specialized EOT addresses dense PBEs. Compact its key
        * and the table below together, retaining each logical tile offset. */
       if (agx_tilebuffer_compact(&key->tib, &shader_key.tib, NULL) != targets)
@@ -6989,7 +7266,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       struct agx_ptr descs = agx_pool_alloc_aligned(
          &batch->pool, descriptor_size * 2 * batch->key.nr_cbufs, 64);
       agx_upload_spilled_rt_descriptors(descs.cpu, batch,
-                                        descriptor_generation);
+                                        descriptor_generation, 0, false);
 
       agx_usc_pack(&b, TEXTURE, cfg) {
          cfg.start = 0;
@@ -7813,17 +8090,23 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
       !no_color && fs && fs->so && fs->so->info.uses_sample_shading &&
       fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
       !fs->epilog_key.write_s && !fs->so->info.writes_memory;
-   return agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout) &&
+   /* Masked-off resident MRTs are preserved by the epilog's tile loads,
+    * making the linked program translucent even when the API main reads no
+    * TIB. Native454 grounds this per-sample read/modify/write transaction;
+    * the compiler still proves complete sample/partition lifetimes. */
+   const bool resident_mrt_preserve =
+      fs &&
+      util_bitcount(agx_g18g_ms_mrt_mask(&batch->tilebuffer_layout)) == 3 &&
+      fragment_pass == AGX_PASS_TYPE_TRANSLUCENT;
+   const bool admitted = agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout) &&
           (no_color ? batch->key.zsbuf.texture != NULL
-                    : batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture &&
-                         agx_g18_msaa4_storage(
-                            dev, agx_resource(batch->key.cbufs[0].texture),
-                            batch->key.cbufs[0].format)) &&
+                    : agx_g18_msaa_color_surfaces(batch)) &&
           agx_g18_msaa4_zs_surface(dev, &batch->key.zsbuf) &&
           (batch->reduced_prim == MESA_PRIM_TRIANGLES ||
            batch->reduced_prim == MESA_PRIM_LINES) &&
           (fragment_pass == AGX_PASS_TYPE_OPAQUE ||
-           fragment_pass == AGX_PASS_TYPE_PUNCH_THROUGH) &&
+           fragment_pass == AGX_PASS_TYPE_PUNCH_THROUGH ||
+           resident_mrt_preserve) &&
           ctx->rast->base.multisample &&
           (unrolled_colour ||
            (ctx->sample_mask & BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) ==
@@ -7836,6 +8119,29 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
           !fs->epilog_key.write_s &&
           (!fs->b.info.writes_sample_mask || unrolled_depth) &&
           !fs->b.info.reads_tib;
+   if (!admitted && (dev->debug & AGX_DBG_FAULTTRACE)) {
+      fprintf(stderr,
+              "G18_MSAA_DRAW_REJECT layout=%u color=%u zs=%u prim=%u "
+              "pass=%u opaque=%u punch=%u raster_ms=%u mask=%#x "
+              "a2c=%u fs=%u so=%u fbfetch=%u memory=%u sample=%u "
+              "epilog_sample=%u write_s=%u write_mask=%u reads_tib=%u "
+              "unrolled_depth=%u unrolled_colour=%u\n",
+              agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout),
+              no_color ? batch->key.zsbuf.texture != NULL
+                       : agx_g18_msaa_color_surfaces(batch),
+              agx_g18_msaa4_zs_surface(dev, &batch->key.zsbuf),
+              batch->reduced_prim, fragment_pass, AGX_PASS_TYPE_OPAQUE,
+              AGX_PASS_TYPE_PUNCH_THROUGH, ctx->rast->base.multisample,
+              ctx->sample_mask, ctx->blend->key.alpha_to_coverage,
+              !!fs, fs && fs->so, fs && fs->so && fs->so->info.uses_fbfetch,
+              fs && fs->so && fs->so->info.writes_memory,
+              fs && fs->so && fs->so->info.uses_sample_shading,
+              fs && fs->epilog_key.sample_shading,
+              fs && fs->epilog_key.write_s,
+              fs && fs->b.info.writes_sample_mask, fs && fs->b.info.reads_tib,
+              unrolled_depth, unrolled_colour);
+   }
+   return admitted;
 }
 
 static uint8_t *
@@ -7938,7 +8244,8 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       batch->key.nr_cbufs == 0 ||
       (batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture) ||
        (dev->chip == AGX_CHIP_G18G &&
-        agx_g18g_word_mrt_mask(&batch->tilebuffer_layout));
+        (agx_g18g_word_mrt_mask(&batch->tilebuffer_layout) ||
+         agx_g18g_ms_mrt_mask(&batch->tilebuffer_layout)));
    const struct pipe_surface *zsbuf = &batch->key.zsbuf;
    /* With the comparison disabled the depth unit performs no test and, per
     * the API, no write either, and a disabled stencil unit does nothing at

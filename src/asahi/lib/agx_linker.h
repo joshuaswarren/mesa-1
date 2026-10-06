@@ -329,13 +329,18 @@ struct agx_fs_epilog_key {
    uint8_t nr_samples;
    /* agx_tilebuffer_layout::max_sample_size_B of the render pass. */
    uint8_t max_sample_size_B;
-   uint16_t max_bytes_per_tile;
+   uint32_t max_bytes_per_tile;
    uint16_t max_samples_per_tile;
    bool force_small_tile;
    bool preserve_zero_mask;
+   /* Execute resident MRT preservation separately for each MSAA sample. */
+   bool sample_loop_mrt;
    bool lower_srgb;
    bool lower_r11g11b10;
    bool native_spills;
+   /* Zero retains the Gen9 private-table consumer. Gen10 uses the same
+    * software tail with its own native descriptors and texture queries. */
+   uint8_t native_spill_generation;
    /* Absolute uniform-half address of the private native spill table. */
    uint16_t emrt_heap_base;
 

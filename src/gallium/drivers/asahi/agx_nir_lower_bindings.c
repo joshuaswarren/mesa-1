@@ -7,7 +7,9 @@
 #include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_builder.h"
 #include "util/bitset.h"
+#include "util/format/u_format.h"
 #include "agx_state.h"
+#include "libagx.h"
 #include "nir.h"
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
@@ -36,22 +38,22 @@ stage_for_descriptors(nir_shader *shader)
 
 static nir_def *
 load_stage_array(nir_builder *b, nir_def *index, unsigned components,
-                 unsigned bit_size, uintptr_t binding, unsigned stride,
-                 unsigned align)
+                  unsigned bit_size, uintptr_t binding, unsigned stride,
+                  unsigned align, unsigned count)
 {
    const unsigned table = AGX_SYSVAL_STAGE(stage_for_descriptors(b->shader));
    nir_scalar scalar = nir_scalar_resolved(index, 0);
 
    if (nir_scalar_is_const(scalar)) {
       const unsigned slot = nir_scalar_as_uint(scalar);
-      assert(slot < PIPE_MAX_SAMPLERS);
+      assert(slot < count);
       return nir_load_sysval_agx(b, components, bit_size, .desc_set = table,
                                  .binding = binding + (slot * stride));
    }
 
    /* Keep a bad dynamic GL index from escaping the fixed driver table. */
    index = nir_umin(b, index,
-                    nir_imm_intN_t(b, PIPE_MAX_SAMPLERS - 1,
+                     nir_imm_intN_t(b, count - 1,
                                    index->bit_size));
 
    struct agx_draw_uniforms *u = NULL;
@@ -95,7 +97,7 @@ load_custom_border_sampler(nir_builder *b, nir_def *index)
    struct agx_stage_uniforms *s = NULL;
    return load_stage_array(
       b, index, 1, 16, (uintptr_t)&s->custom_border_sampler_handle,
-      sizeof(s->custom_border_sampler_handle[0]), 2);
+       sizeof(s->custom_border_sampler_handle[0]), 2, PIPE_MAX_SAMPLERS);
 }
 
 static bool
@@ -114,7 +116,7 @@ lower_custom_border_query(nir_builder *b, nir_tex_instr *tex)
       struct agx_stage_uniforms *s = NULL;
       nir_def *border = load_stage_array(
          b, index, 4, 32, (uintptr_t)&s->custom_border,
-         sizeof(s->custom_border[0]), 4);
+         sizeof(s->custom_border[0]), 4, PIPE_MAX_SAMPLERS);
       replacement = nir_convert_to_bit_size(
          b, border, nir_alu_type_get_base_type(tex->dest_type),
          tex->def.bit_size);
@@ -187,6 +189,7 @@ lower(nir_builder *b, nir_instr *instr, void *data)
       case nir_intrinsic_image_samples:
       case nir_intrinsic_image_atomic:
       case nir_intrinsic_image_atomic_swap:
+      case nir_intrinsic_image_texel_address:
          break;
       default:
          return false;
@@ -194,6 +197,72 @@ lower(nir_builder *b, nir_instr *instr, void *data)
 
       nir_def *index = intr->src[0].ssa;
       nir_scalar index_scalar = nir_scalar_resolved(index, 0);
+
+      if (intr->intrinsic == nir_intrinsic_image_texel_address) {
+         if (!options->image_address_mask)
+            return false;
+
+         STATIC_ASSERT(PIPE_MAX_SHADER_IMAGES <= 64);
+         const unsigned count = b->shader->info.num_images;
+         assert(count > 0 && count <= PIPE_MAX_SHADER_IMAGES);
+         if (nir_scalar_is_const(index_scalar)) {
+            const unsigned slot = nir_scalar_as_uint(index_scalar);
+            assert(slot < count);
+            *options->image_address_mask |= BITFIELD64_BIT(slot);
+         } else {
+            *options->image_address_mask |= BITFIELD64_MASK(count);
+            index = nir_umin(b, index,
+                            nir_imm_intN_t(b, count - 1, index->bit_size));
+         }
+
+         struct agx_stage_uniforms *s = NULL;
+         struct agx_draw_uniforms *u = NULL;
+         const unsigned table = AGX_SYSVAL_STAGE(stage_for_descriptors(b->shader));
+         nir_def *table_base = nir_load_sysval_agx(
+            b, 1, 64, .desc_set = AGX_SYSVAL_TABLE_ROOT,
+            .binding = (uintptr_t)&u->tables[table]);
+         nir_def *offset = nir_iadd_imm(
+            b, nir_imul_imm(b, index, sizeof(s->image_address_metadata[0])),
+            (uintptr_t)&s->image_address_metadata);
+         nir_def *metadata = nir_iadd(b, table_base, nir_u2u64(b, offset));
+
+         /* Even constant slots use ordinary loads. Pushing metadata for
+          * every image can exhaust uniforms in legal image-heavy shaders. */
+         nir_def *base = nir_load_global_constant(b, 4, 32, metadata,
+                                                   .align_mul = 4);
+         nir_def *layout = nir_load_global_constant(
+            b, 4, 32, nir_iadd_imm(b, metadata, 16), .align_mul = 4);
+         enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+         const bool msaa = dim == GLSL_SAMPLER_DIM_MS;
+         nir_def *samples = msaa ? nir_load_global_constant(
+            b, 1, 32, nir_iadd_imm(b, metadata, 32), .align_mul = 4) :
+            nir_imm_int(b, 1);
+         const bool layered = nir_intrinsic_image_array(intr) ||
+                              dim == GLSL_SAMPLER_DIM_CUBE ||
+                              dim == GLSL_SAMPLER_DIM_3D;
+         nir_def *address = libagx_bound_image_texel_address(
+            b, base, layout, intr->src[1].ssa, samples,
+            msaa ? intr->src[2].ssa : nir_imm_int(b, 0),
+            nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))),
+            nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D ||
+                            dim == GLSL_SAMPLER_DIM_BUF),
+            nir_imm_bool(b, layered));
+         nir_def_replace(&intr->def, address);
+         return true;
+      }
+
+      /* Robust buffer-image stores also issue imageSize queries. The native
+       * descriptor has no AGX2 buffer_size_sw field to crawl. */
+      if (options->native_buffer_metadata &&
+          intr->intrinsic == nir_intrinsic_image_size &&
+          nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
+         struct agx_stage_uniforms *s = NULL;
+         nir_def *size = load_stage_array(
+            b, index, 1, 32, (uintptr_t)&s->image_buffer_size,
+            sizeof(s->image_buffer_size[0]), 4, PIPE_MAX_SHADER_IMAGES);
+         nir_def_replace(&intr->def, nir_u2uN(b, size, intr->def.bit_size));
+         return true;
+      }
 
       /* Remap according to the driver layout */
       unsigned offset = BITSET_LAST_BIT(b->shader->info.textures_used);
@@ -237,6 +306,45 @@ lower(nir_builder *b, nir_instr *instr, void *data)
                                   nir_image_intrinsic_type_bindless);
    } else if (instr->type == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+      if (options->native_buffer_metadata &&
+          (tex->op == nir_texop_txs || tex->op == nir_texop_txf) &&
+          tex->sampler_dim == GLSL_SAMPLER_DIM_BUF &&
+          nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0) {
+         struct agx_stage_uniforms *s = NULL;
+         int offset = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+         nir_def *index = offset >= 0 ? tex->src[offset].src.ssa : NULL;
+         index = index ? nir_iadd_imm(b, index, tex->texture_index)
+                       : nir_imm_int(b, tex->texture_index);
+         nir_def *size = load_stage_array(
+            b, index, 1, 32, (uintptr_t)&s->texture_buffer_size,
+            sizeof(s->texture_buffer_size[0]), 4,
+            PIPE_MAX_SHADER_SAMPLER_VIEWS);
+         if (tex->op == nir_texop_txs) {
+            nir_def_replace(&tex->def, nir_u2uN(b, size, tex->def.bit_size));
+            return true;
+         }
+
+         /* Buffer lowering generates another bounds query after this pass.
+          * Carry the actual view metadata into that lowering, instead of
+          * letting it decode software fields from a hardware descriptor. */
+         nir_def *rgb32 = load_stage_array(
+            b, index, 1, 32, (uintptr_t)&s->texture_buffer_rgb32,
+            sizeof(s->texture_buffer_rgb32[0]), 4,
+            PIPE_MAX_SHADER_SAMPLER_VIEWS);
+         nir_def *address = load_stage_array(
+            b, index, 1, 64, (uintptr_t)&s->texture_buffer_address,
+            sizeof(s->texture_buffer_address[0]), 8,
+            PIPE_MAX_SHADER_SAMPLER_VIEWS);
+         assert(nir_tex_instr_src_index(tex, nir_tex_src_backend2) < 0);
+         nir_tex_instr_add_src(
+            tex, nir_tex_src_backend2,
+            nir_vec4(b, size, rgb32,
+                     nir_unpack_64_2x32_split_x(b, address),
+                     nir_unpack_64_2x32_split_y(b, address)));
+         tex->backend_flags |= AGX_TEXTURE_FLAG_BUFFER_METADATA;
+         progress = true;
+      }
 
       if (lower_custom_border_query(b, tex))
          return true;

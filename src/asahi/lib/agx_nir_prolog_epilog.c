@@ -129,10 +129,17 @@ lower_native_emrt_handle(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
+   const struct agx_fs_epilog_key *key = data;
    nir_def *index = intr->src[0].ssa;
+   /* API bindings precede Gallium's private spill records. Only those
+    * records expand from two logical handles to three native slots. */
+   unsigned base = key->native_spill_generation == 10
+                      ? key->link.rt_spill_base : 0;
+   index = nir_iadd_imm(b, index, -(int)base);
    nir_def *rt = nir_ushr_imm(b, index, 1);
    nir_def *offset = nir_iadd(b, nir_imul_imm(b, rt, AGX_G17P_EMRT_DESCRIPTOR_SIZE),
                             nir_ishl_imm(b, nir_iand_imm(b, index, 1), 5));
+   offset = nir_iadd_imm(b, offset, base * 32);
    nir_def_replace(&intr->def, nir_bindless_image_agx(b, offset, .desc_set = 0));
    return true;
 }
@@ -661,7 +668,11 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    for (unsigned rt = 0; rt < ARRAY_SIZE(rt_order); ++rt)
       rt_order[rt] = rt;
 
-   if (key->native_spills && agx_tilebuffer_spills(&tib)) {
+   /* G18's grounded multisample protocol loads resident partitions in
+    * ascending order. Sharing the private descriptor ABI does not select
+    * Gen9's descending-load transaction order. */
+   if (key->native_spills && key->native_spill_generation != 10 &&
+       agx_tilebuffer_spills(&tib)) {
       /* Spill stores introduce conditional image accesses. Emit those first,
        * then the resident attachments, so every sample finishes its tile
        * stores in one block. These outputs address distinct attachments;
@@ -965,14 +976,16 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             write_samples, &force_translucent, key->preserve_zero_mask,
             key->lower_srgb, key->lower_r11g11b10);
    const bool native_spills = key->native_spills && agx_tilebuffer_spills(&tib);
+   const unsigned spill_generation = native_spills
+      ? (key->native_spill_generation ? key->native_spill_generation : 9) : 0;
    if (native_spills) {
       NIR_PASS(_, b->shader, nir_shader_intrinsics_pass, lower_native_emrt_handle,
-               nir_metadata_control_flow, NULL);
+               nir_metadata_control_flow, (void *)key);
    }
    NIR_PASS(_, b->shader, agx_nir_lower_texture_for_generation,
-            native_spills ? 9 : 0);
+            spill_generation);
    NIR_PASS(_, b->shader, agx_nir_lower_multisampled_image_store_for_generation,
-            native_spills ? 9 : 0);
+            spill_generation);
 
    /* If the API shader runs once per sample, then the epilog runs once per
     * sample as well, so we need to lower our code to run for a single sample.
@@ -1001,6 +1014,26 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       b->cursor = nir_after_impl(b->impl);
       nir_export_agx(b, sample_id, .base = AGX_ABI_FIN_SAMPLE_MASK);
    } else if (!key->defer_monolithic_msaa) {
+      /* Zero-mask preservation can introduce tile loads after blend lowering.
+       * Those loads must retain each sample's previous value. Pure stores can
+       * broadcast the pixel-shaded colour to the live coverage mask without a
+       * sample loop. Preserve any sample-shading request already set above. */
+      if (key->sample_loop_mrt) {
+         unsigned targets = 0;
+         for (unsigned rt = 0; rt < ARRAY_SIZE(key->rt_formats); ++rt)
+            targets += key->rt_formats[rt] != PIPE_FORMAT_NONE;
+
+         bool reads_tile = false;
+         nir_foreach_block(block, b->impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_intrinsic &&
+                   nir_instr_as_intrinsic(instr)->intrinsic ==
+                      nir_intrinsic_load_local_pixel_agx)
+                  reads_tile = true;
+            }
+         }
+         b->shader->info.fs.uses_sample_shading |= targets > 1 && reads_tile;
+      }
       NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
    } else if (b->shader->info.fs.uses_discard) {
       /* G17P can keep a pixel-shaded multisample blend as one tile

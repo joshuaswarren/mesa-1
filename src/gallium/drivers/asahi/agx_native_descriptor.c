@@ -388,6 +388,10 @@ agx_gallium_pack_native_pbe_impl(
       agx3_generation == AGX_PBE_AGX3_GENERATION_10 &&
       (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
        legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED);
+   const bool g18_layered =
+      g18_mips &&
+      (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
+       legacy->dimension == AGX_TEXTURE_DIMENSION_3D);
    const bool array =
       (agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
        legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
@@ -398,7 +402,7 @@ agx_gallium_pack_native_pbe_impl(
       gen10_multisample ||
       (agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
        legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED);
-   if ((!array && !multisample &&
+   if ((!array && !multisample && !g18_layered &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        /* Gen10 linear is the J873 bgra8/gears/colour end-of-tile PBE
         * (ffc60a02 00007f80 00005800 0003f010 for BGRA8 256x256, pitch
@@ -417,7 +421,10 @@ agx_gallium_pack_native_pbe_impl(
                     : legacy->samples != AGX_SAMPLE_COUNT_2) ||
        (legacy->compressed && !gen10_multisample) ||
        legacy->mode != AGX_IMAGE_MODE_NORMAL ||
-       (!array && legacy->layers != 1) ||
+       (!array && !g18_layered && legacy->layers != 1) ||
+       (g18_layered && (legacy->layout == AGX_LAYOUT_LINEAR ||
+                        legacy->level != 0 || legacy->levels != 1 ||
+                        legacy->unk_mipmapped)) ||
        (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
                         legacy->level != 0 || legacy->levels != 1 ||
                         legacy->unk_mipmapped)) ||
@@ -455,7 +462,10 @@ agx_gallium_pack_native_pbe_impl(
    };
 
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid = multisample
+   const bool valid = g18_layered
+      ? agx_pbe_g18_layered_pack(&fields, legacy->dimension, legacy->layers,
+                                &packed)
+      : multisample
       ? (array
             ? agx_pbe_agx3_2d_array_multisample_pack(
                  agx3_generation, &fields, legacy->layers,

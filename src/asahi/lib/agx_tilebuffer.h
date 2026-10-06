@@ -61,13 +61,14 @@ struct agx_tilebuffer_layout {
 
    /* Independent storage and raster-sample budgets. Zero retains the legacy
     * byte capacity or imposes no additional sample budget, respectively. */
-   uint16_t max_bytes_per_tile;
+   uint32_t max_bytes_per_tile;
    uint16_t max_samples_per_tile;
 
    /* Selected tile size in pixels. Either 32*32, 32*16, or 16*16. */
    uint16_t tile_size;
 
-   /* USC word corresponding to this configuration of the tilebuffer */
+   /* Legacy USC word, zero for tiles above its 64-KiB limit. Such layouts
+    * require the native Ioto imageblock path and must not emit this word. */
    struct agx_usc_shared_packed usc;
 };
 
@@ -118,7 +119,7 @@ struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
                                       uint8_t nr_cbufs, uint8_t nr_samples,
                                       bool layered, uint8_t max_sample_size_B,
-                                      uint16_t max_bytes_per_tile,
+                                      uint32_t max_bytes_per_tile,
                                       uint16_t max_samples_per_tile);
 
 /* Compact attachment slots for internal programs without moving tile data.
@@ -283,6 +284,9 @@ unsigned agx_g18g_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
 /* Compact G18 four-byte slots: RGBA8 or a scalar R32 integer/float word. */
 unsigned agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib);
+
+/* Resident RGBA32 or scalar R32I/U multisample attachments on G18. */
+unsigned agx_g18g_ms_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
 /* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */
 unsigned

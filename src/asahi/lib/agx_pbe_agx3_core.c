@@ -221,6 +221,35 @@ mark_mip_chain(struct agx_pbe_agx3_descriptor *out, uint32_t level,
  * so a one-layer array is still dimension 3, and depth - 1 for a 3D texture
  * (+0x4ac, reached from the kind-3 dimension select at +0x4a4).
  */
+bool
+agx_pbe_g18_layered_pack(const struct agx_pbe_agx3_2d_fields *fields,
+                         uint32_t dimension, uint32_t layers,
+                         struct agx_pbe_agx3_descriptor *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   if (!out || !fields ||
+       (dimension != AGX_PBE_DIMENSION_2D_ARRAY &&
+        dimension != AGX_PBE_DIMENSION_3D) ||
+       fields->layout == AGX_PBE_LAYOUT_LINEAR || fields->compressed ||
+       layers < 1 || layers > UINT16_MAX + 1u ||
+       !agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_10, fields, out))
+      return false;
+
+   /* Original G18 storage producer: dimension at 0x219546a60..a64,
+    * layer/depth count at 0x219546da4..e10/f28..f38. Native replay528
+    * covers both tiled layouts, one-layer arrays and nonzero depth planes.
+    * Gen10's base codec preserves the independently supplied layer flag. */
+   uint64_t word0 = load_le64(&out->bytes[0]);
+   uint64_t word1 = load_le64(&out->bytes[8]);
+   word0 = (word0 & ~UINT64_C(0xf)) | dimension;
+   word1 |= (uint64_t)(layers - 1) << 44;
+   store_le64(&out->bytes[0], word0);
+   store_le64(&out->bytes[8], word1);
+   return true;
+}
+
 static bool
 pack_layered(uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
              unsigned dimension, uint32_t layers, uint32_t level,

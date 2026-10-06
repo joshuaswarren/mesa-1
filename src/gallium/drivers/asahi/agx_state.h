@@ -201,6 +201,17 @@ struct PACKED agx_stage_uniforms {
 
    /* LOD bias as float16 */
    uint16_t lod_bias[PIPE_MAX_SAMPLERS];
+
+   /* Native texture descriptors do not carry the legacy software buffer
+    * size. Keep the bound view's texel count separate from hardware state. */
+   uint32_t texture_buffer_size[PIPE_MAX_SHADER_SAMPLER_VIEWS];
+   uint32_t image_buffer_size[PIPE_MAX_SHADER_IMAGES];
+   uint32_t texture_buffer_rgb32[PIPE_MAX_SHADER_SAMPLER_VIEWS];
+   uint64_t texture_buffer_address[PIPE_MAX_SHADER_SAMPLER_VIEWS];
+
+   /* G18 bound raw image addresses: base lo/hi, linear row pitch B, tiled
+    * stride el, tile width/height el, layer stride B lo/hi, sample count. */
+   uint32_t image_address_metadata[PIPE_MAX_SHADER_IMAGES][9];
 };
 
 /* In the architecture, there are 512 uniform registers, each 16-bits. In a
@@ -336,6 +347,9 @@ struct agx_uncompiled_shader {
        * AGX2 software sideband. A G18G shader without one writes its
        * images with native stores alone. */
       bool reads_image_sideband;
+
+      /* Bound images whose global atomics/stores use software view metadata. */
+      uint64_t image_address_mask;
 
       /* Number of bindful textures, images used */
       unsigned nr_bindful_textures, nr_bindful_images;
@@ -1174,6 +1188,8 @@ struct agx_lower_bindings_options {
    /* Keep a crawled texture bindful when its index fits the state table:
     * the handle serves the descriptor read, the operation names the entry. */
    bool table_index_crawls;
+   bool native_buffer_metadata;
+   uint64_t *image_address_mask;
    unsigned bindful_sampler_count;
 };
 

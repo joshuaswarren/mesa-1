@@ -122,10 +122,9 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
 
    const unsigned tk = d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
    const unsigned sk = d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
-   /* Native G18 indexed 2D-MS and MS-array reads both name sampler zero.
-    * The descriptor kind changes only the texture operand profile. */
-   const bool indexed_g18g_ms = d->g18g_ms &&
-      tk != AGX3_TEX_OPERAND_IMMEDIATE;
+   /* Native G18 2D-MS and MS-array reads name sampler zero for bindful,
+    * uniform-indexed and lane-indexed descriptors. The descriptor kind
+    * changes only the texture operand profile. */
    if (tk > AGX3_TEX_OPERAND_UNIFORM || sk > AGX3_TEX_OPERAND_UNIFORM ||
        (tk != AGX3_TEX_OPERAND_IMMEDIATE &&
         ((d->texture_value & 1) || d->texture_value > 252)) ||
@@ -134,8 +133,7 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
        (d->multisample &&
         (sk != AGX3_TEX_OPERAND_IMMEDIATE ||
-         d->sampler_value != ((d->g18g_ms && d->array) || indexed_g18g_ms
-                                ? 0 : d->staged_sample ? 1 : 0))))
+         d->sampler_value != (d->g18g_ms ? 0 : d->staged_sample ? 1 : 0))))
       return false;
    if (d->three_d &&
        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
@@ -152,10 +150,12 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
         /* Argument-buffer (uniform handle) reads name sampler 1 like the
          * fragment fetches; the register-handle reads name sampler 0. */
         (d->sampler_value && tk != AGX3_TEX_OPERAND_UNIFORM) ||
-        /* Only the uniform-handle depth read witnesses a partial mask
-         * (gpu/m5-fetch-lod-reference.metal); a register handle or an
-         * array read is witnessed as the whole vector. */
-        (d->mask != 15 && (tk != AGX3_TEX_OPERAND_UNIFORM || d->array))))
+         /* G18 native549 also witnesses a scalar register-indexed 2D
+          * read at level zero. Its f75=1 uses the existing scalar encoding;
+          * the packer keeps G17G callers on the full-vector profile. */
+         (d->mask != 15 && (tk != AGX3_TEX_OPERAND_UNIFORM || d->array) &&
+          !(tk == AGX3_TEX_OPERAND_REGISTER && !d->array &&
+            !d->multisample && !d->three_d && !d->register_lod))))
       return false;
 
    /* The level. f29 is 12 bits of 1/64 fixed point; the per-lane form has no
@@ -1627,6 +1627,7 @@ static bool
 stage_typed_lod_half(enum agx_isa_encoding enc, uint16_t half, uint16_t src,
                      uint8_t slot, uint16_t wait_mask, bool src_cache,
                      bool src_discard, enum agx3_tex_level_kind kind,
+                     bool live_integer_source,
                      uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len)
@@ -1651,6 +1652,11 @@ stage_typed_lod_half(enum agx_isa_encoding enc, uint16_t half, uint16_t src,
     * under f23 = 3 with no lifetime bit at all (a uniform has none). Mesa
     * always hands this a GPR, so only the first form is reachable here; the
     * uniform one is Apple's own in gpu/m5-fetch-lod-reference.metal. */
+   /* Native539's G18 2D/3D read kernels retain their integer level in h18:
+    * 3702008a2100aa02000040301100. Relative to a dead level, only f16 (the
+    * register index) and f27 (discard) change. Permit that uncached live
+    * form only through the G18 helper; other generations and kinds keep
+    * their existing lifetime restriction. */
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    const unsigned slots = gpu1 ? 8 : 6;
    if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) ||
@@ -1660,7 +1666,8 @@ stage_typed_lod_half(enum agx_isa_encoding enc, uint16_t half, uint16_t src,
         kind != AGX3_TEX_LEVEL_INTEGER) ||
        (gpu1 && ((kind != AGX3_TEX_LEVEL_FLOAT &&
                   kind != AGX3_TEX_LEVEL_INTEGER) ||
-                 src_cache || !src_discard)))
+                 src_cache || (!src_discard &&
+                    !(live_integer_source && kind == AGX3_TEX_LEVEL_INTEGER)))))
       return false;
 
    const struct agx3_field_kv base[] = {
@@ -1705,7 +1712,7 @@ agx3_tex_stage_typed_lod_at(enum agx_isa_encoding enc, uint16_t bank,
       return false;
    }
    return stage_typed_lod_half(enc, bank + 6, src, slot, wait_mask,
-                               src_cache, src_discard, kind, out, len);
+                               src_cache, src_discard, kind, false, out, len);
 }
 
 /* A 2D-array sample with a bias and a minimum LOD needs bank 6 for its layer
@@ -1726,7 +1733,7 @@ agx3_tex_stage_array_minimum_lod(enum agx_isa_encoding enc, uint16_t src,
                                  uint8_t *len)
 {
    return stage_typed_lod_half(enc, 4, src, slot, wait_mask, src_cache,
-                               src_discard, AGX3_TEX_LEVEL_MINIMUM, out, len);
+                               src_discard, AGX3_TEX_LEVEL_MINIMUM, false, out, len);
 }
 
 bool
@@ -1744,7 +1751,7 @@ agx3_tex_stage_typed_lod_g18g(uint16_t bank, uint16_t src, uint8_t slot,
    }
    return stage_typed_lod_half(AGX_ISA_ENCODING_AGX3C,
                                bank + AGX3_TEX_G18G_LEVEL_WORD, src, slot,
-                               wait_mask, src_cache, src_discard, kind, out,
+                               wait_mask, src_cache, src_discard, kind, true, out,
                                len);
 }
 

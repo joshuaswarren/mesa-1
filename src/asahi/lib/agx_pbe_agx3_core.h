@@ -135,6 +135,13 @@ bool agx_pbe_g18_2d_mip_pack(
    const struct agx_pbe_agx3_2d_fields *fields, uint32_t level,
    uint32_t levels, struct agx_pbe_agx3_descriptor *out);
 
+/* G18 StateFields (26A428), storage-write mode: one-level uncompressed
+ * tiled array (dimension3) or 3D (dimension5). Buffer is already rebased to
+ * the first addressed slice; layers is the remaining layer/depth count. */
+bool agx_pbe_g18_layered_pack(
+   const struct agx_pbe_agx3_2d_fields *fields, uint32_t dimension,
+   uint32_t layers, struct agx_pbe_agx3_descriptor *out);
+
 bool agx_pbe_agx3_2d_unpack(
    uint32_t generation, const void *bytes, size_t size,
    struct agx_pbe_agx3_2d_fields *fields);

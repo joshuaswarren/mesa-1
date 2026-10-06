@@ -90,6 +90,92 @@ texture_descriptor_ptr(nir_builder *b, nir_tex_instr *tex)
 }
 
 static bool
+bound_image_atomic(const nir_intrinsic_instr *intr, const void *data)
+{
+   return (intr->intrinsic == nir_intrinsic_image_atomic ||
+           intr->intrinsic == nir_intrinsic_image_atomic_swap) &&
+          intr->def.bit_size == 32;
+}
+
+static bool
+fence_bound_image_atomic(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   return bound_image_atomic(intr, NULL) && fence_image(b, intr, NULL);
+}
+
+/* Gallium G18 supplies explicit view metadata at binding lowering. Preserve
+ * the same fences as the later image lowering before removing the atomics. */
+bool
+agx_nir_lower_bound_image_atomics(nir_shader *s)
+{
+   nir_shader_intrinsics_pass(s, fence_bound_image_atomic,
+                              nir_metadata_control_flow, NULL);
+   return nir_lower_image_atomics_to_global(s, bound_image_atomic, NULL);
+}
+
+static bool
+bound_ms_image_store(const nir_intrinsic_instr *intr, const void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_image_store ||
+       nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS ||
+       intr->src[3].ssa->bit_size != 32)
+      return false;
+
+   switch (nir_intrinsic_format(intr)) {
+   case PIPE_FORMAT_R32_FLOAT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32_UINT:
+   case PIPE_FORMAT_R32G32_FLOAT:
+   case PIPE_FORMAT_R32G32_SINT:
+   case PIPE_FORMAT_R32G32_UINT:
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R32G32B32A32_SINT:
+   case PIPE_FORMAT_R32G32B32A32_UINT:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+lower_bound_ms_image_store(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (!bound_ms_image_store(intr, NULL))
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   enum pipe_format format = nir_intrinsic_format(intr);
+   unsigned components = util_format_get_blocksize(format) / 4;
+   nir_def *address = nir_image_texel_address(
+      b, 64, intr->src[0].ssa, intr->src[1].ssa, intr->src[2].ssa,
+      .image_dim = GLSL_SAMPLER_DIM_MS,
+      .image_array = nir_intrinsic_image_array(intr), .format = format,
+      .access = nir_intrinsic_access(intr));
+   nir_intrinsic_set_range_base(nir_def_as_intrinsic(address),
+                                nir_intrinsic_range_base(intr));
+   nir_store_global(b, nir_trim_vector(b, intr->src[3].ssa, components), address,
+                    .align_mul = 4, .write_mask = BITFIELD_MASK(components),
+                    .access = nir_intrinsic_access(intr));
+   if (!(nir_intrinsic_access(intr) & ACCESS_NON_READABLE))
+      nir_fence_mem_to_tex_agx(b);
+
+   b->shader->info.use_lowered_image_to_global = true;
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+bool
+agx_nir_lower_bound_ms_image_stores(nir_shader *s)
+{
+   /* Raw memory lacks the image hardware's bounds checks. Guard coordinates
+    * and the sample index before removing the image operation, regardless
+    * of whether the GL context requested robust buffer access. */
+   bool progress = nir_lower_robust_access(s, bound_ms_image_store, NULL);
+   return nir_shader_intrinsics_pass(s, lower_bound_ms_image_store,
+                                     nir_metadata_control_flow, NULL) || progress;
+}
+
+static bool
 has_nonzero_lod(nir_tex_instr *tex)
 {
    int idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
@@ -382,12 +468,20 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex, bool buffer_metadata,
                      const struct agx_texture_lower_options *options)
 {
    nir_def *coord = nir_steal_tex_src(tex, nir_tex_src_coord);
-   nir_def *size = nir_get_texture_size(b, tex);
+   nir_def *bound_metadata = NULL;
+   if (tex->backend_flags & AGX_TEXTURE_FLAG_BUFFER_METADATA) {
+      bound_metadata = nir_steal_tex_src(tex, nir_tex_src_backend2);
+      assert(bound_metadata && bound_metadata->num_components == 4 &&
+             bound_metadata->bit_size == 32);
+      tex->backend_flags &= ~AGX_TEXTURE_FLAG_BUFFER_METADATA;
+   }
+   nir_def *size = bound_metadata ? nir_channel(b, bound_metadata, 0)
+                                  : nir_get_texture_size(b, tex);
    nir_def *oob = nir_uge(b, coord, size);
 
    /* Apply the buffer offset after calculating oob but before remapping */
-   nir_def *desc = texture_descriptor_ptr(b, tex);
-   coord = buffer_metadata
+   nir_def *desc = bound_metadata ? NULL : texture_descriptor_ptr(b, tex);
+   coord = bound_metadata ? coord : buffer_metadata
       ? nir_iadd(b, coord, load_buffer_metadata(
            b, desc, AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, 32))
       : libagx_buffer_texture_offset(b, desc, coord);
@@ -413,16 +507,20 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex, bool buffer_metadata,
    /* Lower RGB32 reads if the format requires. If we are out-of-bounds, we use
     * the hardware path so we get a zero texel.
     */
-   nir_def *is_rgb32 = buffer_metadata
+   nir_def *is_rgb32 = bound_metadata
+      ? nir_ine_imm(b, nir_channel(b, bound_metadata, 1), 0)
+      : buffer_metadata
       ? nir_ine_imm(b, load_buffer_metadata(
            b, desc, AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET, 32), 0)
       : libagx_texture_is_rgb32(b, desc);
    nir_if *nif = nir_push_if(b, nir_iand(b, is_rgb32, nir_inot(b, oob)));
 
    nir_def *rgb32;
-   if (buffer_metadata) {
-      nir_def *base = load_buffer_metadata(
-         b, desc, AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, 64);
+   if (bound_metadata || buffer_metadata) {
+      nir_def *base = bound_metadata
+         ? nir_pack_64_2x32(b, nir_channels(b, bound_metadata, 0xc))
+         : load_buffer_metadata(
+              b, desc, AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, 64);
       /* In-bounds RGB32 buffer indices fit the 32-bit multiply by three,
        * as in libagx_texture_load_rgb32. Keep the address add fully 64-bit.
        */
@@ -1671,7 +1769,9 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
       return false;
 
    nir_def *index_px;
-   if (*(unsigned *)data == 9) {
+   /* Native eMRT tables carry software geometry outside the hardware PBE.
+    * This path is selected by the epilog's explicit private-table ABI. */
+   if (*(unsigned *)data == 9 || *(unsigned *)data == 10) {
       nir_def *pbe = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
       index_px = libagx_emrt_ms_index_gen9(b,
          nir_iadd_imm(b, pbe, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE),

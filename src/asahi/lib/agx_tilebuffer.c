@@ -110,7 +110,7 @@ struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
                                       uint8_t nr_cbufs, uint8_t nr_samples,
                                       bool layered, uint8_t max_sample_size_B,
-                                      uint16_t max_bytes_per_tile,
+                                      uint32_t max_bytes_per_tile,
                                       uint16_t max_samples_per_tile)
 {
    struct agx_tilebuffer_layout tib = {
@@ -234,6 +234,15 @@ agx_tilebuffer_total_size(struct agx_tilebuffer_layout *tib)
 void
 agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
 {
+   /* USC_SHARED belongs to the legacy pipeline and can encode at most
+    * 64 KiB. G18's larger resident tiles use Ioto imageblock records built
+    * from the full layout below, not this packed USC record. Leave it empty
+    * rather than truncating the allocation or overflowing groups(256). */
+   if (agx_tilebuffer_total_size(tib) > 65536) {
+      memset(&tib->usc, 0, sizeof(tib->usc));
+      return;
+   }
+
    agx_pack(&tib->usc, USC_SHARED, cfg) {
       if (tib->nr_samples > 0) {
          cfg.uses_shared_memory = true;
@@ -310,6 +319,41 @@ agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib)
     * Logical conversion remains in the per-attachment shader/descriptor. */
    return tib && tib->tile_size == 32 * 32
              ? agx_word_mrt_mask(tib, 32768, true) : 0;
+}
+
+unsigned
+agx_g18g_ms_mrt_mask(const struct agx_tilebuffer_layout *tib)
+{
+   /* Native G18 retains three RGBA32 attachments in a 96-KiB tile.
+    * Native513 also grounds scalar R32Sint/R32Uint MS partitions. Keep
+    * each layout homogeneous: every target occupies either sixteen or
+    * four consecutive bytes per sample, with eight-byte sample padding. */
+   if (!tib || (tib->nr_samples != 2 && tib->nr_samples != 4) ||
+       tib->tile_size != (tib->nr_samples == 2 ? 32 * 32 : 32 * 16) ||
+       tib->layered || agx_tilebuffer_spills(tib))
+      return 0;
+
+   unsigned mask = 0, count = 0, stride = 0;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      const enum pipe_format format = tib->logical_format[rt];
+      if (format == PIPE_FORMAT_NONE)
+         continue;
+      const unsigned bytes =
+         (format == PIPE_FORMAT_R32_SINT || format == PIPE_FORMAT_R32_UINT)
+            ? 4
+            : (format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+               format == PIPE_FORMAT_R32G32B32A32_SINT ||
+               format == PIPE_FORMAT_R32G32B32A32_UINT) ? 16 : 0;
+      if (!bytes || (stride && stride != bytes) ||
+          tib->_offset_B[rt] != bytes * count)
+         return 0;
+      stride = bytes;
+      mask |= BITFIELD_BIT(rt);
+      count++;
+   }
+   return count >= 2 && count <= 3 &&
+          tib->sample_size_B == ALIGN_POT(stride * count, 8)
+             ? mask : 0;
 }
 
 unsigned

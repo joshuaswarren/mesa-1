@@ -125,7 +125,9 @@ agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,
    struct agx3_field_kv ov[16];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, data);
-   if (!is_b(enc) || f13)
+   /* The explicit C/D register-sample path receives the caller's data
+    * lifetime bit. Preserve legacy whole-pixel and G17P behavior. */
+   if (f13 || (!is_b(enc) && !sample.g17_register))
       ov[n++] = (struct agx3_field_kv)KV(13, 1);
    ov[n++] = (struct agx3_field_kv)KV(10, width);
    ov[n++] = (struct agx3_field_kv)KV(26, chan_mask);
@@ -159,12 +161,18 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    if (enc == AGX_ISA_ENCODING_AGX3D)
       return false;
 
-   /* Native454's G17G/G18G RGBA32Float MS reloads use this register
-    * sample operand at every dense sixteen-byte tile partition. The G18
-    * long-form field is supplied by the transcode rule. */
+   /* Native454's RGBA32Float and native513's R32Sint/R32Uint G17G/G18G
+    * MS reloads use this register sample operand at dense sixteen-byte
+    * and four-byte tile partitions respectively. The G18 long-form field
+    * is supplied by the transcode rule. */
+   bool scalar_ms = sample.g17_register && sample.reg &&
+                    enc == AGX_ISA_ENCODING_AGX3C &&
+                    width == AGX3_TILE_W32 && chan_mask == 1 &&
+                    !(tile_off % 4);
    if (sample.g17_register &&
        (enc != AGX_ISA_ENCODING_AGX3C || !sample.reg ||
-        width != AGX3_TILE_W32 || chan_mask != 15 || (tile_off % 16)))
+        width != AGX3_TILE_W32 ||
+        (!scalar_ms && (chan_mask != 15 || (tile_off % 16)))))
       return false;
 
    /* Full-component loads, plus the G17P scalar, pair, and RGB565 forms.
@@ -177,7 +185,7 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
     *
     * None carries an incoming wait. */
    if (!common_ok(dest, width, chan_mask, sample, enc, wait_mask, tile_off) ||
-       (chan_mask != 15 &&
+       (chan_mask != 15 && !scalar_ms &&
         !(is_b(enc) &&
           (chan_mask == 1 || chan_mask == 3 ||
            (chan_mask == 7 && width == AGX3_TILE_W16)))) ||

@@ -1022,7 +1022,11 @@ g17g_graphics_program_generate(
         * under AGX_G18_MSAA4. */
        (desc->fragment &&
         !((desc->imageblock.sample_size_B == 8 ||
-           (target_chip == AGX_CHIP_G18G && desc->imageblock.sample_size_B == 16)) &&
+           (target_chip == AGX_CHIP_G18G &&
+            (desc->imageblock.sample_size_B == 16 ||
+             /* Native464: three RGBA32 targets occupy48 bytes/sample in
+              * both the fragment and background/EOT SPECLM records. */
+             desc->imageblock.sample_size_B == 48))) &&
           ((desc->imageblock.nr_samples == 2 &&
             desc->imageblock.tile_size_px == 32 * 32) ||
            (desc->imageblock.nr_samples == 4 &&

@@ -412,6 +412,13 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
       has_load |= key->op[rt] == AGX_BG_LOAD;
    compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
+   /* Native464's resident three-target MS background owns a combined
+    * class252 transaction. The packer validates every sample/partition and
+    * emits its single acquire, without generic per-store class12 releases.
+    * Preserve the established single-target MS dependency path above. */
+   if (cache->dev->chip == AGX_CHIP_G18G && background_targets == 3 &&
+       util_bitcount(agx_g18g_ms_mrt_mask(&key->tib)) == 3)
+      compiler_key.fs.ignore_tib_dependencies = true;
    /* A reload binds texture/sampler pointers in u0..7. A mixed G18
     * background must place clear values after both pointers. */
    const unsigned clear_base =
@@ -478,7 +485,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 {
    const bool g17g = agx_chip_m5_paths(cache->dev->chip);
    const unsigned g18_mrt = cache->dev->chip == AGX_CHIP_G18G
-                              ? agx_g18g_word_mrt_mask(&key->tib) : 0;
+                              ? agx_g18g_word_mrt_mask(&key->tib) |
+                                   agx_g18g_ms_mrt_mask(&key->tib) : 0;
    /* msaa163: G18G's four-sample tile is resolved at end of tile into the
     * single-sample PBE target, the shape Apple's G18 4x render uses: its
     * end-of-tile code is the same program at 1x and 4x (byte-identical over
