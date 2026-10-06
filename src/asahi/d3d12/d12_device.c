@@ -5333,7 +5333,8 @@ d12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
 {
    if (out)
       *out = NULL;
-   if (!riid)
+   /* Validation-only calls ignore the requested interface, including NULL. */
+   if (out && !riid)
       return E_INVALIDARG;
 
    struct d12_device *device = calloc(1, sizeof(*device));

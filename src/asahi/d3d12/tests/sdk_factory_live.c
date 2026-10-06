@@ -94,6 +94,7 @@ int main(void)
    CHECK(!out);
    CHECK(D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                           &IID_ID3D12Device, NULL) == S_FALSE);
+   CHECK(D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, NULL, NULL) == S_FALSE);
 
    /* RemoveDevice is a CPU-side state change. A removed global device cannot
     * be returned again, even for a validation-only request. */
