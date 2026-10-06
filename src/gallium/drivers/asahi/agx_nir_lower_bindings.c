@@ -216,9 +216,11 @@ lower(nir_builder *b, nir_instr *instr, void *data)
        * known.
        */
       if (options->g17p_bindless_storage &&
-          intr->intrinsic != nir_intrinsic_image_load &&
-          intr->intrinsic != nir_intrinsic_image_size &&
-          intr->intrinsic != nir_intrinsic_image_samples)
+          ((intr->intrinsic != nir_intrinsic_image_load &&
+            intr->intrinsic != nir_intrinsic_image_size &&
+            intr->intrinsic != nir_intrinsic_image_samples) ||
+           (intr->intrinsic == nir_intrinsic_image_load &&
+            nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_MS)))
          force_bindless = true;
 
       /* If we can determine statically that the image fits in texture state
