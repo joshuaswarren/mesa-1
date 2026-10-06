@@ -40,7 +40,7 @@ div_rn(nir_builder *b, nir_def *a, nir_def *d)
    nir_def *ed = nir_ushr_imm(b, dd, 23);
    nir_def *ma = nir_ior_imm(b, nir_iand_imm(b, aa, 0x7fffff), 0x3f800000);
    nir_def *md = nir_ior_imm(b, nir_iand_imm(b, dd, 0x7fffff), 0x3f800000);
-   nir_def *y = rcp_normal(b, md);
+   nir_def *y = nir_frcp(b, md);
    nir_def *q = nir_fmul(b, ma, y);
    nir_def *r = nir_ffma(b, nir_fneg(b, md), q, ma);
    q = nir_ffma(b, r, y, q);
