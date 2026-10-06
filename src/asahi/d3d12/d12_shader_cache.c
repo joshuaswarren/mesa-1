@@ -190,6 +190,8 @@ d12_shader_cache_init(struct d12_device *device)
    list_inithead(&cache->stage_lru);
    cache->nr_stages = 0;
    cache->disk = d12_shader_disk_cache_create(device);
+   if (cache->disk)
+      d12_dxil_signature_register_disk(cache->disk);
 }
 
 /* On disk: this header, then the part's info, the outputs and the binary.
@@ -366,6 +368,7 @@ d12_shader_cache_finish(struct d12_device *device)
    }
 
    if (cache->disk) {
+      d12_dxil_signature_unregister_disk(cache->disk);
       disk_cache_destroy(cache->disk);
       cache->disk = NULL;
    }

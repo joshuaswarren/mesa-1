@@ -1350,6 +1350,14 @@ unsigned d12_dxbc_input_signature(const void *data, size_t size_B,
 unsigned d12_dxil_input_signature(const void *dxil, size_t size_B,
                                   struct d12_input_sig_elem *out,
                                   unsigned max);
+
+/* The signature cache may answer from the disk cache of a live device, so
+ * a fresh process does not parse the bitcode of a stage it already holds
+ * compiled. Registered by the device's shader cache; unregistering a disk
+ * the cache still points at clears the pointer. */
+struct disk_cache;
+void d12_dxil_signature_register_disk(struct disk_cache *disk);
+void d12_dxil_signature_unregister_disk(struct disk_cache *disk);
 unsigned d12_dxbc_output_signature(const void *data, size_t size_B,
                                    struct d12_input_sig_elem *out,
                                    unsigned max);

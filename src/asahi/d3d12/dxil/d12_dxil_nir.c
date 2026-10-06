@@ -34,6 +34,7 @@
 #include "d12_nir_min_lod.h"
 
 #include "util/simple_mtx.h"
+#include "util/disk_cache.h"
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 #include "util/log.h"
@@ -6611,6 +6612,99 @@ struct d12_sig_cache_entry {
 static simple_mtx_t d12_sig_cache_lock = SIMPLE_MTX_INITIALIZER;
 static struct d12_sig_cache_entry d12_sig_cache[D12_SIG_CACHE_ENTRIES];
 static unsigned d12_sig_cache_next;
+static struct disk_cache *d12_sig_disk;
+
+void
+d12_dxil_signature_register_disk(struct disk_cache *disk)
+{
+   simple_mtx_lock(&d12_sig_cache_lock);
+   if (!d12_sig_disk)
+      d12_sig_disk = disk;
+   simple_mtx_unlock(&d12_sig_cache_lock);
+}
+
+void
+d12_dxil_signature_unregister_disk(struct disk_cache *disk)
+{
+   simple_mtx_lock(&d12_sig_cache_lock);
+   if (d12_sig_disk == disk)
+      d12_sig_disk = NULL;
+   simple_mtx_unlock(&d12_sig_cache_lock);
+}
+
+/* On disk: the three counts, then the three element arrays, under a key
+ * naming the bytecode. The library's build id is part of the disk cache's
+ * identity, so the element layout cannot change under an entry. */
+struct d12_sig_disk_entry {
+   uint32_t magic;
+   uint32_t count[3];
+   struct d12_input_sig_elem elems[3][D12_MAX_SIG_ELEMENTS];
+};
+
+#define D12_SIG_DISK_MAGIC 0x31474953u /* "SIG1" */
+
+static bool
+d12_sig_disk_key(struct disk_cache *disk, uint64_t hash, size_t size_B,
+                 cache_key key)
+{
+   struct {
+      char tag[8];
+      uint64_t hash;
+      uint64_t size_B;
+   } data = {.tag = "d12sig", .hash = hash, .size_B = size_B};
+   disk_cache_compute_key(disk, &data, sizeof(data), key);
+   return true;
+}
+
+/* A hit fills `entry` (hash and size set by the caller). */
+static bool
+d12_sig_disk_load(uint64_t hash, size_t size_B,
+                  struct d12_sig_cache_entry *entry)
+{
+   simple_mtx_lock(&d12_sig_cache_lock);
+   struct disk_cache *disk = d12_sig_disk;
+   simple_mtx_unlock(&d12_sig_cache_lock);
+   if (!disk)
+      return false;
+
+   cache_key key;
+   d12_sig_disk_key(disk, hash, size_B, key);
+   size_t size = 0;
+   struct d12_sig_disk_entry *on_disk = disk_cache_get(disk, key, &size);
+   if (!on_disk)
+      return false;
+   bool ok = size == sizeof(*on_disk) && on_disk->magic == D12_SIG_DISK_MAGIC &&
+             on_disk->count[0] <= D12_MAX_SIG_ELEMENTS &&
+             on_disk->count[1] <= D12_MAX_SIG_ELEMENTS &&
+             on_disk->count[2] <= D12_MAX_SIG_ELEMENTS;
+   if (ok) {
+      memcpy(entry->count, on_disk->count, sizeof(entry->count));
+      memcpy(entry->elems, on_disk->elems, sizeof(entry->elems));
+   }
+   free(on_disk);
+   return ok;
+}
+
+static void
+d12_sig_disk_store(const struct d12_sig_cache_entry *entry)
+{
+   simple_mtx_lock(&d12_sig_cache_lock);
+   struct disk_cache *disk = d12_sig_disk;
+   simple_mtx_unlock(&d12_sig_cache_lock);
+   if (!disk)
+      return;
+
+   struct d12_sig_disk_entry *on_disk = calloc(1, sizeof(*on_disk));
+   if (!on_disk)
+      return;
+   on_disk->magic = D12_SIG_DISK_MAGIC;
+   memcpy(on_disk->count, entry->count, sizeof(on_disk->count));
+   memcpy(on_disk->elems, entry->elems, sizeof(on_disk->elems));
+   cache_key key;
+   d12_sig_disk_key(disk, entry->hash, entry->size_B, key);
+   disk_cache_put(disk, key, on_disk, sizeof(*on_disk), NULL);
+   free(on_disk);
+}
 
 static void
 d12_dxil_copy_signature(const struct d12_sig_element *sig, unsigned count,
@@ -6662,31 +6756,39 @@ d12_dxil_signature(const void *dxil, size_t size_B,
    }
    simple_mtx_unlock(&d12_sig_cache_lock);
 
-   struct d12_module *mod = d12_dxil_module_alloc();
-   if (!mod)
-      return 0;
-   if (!d12_dxil_module_parse(mod, bc, bc_size)) {
-      d12_dxil_module_free(mod);
-      return 0;
-   }
-
+   /* Not seen in this process: the disk may hold it from an earlier one
+    * (a fresh process otherwise parses the whole module of every stage
+    * whose compiled code it is about to load from the same disk). */
    struct d12_sig_cache_entry entry = {
       .hash = hash,
       .size_B = size_B,
       .valid = true,
-      .count = {
-         MIN2(mod->num_input_sig, D12_MAX_SIG_ELEMENTS),
-         MIN2(mod->num_output_sig, D12_MAX_SIG_ELEMENTS),
-         MIN2(mod->num_patch_sig, D12_MAX_SIG_ELEMENTS),
-      },
    };
-   d12_dxil_copy_signature(mod->input_sig, entry.count[D12_SIGNATURE_INPUT],
-                           entry.elems[D12_SIGNATURE_INPUT]);
-   d12_dxil_copy_signature(mod->output_sig, entry.count[D12_SIGNATURE_OUTPUT],
-                           entry.elems[D12_SIGNATURE_OUTPUT]);
-   d12_dxil_copy_signature(mod->patch_sig, entry.count[D12_SIGNATURE_PATCH],
-                           entry.elems[D12_SIGNATURE_PATCH]);
-   d12_dxil_module_free(mod);
+   if (!d12_sig_disk_load(hash, size_B, &entry)) {
+      struct d12_module *mod = d12_dxil_module_alloc();
+      if (!mod)
+         return 0;
+      if (!d12_dxil_module_parse(mod, bc, bc_size)) {
+         d12_dxil_module_free(mod);
+         return 0;
+      }
+
+      entry.count[D12_SIGNATURE_INPUT] =
+         MIN2(mod->num_input_sig, D12_MAX_SIG_ELEMENTS);
+      entry.count[D12_SIGNATURE_OUTPUT] =
+         MIN2(mod->num_output_sig, D12_MAX_SIG_ELEMENTS);
+      entry.count[D12_SIGNATURE_PATCH] =
+         MIN2(mod->num_patch_sig, D12_MAX_SIG_ELEMENTS);
+      d12_dxil_copy_signature(mod->input_sig, entry.count[D12_SIGNATURE_INPUT],
+                              entry.elems[D12_SIGNATURE_INPUT]);
+      d12_dxil_copy_signature(mod->output_sig,
+                              entry.count[D12_SIGNATURE_OUTPUT],
+                              entry.elems[D12_SIGNATURE_OUTPUT]);
+      d12_dxil_copy_signature(mod->patch_sig, entry.count[D12_SIGNATURE_PATCH],
+                              entry.elems[D12_SIGNATURE_PATCH]);
+      d12_dxil_module_free(mod);
+      d12_sig_disk_store(&entry);
+   }
 
    unsigned n = MIN2(entry.count[kind], max);
    memcpy(out, entry.elems[kind], n * sizeof(*out));
