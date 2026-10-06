@@ -3078,6 +3078,13 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
 
+   /* EXPERIMENT (MatmulGap H5, not for landing as-is): hoist loop-invariant
+    * work such as cooperative-matrix lane offsets out of loops. */
+   if (getenv("AGX_LICM")) {
+      NIR_PASS(_, nir, nir_opt_licm, NULL);
+      NIR_PASS(_, nir, nir_opt_cse);
+   }
+
    progress = false;
 
    /* If address lowering made progress, clean up before forming preambles.
