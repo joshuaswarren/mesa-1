@@ -27,6 +27,9 @@
 #include "agx3_pack.h"
 #include "glsl_types.h"
 #include "nir.h"
+#include "nir_serialize.h"
+#include "util/mesa-blake3.h"
+#include "util/os_misc.h"
 #include "nir_builtin_builder.h"
 #include "nir_intrinsics.h"
 #include "nir_intrinsics_indices.h"
@@ -9796,6 +9799,41 @@ bool
 agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
 {
+   /* Same-build CPU replay of the exact driver-lowered compiler input.
+    * The key contains no pointers. This is a debug format, not a cache ABI.
+    * Content-address the complete input so repeated pipeline creation does
+    * not rewrite an input or race another compiler thread. "wbx" also keeps
+    * the serialized bytes binary on Wine's Windows CRT. */
+   const char *dump_path = os_get_option_secure("AGX_SHADER_DUMP_PATH");
+   if (dump_path) {
+      struct blob blob;
+      blob_init(&blob);
+      blob_write_uint32(&blob, sizeof(*key));
+      blob_write_bytes(&blob, key, sizeof(*key));
+      nir_serialize(&blob, nir, false);
+      blake3_hash identity;
+      char hash[BLAKE3_HEX_LEN];
+      char *path = NULL;
+      if (!blob.out_of_memory) {
+         _mesa_blake3_compute(blob.data, blob.size, identity);
+         _mesa_blake3_format(hash, identity);
+      }
+      if (!blob.out_of_memory &&
+          asprintf(&path, "%s/%s-%s", dump_path,
+                   _mesa_shader_stage_to_string(nir->info.stage), hash) >= 0) {
+         FILE *file = fopen(path, "wbx");
+         if (file) {
+            if (fwrite(blob.data, 1, blob.size, file) == blob.size) {
+               _mesa_blake3_format(hash, nir->info.source_blake3);
+               fprintf(stderr, "AGX compiler input %s name=%s source=%s\n",
+                       path, nir->info.name ? nir->info.name : "?", hash);
+            }
+            fclose(file);
+         }
+         free(path);
+      }
+      blob_finish(&blob);
+   }
    agx_compiler_debug = agx_get_compiler_debug();
    agx_refusal[0] = 0;
    /* v56d: the native constant-program decision is per compile

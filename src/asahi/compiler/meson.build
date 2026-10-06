@@ -1083,3 +1083,12 @@ if with_tests
     suite : ['asahi'],
   )
 endif
+
+if with_tests
+  executable(
+    'agx_replay',
+    files('test/agx-replay.c'),
+    dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+    link_with : [libasahi_compiler, libpoly_nir],
+  )
+endif
