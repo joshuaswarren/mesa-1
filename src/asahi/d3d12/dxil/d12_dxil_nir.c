@@ -7046,7 +7046,8 @@ d12_sig_disk_load(uint64_t hash, size_t size_B,
    cache_key key;
    d12_sig_disk_key(disk, hash, size_B, key);
    size_t size = 0;
-   struct d12_sig_disk_entry *on_disk = disk_cache_get(disk, key, &size);
+   struct d12_sig_disk_entry *on_disk =
+      (struct d12_sig_disk_entry *)disk_cache_get(disk, key, &size);
    if (!on_disk)
       return false;
    bool ok = size == sizeof(*on_disk) && on_disk->magic == D12_SIG_DISK_MAGIC &&

@@ -136,3 +136,46 @@ then real titles; pass/fail and frame time recorded against the current tool.
   `drm.h`; only legacy structs use it, none of ours.
 * Wine's 4K-page processes on the 16K kernel already mmap GEM BOs (Honeykrisp
   through winevulkan), so the same path is expected to work for us.
+# Windows exports and Agility SDK
+
+Both Windows module definitions assign the named exports to Windows ordinals
+101–108. `build-wine-arm64ec.sh` checks the linked PE with
+`tools/check-d3d12-exports.py` and llvm-readobj, so changing the definition without
+producing the expected binary fails the build.
+
+The driver creates devices directly; it has no D3D12Core loader. Executable
+`D3D12SDKVersion`/`D3D12SDKPath` exports do not select a Microsoft runtime.
+`D3D12GetInterface` provides `ID3D12SDKConfiguration`/`1` and
+`ID3D12DeviceFactory`. SDK selection accepts any version/path without opening it;
+both paths use the existing AGX backend. Global `D3D12CreateDevice` returns
+one live device per adapter LUID. The registry owns no reference and is locked
+against final Release. A removed singleton cannot be returned again. Factories
+create independent devices, including when ALLOW_RETURNING flags are set;
+those flags permit a fallback which this backend does not need. Factory flags
+remain local when applying or initializing global state.
+
+Device and factory configuration tear-offs expose the same serialization and
+experimental-feature methods. Factory configuration shares its owner's COM
+identity and reference count, and reports the built-in SDK version rather than
+the ignored requested version. DRED settings are accepted as advisory stubs;
+DRED reports, debug layers and experimental features remain unsupported.
+Unknown interfaces still return E_NOINTERFACE. The Proton tool forces builtin
+d3d12/d3d12core, keeping application native DLLs out of this path. Applications
+that directly import functions from Microsoft's D3D12Core are outside this
+compatibility path; we do not provide a separate Windows Core DLL.
+
+Build `tools/build-ordinal-test.sh SOURCE OUT` on a Linux build host with
+LLVM_MINGW_ROOT set. The x64 probe imports CreateDevice/GetDebugInterface by
+ordinal 101/102, uses named serializers, exports SDK version 614 and
+`.\\D3D12\\x64\\`, and creates devices globally and through both factory paths. It also checks
+singleton and independent identities, local factory flags, the configuration
+tear-off's COM lifetime and serializer ABI, and DRED settings lookup.
+Its app-local Core fixture exits with code 99 if loaded. Run it under the
+experimental tool with `tools/neo-run-proton.sh`, inside an approved aurora-ctl
+request guarded by `tests/neo-gpu-session.py`. Success requires
+`ORDINAL_AGILITY_RESULT failures=0` and a valid GPU-session result.
+
+Public behavior references (reference only; no LGPL source copied):
+[vkd3d-proton SDK configuration](https://github.com/HansKristian-Work/vkd3d-proton/blob/master/libs/d3d12/main.c),
+[Microsoft GetInterface](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-d3d12getinterface),
+and the MIT [DirectX-Headers API definitions](https://github.com/microsoft/DirectX-Headers/blob/main/include/directx/d3d12.h).

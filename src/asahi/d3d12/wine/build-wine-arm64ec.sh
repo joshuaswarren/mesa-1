@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 #
 # Reproducible build of the Wine/Proton d3d12agx pair on an aarch64 Linux box
-# (the Neo) with llvm-mingw:
+# (for example m1pro, never the Neo) with llvm-mingw:
 #   1. native Mesa host tools (mesa_clc, vtn_bindgen2, asahi_clc) from this tree
 #   2. ARM64EC PE d3d12.dll (meson cross build, -Dasahi-d3d12-platform=wine)
 #   3. aarch64 ELF unixlib d3d12.so
@@ -75,14 +75,17 @@ cc -O2 -fPIC -shared -fvisibility=hidden -Wall -Wextra \
 # 4. package ----------------------------------------------------------------
 cp "$cross/src/asahi/d3d12/d3d12.dll" "$out/d3d12.dll"
 python3 "$wine_dir/tools/mark-wine-builtin.py" "$out/d3d12.dll"
+python3 "$wine_dir/tools/check-d3d12-exports.py" "$out/d3d12.dll" \
+   --llvm-readobj "$toolchain/bin/llvm-readobj" > "$out/d3d12.exports.json.txt"
+cat "$out/d3d12.exports.json.txt"
 "$toolchain/bin/llvm-readobj" --file-headers --coff-load-config "$out/d3d12.dll" \
-   | grep -E 'Format|Machine|CHPEMetadataPointer' > "$out/d3d12.dll.readobj.txt"
+   | /usr/bin/grep -E 'Format|Machine|CHPEMetadataPointer' > "$out/d3d12.dll.readobj.txt"
 cat "$out/d3d12.dll.readobj.txt"
 # llvm-readobj reports ARM64EC for an AMD64-machine image with CHPE metadata;
 # mark-wine-builtin.py verified the raw header field is 0x8664 (what
 # wineserver requires).
-grep -q 'IMAGE_FILE_MACHINE_ARM64EC\|IMAGE_FILE_MACHINE_AMD64' "$out/d3d12.dll.readobj.txt"
-grep -q 'CHPEMetadataPointer: 0x[1-9A-F]' "$out/d3d12.dll.readobj.txt" || { echo "not an ARM64EC image" >&2; exit 1; }
+/usr/bin/grep -q 'IMAGE_FILE_MACHINE_ARM64EC\|IMAGE_FILE_MACHINE_AMD64' "$out/d3d12.dll.readobj.txt"
+/usr/bin/grep -q 'CHPEMetadataPointer: 0x[1-9A-F]' "$out/d3d12.dll.readobj.txt" || { echo "not an ARM64EC image" >&2; exit 1; }
 git -C "$src" rev-parse HEAD > "$out/SOURCE-COMMIT" 2>/dev/null || cp "$src/SOURCE-COMMIT" "$out/SOURCE-COMMIT"
 (cd "$out" && sha256sum d3d12.dll d3d12.so > ARTIFACTS.sha256 && cat ARTIFACTS.sha256)
 echo "== done $(date -u +%FT%TZ)"
