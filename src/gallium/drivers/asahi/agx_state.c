@@ -7236,7 +7236,7 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
       size_t ib_extent = 0;
       vp.index_size_B = info->index_size;
       vp.index_buffer = agx_index_buffer_ptr(batch, info, draws, &ib_extent);
-      vp.index_buffer_range_el = ib_extent;
+      vp.index_buffer_range_el = ib_extent / info->index_size;
    }
 
    /* Setup parameters */
