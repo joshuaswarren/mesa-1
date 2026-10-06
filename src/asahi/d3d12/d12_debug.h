@@ -45,6 +45,9 @@ struct d12_debug_flags {
     * the queue's own previous timeline point (the pre-t-1185 shape), for
     * A/B against the firmware-ordered default. */
    bool submit_self_wait;
+   /* D3D12AGX_SUBMIT_INLINE_ALWAYS: submit from the calling thread even
+    * while earlier submissions are in flight (the pre-t-1185 shape). */
+   bool submit_inline_always;
 
    /* Qualification opt-ins consumed by the G17P admission gates in
     * d12_cmd.c. Each is true only when the variable is exactly "1". */

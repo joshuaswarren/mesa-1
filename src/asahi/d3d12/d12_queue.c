@@ -2849,10 +2849,16 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
             break;
       } else if (d12_queue_idle_locked(queue) &&
                  d12_queue_timeline_has_capacity(
-                    &queue->timeline, D12_QUEUE_MAX_INFLIGHT_SUBMITS)) {
-         /* Nothing is ahead of this list: submit it from here instead of
-          * paying a worker wakeup.  A full in-flight window still goes
-          * through the worker so this call never blocks on the GPU. */
+                    &queue->timeline, D12_QUEUE_MAX_INFLIGHT_SUBMITS) &&
+                 (!d12_queue_timeline_inflight(&queue->timeline) ||
+                  d12_debug()->submit_inline_always)) {
+         /* Nothing is ahead of this list and the GPU is idle: submit it
+          * from here, where the worker's wake-up would be latency the
+          * GPU waits for.  While earlier submissions are still in flight
+          * the GPU is busy anyway, so the ioctl (about 30 us on the M1
+          * Pro) goes to the worker and the application thread moves on,
+          * which is vkd3d-proton's shape.  A full in-flight window goes
+          * through the worker too, so this call never blocks on the GPU. */
          d12_queue_dump_path_locked(queue, "Execute", true);
          d12_queue_inline_begin_locked(queue);
          mtx_unlock(&queue->lock);
