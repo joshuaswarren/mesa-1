@@ -24,7 +24,9 @@
  * the samples' FrameCount; up to 8), --draws N (draws per frame in the
  * draws scenes, default 1000), --pso-vary MASK (what the draws_pso
  * pipelines vary: 1 cull mode, 2 blending, default 3), --nodepth (draws
- * scenes without the depth buffer).
+ * scenes without the depth buffer), --depth-store store|discard (declared
+ * passes, differing only in the depth ending access), --vertexid (full-screen
+ * SV_VertexID geometry for devices without vertex-buffer pipelines).
  *
  * Scenes (every one clears the colour target first):
  *   triangle    HelloTriangle: one vertex-buffer draw
@@ -39,8 +41,8 @@
  *               for parity: the cost here is the GPU's, not the driver's)
  *   dispatches  64 dispatches with a UAV barrier between each
  *
- * Per scene two loops run: "pipelined" keeps the in-flight count of frames going,
- * which is the throughput an application sees; "serial" waits for every
+ * Per scene two loops run: "pipelined" keeps the in-flight count of frames
+ * going, which is the throughput an application sees; "serial" waits for every
  * frame before recording the next, which is the latency of one frame on
  * the GPU plus the submission path. CPU record and ExecuteCommandLists
  * times are medians over the pipelined loop. The last line is
@@ -80,6 +82,9 @@ typedef HRESULT(WINAPI *pfn_serialize_rs_t)(const D3D12_ROOT_SIGNATURE_DESC *,
 
 static unsigned draw_scene_draws = DRAW_SCENE_DRAWS_DEFAULT;
 static bool draw_scene_depth = true;
+/* 0: OM/Clear (default), 1/2: declared passes with depth store/discard. */
+static unsigned depth_store_mode;
+static bool vertexid_geometry;
 /* Which state the draws_pso pipelines vary: bit 0 cull mode, bit 1 blending. */
 static unsigned draw_pso_vary = 3;
 static pfn_create_device_t pfn_create_device;
@@ -186,6 +191,8 @@ struct fb {
    UINT64 frame_fence[FRAME_COUNT_MAX];
    ID3D12CommandAllocator *alloc[FRAME_COUNT_MAX];
    ID3D12GraphicsCommandList *list;
+   ID3D12GraphicsCommandList4 *pass_list;
+   bool pass_unsupported;
    unsigned frame_index;
    unsigned frame_count;
 
@@ -425,9 +432,13 @@ setup_triangle(struct fb *b, const struct shaders *s)
        .AlignedByteOffset = 8,
        .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
    };
-   D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = base_gfx_desc(
-      b->rs_empty, s->vb_vs, s->vb_vs_size, s->vb_ps, s->vb_ps_size);
-   pd.InputLayout = (D3D12_INPUT_LAYOUT_DESC){elems, 2};
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC pd =
+      base_gfx_desc(b->rs_empty, vertexid_geometry ? s->tri : s->vb_vs,
+                    vertexid_geometry ? s->tri_size : s->vb_vs_size,
+                    vertexid_geometry ? s->solid : s->vb_ps,
+                    vertexid_geometry ? s->solid_size : s->vb_ps_size);
+   if (!vertexid_geometry)
+      pd.InputLayout = (D3D12_INPUT_LAYOUT_DESC){elems, 2};
    HRESULT hr = ID3D12Device_CreateGraphicsPipelineState(
       b->dev, &pd, &IID_ID3D12PipelineState, (void **)&b->pso_vb);
    CHECK(hr == S_OK, "vertex-buffer PSO");
@@ -519,9 +530,13 @@ setup_draws(struct fb *b, const struct shaders *s)
        .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
    };
    for (unsigned i = 0; i < DRAW_SCENE_PSOS; i++) {
-      D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = base_gfx_desc(
-         b->rs_consts, s->vb_vs, s->vb_vs_size, s->vb_ps, s->vb_ps_size);
-      pd.InputLayout = (D3D12_INPUT_LAYOUT_DESC){elems, 2};
+      D3D12_GRAPHICS_PIPELINE_STATE_DESC pd =
+         base_gfx_desc(b->rs_consts, vertexid_geometry ? s->tri : s->vb_vs,
+                       vertexid_geometry ? s->tri_size : s->vb_vs_size,
+                       vertexid_geometry ? s->solid : s->vb_ps,
+                       vertexid_geometry ? s->solid_size : s->vb_ps_size);
+      if (!vertexid_geometry)
+         pd.InputLayout = (D3D12_INPUT_LAYOUT_DESC){elems, 2};
       if (draw_scene_depth) {
          pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
          pd.DepthStencilState.DepthEnable = TRUE;
@@ -728,13 +743,52 @@ begin_frame_graphics(struct fb *b, bool depth)
    transition(list, b->rt, D3D12_RESOURCE_STATE_COMMON,
               D3D12_RESOURCE_STATE_RENDER_TARGET);
    const FLOAT clear[4] = {0.0f, 0.2f, 0.4f, 1.0f};
-   ID3D12GraphicsCommandList_ClearRenderTargetView(list, b->rtv, clear, 0,
-                                                   NULL);
-   if (depth)
-      ID3D12GraphicsCommandList_ClearDepthStencilView(
-         list, b->dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
-   ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &b->rtv, FALSE,
-                                                depth ? &b->dsv : NULL);
+   if (depth && depth_store_mode) {
+      if (ID3D12GraphicsCommandList_QueryInterface(
+             list, &IID_ID3D12GraphicsCommandList4, (void **)&b->pass_list) !=
+             S_OK ||
+          !b->pass_list) {
+         b->pass_unsupported = true;
+         return;
+      }
+      D3D12_RENDER_PASS_RENDER_TARGET_DESC colour = {
+         .cpuDescriptor = b->rtv,
+         .BeginningAccess =
+            {
+               .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
+               .Clear.ClearValue = {.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                                    .Color = {0.0f, 0.2f, 0.4f, 1.0f}},
+            },
+         .EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,
+      };
+      D3D12_RENDER_PASS_DEPTH_STENCIL_DESC z = {
+         .cpuDescriptor = b->dsv,
+         .DepthBeginningAccess =
+            {
+               .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
+               .Clear.ClearValue = {.Format = DXGI_FORMAT_D32_FLOAT,
+                                    .DepthStencil = {.Depth = 1.0f}},
+            },
+         .DepthEndingAccess.Type =
+            depth_store_mode == 1
+               ? D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE
+               : D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD,
+         .StencilBeginningAccess.Type =
+            D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS,
+         .StencilEndingAccess.Type =
+            D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS,
+      };
+      ID3D12GraphicsCommandList4_BeginRenderPass(b->pass_list, 1, &colour, &z,
+                                                 D3D12_RENDER_PASS_FLAG_NONE);
+   } else {
+      ID3D12GraphicsCommandList_ClearRenderTargetView(list, b->rtv, clear, 0,
+                                                      NULL);
+      if (depth)
+         ID3D12GraphicsCommandList_ClearDepthStencilView(
+            list, b->dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+      ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &b->rtv, FALSE,
+                                                   depth ? &b->dsv : NULL);
+   }
    D3D12_VIEWPORT vp = {
       .Width = (float)b->width, .Height = (float)b->height, .MaxDepth = 1.0f};
    ID3D12GraphicsCommandList_RSSetViewports(list, 1, &vp);
@@ -745,6 +799,11 @@ begin_frame_graphics(struct fb *b, bool depth)
 static void
 end_frame_graphics(struct fb *b)
 {
+   if (b->pass_list) {
+      ID3D12GraphicsCommandList4_EndRenderPass(b->pass_list);
+      ID3D12GraphicsCommandList4_Release(b->pass_list);
+      b->pass_list = NULL;
+   }
    transition(b->list, b->rt, D3D12_RESOURCE_STATE_RENDER_TARGET,
               D3D12_RESOURCE_STATE_COMMON);
 }
@@ -894,6 +953,8 @@ run_frame(struct fb *b, enum scene_id scene, double *record_us,
    if (ID3D12GraphicsCommandList_Reset(b->list, alloc, NULL) != S_OK)
       return false;
    record_scene(b, scene);
+   if (b->pass_unsupported)
+      return false;
    if (ID3D12GraphicsCommandList_Close(b->list) != S_OK)
       return false;
    double t1 = now_ns();
@@ -917,6 +978,7 @@ replace_list(struct fb *b)
    wait_idle(b);
    ID3D12GraphicsCommandList_Release(b->list);
    b->list = NULL;
+   b->pass_unsupported = false;
    if (ID3D12Device_CreateCommandList(
           b->dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, b->alloc[b->frame_index],
           NULL, &IID_ID3D12GraphicsCommandList, (void **)&b->list) != S_OK)
@@ -1008,7 +1070,19 @@ main(int argc, char **argv)
          inflight = (unsigned)atoi(argv[++i]);
       else if (!strcmp(argv[i], "--draws") && i + 1 < argc)
          draw_scene_draws = (unsigned)atoi(argv[++i]);
-      else if (!strcmp(argv[i], "--nodepth"))
+      else if (!strcmp(argv[i], "--vertexid"))
+         vertexid_geometry = true;
+      else if (!strcmp(argv[i], "--depth-store") && i + 1 < argc) {
+         const char *mode = argv[++i];
+         if (!strcmp(mode, "store"))
+            depth_store_mode = 1;
+         else if (!strcmp(mode, "discard"))
+            depth_store_mode = 2;
+         else {
+            fprintf(stderr, "--depth-store expects store or discard\n");
+            return 2;
+         }
+      } else if (!strcmp(argv[i], "--nodepth"))
          draw_scene_depth = false;
       else if (!strcmp(argv[i], "--pso-vary") && i + 1 < argc)
          draw_pso_vary = (unsigned)atoi(argv[++i]) & 3;
@@ -1017,12 +1091,13 @@ main(int argc, char **argv)
    }
    if (!shader_dir || !frames || !width || !height || !inflight ||
        inflight > FRAME_COUNT_MAX || !draw_scene_draws) {
-      fprintf(stderr,
-              "usage: %s SHADER_DIR [--frames N] [--scene NAME] "
-              "[--width W --height H] [--inflight N] [--draws N] [--nodepth] [--pso-vary MASK]\n"
-              "       D3D12_LIBRARY selects the implementation "
-              "(default libd3d12agx.so)\n",
-              argv[0]);
+      fprintf(
+         stderr,
+         "usage: %s SHADER_DIR [--frames N] [--scene NAME] "
+         "[--width W --height H] [--inflight N] [--draws N] [--nodepth] [--pso-vary MASK] [--depth-store store|discard] [--vertexid]\n"
+         "       D3D12_LIBRARY selects the implementation "
+         "(default libd3d12agx.so)\n",
+         argv[0]);
       return 2;
    }
 
@@ -1146,9 +1221,12 @@ main(int argc, char **argv)
          printf("frame %-10s FAILED\n", scene_names[sc]);
    }
 
-   printf("FRAMEBENCH_JSON {\"library\": \"%s\", \"width\": %u, \"height\": %u, "
-          "\"frames\": %u, \"inflight\": %u",
-          library, width, height, frames, inflight);
+   printf(
+      "FRAMEBENCH_JSON {\"library\": \"%s\", \"width\": %u, \"height\": %u, "
+      "\"frames\": %u, \"inflight\": %u, "
+      "\"depth_store_mode\": %u, \"vertexid\": %s",
+      library, width, height, frames, inflight, depth_store_mode,
+      vertexid_geometry ? "true" : "false");
    for (unsigned sc = 0; sc < SCENE_COUNT; sc++) {
       const struct scene_result *r = &results[sc];
       printf(", \"%s\": {\"ok\": %s, \"pipelined_us\": %.1f, \"serial_us\": %.1f, "

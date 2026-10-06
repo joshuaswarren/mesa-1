@@ -407,7 +407,14 @@ record_texture_dispatch_list(struct bench *b, double *per_dispatch_ns)
 #define PASS_FRAMES 16
 #define PASS_DRAWS 4
 
-enum pass_shape { PASS_RT, PASS_DSRT, PASS_DISCARD, PASS_SHAPES };
+enum pass_shape {
+   PASS_RT,
+   PASS_DSRT,
+   PASS_DISCARD,
+   PASS_DECL_STORE,
+   PASS_DECL_DISCARD,
+   PASS_SHAPES
+};
 
 static bool
 record_pass_list(struct bench *b, ID3D12GraphicsCommandList *list,
@@ -418,6 +425,13 @@ record_pass_list(struct bench *b, ID3D12GraphicsCommandList *list,
 {
    const FLOAT clear[4] = {0.1f, 0.2f, 0.3f, 1.0f};
    const bool depth = shape != PASS_RT;
+   const bool declared = shape >= PASS_DECL_STORE;
+   ID3D12GraphicsCommandList4 *list4 = NULL;
+   if (declared &&
+       (ID3D12GraphicsCommandList_QueryInterface(
+           list, &IID_ID3D12GraphicsCommandList4, (void **)&list4) != S_OK ||
+        !list4))
+      return false;
    double t0 = now_ns();
    transition(list, rt, D3D12_RESOURCE_STATE_COMMON,
               D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -425,13 +439,45 @@ record_pass_list(struct bench *b, ID3D12GraphicsCommandList *list,
       transition(list, ds, D3D12_RESOURCE_STATE_COMMON,
                  D3D12_RESOURCE_STATE_DEPTH_WRITE);
    for (unsigned f = 0; f < PASS_FRAMES; f++) {
-      if (depth)
-         ID3D12GraphicsCommandList_ClearDepthStencilView(
-            list, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
-      ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear, 0,
-                                                      NULL);
-      ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE,
-                                                   depth ? &dsv : NULL);
+      if (declared) {
+         D3D12_RENDER_PASS_RENDER_TARGET_DESC colour = {
+            .cpuDescriptor = rtv,
+            .BeginningAccess =
+               {
+                  .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
+                  .Clear.ClearValue = {.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                                       .Color = {0.1f, 0.2f, 0.3f, 1.0f}},
+               },
+            .EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,
+         };
+         D3D12_RENDER_PASS_DEPTH_STENCIL_DESC z = {
+            .cpuDescriptor = dsv,
+            .DepthBeginningAccess =
+               {
+                  .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
+                  .Clear.ClearValue = {.Format = DXGI_FORMAT_D32_FLOAT,
+                                       .DepthStencil = {.Depth = 1.0f}},
+               },
+            .DepthEndingAccess.Type =
+               shape == PASS_DECL_STORE
+                  ? D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE
+                  : D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD,
+            .StencilBeginningAccess.Type =
+               D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS,
+            .StencilEndingAccess.Type =
+               D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS,
+         };
+         ID3D12GraphicsCommandList4_BeginRenderPass(
+            list4, 1, &colour, &z, D3D12_RENDER_PASS_FLAG_NONE);
+      } else {
+         if (depth)
+            ID3D12GraphicsCommandList_ClearDepthStencilView(
+               list, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+         ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear, 0,
+                                                         NULL);
+         ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE,
+                                                      depth ? &dsv : NULL);
+      }
       D3D12_VIEWPORT vp = {.Width = PASS_W, .Height = PASS_H, .MaxDepth = 1.0f};
       ID3D12GraphicsCommandList_RSSetViewports(list, 1, &vp);
       D3D12_RECT sc = {.right = PASS_W, .bottom = PASS_H};
@@ -442,6 +488,8 @@ record_pass_list(struct bench *b, ID3D12GraphicsCommandList *list,
          list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       for (unsigned i = 0; i < PASS_DRAWS; i++)
          ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+      if (declared)
+         ID3D12GraphicsCommandList4_EndRenderPass(list4);
       if (shape == PASS_DISCARD)
          ID3D12GraphicsCommandList_DiscardResource(list, ds, NULL);
    }
@@ -450,13 +498,16 @@ record_pass_list(struct bench *b, ID3D12GraphicsCommandList *list,
    if (depth)
       transition(list, ds, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                  D3D12_RESOURCE_STATE_COMMON);
-   if (ID3D12GraphicsCommandList_Close(list) != S_OK)
+   HRESULT close_hr = ID3D12GraphicsCommandList_Close(list);
+   if (list4)
+      ID3D12GraphicsCommandList4_Release(list4);
+   if (close_hr != S_OK)
       return false;
    *record_us = (now_ns() - t0) / 1e3;
    return true;
 }
 
-/* Returns false on any failure; fills gpu_ms[PASS_SHAPES] with the best of
+/* Returns false on any failure; fills gpu_ms[PASS_SHAPES] with the median of
  * three executions of each shape and record_us with the dsrt recording cost.
  * A shape the device refuses to record (a native path that admits only some
  * attachment shapes) is reported as 0 and skipped, not failed: the rest of
@@ -549,7 +600,8 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
       return false;
    bool ok = true;
    for (unsigned shape = 0; shape < PASS_SHAPES && ok; shape++) {
-      double best = 0;
+      double samples[3];
+      unsigned sample_count = 0;
       ID3D12GraphicsCommandList *list = NULL;
       if (ID3D12CommandAllocator_Reset(alloc) != S_OK ||
           ID3D12Device_CreateCommandList(
@@ -571,7 +623,7 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
                                &rec)) {
             printf("passes: shape %u is not recordable on this device\n",
                    shape);
-            best = 0;
+            sample_count = 0;
             break;
          }
          if (shape == PASS_DSRT)
@@ -581,11 +633,10 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
          ID3D12CommandQueue_ExecuteCommandLists(b->queue, 1, lists);
          ok = wait_idle(b) == S_OK;
          double ms = (now_ns() - e0) / 1e6;
-         if (!rep || ms < best)
-            best = ms;
+         samples[sample_count++] = ms;
       }
       ID3D12GraphicsCommandList_Release(list);
-      gpu_ms[shape] = best;
+      gpu_ms[shape] = sample_count ? percentile(samples, sample_count, 0.5) : 0;
    }
    ID3D12CommandAllocator_Release(alloc);
 
@@ -1309,15 +1360,21 @@ main(int argc, char **argv)
                         &pass_record_us),
            "render-pass traffic lists execute");
    printf("passes %u frames at %ux%u: rt %.2f ms, ds+rt %.2f ms, "
-          "ds+rt+discard %.2f ms (GPU wall, best of 3); record %.1f us\n",
+          "ds+rt+discard %.2f ms (GPU wall, median of 3); record %.1f us\n",
           PASS_FRAMES, PASS_W, PASS_H, pass_ms[PASS_RT], pass_ms[PASS_DSRT],
           pass_ms[PASS_DISCARD], pass_record_us);
+   printf("passes declared depth store %.3f ms, discard %.3f ms "
+          "(same clear/test/draw; 16 passes)\n",
+          pass_ms[PASS_DECL_STORE], pass_ms[PASS_DECL_DISCARD]);
    if (only_passes) {
-      printf("MICROBENCH_JSON {\"only\": \"passes\", "
-             "\"gpu_wall_ms_passes_rt\": %.3f, \"gpu_wall_ms_passes_dsrt\": %.3f, "
-             "\"gpu_wall_ms_passes_discard\": %.3f, \"record_us_passes\": %.1f}\n",
-             pass_ms[PASS_RT], pass_ms[PASS_DSRT], pass_ms[PASS_DISCARD],
-             pass_record_us);
+      printf(
+         "MICROBENCH_JSON {\"only\": \"passes\", "
+         "\"gpu_wall_ms_passes_rt\": %.3f, \"gpu_wall_ms_passes_dsrt\": %.3f, "
+         "\"gpu_wall_ms_passes_discard\": %.3f, "
+         "\"gpu_wall_ms_depth_store\": %.3f, "
+         "\"gpu_wall_ms_depth_discard\": %.3f, \"record_us_passes\": %.1f}\n",
+         pass_ms[PASS_RT], pass_ms[PASS_DSRT], pass_ms[PASS_DISCARD],
+         pass_ms[PASS_DECL_STORE], pass_ms[PASS_DECL_DISCARD], pass_record_us);
       return 0;
    }
 
