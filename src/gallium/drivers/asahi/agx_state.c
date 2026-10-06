@@ -1776,12 +1776,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
-      /* TES keeps its API stage for sysvals, but its normalized NIR runs as
-       * a vertex shader and needs the same native texture-pointer prefix. */
+      /* Every stage but the fragment one reaches the GPU as a compute
+       * dispatch or a hardware vertex program on G17P -- geometry and
+       * tessellation control run as compute, tessellation evaluation as the
+       * vertex shader (keeping its API stage for sysvals) -- and both carry
+       * the texture and sampler table pointers in uniform halves 0..7. */
       compiled->g17p_texture_resources =
-         dev->chip == AGX_CHIP_G17P &&
-         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL ||
-          stage == MESA_SHADER_COMPUTE) &&
+         dev->chip == AGX_CHIP_G17P && stage != MESA_SHADER_FRAGMENT &&
          (BITSET_LAST_BIT(nir->info.textures_used) != 0 ||
           BITSET_LAST_BIT(nir->info.images_used) != 0);
       const unsigned uniform_base =
@@ -3988,13 +3989,17 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
    size_t count = 0;
    const mesa_shader_stage stage = cs->stage;
+   /* A hardware vertex program -- the vertex shader, a tessellation
+    * evaluation shader run as one, or a geometry shader's copy program --
+    * takes the pair exactly when it was compiled to read it. The copy
+    * program samples nothing even when its geometry shader, whose texture
+    * table this stage's count describes, does. */
    const bool resource_pair =
       batch->texture_count[stage] != 0 &&
-      (stage == MESA_SHADER_FRAGMENT ||
-       ((stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL) &&
-        cs->g17p_texture_resources));
+      (stage == MESA_SHADER_FRAGMENT || cs->g17p_texture_resources);
 
-   if (batch->texture_count[stage] && !resource_pair)
+   if (batch->texture_count[stage] && !resource_pair &&
+       stage == MESA_SHADER_FRAGMENT)
       return 0;
    if (resource_pair) {
       if (!batch->stage_uniforms[stage].texture_base ||
