@@ -572,6 +572,13 @@ d3d12agx_g10_vertex_buffers = executable(
   link_with : [libd3d12agx],
 )
 
+d3d12agx_g12_sample_shapes = executable(
+  'd3d12agx_g12_sample_shapes',
+  files('tests/g12_sample_shapes.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g9_amplification = executable(
   'd3d12agx_g9_amplification',
   files('tests/g9_amplification.c'),

@@ -7600,10 +7600,17 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    seg->dispatches++;
 }
 
-/* First bounded graphics-stage producer: monolithic native VS/FS with
- * command-owned root/draw/blend ranges. This supplies Ioto bytes only; the
- * independent VDM-context, PPP, background and EOT gates remain mandatory.
- * Texture, preamble and promoted-constant ABIs are deliberately not admitted. */
+/* Bounded graphics-stage producer: monolithic native VS/FS with
+ * command-owned root/draw/blend ranges, plus the two pointer cells a
+ * root-only stage can still consume: the vertex-attribute parameter block
+ * (agx_nir_lower_vbo fetches attributes with plain memory loads through
+ * D12_UNIFORM_VB_PARAMS) and the shader-visible descriptor heap base
+ * (SM 6.6 ResourceDescriptorHeap[] buffer access through D12_UNIFORM_HEAP).
+ * Both are ordinary dword-aligned Ioto uniform ranges, exactly what the
+ * native compute producer already publishes for them. This supplies Ioto
+ * bytes only; the independent VDM-context, PPP, background and EOT gates
+ * remain mandatory. Texture, preamble and promoted-constant ABIs are
+ * deliberately not admitted. */
 static bool d12_list_native_cell(struct d12_cmd_list *list, uint64_t address,
                                  size_t pointee_size);
 
@@ -7611,7 +7618,8 @@ static uint32_t
 d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                   bool fragment, const struct agx_tilebuffer_layout *tib,
                   uint64_t root_gpu, uint64_t draw_gpu, uint64_t blend_gpu,
-                  const struct d12_dispatch_uniforms *poly)
+                  const struct d12_dispatch_uniforms *poly,
+                  uint64_t heap_gpu)
 {
    const char *failure = "stage-metadata";
    struct agx_device *dev = &list->device->dev;
@@ -7633,7 +7641,7 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
       goto fail;
 
    failure = "uniform-ownership";
-   struct agx3_ioto_uniform_range ranges[4];
+   struct agx3_ioto_uniform_range ranges[5];
    size_t count = 0;
    if (fragment && blend_gpu)
       ranges[count++] = (struct agx3_ioto_uniform_range){
@@ -7673,6 +7681,18 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
          .address = poly->mesh_params,
       };
    }
+   /* The bound shader-visible heap's 40-byte descriptor array. A root-only
+    * stage can only reach buffers through it, and a stage that never
+    * indexes the heap merely loads one unused pointer. */
+   if (heap_gpu) {
+      if (count >= ARRAY_SIZE(ranges))
+         goto fail;
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = D12_UNIFORM_HEAP,
+         .size_halfs = D12_UNIFORM_HEAP_REGS, .address = heap_gpu,
+      };
+   }
+   STATIC_ASSERT(ARRAY_SIZE(ranges) <= AGX3_G17P_GRAPHICS_MAX_RANGES);
    for (size_t i = 0; i < count; i++) {
       const size_t size = (size_t)ranges[i].size_halfs * 2;
       /* This subset consumes only immutable command-list uploads. */
@@ -7756,24 +7776,37 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    struct d12_device *device = list->device;
 
    if (device->dev.chip == AGX_CHIP_G17P) {
-      /* Unused null texture/PBE home cells are always uploaded by the
-       * binding collector; the frontend usage proof decides admission. */
-      /* The bounded mesh chain publishes its parameters to the mesh
-       * raster stage only; every other software stage stays refused. */
+      /* The frontend usage proof decides admission: a stage with a texture
+       * or image instruction needs the native indexed texture/sampler ABI,
+       * which no graphics producer supplies yet. The binding collector
+       * always uploads the root-slot texture/PBE tables and, when a heap is
+       * bound, its parallel native texture/PBE/sampler arrays; a root-only
+       * stage cannot read any of those, so their presence is not a
+       * refusal. */
+      if (!st->g17p_root_only) {
+         mesa_loge("native graphics texture stage producer unavailable");
+         list->state = D12_LIST_ERROR;
+         return 0;
+      }
+      /* Vertex-attribute parameters are the one Poly uniform a hardware
+       * vertex stage consumes itself, and the bounded mesh chain publishes
+       * its parameters to the mesh raster stage only. The others feed the
+       * geometry and tessellation compute variants, which have no native
+       * producer. */
       const bool mesh_stage = poly && poly->mesh_params && !fragment &&
                               list->pso->has_mesh && st == &list->pso->ms_rast;
       const bool software_stages = poly &&
          (poly->geom_params || poly->tess_params || poly->vs_outputs ||
           poly->vertex_params || poly->stat_query ||
           (poly->mesh_params && !mesh_stage));
-      if (!st->g17p_root_only || heap_gpu || heap_textures_gpu ||
-          heap_pbes_gpu || heap_samplers_gpu || software_stages) {
-         mesa_loge("native graphics texture/poly stage producer unavailable");
+      if (software_stages) {
+         mesa_loge("native graphics Poly (GS/HS/DS/MS) stage producer "
+                   "unavailable");
          list->state = D12_LIST_ERROR;
          return 0;
       }
       return d12_gfx_stage_g17p(list, st, fragment, tib, root_gpu, draw_gpu,
-                                blend_gpu, poly);
+                                blend_gpu, poly, heap_gpu);
    }
 
    uint32_t usc;
