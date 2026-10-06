@@ -456,3 +456,181 @@ Neo 9/17 at 9b1afcfb219 and cc55230bb1e (h-6529), at 1b20e71cef2 and
 `pso_threads`, `pso_library_race`, `bundle_state`, `execute_indirect_count`
 and the queue/fence contract test pass on the M1 Pro at the head; meson host
 tests OK. Raw logs and JSON records: `reports/d3d12-stats/t-1082-*`.
+
+## 10. Fourth pass (t-1185, 2026-10-06): frame-level A vs B, descriptors, G17P
+
+Series on top of `416e97802f1`. That is the third pass rebased onto the
+accepted i2 (`3b1710ace11`) and t-1181 (`6a05a2d8922`) heads. The first seven
+commits are from run 1 of the task; run 2 fixed one of them (see A below) and
+added the rest.
+
+### Commits
+
+| sha | area | change |
+|---|---|---|
+| 762ef1e9329 | bench | `d3d12agx_framebench`: whole frames in the DirectX-Graphics-Samples shape against any D3D12 library (`D3D12_LIBRARY`), so the same binary measures d3d12agx (A) and vkd3d-proton on Honeykrisp (B) |
+| e7f7a02b969, fc21e4952a8 | CPU | `d12_debug()` is a load and a branch, then inline |
+| d1664c56b07 | queue | submissions do not wait on the queue's own previous point (frames overlap) |
+| aa06994ae96 | resources | render targets and depth buffers are twiddled by default |
+| 7a152176224 | descriptors | a CBV write copies the null native descriptors |
+| 86aa9f8b022 | draws | fetch parameters, USC words and pipeline state reused across draws; ExecuteIndirect draws keep a private fetch block (fix for vkd3d-proton `test_execute_indirect_state`, found by the corpus run) |
+| 25c7c3f846a, 9ef4206820f, 1f331c82fb5, 7e212ae1b73 | bench | framebench scene variants, `--inflight`, `--pso-vary`; microbench `--groups`, pipeline-library and texture-SRV rows; both benches skip what a device cannot record |
+| 6ffbd34098a | queue | ExecuteCommandLists submits from the worker while the GPU is busy |
+| 422c29ec4c4 | PSO | DXIL signatures come from the shader disk cache |
+| 164a218d30b | G17P | `D3D12AGX_G17P_DISPATCH_NO_BARRIER` experiment (off by default) |
+| 46fbf878c9d | G17P | one sampler cell per recording for native Texture.Load, so the state-loader program cache hits |
+| 1bf20882f61 | draws | viewport/scissor state, attachment match and UAV walk only when their state changed |
+| 50c95e48645 | draws | the VS-FS varyings link is kept per pipeline |
+| 333e1491025 | descriptors | CPU heaps keep native words, and CopyDescriptors copies them |
+| 3f87e36caed | draws | a root-constant change reloads only the fragment-shader PPP group |
+| 82edbab2e17 | queue | a submission behind a heavy one (>= 512 draws) waits for it |
+
+### A vs B: frame level (d3d12agx debugoptimized vs vkd3d-proton release, same binary)
+
+`d3d12agx_framebench --frames 300`, 1280x720, 2 frames in flight, pipelined
+microseconds per frame, median of 3 interleaved runs. The final head library
+(`t1185r8`, identical to `82edbab2e17`) is compared with the base `416e97802f1`.
+
+| scene | M2 base | M2 head | M2 vkd3d-proton | M1 Pro base | M1 Pro head | M1 Pro vkd3d-proton |
+|---|---|---|---|---|---|---|
+| triangle (HelloTriangle) | 248 | 202 | 192 | 275 | 198 | 206 |
+| bundles (HelloBundles) | 258 | 213 | 205 | 303 | 233 | 222 |
+| texload (Texture.Load dispatch + triangle) | 284 | 254 | 259 | 330 | 274 | 270 |
+| draws (1000 VB draws, depth) | 492 | 389 | 442 | 636 | 480 | 434 |
+| draws_rc (+ root constant per draw) | 453 | 426 | 464 | 645 | 632 | 589 |
+| draws_pso (+ 4 PSOs, cull and blend) | 482 | 456 | 416 | 658 | 629 | 513 |
+| fill (100 full-screen triangles) | 415 | 380 | 392 | 460 | 405 | 424 |
+| dispatches (64 dispatches + UAV barriers) | 479 | 413 | 667 | 792 | 726 | 984 |
+
+Frames in flight, triangle scene, microseconds per frame (1/2/4/8 in flight):
+on M2 the head is 287/235/154/103, the base 266/249/231/249 and
+vkd3d-proton 280/191/174/131.
+
+On the M2, d3d12agx is ahead on draws (-12%), draws_rc (-8%), fill (-3%) and
+dispatches (-38%), level on texload, and 4-9% behind on triangle, bundles and
+draws_pso. On the M1 Pro (shared with other workers, load 1-7 during the run)
+it is ahead on triangle, fill and dispatches. Two caveats on the M2 numbers:
+the M2 is a fanless MacBook Air and GPU-bound pipelined frames vary by ±20%
+from run to run, and for draws_pso vkd3d-proton itself ranged 285-443 us
+across reruns. A release build of d3d12agx moved none of these by more than
+the noise: they are GPU-bound.
+
+Overlapping frames (d1664c56b07) favour light frames but not heavy ones. On
+the M2, draws_pso at 250/1000/4000 draws took 276/489-572/1122-1296 us
+overlapped against 288-344/380-397/782 us serialised (vkd3d-proton
+244/444/955). 82edbab2e17 serialises behind a submission of at least 512
+draws, which gives 280-292/395-414/773 us.
+
+### Per-commit attribution (M2, alternating order)
+
+The library of every commit, run with the same head benchmark binaries, four
+rounds (forward, reverse, forward, reverse). The table gives the framebench
+pipelined time in us and the microbench recording times in ns.
+
+| after | draws | draws_rc | draws_pso | triangle | plain draw | rootconst draw | SRV copy bulk/single | first graphics PSO |
+|---|---|---|---|---|---|---|---|---|
+| base | 500 | 462 | 490 | 253 | 89 | 212 | 109/119 | 0.26-0.32 ms |
+| self-wait removed | 542 | 484 | 548 | 192 | 91 | 209 | | |
+| draw-state reuse (run 1) | 480 | 491 | 567 | 187 | 93 | 213 | | |
+| queue worker | 473 | 485 | 555 | 190 | 90 | 213 | | |
+| signature disk cache | | | | | | | | 0.20 ms |
+| per-draw state checks | 393 | 506 | 568 | 186 | 69 | 191 | | |
+| d12_debug inline | 395 | 493 | 560 | 185 | 63 | 191 | | |
+| CPU-heap native words | 393 | 481 | 573 | 193 | 65 | 191 | 8/39 | |
+| fragment-shader PPP group | 411 | 452 | 516 | 192 | 73 | 181 | 8/40 | |
+| heavy-submission wait (separate runs) | 389 | 426 | 456 | 202 | 64 | 172 | 7/36 | 0.20 ms |
+
+### Microbenchmark, base -> head (median of 3)
+
+| metric | M2 | M1 Pro |
+|---|---|---|
+| record plain draw | 87 -> 64 ns | 105 -> 76 ns |
+| record draw + root constant | 220 -> 172 ns | 238 -> 187 ns |
+| record PSO toggle | 113 -> 88 ns | 139 -> 114 ns |
+| texture SRV CopyDescriptors bulk / single | 147 / 151 -> 7 / 36 ns | 211 / 225 -> 9 / 46 ns |
+| texture SRV shader-visible write | 155 -> 101 ns | 233 -> 140 ns |
+| texture SRV CPU-heap write (now packs) | 10 -> 103 ns | 16 -> 131 ns |
+| CBV copy bulk / single | 19 / 25 -> 7 / 37 ns | 28 / 41 -> 8 / 44 ns |
+| first graphics PSO, warm disk cache, fresh process | 0.27 -> 0.14-0.18 ms | 0.35-0.44 -> 0.23-0.26 ms |
+| ExecuteCommandLists 20k draws: call / GPU wall | 25.8 us / 5.4 ms -> 20.8 us / 3.2 ms | 50 us / 7.4 ms -> 36 us / 5.6 ms |
+| 1080p passes, rt / ds+rt / discard | 2.77 / 3.16 / 3.04 -> 2.77 / 3.05 / 3.01 ms | 2.59 / 3.35 / 3.43 -> 2.75 / 3.40 / 3.36 ms |
+
+Render-pass traffic (item 4): run 1's twiddled render targets
+(aa06994ae96) make the `--only passes` shapes recordable on the Neo at all.
+On AGX2 the 1080p clear/draw/discard shapes are unchanged within noise. The
+remaining depth-store cost is the ZLS single store bit (section 9);
+Honeykrisp's `HK_ZLS_PRECISE_DEPTH_STORE` is still off by default, so it was
+not adopted.
+
+### Correctness
+
+- Frozen 17: M1 Pro 11/17 and M2 11/17 at the head (unchanged). Neo: see below.
+- vkd3d-proton 581 corpus, t-1181 harness, base vs head:
+  - M2 tight 359 -> 358 and fair 361 -> 360.
+  - M1 Pro tight 357 -> 357 and fair 361 -> 360.
+  - The only difference on either machine is `test_fence_pending_signal_cpu_rewind_plain`. It is a timing race, as the test's own comment says ("Technically this is a bit racy"): the heavy dispatch must still be running when the CPU resets the fence. On the M2, vkd3d-proton on Honeykrisp passes it 4/10 times, the head 2/10 and `D3D12AGX_SUBMIT_SELF_WAIT=1` 10/10.
+  - The bisection also found `test_execute_indirect_state` failing after 86aa9f8b022 (run 1). It is fixed in that commit.
+- The unit tests (10/10) and the live tests (device_interfaces, command_sync, queue_fence, fence_multiple, bundle_state, pso_threads, pso_library_race, execute_indirect_count, cpu_volume, streamout_topology, render_pass_split, createheap and caps queries) match the base on the M1 Pro.
+- Every commit of the series builds (the per-commit library build), and the head builds every target.
+
+### Neo (G17P), F45 container builds, Phase 2 kit environment
+
+These are h-9353 (head tree r8) and h-9479 (final head 7e212ae1b73), each
+against the base `416e97802f1` with the same benchmark binaries. G17P native
+graphics admits no vertex-buffer pipeline yet, so the framebench graphics
+scenes and the microbench draw phases do not run on the Neo at base or at
+head. Since 7e212ae1b73 the benches report them as UNSUPPORTED and measure
+the rest.
+
+| metric | base | head |
+|---|---|---|
+| frozen 17 | 9/17 | 9/17 (baseline; also 9/17 with the no-barrier knob) |
+| texture SRV CopyDescriptors bulk / single | 76-77 / 83-85 ns | 4 / 19-20 ns |
+| texture SRV shader-visible write | 89-90 ns | 54-55 ns |
+| texture SRV / CBV CPU-heap write | 8 / 6 ns | 53 / 18-22 ns |
+| framebench dispatches (64 dispatches + UAV barriers), pipelined | 326-329 us | 149-160 us |
+| ExecuteCommandLists(20k dispatches) call | 401-425 us | 248-358 us |
+| 20k one-group dispatches, GPU wall | 41.6-41.9 ms | 40.6 ms |
+| record dispatch | 38 ns | 38 ns |
+| record native Texture.Load dispatch | 4.9-9.5 us | 4.6-8.7 us |
+
+G17P launch cost (item 1). 20k dispatches take 40.7 / 43.2 / 50.6 / 123.3 ms
+at 1 / 16 / 64 / 256 groups, so a fixed cost of about 2 us per launch
+dominates small grids. The strong barrier word after every launch gives
+45.7 ms. With `D3D12AGX_G17P_DISPATCH_NO_BARRIER=1`, which drops the weak
+barrier word that ends every launch and keeps the strong flush at barriers
+and segment ends, the same submission takes 4.58 ms at 1 group (0.23 us per
+launch, 8.9x) and 26.2 ms at 64 groups. The run raised no quarantine and no
+timeout, and the frozen 17 under the knob gave the same 9/17. So the weak word
+serialises consecutive launches: each launch waits for the previous one to
+drain. D3D12 orders dispatches only across barriers, so dropping the word is
+within the API contract. The knob stays opt-in until the vkd3d-proton corpus
+has run on the Neo under it.
+
+The native Texture.Load sampler-cell change did not move the
+microbenchmark: that benchmark alternates two texture tables, so the
+state-loader program still changes per dispatch. The change only helps runs
+that reuse one table.
+
+vkd3d-proton (B) on the Neo reports 17-44 us for every frame scene (the same
+scenes take 190-440 us on the M2) and was not checked for rendered output, so
+the Neo B frame numbers are recorded but not used as a comparison.
+
+`render_pass_split` fails "the list closes cleanly" at base and at head on the
+Neo: a G17P recording limit that predates this series.
+
+### What remains (ranked)
+
+1. Make the G17P no-barrier launch the default once the vkd3d-proton corpus
+   has run on the Neo with `D3D12AGX_G17P_DISPATCH_NO_BARRIER=1` (8.9x on
+   20k-dispatch submissions).
+2. draws_pso on AGX2: still 4-9% behind vkd3d-proton on the M2 with blended
+   pipelines (`--pso-vary 2`). Profile it GPU-side.
+3. Per-draw recording with a root constant per draw (172 ns on the M2):
+   every root change rebuilds both stages' USC words. A root-pointer
+   indirection would let them persist.
+4. The light-frame and heavy-frame overlap trade-off is a fixed threshold of
+   512 draws per submission. A kernel-side reason (TVB pressure?) should
+   replace it.
+5. G17P native Texture.Load: key the state-loader program cache on more than
+   the last program (two-table alternation misses).
