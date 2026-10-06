@@ -1380,6 +1380,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    foreach mode, op : {'1': 'tex', '2': 'txb', '3': 'txl', '4': 'txd'}
+      executable(
+        'g17p-vulkan-min-lod-' + op,
+        files('tests/g17p_offscreen_triangle.c'),
+        include_directories : [inc_include],
+        dependencies : [dep_dl],
+        c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_MIN_LOD=' + mode],
+        gnu_symbol_visibility : 'hidden',
+      )
+    endforeach
+
     executable(
       'g17p-vulkan-texel-fetch-lod',
       files('tests/g17p_offscreen_triangle.c'),

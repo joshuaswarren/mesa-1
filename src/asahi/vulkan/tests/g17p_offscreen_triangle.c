@@ -391,6 +391,14 @@
 #define G17P_SHADOW_COMPARE 0
 #endif
 
+#ifndef G17P_TEXTURE_MIN_LOD
+/* 1=tex, 2=txb, 3=txl, 4=txd; image-view clamp is selected at runtime. */
+#define G17P_TEXTURE_MIN_LOD 0
+#endif
+#if G17P_TEXTURE_MIN_LOD
+static float view_min_lod;
+#endif
+
 #ifndef G17P_TEXEL_FETCH_LOD
 #define G17P_TEXEL_FETCH_LOD 0
 #endif
@@ -521,7 +529,7 @@
    (G17P_LOD_ORACLE || G17P_TEXTURE_ALPHA_COMPOSITE ||                     \
     G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE || G17P_SHADOW_COMPARE || \
     G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE || G17P_TEXTURE_3D ||          \
-    G17P_TWO_SAMPLERS || G17P_YCBCR)
+    G17P_TWO_SAMPLERS || G17P_YCBCR || G17P_TEXTURE_MIN_LOD)
 
 #if G17P_YCBCR
 #define TEXTURE_FORMAT VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
@@ -761,6 +769,22 @@
 #include "g17p_vulkan_shadow_compare_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_shadow_compare_frag_spv
+#elif G17P_TEXTURE_MIN_LOD
+#include "g17p_vulkan_implicit_lod_vert.h"
+#if G17P_TEXTURE_MIN_LOD == 1
+#include "g17p_vulkan_min_lod_tex_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_min_lod_tex_frag_spv
+#elif G17P_TEXTURE_MIN_LOD == 2
+#include "g17p_vulkan_min_lod_txb_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_min_lod_txb_frag_spv
+#elif G17P_TEXTURE_MIN_LOD == 3
+#include "g17p_vulkan_min_lod_txl_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_min_lod_txl_frag_spv
+#else
+#include "g17p_vulkan_min_lod_txd_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_min_lod_txd_frag_spv
+#endif
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #elif G17P_TEXEL_FETCH_LOD
 #include "g17p_vulkan_implicit_lod_vert.h"
 #include "g17p_vulkan_texel_fetch_lod_frag.h"
@@ -1472,6 +1496,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_TEXTURE_MIN_LOD
+#define PROBE_NAME "g17p-vulkan-texture-min-lod"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_TEXEL_FETCH_LOD
 #define PROBE_NAME "g17p-vulkan-texel-fetch-lod"
 #define READBACK_IMAGE_USAGE 0
@@ -1892,7 +1921,7 @@ VK_FN(vkEnumeratePhysicalDevices);
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
    G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR ||        \
-   G17P_DYNAMIC_VERTEX_INPUT
+   G17P_DYNAMIC_VERTEX_INPUT || G17P_TEXTURE_MIN_LOD
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL || G17P_DYNAMIC_VERTEX_INPUT
@@ -2375,6 +2404,15 @@ verify_readback(const uint8_t *map)
       {255, 255, 255, 255},
       {0, 0, 0, 0},
    };
+#elif G17P_TEXTURE_MIN_LOD
+   /* 64 texels over 32 pixels gives implicit/gradient LOD1; txb subtracts
+    * one and txl requests zero. Clamping to two must select blue instead. */
+   const unsigned level = view_min_lod == 2 ? 2 :
+                          (G17P_TEXTURE_MIN_LOD == 1 ||
+                           G17P_TEXTURE_MIN_LOD == 4) ? 1 : 0;
+   const uint8_t expected[4] = {level == 0 ? 255 : 0,
+                                level == 1 ? 255 : 0,
+                                level == 2 ? 255 : 0, 255};
 #elif G17P_TEXEL_FETCH_LOD
    /* Mip 2 is blue. Mip 0 red and mip 1 green are exact negative controls
     * for a dropped or mis-typed integer level. */
@@ -3051,7 +3089,7 @@ main(void)
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
    G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR ||        \
-   G17P_DYNAMIC_VERTEX_INPUT
+   G17P_DYNAMIC_VERTEX_INPUT || G17P_TEXTURE_MIN_LOD
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -3084,8 +3122,11 @@ main(void)
    for (uint32_t p = 0; p < physical_count && !physical; ++p) {
       VkPhysicalDeviceProperties candidate;
       vkGetPhysicalDeviceProperties(physical_devices[p], &candidate);
+#if !G17P_TEXTURE_MIN_LOD
+      /* The min-LOD oracle also serves older GPUs, selected by the ICD. */
       if (candidate.deviceID != T8140_DEVICE_ID)
          continue;
+#endif
 
       uint32_t queue_count = 0;
       vkGetPhysicalDeviceQueueFamilyProperties(physical_devices[p],
@@ -3491,9 +3532,28 @@ main(void)
       VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME,
    };
 #endif
+#if G17P_TEXTURE_MIN_LOD
+   const char *clamp = getenv("G17P_VIEW_MIN_LOD");
+   if (clamp && strcmp(clamp, "0") && strcmp(clamp, "2"))
+      die("G17P_VIEW_MIN_LOD must be 0 or 2");
+   view_min_lod = clamp && !strcmp(clamp, "0") ? 0.0f : 2.0f;
+   VkPhysicalDeviceImageViewMinLodFeaturesEXT min_lod_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 min_lod_available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &min_lod_features,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &min_lod_available);
+   if (!min_lod_features.minLod)
+      die("imageViewMinLod is not advertised");
+   const char *min_lod_extensions[] = {VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME};
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-#if G17P_DYNAMIC_VERTEX_INPUT
+#if G17P_TEXTURE_MIN_LOD
+      .pNext = &min_lod_features,
+#elif G17P_DYNAMIC_VERTEX_INPUT
       .pNext = &dynamic_vi_enabled,
 #elif G17P_SHADER_QUAD_CONTROL
       .pNext = &quad_enabled,
@@ -3532,7 +3592,10 @@ main(void)
 #elif G17P_LOGIC_OP_XOR
       .pEnabledFeatures = &blend_features,
 #endif
-#if G17P_DYNAMIC_VERTEX_INPUT
+#if G17P_TEXTURE_MIN_LOD
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = min_lod_extensions,
+#elif G17P_DYNAMIC_VERTEX_INPUT
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = dynamic_vi_device_extensions,
 #elif G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
@@ -4679,9 +4742,17 @@ main(void)
       .conversion = ycbcr_conversion,
    };
 #endif
+#if G17P_TEXTURE_MIN_LOD
+   const VkImageViewMinLodCreateInfoEXT view_clamp = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT,
+      .minLod = view_min_lod,
+   };
+#endif
    const VkImageViewCreateInfo texture_view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-#if G17P_YCBCR
+#if G17P_TEXTURE_MIN_LOD
+      .pNext = &view_clamp,
+#elif G17P_YCBCR
       .pNext = &sampler_ycbcr_info,
 #endif
       .image = texture,
@@ -6693,7 +6764,11 @@ main(void)
 #else
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
-#if G17P_MULTI_VIEWPORT
+#if G17P_TEXTURE_MIN_LOD
+   printf(PROBE_NAME ": PASS op=%u minLod=%.0f; every pixel and guard exact, "
+                     "checksum %016" PRIx64 "\n",
+          G17P_TEXTURE_MIN_LOD, view_min_lod, checksum);
+#elif G17P_MULTI_VIEWPORT
    printf(PROBE_NAME ": PASS — four instances selected exact quadrant "
                      "viewports 0 through 3 immediately/3s; all guards "
                      "unchanged, checksum %016" PRIx64 "\n",
