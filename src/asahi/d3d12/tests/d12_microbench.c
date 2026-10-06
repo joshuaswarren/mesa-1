@@ -15,7 +15,7 @@
  * into a CPU figure.
  *
  * Usage: d3d12agx_microbench tri.dxil solid.dxil res_probe.dxil [tex_probe.dxil]
- *        [--only NAME] [--idle SECONDS]
+ *        [--only NAME] [--idle SECONDS] [--groups N]
  *
  * With tex_probe.dxil a texture descriptor table over a 65536-slot heap is
  * measured too (dispatch_texture).
@@ -25,6 +25,9 @@
  * rest of the metrics are then reported as zero. "--only passes" runs the
  * render-pass traffic measurement (GPU wall time of 16 frames of clear,
  * bind and draw on a 1080p colour target and a D32 depth buffer) alone.
+ *
+ * --groups N dispatches N workgroups per Dispatch in the 20k-dispatch
+ * submission (default 1), to separate a fixed per-launch cost from work.
  *
  * --idle sleeps for SECONDS after the round-trip loop with the device,
  * queue and fence alive and nothing in flight, printing the process id
@@ -60,6 +63,7 @@
 #define ROUNDTRIP_REPEATS 100
 
 static unsigned failures;
+static unsigned dispatch_groups = 1;
 
 #define CHECK(cond, what)                                                    \
    do {                                                                      \
@@ -338,7 +342,7 @@ record_dispatch_list(struct bench *b, unsigned ways, double *per_dispatch_ns)
       if (ways)
          ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
             b->clist, 0, b->tables[i % ways]);
-      ID3D12GraphicsCommandList_Dispatch(b->clist, 1, 1, 1);
+      ID3D12GraphicsCommandList_Dispatch(b->clist, dispatch_groups, 1, 1);
    }
    double t2 = now_ns();
    hr = ID3D12GraphicsCommandList_Close(b->clist);
@@ -611,6 +615,11 @@ main(int argc, char **argv)
          only = argv[++i];
       else if (!strcmp(argv[i], "--idle") && i + 1 < argc)
          idle_seconds = (unsigned)atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--groups") && i + 1 < argc) {
+         dispatch_groups = (unsigned)atoi(argv[++i]);
+         if (!dispatch_groups)
+            dispatch_groups = 1;
+      }
       else
          tex_path = argv[i];
    }
@@ -633,9 +642,12 @@ main(int argc, char **argv)
    REQUIRE(!tex_path || tex_cs, "read texture shader bytecode");
 
    struct bench b = {0};
+   double dev_t0 = now_ns();
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&b.dev);
+   double device_create_ms = (now_ns() - dev_t0) / 1e6;
    REQUIRE(hr == S_OK && b.dev, "D3D12CreateDevice");
+   printf("device create %.2f ms\n", device_create_ms);
 
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_DIRECT};
    hr = ID3D12Device_CreateCommandQueue(b.dev, &qd, &IID_ID3D12CommandQueue,
@@ -1246,8 +1258,8 @@ main(int argc, char **argv)
    REQUIRE(hr == S_OK, "20k-dispatch list executes and signals");
    double execute_call_cs_us = (e1 - e0) / 1e3;
    double gpu_wall_cs_ms = (e2 - e0) / 1e6;
-   printf("submit ExecuteCommandLists(20k dispatches) call %.1f us, fence after %.2f ms\n",
-          execute_call_cs_us, gpu_wall_cs_ms);
+   printf("submit ExecuteCommandLists(20k dispatches x%u groups) call %.1f us, fence after %.2f ms\n",
+          dispatch_groups, execute_call_cs_us, gpu_wall_cs_ms);
 
    /* Reset cost after a submitted list: the allocator must take fresh
     * storage rather than rewind what the GPU may still read. */

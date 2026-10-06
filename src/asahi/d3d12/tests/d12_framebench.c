@@ -21,14 +21,21 @@
  * res_probe, tex_probe .dxil). Options: --frames N (timed frames per scene,
  * default 200), --scene NAME (one scene), --width W --height H (default
  * 1280x720, HelloWindow's size), --inflight N (frames in flight, default 2,
- * the samples' FrameCount; up to 8).
+ * the samples' FrameCount; up to 8), --draws N (draws per frame in the
+ * draws scenes, default 1000), --nodepth (draws scenes without the depth
+ * buffer).
  *
  * Scenes (every one clears the colour target first):
  *   triangle    HelloTriangle: one vertex-buffer draw
  *   bundles     HelloBundles: the same draw replayed from a bundle
  *   texload     a Texture.Load dispatch over a 2D texture, then the triangle
- *   draws       1000 draws, a root constant per draw, four pipeline states,
- *               a D32 depth buffer cleared and tested
+ *   draws       1000 draws of a triangle a few pixels across from a vertex
+ *               buffer, one pipeline state, over a cleared and tested D32
+ *               depth buffer (the per-draw cost, not the fill)
+ *   draws_rc    the same with a root constant set before every draw
+ *   draws_pso   the same with a root constant and four pipeline states
+ *   fill        100 full-screen triangles over the depth buffer (fill rate,
+ *               for parity: the cost here is the GPU's, not the driver's)
  *   dispatches  64 dispatches with a UAV barrier between each
  *
  * Per scene two loops run: "pipelined" keeps the in-flight count of frames going,
@@ -57,8 +64,9 @@
 #define FRAME_COUNT_MAX 8
 #define FRAME_COUNT_DEFAULT 2
 #define WARMUP_FRAMES 16
-#define DRAW_SCENE_DRAWS 1000
+#define DRAW_SCENE_DRAWS_DEFAULT 1000
 #define DRAW_SCENE_PSOS 4
+#define FILL_SCENE_DRAWS 100
 #define DISPATCH_SCENE_DISPATCHES 64
 #define TEX_W 16
 #define TEX_H 16
@@ -69,6 +77,8 @@ typedef HRESULT(WINAPI *pfn_serialize_rs_t)(const D3D12_ROOT_SIGNATURE_DESC *,
                                             D3D_ROOT_SIGNATURE_VERSION,
                                             ID3DBlob **, ID3DBlob **);
 
+static unsigned draw_scene_draws = DRAW_SCENE_DRAWS_DEFAULT;
+static bool draw_scene_depth = true;
 static pfn_create_device_t pfn_create_device;
 static pfn_serialize_rs_t pfn_serialize_rs;
 
@@ -184,14 +194,15 @@ struct fb {
    /* triangle / bundles */
    ID3D12RootSignature *rs_empty;
    ID3D12PipelineState *pso_vb;
-   ID3D12Resource *vb;
-   D3D12_VERTEX_BUFFER_VIEW vbv;
+   ID3D12Resource *vb, *vb_small;
+   D3D12_VERTEX_BUFFER_VIEW vbv, vbv_small;
    ID3D12CommandAllocator *bundle_alloc;
    ID3D12GraphicsCommandList *bundle;
 
-   /* draws */
+   /* draws, fill */
    ID3D12RootSignature *rs_consts;
    ID3D12PipelineState *pso_draws[DRAW_SCENE_PSOS];
+   ID3D12PipelineState *pso_fill;
 
    /* dispatches */
    ID3D12RootSignature *rs_table;
@@ -438,6 +449,25 @@ setup_triangle(struct fb *b, const struct shaders *s)
       .StrideInBytes = 24,
    };
 
+   /* The draws scenes price the draw, not the fill: a triangle a few
+    * pixels across. */
+   float small[3][6];
+   memcpy(small, verts, sizeof(small));
+   for (unsigned v = 0; v < 3; v++) {
+      small[v][0] *= 0.02f;
+      small[v][1] *= 0.02f;
+   }
+   b->vb_small = make_buffer(b->dev, sizeof(small), D3D12_RESOURCE_FLAG_NONE,
+                             D3D12_HEAP_TYPE_UPLOAD);
+   CHECK(b->vb_small, "small vertex buffer");
+   hr = ID3D12Resource_Map(b->vb_small, 0, &none, &map);
+   CHECK(hr == S_OK && map, "map small vertex buffer");
+   memcpy(map, small, sizeof(small));
+   ID3D12Resource_Unmap(b->vb_small, 0, NULL);
+   b->vbv_small = b->vbv;
+   b->vbv_small.BufferLocation =
+      ID3D12Resource_GetGPUVirtualAddress(b->vb_small);
+
    /* HelloBundles: the draw recorded once into a bundle. */
    hr = ID3D12Device_CreateCommandAllocator(
       b->dev, D3D12_COMMAND_LIST_TYPE_BUNDLE, &IID_ID3D12CommandAllocator,
@@ -468,13 +498,33 @@ setup_draws(struct fb *b, const struct shaders *s)
    b->rs_consts = make_root_sig(b, &consts, 1);
    CHECK(b->rs_consts, "root-constant root signature");
 
+   /* The draws scene uses the small vertex-buffer triangle: tri.dxil's
+    * SV_VertexID triangle covers the whole viewport, which makes 1000 of
+    * them a fill-rate test (the fill scene) rather than a draw-cost one. */
+   D3D12_INPUT_ELEMENT_DESC elems[] = {
+      {.SemanticName = "TEXCOORD",
+       .SemanticIndex = 0,
+       .Format = DXGI_FORMAT_R32G32_FLOAT,
+       .InputSlot = 31,
+       .AlignedByteOffset = 0,
+       .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
+      {.SemanticName = "TEXCOORD",
+       .SemanticIndex = 1,
+       .Format = DXGI_FORMAT_R32G32B32A32_FLOAT,
+       .InputSlot = 31,
+       .AlignedByteOffset = 8,
+       .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
+   };
    for (unsigned i = 0; i < DRAW_SCENE_PSOS; i++) {
       D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = base_gfx_desc(
-         b->rs_consts, s->tri, s->tri_size, s->solid, s->solid_size);
-      pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-      pd.DepthStencilState.DepthEnable = TRUE;
-      pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-      pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+         b->rs_consts, s->vb_vs, s->vb_vs_size, s->vb_ps, s->vb_ps_size);
+      pd.InputLayout = (D3D12_INPUT_LAYOUT_DESC){elems, 2};
+      if (draw_scene_depth) {
+         pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+         pd.DepthStencilState.DepthEnable = TRUE;
+         pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+         pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+      }
       /* Four distinct states an engine toggles between: cull mode and
        * blending. */
       pd.RasterizerState.CullMode =
@@ -493,6 +543,15 @@ setup_draws(struct fb *b, const struct shaders *s)
          b->dev, &pd, &IID_ID3D12PipelineState, (void **)&b->pso_draws[i]);
       CHECK(hr == S_OK, "draws-scene PSO");
    }
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC fd = base_gfx_desc(
+      b->rs_empty, s->tri, s->tri_size, s->solid, s->solid_size);
+   fd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+   fd.DepthStencilState.DepthEnable = TRUE;
+   fd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+   fd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+   HRESULT hr = ID3D12Device_CreateGraphicsPipelineState(
+      b->dev, &fd, &IID_ID3D12PipelineState, (void **)&b->pso_fill);
+   CHECK(hr == S_OK, "fill-scene PSO");
    return true;
 }
 
@@ -647,12 +706,16 @@ enum scene_id {
    SCENE_BUNDLES,
    SCENE_TEXLOAD,
    SCENE_DRAWS,
+   SCENE_DRAWS_RC,
+   SCENE_DRAWS_PSO,
+   SCENE_FILL,
    SCENE_DISPATCHES,
    SCENE_COUNT,
 };
 
 static const char *const scene_names[SCENE_COUNT] = {
-   "triangle", "bundles", "texload", "draws", "dispatches",
+   "triangle", "bundles", "texload", "draws", "draws_rc", "draws_pso",
+   "fill", "dispatches",
 };
 
 static void
@@ -722,21 +785,39 @@ record_texload(struct fb *b)
 }
 
 static void
-record_draws(struct fb *b)
+record_draws(struct fb *b, bool root_constants, bool pso_switches)
+{
+   ID3D12GraphicsCommandList *list = b->list;
+   begin_frame_graphics(b, draw_scene_depth);
+   ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, b->rs_consts);
+   ID3D12GraphicsCommandList_SetPipelineState(list, b->pso_draws[0]);
+   ID3D12GraphicsCommandList_IASetPrimitiveTopology(
+      list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   ID3D12GraphicsCommandList_IASetVertexBuffers(list, 31, 1, &b->vbv_small);
+   const unsigned per_pso = (draw_scene_draws + DRAW_SCENE_PSOS - 1) / DRAW_SCENE_PSOS;
+   for (unsigned i = 0; i < draw_scene_draws; i++) {
+      if (pso_switches && i % per_pso == 0)
+         ID3D12GraphicsCommandList_SetPipelineState(
+            list, b->pso_draws[(i / per_pso) % DRAW_SCENE_PSOS]);
+      if (root_constants)
+         ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstant(list, 0, i,
+                                                                0);
+      ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+   }
+   end_frame_graphics(b);
+}
+
+static void
+record_fill(struct fb *b)
 {
    ID3D12GraphicsCommandList *list = b->list;
    begin_frame_graphics(b, true);
-   ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, b->rs_consts);
+   ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, b->rs_empty);
+   ID3D12GraphicsCommandList_SetPipelineState(list, b->pso_fill);
    ID3D12GraphicsCommandList_IASetPrimitiveTopology(
       list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-   const unsigned per_pso = DRAW_SCENE_DRAWS / DRAW_SCENE_PSOS;
-   for (unsigned i = 0; i < DRAW_SCENE_DRAWS; i++) {
-      if (i % per_pso == 0)
-         ID3D12GraphicsCommandList_SetPipelineState(
-            list, b->pso_draws[(i / per_pso) % DRAW_SCENE_PSOS]);
-      ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstant(list, 0, i, 0);
+   for (unsigned i = 0; i < FILL_SCENE_DRAWS; i++)
       ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
-   }
    end_frame_graphics(b);
 }
 
@@ -768,7 +849,16 @@ record_scene(struct fb *b, enum scene_id scene)
       record_texload(b);
       break;
    case SCENE_DRAWS:
-      record_draws(b);
+      record_draws(b, false, false);
+      break;
+   case SCENE_DRAWS_RC:
+      record_draws(b, true, false);
+      break;
+   case SCENE_DRAWS_PSO:
+      record_draws(b, true, true);
+      break;
+   case SCENE_FILL:
+      record_fill(b);
       break;
    case SCENE_DISPATCHES:
       record_dispatches(b);
@@ -896,14 +986,18 @@ main(int argc, char **argv)
          height = (unsigned)atoi(argv[++i]);
       else if (!strcmp(argv[i], "--inflight") && i + 1 < argc)
          inflight = (unsigned)atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--draws") && i + 1 < argc)
+         draw_scene_draws = (unsigned)atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--nodepth"))
+         draw_scene_depth = false;
       else
          shader_dir = argv[i];
    }
    if (!shader_dir || !frames || !width || !height || !inflight ||
-       inflight > FRAME_COUNT_MAX) {
+       inflight > FRAME_COUNT_MAX || !draw_scene_draws) {
       fprintf(stderr,
               "usage: %s SHADER_DIR [--frames N] [--scene NAME] "
-              "[--width W --height H] [--inflight N]\n"
+              "[--width W --height H] [--inflight N] [--draws N] [--nodepth]\n"
               "       D3D12_LIBRARY selects the implementation "
               "(default libd3d12agx.so)\n",
               argv[0]);
