@@ -1862,6 +1862,15 @@ struct d12_segment {
     * state is persistent, so repeating an identical update on every draw is
     * pure command/data growth. */
    bool viewport_ppp_valid;
+   /* The vertex VDM state last emitted in this render (AGX2): a draw with
+    * the same vertex program words and restart index re-emits nothing. */
+   bool vs_state_valid;
+   /* The fragment PPP blob the render's last draw pointed the PPP at: a
+    * draw with the same blob emits no PPP_STATE packet. */
+   uint64_t fragment_ppp_gpu;
+   uint32_t vs_state_usc;
+   uint32_t vs_state_restart;
+   const struct d12_gfx_stage *vs_state_stage;
    uint8_t viewport_count;
    uint16_t viewport_scissor_index;
    uint16_t viewport_depth_bias_index;
@@ -1923,7 +1932,7 @@ struct d12_gfx_upload_cache_entry {
    struct agx_tilebuffer_layout tib;
    uint64_t root, textures, pbes;
    uint64_t heap, heap_textures, heap_pbes, heap_samplers;
-   uint64_t draw, blend;
+   uint64_t draw, blend, vb_params;
    uint32_t vs_usc, fs_usc, varyings;
 };
 
@@ -2082,6 +2091,17 @@ struct d12_cmd_list {
       uint32_t size_B;
       uint32_t stride_B;
    } vb[D12_MAX_VB_SLOTS];
+   /* Bumped by every vertex-buffer binding change and every Reset. */
+   uint32_t vb_generation;
+   /* The fetch parameter block last uploaded for (PSO, bindings). A run
+    * of draws with the same vertex buffers reuses it, so the uniform that
+    * names it, and with it the vertex USC words, repeat across draws. */
+   struct {
+      const struct d12_pipeline_state *pso;
+      uint32_t generation;
+      uint64_t params_gpu;
+      uint64_t data_gpu;
+   } vb_params_cache;
 
    /* IASetIndexBuffer. size_B of zero means nothing is bound, which is
     * distinct from a bound buffer of length zero only in that the latter

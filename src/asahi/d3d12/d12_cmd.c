@@ -987,6 +987,7 @@ d12_list_reset_api_state(struct d12_cmd_list *list)
    list->root_generation[1]++;
 
    memset(list->vb, 0, sizeof(list->vb));
+   list->vb_generation++;
    memset(&list->ib, 0, sizeof(list->ib));
    memset(list->viewports, 0, sizeof(list->viewports));
    memset(list->scissors, 0, sizeof(list->scissors));
@@ -1016,7 +1017,8 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->pending_rt_clear_count = 0;
    list->pending_ds_clear.valid = false;
    list->pending_ds_discard.resource = NULL;
-   /* Both caches name storage of the previous recording. */
+   /* These caches name storage of the previous recording. */
+   list->vb_params_cache.pso = NULL;
    list->g17p_program_cache.valid = false;
    list->g17p_bind_cache.bind_valid = false;
    list->g17p_bind_cache.indices_valid = false;
@@ -8936,13 +8938,29 @@ done:
  */
 static uint64_t
 d12_list_upload_vb_params(struct d12_cmd_list *list,
-                          struct d12_pipeline_state *pso,
+                          struct d12_pipeline_state *pso, bool private_block,
                           uint64_t *out_params_gpu)
 {
    if (out_params_gpu)
       *out_params_gpu = 0;
    if (!pso->nr_vb_attribs)
       return 0;
+
+   /* The block depends only on the PSO's attributes and the bound vertex
+    * buffers. Until one of them changes every draw names the same block,
+    * which keeps the vertex USC words identical too; uploading a fresh
+    * copy per draw made a 1000-draw frame rebuild them 1000 times.
+    *
+    * An ExecuteIndirect draw gets a block of its own: the GPU patches its
+    * vertex buffer views into it, and the next command's patches start from
+    * it, so a block shared with ordinary draws would hand them the patched
+    * views (vkd3d-proton test_execute_indirect_state). */
+   if (!private_block && list->vb_params_cache.pso == pso &&
+       list->vb_params_cache.generation == list->vb_generation) {
+      if (out_params_gpu)
+         *out_params_gpu = list->vb_params_cache.data_gpu;
+      return list->vb_params_cache.params_gpu;
+   }
 
    struct d12_vb_params vbp;
    memset(&vbp, 0, sizeof(vbp));
@@ -8988,7 +9006,15 @@ d12_list_upload_vb_params(struct d12_cmd_list *list,
       *out_params_gpu = vbp_gpu;
 
    uint64_t ptr = d12_list_upload(list, &vbp_gpu, sizeof(vbp_gpu), 8);
-   return ptr ? ptr : D12_VB_PARAMS_FAILED;
+   if (!ptr)
+      return D12_VB_PARAMS_FAILED;
+   if (private_block)
+      return ptr;
+   list->vb_params_cache.pso = pso;
+   list->vb_params_cache.generation = list->vb_generation;
+   list->vb_params_cache.params_gpu = ptr;
+   list->vb_params_cache.data_gpu = vbp_gpu;
+   return ptr;
 }
 
 static bool
@@ -9715,10 +9741,11 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
                             uint64_t root, uint64_t textures, uint64_t pbes,
                             uint64_t heap, uint64_t heap_textures,
                             uint64_t heap_pbes, uint64_t heap_samplers,
-                            uint64_t draw, uint64_t blend)
+                            uint64_t draw, uint64_t blend, uint64_t vb_params)
 {
    uint64_t hash = ((uintptr_t)pso >> 4) ^ root ^ textures ^ pbes ^ draw ^
-                   blend ^ heap ^ heap_textures ^ heap_pbes ^ heap_samplers;
+                   blend ^ heap ^ heap_textures ^ heap_pbes ^ heap_samplers ^
+                   vb_params;
    unsigned start = hash & (D12_GFX_UPLOAD_CACHE_SIZE - 1);
 
    static_assert(
@@ -9738,7 +9765,8 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
           entry->heap == heap && entry->heap_textures == heap_textures &&
           entry->heap_pbes == heap_pbes &&
           entry->heap_samplers == heap_samplers && entry->draw == draw &&
-          entry->blend == blend && memcmp(&entry->tib, tib, sizeof(*tib)) == 0)
+          entry->blend == blend && entry->vb_params == vb_params &&
+          memcmp(&entry->tib, tib, sizeof(*tib)) == 0)
          return entry;
    }
 
@@ -10544,8 +10572,9 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
     * SV_VertexID and so never fetches an attribute at all.
     */
    uint64_t vb_params_data_gpu = 0;
-   uint64_t vb_params_gpu =
-      d12_list_upload_vb_params(list, pso, &vb_params_data_gpu);
+   uint64_t vb_params_gpu = d12_list_upload_vb_params(
+      list, pso, indirect_vb_patch_count || out_vb_params,
+      &vb_params_data_gpu);
    if (vb_params_gpu == D12_VB_PARAMS_FAILED)
       return;
    if (!d12_list_dispatch_indirect_vb_patches(
@@ -10711,15 +10740,20 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
                                     &pso->fs.info))
       return;
 
+   /* A vertex-buffer pipeline's vertex words also name the fetch
+    * parameter block, which d12_list_upload_vb_params keeps across draws
+    * with the same bindings, so it is part of the key rather than a
+    * reason to rebuild both stages' words on every draw. */
    const bool cacheable_gfx_upload = vstage == &pso->vs && !pso->has_gs &&
-                                     !pso->has_tess && !pso->has_mesh &&
-                                     !pso->nr_vb_attribs;
+                                     !pso->has_tess && !pso->has_mesh;
    struct d12_gfx_upload_cache_entry *gfx_cache =
       cacheable_gfx_upload
          ? d12_gfx_upload_cache_lookup(list, pso, &seg->tib, root_gpu,
                                        textures_gpu, pbes_gpu, heap_gpu,
                                        heap_textures_gpu, heap_pbes_gpu,
-                                       heap_samplers_gpu, draw_gpu, blend_gpu)
+                                       heap_samplers_gpu, draw_gpu, blend_gpu,
+                                       pso->nr_vb_attribs ? poly_u.vb_params
+                                                          : 0)
          : NULL;
    const bool gfx_cache_hit = gfx_cache && gfx_cache->valid;
    uint32_t vs_usc = gfx_cache_hit ? gfx_cache->vs_usc : 0;
@@ -10771,6 +10805,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             .heap_samplers = heap_samplers_gpu,
             .draw = draw_gpu,
             .blend = blend_gpu,
+            .vb_params = pso->nr_vb_attribs ? poly_u.vb_params : 0,
             .vs_usc = vs_usc,
             .fs_usc = fs_usc,
             .varyings = varyings,
@@ -10818,11 +10853,31 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
               ? UINT16_MAX
               : UINT32_MAX;
 
-      agx_push(out, VDM_STATE, cfg) {
-         cfg.restart_index_present = true;
+      /* The VDM keeps its state across draws of one render, so a draw
+       * that changes neither the restart index nor the vertex program
+       * emits neither (Honeykrisp's dirty model). AGX3 reuses its own
+       * state-update records below. */
+      const bool agx2 =
+         agx_chip_command_stream_generation(list->device->dev.chip) ==
+         AGX_CS_GENERATION_AGX2;
+      const bool vs_state_same =
+         agx2 && seg->vs_state_valid && seg->vs_state_usc == vs_usc &&
+         seg->vs_state_stage == vstage;
+      if (!vs_state_same || seg->vs_state_restart != restart_index) {
+         agx_push(out, VDM_STATE, cfg) {
+            cfg.restart_index_present = true;
+         }
+         agx_push(out, VDM_STATE_RESTART_INDEX, cfg) {
+            cfg.value = restart_index;
+         }
       }
-      agx_push(out, VDM_STATE_RESTART_INDEX, cfg) {
-         cfg.value = restart_index;
+      if (agx2) {
+         seg->vs_state_restart = restart_index;
+         if (vs_state_same)
+            goto vs_state_emitted;
+         seg->vs_state_valid = true;
+         seg->vs_state_usc = vs_usc;
+         seg->vs_state_stage = vstage;
       }
    }
 
@@ -10906,6 +10961,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
       list->state = D12_LIST_ERROR;
       return;
    }
+vs_state_emitted:
 
    /* Viewport, scissor and depth bias */
    {
@@ -11070,9 +11126,15 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             : NULL;
 
       if (fragment_cache && fragment_cache->valid) {
-         if (!d12_emit_ppp_state(list, &out, fragment_cache->gpu,
-                                 fragment_cache->size))
-            return;
+         /* The PPP keeps the state it last loaded for the rest of the
+          * render; re-pointing it at the same blob every draw made the
+          * hardware reload the whole fragment pipeline per draw. */
+         if (seg->fragment_ppp_gpu != fragment_cache->gpu) {
+            if (!d12_emit_ppp_state(list, &out, fragment_cache->gpu,
+                                    fragment_cache->size))
+               return;
+            seg->fragment_ppp_gpu = fragment_cache->gpu;
+         }
       } else {
 
          /* Field order is fixed by AGX_PPP_HEADER and the pushes below must
@@ -11219,6 +11281,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             list->state = D12_LIST_ERROR;
             return;
          }
+         seg->fragment_ppp_gpu = gpu;
          if (fragment_cache) {
             *fragment_cache = (struct d12_fragment_state_cache_entry){
                .valid = true,
@@ -12066,6 +12129,7 @@ d12_list_IASetVertexBuffers(ID3D12GraphicsCommandList6 *iface, UINT start_slot,
       list->vb[slot].size_B = views[i].SizeInBytes;
       list->vb[slot].stride_B = views[i].StrideInBytes;
    }
+   list->vb_generation++;
 }
 
 /*
