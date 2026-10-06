@@ -270,6 +270,7 @@ struct d12_flat_transport {
    uint64_t sint_components[4];
    uint64_t flat_outputs;
    bool enabled;
+   bool bitcast;
 };
 
 /* What a compiled API stage is a function of, beyond the device: the
@@ -294,6 +295,7 @@ struct d12_stage_cache_key {
 
 #define D12_STAGE_KEY_FS_EPILOG_REQUESTED (1u << 0)
 #define D12_STAGE_KEY_FLAT_TRANSPORT      (1u << 1)
+#define D12_STAGE_KEY_LOSSLESS_FLAT       (1u << 2)
 
 /* Everything compile_gfx_stage / the compute path derive from the NIR
  * besides the binary, so a cache hit replays a compile exactly. */
@@ -511,6 +513,8 @@ struct d12_device {
    void *dbg_mesh_disp;
    void *dbg_mesh_verts;
    void *dbg_mesh_idx;
+   unsigned dbg_mesh_vertex_stride, dbg_mesh_vertex_count;
+   unsigned dbg_mesh_index_count;
    void *dbg_tcs_buf;
    unsigned dbg_tcs_buf_n;
 
@@ -1578,6 +1582,8 @@ struct d12_pipeline_state {
    struct agx_unlinked_uvs_layout ms_uvs;
    struct agx_varyings_vs ms_varyings;
    uint64_t ms_outputs;
+   uint64_t ms_primitive_outputs;
+   uint32_t ms_max_vertices, ms_max_primitives;
 
    enum tess_primitive_mode tess_mode;
    enum gl_tess_spacing tess_spacing;
@@ -2841,12 +2847,18 @@ HRESULT d12_pipeline_state_create_mesh(
    const D3D12_BLEND_DESC *blend_desc,
    const struct d12_binding_map *map, REFIID riid, void **out);
 
+/*
+ * vs_is_mesh: this is the graphics half of a MESH pipeline. There is no
+ * vertex shader -- vs_dxil must be NULL -- and the vertex-side signature
+ * check is skipped, because the pixel shader's inputs are fed by the mesh
+ * shader's outputs rather than by a VS.
+ */
 HRESULT d12_pipeline_state_create_graphics(
    struct d12_device *device, const void *vs_dxil, size_t vs_size,
-   const void *ps_dxil, size_t ps_size, const void *gs_dxil, size_t gs_size,
-   const void *hs_dxil, size_t hs_size, const void *ds_dxil, size_t ds_size,
-   enum pipe_format rt_format, unsigned nr_rt, const DXGI_FORMAT *rt_formats,
-   unsigned nr_samples, UINT sample_mask,
+   bool vs_is_mesh, const void *ps_dxil, size_t ps_size, const void *gs_dxil,
+   size_t gs_size, const void *hs_dxil, size_t hs_size, const void *ds_dxil,
+   size_t ds_size, enum pipe_format rt_format, unsigned nr_rt,
+   const DXGI_FORMAT *rt_formats, unsigned nr_samples, UINT sample_mask,
    const D3D12_DEPTH_STENCIL_DESC *ds_desc, DXGI_FORMAT dsv_format,
    const D3D12_RASTERIZER_DESC *rs_desc, float rasterizer_depth_bias,
    bool front_stencil_enable, bool back_stencil_enable,
@@ -2857,8 +2869,8 @@ HRESULT d12_pipeline_state_create_graphics(
    const D3D12_STREAM_OUTPUT_DESC *so_desc,
    D3D12_PRIMITIVE_TOPOLOGY_TYPE primitive_topology_type,
    D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut,
-   D3D12_PIPELINE_STATE_FLAGS flags,
-   const struct d12_binding_map *map, REFIID riid, void **out);
+   D3D12_PIPELINE_STATE_FLAGS flags, const struct d12_binding_map *map,
+   REFIID riid, void **out);
 
 void d12_device_add_ref(struct d12_device *device);
 void d12_device_release(struct d12_device *device);

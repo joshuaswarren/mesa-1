@@ -908,26 +908,41 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
    }
 
    if (has_ms) {
-      if (!st.ps || !st.ps->pShaderBytecode) {
-         mesa_loge("CreatePipelineState: a mesh pipeline needs a pixel "
-                   "shader");
+      /*
+       * A mesh pipeline may not carry any stage of the legacy geometry
+       * pipeline. D3D12 rejects the combination outright, and so must we:
+       * the mesh branch is taken before the vertex branch below, so
+       * without this an MS+VS stream would silently build a mesh pipeline
+       * and drop the vertex shader on the floor.
+       *
+       * A pixel shader is NOT required. The suite's own words: "On the
+       * most basic level, only a root signature and mesh shader are
+       * required". Input layout and primitive topology are ignored rather
+       * than refused, which is what the ordinary graphics path already
+       * does with them.
+       */
+      if ((st.vs && st.vs->pShaderBytecode) ||
+          (st.gs && st.gs->pShaderBytecode) ||
+          (st.hs && st.hs->pShaderBytecode) ||
+          (st.ds && st.ds->pShaderBytecode)) {
+         mesa_loge("CreatePipelineState: a mesh pipeline cannot also carry "
+                   "a vertex, geometry, hull or domain shader");
          return E_INVALIDARG;
       }
       return d12_pipeline_state_create_mesh(
          device, st.ms->pShaderBytecode, st.ms->BytecodeLength,
          st.as ? st.as->pShaderBytecode : NULL,
-         st.as ? st.as->BytecodeLength : 0, st.ps->pShaderBytecode,
-         st.ps->BytecodeLength, rt_format,
+         st.as ? st.as->BytecodeLength : 0,
+         st.ps ? st.ps->pShaderBytecode : NULL,
+         st.ps ? st.ps->BytecodeLength : 0, rt_format,
          st.have_rt_formats ? st.rt_formats.NumRenderTargets : 0,
          st.rt_formats.RTFormats, nr_samples, sample_mask, st.ds_state,
-         dsv_format,
-         st.raster,
-         st.blend, map, riid, out);
+         dsv_format, st.raster, st.blend, map, riid, out);
    }
 
    if (has_vs) {
       return d12_pipeline_state_create_graphics(
-         device, st.vs->pShaderBytecode, st.vs->BytecodeLength,
+         device, st.vs->pShaderBytecode, st.vs->BytecodeLength, false,
          st.ps ? st.ps->pShaderBytecode : NULL,
          st.ps ? st.ps->BytecodeLength : 0,
          st.gs ? st.gs->pShaderBytecode : NULL,
@@ -938,15 +953,13 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
          st.ds ? st.ds->BytecodeLength : 0, rt_format,
          st.have_rt_formats ? st.rt_formats.NumRenderTargets : 0,
          st.rt_formats.RTFormats, nr_samples, sample_mask, st.ds_state,
-         dsv_format,
-         st.raster, st.raster ? (float)st.raster->DepthBias : 0.0f,
-         true, true,
-         st.ds_state ? st.ds_state->StencilReadMask : UINT8_MAX,
+         dsv_format, st.raster, st.raster ? (float)st.raster->DepthBias : 0.0f,
+         true, true, st.ds_state ? st.ds_state->StencilReadMask : UINT8_MAX,
          st.ds_state ? st.ds_state->StencilWriteMask : UINT8_MAX,
          st.ds_state ? st.ds_state->StencilReadMask : UINT8_MAX,
-         st.ds_state ? st.ds_state->StencilWriteMask : UINT8_MAX,
-         st.blend, st.input_layout, st.stream_output, st.primitive_topology,
-         st.strip_cut, st.flags, map, riid, out);
+         st.ds_state ? st.ds_state->StencilWriteMask : UINT8_MAX, st.blend,
+         st.input_layout, st.stream_output, st.primitive_topology, st.strip_cut,
+         st.flags, map, riid, out);
    }
 
    mesa_loge("CreatePipelineState: stream declares no usable pipeline");
@@ -1076,17 +1089,15 @@ d12_device_CreateGraphicsPipelineState(
    }
 
    HRESULT hr = d12_pipeline_state_create_graphics(
-      device, desc->VS.pShaderBytecode, desc->VS.BytecodeLength,
+      device, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, false,
       desc->PS.pShaderBytecode, desc->PS.BytecodeLength,
       desc->GS.pShaderBytecode, desc->GS.BytecodeLength,
       desc->HS.pShaderBytecode, desc->HS.BytecodeLength,
       desc->DS.pShaderBytecode, desc->DS.BytecodeLength, rt_format,
       desc->NumRenderTargets, desc->RTVFormats, desc->SampleDesc.Count,
-      desc->SampleMask, &desc->DepthStencilState,
-      dsv_format, &desc->RasterizerState,
-      (float)desc->RasterizerState.DepthBias,
-      true, true,
-      desc->DepthStencilState.StencilReadMask,
+      desc->SampleMask, &desc->DepthStencilState, dsv_format,
+      &desc->RasterizerState, (float)desc->RasterizerState.DepthBias, true,
+      true, desc->DepthStencilState.StencilReadMask,
       desc->DepthStencilState.StencilWriteMask,
       desc->DepthStencilState.StencilReadMask,
       desc->DepthStencilState.StencilWriteMask, &desc->BlendState,
@@ -2231,7 +2242,8 @@ d12_device_CreateCommandSignature(ID3D12Device2 *iface,
       D3D12_INDIRECT_ARGUMENT_TYPE type = desc->pArgumentDescs[i].Type;
       bool terminal = type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
                       type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ||
-                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH ||
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
       if (terminal) {
          if (saw_terminal || i + 1 != desc->NumArgumentDescs)
             return E_INVALIDARG;
@@ -2258,13 +2270,18 @@ d12_device_CreateCommandSignature(ID3D12Device2 *iface,
 
       bool terminal = type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
                       type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ||
-                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH ||
+                      type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
 
       if (terminal) {
+         /* DISPATCH_MESH's argument record is three UINTs, the same shape
+          * and size as DISPATCH's, so it shares that arm. */
          packed_size += type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW
                            ? sizeof(D3D12_DRAW_ARGUMENTS)
                         : type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
                            ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
+                        : type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH
+                           ? sizeof(D3D12_DISPATCH_MESH_ARGUMENTS)
                            : sizeof(D3D12_DISPATCH_ARGUMENTS);
       } else if (type == D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT) {
          if (!rs || !argument->Constant.Num32BitValuesToSet ||

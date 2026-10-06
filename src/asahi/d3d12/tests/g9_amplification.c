@@ -75,11 +75,23 @@ slurp(const char *path, size_t *size)
 }
 
 /* One subobject: type tag padded to void*, then the payload. */
-#define SUBOBJ(name, tag, type)                                              \
-   struct {                                                                  \
-      __attribute__((aligned(sizeof(void *))))                                 \
-         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t;                              \
-      __attribute__((aligned(sizeof(void *)))) type v;                                                \
+/*
+ * One stream subobject. D3D12 aligns each SUBOBJECT to void*, but the
+ * inner struct sits at its own natural alignment straight after the type
+ * tag -- that is what CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT does, and
+ * what the driver's stream parser steps by.
+ *
+ * Aligning the INNER member to void* instead (as this did until
+ * 2026-08-10) pushes any 4-aligned payload -- D3D12_RASTERIZER_DESC,
+ * D3D12_RT_FORMAT_ARRAY -- from offset 4 to offset 8. The parser then
+ * reads the following subobject's type out of padding, sees a zero, and
+ * rejects the stream with "duplicate or invalid stream subobject 0".
+ * That was a bug in this test, not in the driver.
+ */
+#define SUBOBJ(name, tag, type)                                                \
+   struct __attribute__((aligned(sizeof(void *)))) {                           \
+      D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t;                                   \
+      type v;                                                                  \
    } name = {.t = tag}
 
 int

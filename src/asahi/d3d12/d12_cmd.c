@@ -6082,9 +6082,18 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
 
    util_dynarray_foreach (&list->descriptor_fixups,
                           struct d12_descriptor_fixup, fixup) {
-      if (!fixup->source || fixup->slot >= D12_MAX_RESOURCE_BINDINGS ||
-          fixup->slot >= fixup->table_count)
+      if (!fixup->source) {
          return false;
+         return false;
+      }
+      if ((fixup->slot >= D12_MAX_RESOURCE_BINDINGS ||
+           fixup->slot >= fixup->table_count)) {
+         mesa_loge("descriptor refresh: slot %u out of range (max %u, "
+                   "table_count %u)",
+                   fixup->slot, (unsigned)D12_MAX_RESOURCE_BINDINGS,
+                   fixup->table_count);
+         return false;
+      }
 
       const struct d12_descriptor *d = fixup->source;
       struct d12_descriptor effective = *d;
@@ -9605,13 +9614,55 @@ struct d12_mesh_stage {
    D3D12_SHADER_VISIBILITY visibility;
 };
 
+/* Output storage is recording-owned but is not command stream data. A
+ * GPU-sized launch can require much more than the stream's upload arena. The
+ * read tracker retains this BO across Close and queue execution. */
+static uint64_t
+d12_list_mesh_storage(struct d12_cmd_list *list, size_t size)
+{
+   struct agx_bo *bo = agx_bo_create(&list->device->dev, MAX2(size, 16), 0, 0,
+                                     "d3d12 mesh output");
+   if (!bo) {
+      list->state = D12_LIST_ERROR;
+      return 0;
+   }
+   void *map = agx_bo_map(bo);
+   if (!map) {
+      agx_bo_unreference(&list->device->dev, bo);
+      list->state = D12_LIST_ERROR;
+      return 0;
+   }
+   memset(map, 0, size);
+   if (agx_bo_sync_for_device(bo, 0, size)) {
+      agx_bo_unreference(&list->device->dev, bo);
+      list->state = D12_LIST_ERROR;
+      return 0;
+   }
+   uint64_t address = bo->va->addr;
+   d12_list_track_read_bo(list, bo);
+   agx_bo_unreference(&list->device->dev, bo);
+   return address;
+}
+
+static void *
+d12_list_mesh_cpu(struct d12_cmd_list *list, uint64_t address)
+{
+   util_dynarray_foreach(&list->reads.refs, struct d12_read_ref, ref) {
+      if (ref->kind == D12_READ_REF_BO && address >= ref->bo->va->addr &&
+          address - ref->bo->va->addr < ref->bo->size) {
+         uint8_t *map = agx_bo_map(ref->bo);
+         return map ? map + (address - ref->bo->va->addr) : NULL;
+      }
+   }
+   return NULL;
+}
+
 static bool
-d12_list_mesh_prerast(struct d12_cmd_list *list,
-                      struct d12_pipeline_state *pso, unsigned tg_x,
-                      unsigned tg_y, unsigned tg_z, uint64_t root_gpu,
-                      uint64_t textures_gpu, uint64_t pbes_gpu,
-                      uint64_t draw_gpu,
-                      struct agx_draw *out_draw,
+d12_list_mesh_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
+                      unsigned tg_x, unsigned tg_y, unsigned tg_z,
+                      uint64_t root_gpu, uint64_t textures_gpu,
+                      uint64_t pbes_gpu, uint64_t draw_gpu,
+                      uint64_t indirect_args, struct agx_draw *out_draw,
                       struct d12_dispatch_uniforms *out_poly)
 {
    struct d12_device *device = list->device;
@@ -9619,7 +9670,48 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
    if (!d12_list_require_legacy_compute(list))
       return false;
 
-   unsigned groups = tg_x * tg_y * tg_z;
+   uint64_t requested_groups = (uint64_t)tg_x * tg_y * tg_z;
+   const bool dynamic_groups = pso->has_amp || indirect_args;
+
+   if (pso->has_amp && !indirect_args &&
+       requested_groups > D12_MESH_MAX_AS_GROUPS) {
+      mesa_loge("DispatchMesh requests %" PRIu64
+                " amplification workgroups, software limit is %u",
+                requested_groups, (unsigned)D12_MESH_MAX_AS_GROUPS);
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+
+   if (!dynamic_groups && requested_groups > D12_MESH_MAX_AMP_GROUPS) {
+      mesa_loge("DispatchMesh requests %" PRIu64
+                " workgroups, software mesh limit is %u",
+                requested_groups, (unsigned)D12_MESH_MAX_AMP_GROUPS);
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+
+   unsigned as_groups =
+      pso->has_amp
+         ? (indirect_args ? D12_MESH_MAX_AS_GROUPS : (unsigned)requested_groups)
+         : 1;
+   unsigned groups = pso->has_amp
+                        ? as_groups * D12_MESH_MAX_AMP_GROUPS
+                        : (indirect_args ? D12_MESH_MAX_AMP_GROUPS
+                                         : (unsigned)requested_groups);
+
+   /*
+    * Two cases have no CPU-side group count. An amplification shader
+    * writes the mesh grid on the GPU, and an INDIRECT DispatchMesh reads
+    * it out of a buffer -- in which case tg_* are zero here and the real
+    * grid only exists at execution time. Both must size the output
+    * buffers for the bound below.
+    *
+    * This is deliberately done BEFORE the sizes are computed. Raising
+    * `groups` afterwards, as this did until 2026-08-10, sized the vertex,
+    * primitive and index buffers for the caller's count while dispatching
+    * up to D12_MESH_MAX_AMP_GROUPS groups into them -- an overrun whenever
+    * the caller asked for fewer than the bound.
+    */
    if (!groups) {
       mesa_loge("DispatchMesh with an empty thread group count");
       list->state = D12_LIST_ERROR;
@@ -9629,48 +9721,64 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
    /* Worst case per workgroup, from the shader's declared maxima. D3D12
     * caps a mesh shader at 256 vertices and 256 primitives per group.
     */
-   const unsigned max_verts = 256, max_prims = 256;
+   const unsigned max_verts = pso->ms_max_vertices;
+   const unsigned max_prims = pso->ms_max_primitives;
    unsigned nr_slots = MAX2(util_last_bit64(pso->ms_outputs), 1);
 
-   /* Fixed stride: the translator addresses slot (sigId + row) within a
-    * D12_MESH_MAX_SLOTS-wide record per vertex, so the buffer has to be
-    * sized that way whatever the shader actually writes.
-    */
-   const size_t vtx_stride = D12_MESH_MAX_SLOTS * D12_MESH_SLOT_STRIDE;
-   size_t verts_B = (size_t)groups * max_verts * vtx_stride;
-   size_t prims_B = (size_t)groups * max_prims * vtx_stride;
+   /* Signature IDs name records independently of packed varying registers.
+    * Use the same declaration-sized strides as the translator and raster VS. */
+   const size_t vtx_stride = nr_slots * D12_MESH_SLOT_STRIDE;
+   const size_t prim_stride =
+      MAX2(util_last_bit64(pso->ms_primitive_outputs), 1) *
+      D12_MESH_SLOT_STRIDE;
+   size_t verts_B =
+      pso->ms_outputs ? (size_t)groups * max_verts * vtx_stride : 16;
+   size_t prims_B =
+      pso->ms_primitive_outputs ? (size_t)groups * max_prims * prim_stride : 16;
    size_t idx_B = (size_t)groups * max_prims * 3 * 4;
 
-   /* With an amplification shader the mesh grid is GPU-written, so the
-    * worst case has to cover whatever it asks for. D3D12 caps
-    * DispatchMesh at 2^22 groups total but a test-sized bound is what
-    * the buffers can actually hold; anything larger is refused rather
-    * than silently overrun.
-    */
-   if (pso->has_amp)
-      groups = D12_MESH_MAX_AMP_GROUPS;
-
-   uint64_t counts = d12_list_upload_zero(list, 8, 8);
-   uint64_t vertices = d12_list_upload_zero(list, verts_B, 16);
-   uint64_t primitives = d12_list_upload_zero(list, prims_B, 16);
-   uint64_t indices = d12_list_upload_zero(list, idx_B, 4);
+   uint64_t counts = d12_list_mesh_storage(list, (size_t)groups * 8);
+   uint64_t vertices = d12_list_mesh_storage(list, verts_B);
+   uint64_t primitives = d12_list_mesh_storage(list, prims_B);
+   uint64_t indices = d12_list_mesh_storage(list, idx_B);
    uint64_t drawdesc = d12_list_upload_zero(list, 5 * 4, 4);
-   uint64_t dispatch = d12_list_upload_zero(list, 3 * 4, 4);
+   uint32_t direct_dims[3] = {tg_x, tg_y, tg_z};
+   uint64_t dispatch =
+      pso->has_amp
+         ? d12_list_upload_zero(list, D12_MESH_MAX_AS_GROUPS * 3 * 4, 4)
+         : d12_list_upload(list, direct_dims, sizeof(direct_dims), 4);
    uint64_t gridbuf = d12_list_upload_zero(list, 6 * 4, 4);
-   uint64_t payload =
-      pso->as_payload_size
-         ? d12_list_upload_zero(list, pso->as_payload_size, 16)
+   uint64_t mesh_dims = pso->has_amp
+                           ? d12_list_upload_zero(list, 3 * 4, 4)
+                           : (indirect_args ? indirect_args : dispatch);
+   uint64_t group_map =
+      pso->has_amp
+         ? d12_list_mesh_storage(list, (size_t)groups * 4 * sizeof(uint32_t))
          : 0;
+   uint64_t as_dims =
+      pso->has_amp
+         ? (indirect_args
+               ? indirect_args
+               : d12_list_upload(list, direct_dims, sizeof(direct_dims), 4))
+         : 0;
+   uint64_t payload = pso->as_payload_size
+                         ? d12_list_mesh_storage(
+                              list, (size_t)as_groups * D12_MESH_PAYLOAD_STRIDE)
+                         : 0;
    if (!counts || !vertices || !primitives || !indices || !drawdesc ||
-       !dispatch || !gridbuf)
+       !dispatch || !gridbuf || !mesh_dims ||
+       (pso->has_amp && (!group_map || !as_dims || !payload)))
       return false;
 
-   /* The parameter block the shader indirects through. Laid out by
-    * D12_MESH_OFF_*; the payload is null because amplification shaders
-    * are refused at PSO creation.
+   /* The parameter block the shader indirects through, laid out by
+    * D12_MESH_OFF_*.  Direct dimensions live in dispatch, indirect ones in
+    * the patched argument buffer, and amplification dimensions are written
+    * into dispatch by the amplification shader.
     */
-   uint64_t block[8] = {counts,   vertices, primitives, indices,
-                        payload,  dispatch, drawdesc,   gridbuf};
+   uint64_t block[12] = {
+      counts,   vertices, primitives, indices,   payload, dispatch,
+      drawdesc, gridbuf,  mesh_dims,  group_map, as_dims, groups,
+   };
    uint64_t mp_gpu = d12_list_upload(list, block, sizeof(block), 8);
    if (!mp_gpu)
       return false;
@@ -9705,21 +9813,47 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
     * GROUP count into the six-word indirect-local grid the mesh
     * dispatch consumes. Without one, the mesh grid is known on the CPU.
     */
+   uint64_t launch_args = 0;
+   if (indirect_args) {
+      const unsigned *wg = pso->has_amp ? pso->as_workgroup : pso->ms_workgroup;
+      const uint32_t grid[6] = {0, 0, 0, wg[0], wg[1], wg[2]};
+      launch_args = d12_list_upload(list, grid, sizeof(grid), 4);
+      if (!launch_args)
+         return false;
+      const struct libagx_d3d12_indirect_dispatch_args args = {
+         .out = launch_args,
+         .in = indirect_args,
+         .workgroup_x = wg[0],
+         .workgroup_y = wg[1],
+         .workgroup_z = wg[2],
+      };
+      d12_list_dispatch_precomp_to(list, LIBAGX_D3D12_INDIRECT_DISPATCH, &args,
+                                   sizeof(args), agx_1d(1), true);
+      if (list->state != D12_LIST_RECORDING)
+         return false;
+      seg = &list->segments[list->segment_count - 1];
+   }
+   d12_segment_mark_write_set_incomplete(seg, D12_WRITE_COMPUTE);
+
    struct d12_mesh_stage stages[4];
    unsigned nr_stages = 0;
 
    if (pso->has_amp) {
       stages[nr_stages++] = (struct d12_mesh_stage){
          pso->as_va, &pso->as_info,
-         agx_3d(tg_x * pso->as_workgroup[0], tg_y * pso->as_workgroup[1],
-                tg_z * pso->as_workgroup[2]),
+         indirect_args
+            ? agx_grid_indirect_local(launch_args)
+            : agx_3d(tg_x * pso->as_workgroup[0], tg_y * pso->as_workgroup[1],
+                     tg_z * pso->as_workgroup[2]),
          agx_workgroup(pso->as_workgroup[0], pso->as_workgroup[1],
                        pso->as_workgroup[2]),
          D3D12_SHADER_VISIBILITY_AMPLIFICATION};
 
-      stages[nr_stages++] = (struct d12_mesh_stage){
-         pso->as_setup_va, &pso->as_setup_info, agx_3d(1, 1, 1),
-         agx_workgroup(1, 1, 1), D3D12_SHADER_VISIBILITY_ALL};
+      stages[nr_stages++] =
+         (struct d12_mesh_stage){pso->as_setup_va, &pso->as_setup_info,
+                                 agx_3d(D12_MESH_MAX_AS_GROUPS, 1, 1),
+                                 agx_workgroup(D12_MESH_MAX_AS_GROUPS, 1, 1),
+                                 D3D12_SHADER_VISIBILITY_ALL};
 
       stages[nr_stages++] = (struct d12_mesh_stage){
          pso->ms_va, &pso->ms_info, agx_grid_indirect_local(gridbuf),
@@ -9728,10 +9862,13 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
    } else {
       stages[nr_stages++] = (struct d12_mesh_stage){
          pso->ms_va, &pso->ms_info,
-         agx_3d(tg_x * pso->ms_workgroup[0], tg_y * pso->ms_workgroup[1],
-                tg_z * pso->ms_workgroup[2]),
+         indirect_args
+            ? agx_grid_indirect_local(launch_args)
+            : agx_3d(tg_x * pso->ms_workgroup[0], tg_y * pso->ms_workgroup[1],
+                     tg_z * pso->ms_workgroup[2]),
          agx_workgroup(pso->ms_workgroup[0], pso->ms_workgroup[1],
-                       pso->ms_workgroup[2]), D3D12_SHADER_VISIBILITY_MESH};
+                       pso->ms_workgroup[2]),
+         D3D12_SHADER_VISIBILITY_MESH};
    }
 
    stages[nr_stages++] = (struct d12_mesh_stage){
@@ -9769,18 +9906,25 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
 
    if (d12_debug()->dump_mesh) {
       device->dbg_tess_draw = d12_list_data_cpu(list, drawdesc);
-      device->dbg_tess_counts = d12_list_data_cpu(list, counts);
-      device->dbg_tess_counts_n = 2;
-      device->dbg_mesh_verts = d12_list_data_cpu(list, vertices);
-      device->dbg_mesh_idx = d12_list_data_cpu(list, indices);
+      device->dbg_tess_counts = d12_list_mesh_cpu(list, counts);
+      device->dbg_tess_counts_n = groups * 2;
+      device->dbg_mesh_verts = d12_list_mesh_cpu(list, vertices);
+      device->dbg_mesh_vertex_stride = vtx_stride;
+      device->dbg_mesh_vertex_count =
+         pso->ms_outputs ? MIN2(groups * max_verts, 4) : 0;
+      device->dbg_mesh_index_count = MIN2(idx_B / 4, 6);
+      device->dbg_mesh_idx = d12_list_mesh_cpu(list, indices);
       device->dbg_mesh_grid = d12_list_data_cpu(list, gridbuf);
       device->dbg_mesh_disp = d12_list_data_cpu(list, dispatch);
       mesa_logi("mesh: groups=%u slots=%u vtx_stride=%zu idx_B=%zu amp=%d",
                 groups, nr_slots, vtx_stride, idx_B, pso->has_amp);
    }
 
-   *out_draw = agx_draw_indexed_indirect(drawdesc, indices, idx_B,
-                                         AGX_INDEX_SIZE_U32, false);
+   /* ms_rast expands the mesh index list in its vertex fetch so it can derive
+    * a primitive number and attach the corresponding per-primitive outputs.
+    * The indirect descriptor's first four words already have the non-indexed
+    * {vertex_count, instance_count, first_vertex, first_instance} shape. */
+   *out_draw = agx_draw_indirect(drawdesc);
    *out_poly = u;
    return true;
 }
@@ -10590,7 +10734,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
 
    /* Reset/ClearState and bundle entry deliberately leave IA topology
     * undefined. Undefined draw output must not silently become triangles. */
-   if (list->topology == MESA_PRIM_UNKNOWN)
+   if (!pso->has_mesh && list->topology == MESA_PRIM_UNKNOWN)
       return;
 
    if (pso->so_dynamic_topology) {
@@ -10908,8 +11052,8 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
        * counts here -- a mesh draw has no vertices of its own.
        */
       if (!d12_list_mesh_prerast(list, pso, vertex_count, instance_count,
-                                 first_vertex, root_gpu, textures_gpu,
-                                 pbes_gpu, draw_gpu, &draw, &poly_u))
+                                 first_vertex, root_gpu, textures_gpu, pbes_gpu,
+                                 draw_gpu, indirect_args, &draw, &poly_u))
          return;
 
       vstage = &pso->ms_rast;
@@ -12177,22 +12321,30 @@ d12_list_ExecuteIndirect(ID3D12GraphicsCommandList6 *iface,
       signature->arguments[terminal_index].Type;
    const bool dispatch = type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
    const bool indexed = type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
-   const size_t terminal_size =
-      dispatch ? sizeof(D3D12_DISPATCH_ARGUMENTS)
-      : indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
-                : sizeof(D3D12_DRAW_ARGUMENTS);
-   if (type != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW && !indexed && !dispatch) {
+   /* DISPATCH_MESH is a GRAPHICS terminal, not a compute one: DispatchMesh
+    * routes through d12_list_draw, whose thread-group counts ride in the
+    * vertex/instance arguments and whose indirect address reaches
+    * d12_list_mesh_prerast as draw_gpu. It therefore takes the draw arm
+    * below rather than the dispatch arm. */
+   const bool mesh = type == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+   const size_t terminal_size = dispatch ? sizeof(D3D12_DISPATCH_ARGUMENTS)
+                                : mesh   ? sizeof(D3D12_DISPATCH_MESH_ARGUMENTS)
+                                : indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
+                                          : sizeof(D3D12_DRAW_ARGUMENTS);
+   if (type != D3D12_INDIRECT_ARGUMENT_TYPE_DRAW && !indexed && !dispatch &&
+       !mesh) {
       mesa_loge("ExecuteIndirect: argument type %u unsupported", type);
       list->state = D12_LIST_ERROR;
       return;
    }
 
-   if (!list->pso ||
-       (dispatch && !list->pso->is_compute) ||
-       (!dispatch && (list->pso->is_compute || list->pso->has_tess ||
-                      list->pso->has_mesh))) {
-      mesa_loge("ExecuteIndirect: tessellation and mesh graphics pipelines "
-                "are unsupported");
+   if (!list->pso || (dispatch && !list->pso->is_compute) ||
+       (mesh && !list->pso->has_mesh) ||
+       (!dispatch && !mesh &&
+        (list->pso->is_compute || list->pso->has_tess ||
+         list->pso->has_mesh))) {
+      mesa_loge("ExecuteIndirect: pipeline does not match the command "
+                "signature's terminal argument");
       list->state = D12_LIST_ERROR;
       return;
    }
@@ -12680,6 +12832,7 @@ d12_list_SetGraphicsRootSignature(ID3D12GraphicsCommandList6 *iface,
                                   ID3D12RootSignature *root_sig)
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
+
    list->graphics_rs = (struct d12_root_signature *)root_sig;
    if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
       struct d12_bundle_cmd *cmd =
@@ -13516,6 +13669,7 @@ d12_list_SetComputeRootSignature(ID3D12GraphicsCommandList6 *iface,
                                  ID3D12RootSignature *root_sig)
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
+
    list->compute_rs = (struct d12_root_signature *)root_sig;
    if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
       struct d12_bundle_cmd *cmd =

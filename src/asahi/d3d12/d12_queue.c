@@ -2281,15 +2281,15 @@ d12_queue_dump_completion(struct d12_device *device)
 
       if (device->dbg_mesh_verts) {
          const float *v = (const float *)device->dbg_mesh_verts;
-         unsigned stride_f = (32 * 16) / 4;
-         for (unsigned i = 0; i < 4; i++) {
+         unsigned stride_f = device->dbg_mesh_vertex_stride / 4;
+         for (unsigned i = 0; i < device->dbg_mesh_vertex_count; i++) {
             const float *p = v + i * stride_f;
             mesa_logi("  mesh vtx %u: %8.4f %8.4f %8.4f %8.4f", i, p[0],
                       p[1], p[2], p[3]);
          }
          const uint32_t *ix = (const uint32_t *)device->dbg_mesh_idx;
-         mesa_logi("  mesh indices: %u %u %u / %u %u %u", ix[0], ix[1],
-                   ix[2], ix[3], ix[4], ix[5]);
+         for (unsigned i = 0; i < device->dbg_mesh_index_count; i++)
+            mesa_logi("  mesh index %u: %u", i, ix[i]);
          device->dbg_mesh_verts = NULL;
       }
       device->dbg_tess_draw = NULL;

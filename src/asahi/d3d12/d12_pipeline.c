@@ -1723,16 +1723,46 @@ fail:
  * info.stage to COMPUTE, so anything that reads the stage back has to
  * come after it.
  */
+static nir_shader *dxil_to_nir_stage_vis(const struct d12_binding_map *map,
+                                         uint32_t descriptor_generation,
+                                         const void *dxil, size_t dxil_size,
+                                         mesa_shader_stage stage,
+                                         uint8_t *texture_shapes,
+                                         D3D12_SHADER_VISIBILITY visibility);
+
+/* Every ordinary stage takes its binding visibility straight from its NIR
+ * stage. Only mesh and amplification need the two to differ. */
 static nir_shader *
 dxil_to_nir_stage(const struct d12_binding_map *map,
                   uint32_t descriptor_generation, const void *dxil,
                   size_t dxil_size, mesa_shader_stage stage,
                   uint8_t *texture_shapes)
 {
+   return dxil_to_nir_stage_vis(map, descriptor_generation, dxil, dxil_size,
+                                stage, texture_shapes,
+                                d12_stage_visibility(stage));
+}
+
+/*
+ * visibility is split from stage because a MESH or AMPLIFICATION shader is
+ * translated as COMPUTE -- that is what its container truthfully declares
+ * and what it compiles to -- while the root signature still describes its
+ * bindings under D3D12_SHADER_VISIBILITY_MESH / _AMPLIFICATION. Deriving
+ * the filter from the NIR stage would resolve those to _ALL and hide every
+ * mesh-visible range, which reads as "shader uses a resource the root
+ * signature does not bind".
+ */
+static nir_shader *
+dxil_to_nir_stage_vis(const struct d12_binding_map *map,
+                      uint32_t descriptor_generation, const void *dxil,
+                      size_t dxil_size, mesa_shader_stage stage,
+                      uint8_t *texture_shapes,
+                      D3D12_SHADER_VISIBILITY visibility)
+{
    struct d12_binding_map filtered_map;
    if (map) {
       filtered_map = *map;
-      filtered_map.visibility_filter = d12_stage_visibility(stage);
+      filtered_map.visibility_filter = visibility;
       map = &filtered_map;
    }
 
@@ -1762,11 +1792,13 @@ dxil_to_nir_stage(const struct d12_binding_map *map,
             d12_dxbc_to_nir(dxil, dxil_size, stage, map,
                             descriptor_generation, NULL, &dxbc_error);
          if (!nir)
-            mesa_loge("graphics PSO: DXBC->NIR failed: %s", dxbc_error);
+            mesa_loge("graphics PSO: %s DXBC->NIR failed: %s",
+                      _mesa_shader_stage_to_string(stage), dxbc_error);
          return nir;
       }
 
-      mesa_loge("graphics PSO: %s", why);
+      mesa_loge("graphics PSO: %s bytecode rejected: %s",
+                _mesa_shader_stage_to_string(stage), why);
       return NULL;
    }
 
@@ -1797,7 +1829,8 @@ dxil_to_nir_stage(const struct d12_binding_map *map,
    d12_dxil_module_free(mod);
 
    if (!nir)
-      mesa_loge("graphics PSO: DXIL->NIR failed: %s", error);
+      mesa_loge("graphics PSO: %s DXIL->NIR failed: %s",
+                _mesa_shader_stage_to_string(stage), error);
 
    return nir;
 }
@@ -1947,6 +1980,70 @@ d12_validate_stage_link(const void *producer_bc, size_t producer_size,
                                           &producer[i]))
             return false;
       }
+   }
+
+   return true;
+}
+
+/*
+ * DXIL assigns mesh per-vertex outputs, mesh per-primitive outputs and pixel
+ * inputs independent physical registers.  The software raster linker already
+ * joins those streams by semantic, so applying the ordinary stage comparator's
+ * register/start-component requirement rejects valid repacking.  Mesh links do
+ * require an exact semantic width: unlike the ordinary vertex path, consuming
+ * only part of a mesh output is rejected by native D3D12.
+ */
+static bool
+d12_mesh_signature_element_compatible(const struct d12_input_sig_elem *producer,
+                                      const struct d12_input_sig_elem *consumer)
+{
+   return producer->rows == consumer->rows &&
+          producer->component_count == consumer->component_count &&
+          (!producer->component_type || !consumer->component_type ||
+           producer->component_type == consumer->component_type) &&
+          producer->min_precision == consumer->min_precision;
+}
+
+static bool
+d12_validate_mesh_ps_link(const void *ms, size_t ms_size, const void *ps,
+                          size_t ps_size)
+{
+   if (!ps || !ps_size)
+      return true;
+
+   struct d12_input_sig_elem vertex[D12_MAX_SIG_ELEMENTS] = {0};
+   struct d12_input_sig_elem primitive[D12_MAX_SIG_ELEMENTS] = {0};
+   struct d12_input_sig_elem input[D12_MAX_SIG_ELEMENTS] = {0};
+   unsigned nr_vertex = d12_read_signature(ms, ms_size, D12_SIG_OUTPUT, vertex,
+                                           ARRAY_SIZE(vertex));
+   unsigned nr_primitive = d12_read_signature(ms, ms_size, D12_SIG_PATCH,
+                                              primitive, ARRAY_SIZE(primitive));
+   unsigned nr_input =
+      d12_read_signature(ps, ps_size, D12_SIG_INPUT, input, ARRAY_SIZE(input));
+
+   bool has_position = false;
+   for (unsigned i = 0; i < nr_vertex; i++)
+      has_position |= !strcasecmp(vertex[i].name, "SV_Position");
+   if (!has_position)
+      return false;
+
+   for (unsigned i = 0; i < nr_input; i++) {
+      const struct d12_input_sig_elem *v =
+         d12_find_signature_semantic(vertex, nr_vertex, &input[i]);
+      const struct d12_input_sig_elem *p =
+         d12_find_signature_semantic(primitive, nr_primitive, &input[i]);
+
+      if ((v && d12_mesh_signature_element_compatible(v, &input[i])) ||
+          (p && d12_mesh_signature_element_compatible(p, &input[i])))
+         continue;
+
+      /* PrimitiveID is not generated across a mesh link: the mesh shader must
+       * publish it as a primitive output, hence generate_primitive_id=false. */
+      if (!v && !p &&
+          d12_sig_is_generated(&input[i], MESA_SHADER_FRAGMENT, false))
+         continue;
+
+      return false;
    }
 
    return true;
@@ -2271,13 +2368,19 @@ d12_lower_flat_input_transport_instr(nir_builder *b,
    for (unsigned i = 0; i < intr->def.num_components; i++) {
       nir_def *value = nir_channel(b, &intr->def, i);
       unsigned type = d12_flat_transport_type(data, sem.location, first + i);
-      components[i] = type == 1 ? nir_f2u32(b, value)
-                                : type == 2 ? nir_f2i32(b, value) : value;
+      components[i] = type && ((struct d12_flat_transport *)data)->bitcast
+                         ? value
+                      : type == 1 ? nir_f2u32(b, value)
+                      : type == 2 ? nir_f2i32(b, value)
+                                  : value;
       progress |= type != 0;
    }
 
    if (!progress)
       return false;
+
+   if (((struct d12_flat_transport *)data)->bitcast)
+      nir_intrinsic_set_dest_type(intr, nir_type_float32);
 
    nir_def *replacement =
       nir_vec(b, components, intr->def.num_components);
@@ -2419,12 +2522,11 @@ d12_merge_texture_shapes(uint8_t *pso_shapes, const uint8_t *stage_shapes)
  * in it is a function of the inputs here, so a cached stage replays it.
  */
 static bool
-compile_gfx_stage(struct d12_device *device,
-                  const struct d12_binding_map *map, const void *dxil,
-                  size_t dxil_size, mesa_shader_stage stage,
-                  struct agx_tilebuffer_layout *tib,
-                  uint16_t api_sample_mask, uint8_t a8_mask,
-                  const struct d12_vs_fetch *fetch, bool allow_flat_transport,
+compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
+                  const void *dxil, size_t dxil_size, mesa_shader_stage stage,
+                  struct agx_tilebuffer_layout *tib, uint16_t api_sample_mask,
+                  uint8_t a8_mask, const struct d12_vs_fetch *fetch,
+                  bool allow_flat_transport, bool lossless_flat_transport,
                   struct d12_stage_outputs *o, struct agx_shader_part *out)
 {
    const uint32_t descriptor_generation =
@@ -2444,6 +2546,22 @@ compile_gfx_stage(struct d12_device *device,
        */
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_FRAGMENT, &agx_nir_options, "d12 empty fragment shader");
+      nir = b.shader;
+   } else if (!dxil && stage == MESA_SHADER_VERTEX) {
+      /* A MESH pipeline has no vertex shader. Its rasterization vertex
+       * stage is built separately into pso->ms_rast, and the draw path
+       * binds ms_rast/ms_uvs/ms_varyings rather than vs/uvs/varyings, so
+       * nothing compiled here is ever used by a mesh draw. The ordinary
+       * graphics path still wants a vertex stage to link and to lay the
+       * tilebuffer out against, so compile an empty one.
+       *
+       * The mesh shader must NOT be handed to this slot instead: its
+       * container declares DXIL kind 13, which d12_dxil_container_stage
+       * truthfully reports as COMPUTE, and the stage-equality check in
+       * dxil_to_nir_stage then refuses the whole pipeline.
+       */
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_VERTEX, &agx_nir_options, "d12 empty vertex shader");
       nir = b.shader;
    } else {
       nir = dxil_to_nir_stage(map, descriptor_generation, dxil, dxil_size,
@@ -2500,6 +2618,7 @@ compile_gfx_stage(struct d12_device *device,
 
    if (stage == MESA_SHADER_FRAGMENT && allow_flat_transport) {
       d12_gather_flat_transport(dxil, dxil_size, nir, &o->flat_transport);
+      o->flat_transport.bitcast = lossless_flat_transport;
       NIR_PASS(_, nir, d12_nir_lower_flat_input_transport,
                &o->flat_transport);
    }
@@ -2864,6 +2983,9 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                      struct agx_unlinked_uvs_layout *uvs,
                      struct agx_shader_part *out)
 {
+   /* DXIL global stores/atomics need the same side-effect metadata as API
+    * compute and graphics stages, including execution-mask lowering. */
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    NIR_PASS(_, nir, agx_nir_lower_texture);
    const bool native = device->dev.chip == AGX_CHIP_G17P;
    if (native)
@@ -3846,16 +3968,16 @@ d12_translate_logic_op(D3D12_LOGIC_OP in, enum pipe_logicop *out)
 }
 
 /*
- * ms_setup: turn the mesh shader's GPU-written counts into an indirect
- * draw. The counts do not exist until the mesh shader has run, so the
- * CPU cannot fill this in -- the same reason tessellation needs its
- * prefix sum before the draw.
+ * ms_setup: turn the mesh dispatch dimensions into an indirect draw.
  *
- * Reads  { u32 vertices, u32 primitives } from the counts buffer.
- * Writes { index_count = primitives * 3, 1, 0, 0, 0 }.
+ * Each workgroup owns an index segment sized by its primitive declaration.  Drawing that
+ * complete segment lets the rasterization shader derive a stable group and
+ * local primitive ID without a GPU prefix sum; primitives beyond the group's
+ * GPU-written count are discarded there.  The bounded group count keeps every
+ * generated address inside the allocation even for GPU-written dimensions.
  */
 static nir_shader *
-build_ms_setup(void)
+build_ms_setup(unsigned max_prims)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "d12 mesh draw setup");
@@ -3866,20 +3988,26 @@ build_ms_setup(void)
 
    nir_def *params = nir_load_preamble(&b, 1, 64, .base = D12_UNIFORM_MESH_PARAMS);
 
-   nir_def *counts = nir_load_global(
-      &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_COUNTS),
-      .align_mul = 8);
    /* NOT the dispatch slot: an amplification shader writes its
     * DispatchMesh grid there, so the draw descriptor has its own.
     */
    nir_def *draw = nir_load_global(
       &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_DRAW), .align_mul = 8);
 
-   nir_def *prims =
-      nir_load_global(&b, 1, 32, nir_iadd_imm(&b, counts, 4), .align_mul = 4);
+   nir_def *dims_ptr = nir_load_global(
+      &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_GROUP_DIMS),
+      .align_mul = 8);
+   nir_def *dims = nir_load_global(&b, 3, 32, dims_ptr, .align_mul = 4);
+   nir_def *groups = nir_imul(
+      &b, nir_channel(&b, dims, 0),
+      nir_imul(&b, nir_channel(&b, dims, 1), nir_channel(&b, dims, 2)));
+   nir_def *capacity = nir_load_global(
+      &b, 1, 32, nir_iadd_imm(&b, params, D12_MESH_OFF_CAPACITY),
+      .align_mul = 8);
+   groups = nir_umin(&b, groups, capacity);
 
-   /* A D3D12 mesh shader emits triangles: three indices per primitive. */
-   nir_def *idx = nir_imul_imm(&b, prims, 3);
+   /* Three expanded vertices per declared triangle in each workgroup. */
+   nir_def *idx = nir_imul_imm(&b, groups, max_prims * 3);
 
    nir_store_global(&b, idx, draw, .write_mask = 1, .align_mul = 4);
    nir_store_global(&b, nir_imm_int(&b, 1), nir_iadd_imm(&b, draw, 4),
@@ -3904,7 +4032,7 @@ build_as_setup(const unsigned wg[3])
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "d12 amplification setup");
-   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[0] = D12_MESH_MAX_AS_GROUPS;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
    b.shader->info.internal = false;
@@ -3916,33 +4044,200 @@ build_as_setup(const unsigned wg[3])
       .align_mul = 8);
    nir_def *grid = nir_load_global(
       &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_GRID), .align_mul = 8);
+   nir_def *mesh_dims = nir_load_global(
+      &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_GROUP_DIMS),
+      .align_mul = 8);
+   nir_def *map = nir_load_global(
+      &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_GROUP_MAP),
+      .align_mul = 8);
+   nir_def *as_dims_ptr =
+      nir_load_global(&b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_AS_DIMS),
+                      .align_mul = 8);
+   nir_def *as_dims = nir_load_global(&b, 3, 32, as_dims_ptr, .align_mul = 4);
+   nir_def *as_groups = nir_imul(
+      &b, nir_channel(&b, as_dims, 0),
+      nir_imul(&b, nir_channel(&b, as_dims, 1), nir_channel(&b, as_dims, 2)));
+   as_groups = nir_umin_imm(&b, as_groups, D12_MESH_MAX_AS_GROUPS);
 
+   nir_def *tid = nir_load_local_invocation_index(&b);
+   nir_def *own_addr = nir_iadd(
+      &b, disp, nir_u2u64(&b, nir_imul_imm(&b, tid, 3 * sizeof(uint32_t))));
+   nir_def *own_dims = nir_load_global(&b, 3, 32, own_addr, .align_mul = 4);
+   nir_def *own_count = nir_imul(
+      &b, nir_channel(&b, own_dims, 0),
+      nir_imul(&b, nir_channel(&b, own_dims, 1), nir_channel(&b, own_dims, 2)));
+   own_count = nir_umin_imm(&b, own_count, D12_MESH_MAX_AMP_GROUPS);
+   nir_def *active = nir_ult(&b, tid, as_groups);
+   own_count = nir_bcsel(&b, active, own_count, nir_imm_int(&b, 0));
+
+   nir_def *prefix = nir_imm_int(&b, 0);
+   nir_def *total = nir_imm_int(&b, 0);
+   for (unsigned i = 0; i < D12_MESH_MAX_AS_GROUPS; i++) {
+      nir_def *addr = nir_iadd_imm(&b, disp, i * 3 * sizeof(uint32_t));
+      nir_def *dims = nir_load_global(&b, 3, 32, addr, .align_mul = 4);
+      nir_def *count = nir_imul(
+         &b, nir_channel(&b, dims, 0),
+         nir_imul(&b, nir_channel(&b, dims, 1), nir_channel(&b, dims, 2)));
+      count = nir_umin_imm(&b, count, D12_MESH_MAX_AMP_GROUPS);
+      count = nir_bcsel(&b, nir_ult(&b, nir_imm_int(&b, i), as_groups), count,
+                        nir_imm_int(&b, 0));
+      total = nir_iadd(&b, total, count);
+      prefix = nir_iadd(&b, prefix,
+                        nir_bcsel(&b, nir_ult(&b, nir_imm_int(&b, i), tid),
+                                  count, nir_imm_int(&b, 0)));
+   }
+   total = nir_umin_imm(&b, total, D12_MESH_MAX_TOTAL_GROUPS);
+
+   nir_push_if(&b, nir_ieq_imm(&b, tid, 0));
+   nir_store_global(&b, total, mesh_dims, .write_mask = 1, .align_mul = 4);
+   nir_store_global(&b, nir_imm_int(&b, 1), nir_iadd_imm(&b, mesh_dims, 4),
+                    .write_mask = 1, .align_mul = 4);
+   nir_store_global(&b, nir_imm_int(&b, 1), nir_iadd_imm(&b, mesh_dims, 8),
+                    .write_mask = 1, .align_mul = 4);
+   nir_store_global(&b, nir_imul_imm(&b, total, wg[0]), grid, .write_mask = 1,
+                    .align_mul = 4);
+   nir_store_global(&b, nir_imm_int(&b, wg[1]), nir_iadd_imm(&b, grid, 4),
+                    .write_mask = 1, .align_mul = 4);
+   nir_store_global(&b, nir_imm_int(&b, wg[2]), nir_iadd_imm(&b, grid, 8),
+                    .write_mask = 1, .align_mul = 4);
    for (unsigned i = 0; i < 3; i++) {
-      nir_def *groups = nir_load_global(
-         &b, 1, 32, nir_iadd_imm(&b, disp, i * 4), .align_mul = 4);
-
-      nir_store_global(&b, nir_imul_imm(&b, groups, wg[i]),
-                       nir_iadd_imm(&b, grid, i * 4), .write_mask = 1,
-                       .align_mul = 4);
       nir_store_global(&b, nir_imm_int(&b, wg[i]),
                        nir_iadd_imm(&b, grid, (3 + i) * 4), .write_mask = 1,
                        .align_mul = 4);
    }
+   nir_pop_if(&b, NULL);
+
+   nir_def *dx = nir_umax_imm(&b, nir_channel(&b, own_dims, 0), 1);
+   nir_def *dy = nir_umax_imm(&b, nir_channel(&b, own_dims, 1), 1);
+   nir_variable *child =
+      nir_local_variable_create(b.impl, glsl_uint_type(), "child");
+   nir_store_var(&b, child, nir_imm_int(&b, 0), 1);
+   nir_push_loop(&b);
+   {
+      nir_def *local = nir_load_var(&b, child);
+      nir_push_if(&b, nir_uge(&b, local, own_count));
+      nir_jump(&b, nir_jump_break);
+      nir_pop_if(&b, NULL);
+      nir_def *linear = nir_iadd(&b, prefix, local);
+      nir_def *emit =
+         nir_iand(&b, active,
+                  nir_iand(&b, nir_ult(&b, local, own_count),
+                           nir_ult_imm(&b, linear, D12_MESH_MAX_TOTAL_GROUPS)));
+
+      nir_push_if(&b, emit);
+      nir_def *x = nir_umod(&b, local, dx);
+      nir_def *yz = nir_udiv(&b, local, dx);
+      nir_def *y = nir_umod(&b, yz, dy);
+      nir_def *z = nir_udiv(&b, yz, dy);
+      nir_def *entry = nir_vec4(&b, x, y, z, tid);
+      nir_def *addr = nir_iadd(
+         &b, map,
+         nir_u2u64(&b, nir_imul_imm(&b, linear, 4 * sizeof(uint32_t))));
+      nir_store_global(&b, entry, addr, .write_mask = 0xf, .align_mul = 16);
+      nir_pop_if(&b, NULL);
+      nir_store_var(&b, child, nir_iadd_imm(&b, local, 1), 1);
+   }
+   nir_pop_loop(&b, NULL);
+   NIR_PASS(_, b.shader, nir_lower_vars_to_ssa);
 
    return b.shader;
 }
 
+static nir_alu_type
+d12_mesh_sig_type(const struct d12_input_sig_elem *sig)
+{
+   switch (sig->component_type) {
+   case 1:
+      return nir_type_uint32;
+   case 2:
+      return nir_type_int32;
+   case 3:
+      return nir_type_float32;
+   default:
+      return nir_type_uint32;
+   }
+}
+
+static nir_def *
+d12_mesh_load_output(nir_builder *b, nir_def *base, nir_def *index,
+                     unsigned slot, unsigned slots)
+{
+   nir_def *off = nir_imul_imm(b, index, slots * D12_MESH_SLOT_STRIDE);
+   off = nir_iadd_imm(b, off, slot * D12_MESH_SLOT_STRIDE);
+   return nir_load_global(b, 4, 32, nir_iadd(b, base, nir_u2u64(b, off)),
+                          .align_mul = 16);
+}
+
+static void
+d12_mesh_store_linked_output(nir_builder *b, nir_def *value,
+                             const struct d12_input_sig_elem *producer,
+                             const struct d12_input_sig_elem *consumer,
+                             unsigned row, bool lower_integer_transport)
+{
+   unsigned location = VARYING_SLOT_VAR0 + consumer->register_index + row;
+   unsigned components =
+      MIN2(producer->component_count, consumer->component_count);
+   components = MIN2(components, 4 - consumer->start_component);
+
+   for (unsigned c = 0; c < components; c++) {
+      nir_def *component = nir_channel(b, value, c);
+      nir_alu_type src_type = d12_mesh_sig_type(consumer);
+      if (lower_integer_transport && consumer->component_type == 1) {
+         src_type = nir_type_float32;
+      } else if (lower_integer_transport && consumer->component_type == 2) {
+         src_type = nir_type_float32;
+      }
+
+      nir_store_output(b, component, nir_imm_int(b, 0),
+                       .base = consumer->register_index + row,
+                       .component = consumer->start_component + c,
+                       .write_mask = 1, .src_type = src_type,
+                       .io_semantics.location = location,
+                       .io_semantics.num_slots = consumer->rows);
+   }
+
+   b->shader->info.outputs_written |= BITFIELD64_BIT(location);
+}
+
 /*
- * ms_rast: the hardware vertex shader for a mesh pipeline. The mesh
- * shader wrote per-vertex outputs as a flat array of vec4 slots; this
- * reads the slot for gl_VertexID and hands it to the rasterizer.
- *
- * Slot 0 is POSITION by DXIL's mesh signature convention; the remaining
- * live slots become VAR0.. varyings for the pixel shader.
+ * ms_rast is the hardware vertex shader for a mesh pipeline.  Mesh output
+ * stores land in the driver's global-memory ABI, so this stage links that
+ * memory back to the pixel shader by SEMANTIC, not by assuming producer and
+ * consumer registers are identical.  DXIL is free to repack them: the
+ * interface-matching shader, for example, writes UV_VERTEX_ID in mesh slot 2
+ * but the pixel shader consumes it in register 2, component 1.
  */
 static nir_shader *
-build_ms_rast(uint64_t outputs)
+d12_build_mesh_rast(const void *ms_dxil, size_t ms_size, const void *ps_dxil,
+                    size_t ps_size, unsigned max_prims)
 {
+   struct d12_input_sig_elem output[D12_MAX_SIG_ELEMENTS] = {0};
+   struct d12_input_sig_elem primitive[D12_MAX_SIG_ELEMENTS] = {0};
+   struct d12_input_sig_elem input[D12_MAX_SIG_ELEMENTS] = {0};
+   unsigned nr_output = d12_read_signature(ms_dxil, ms_size, D12_SIG_OUTPUT,
+                                           output, ARRAY_SIZE(output));
+   unsigned nr_primitive = d12_read_signature(ms_dxil, ms_size, D12_SIG_PATCH,
+                                              primitive, ARRAY_SIZE(primitive));
+   unsigned nr_input = ps_dxil
+                          ? d12_read_signature(ps_dxil, ps_size, D12_SIG_INPUT,
+                                               input, ARRAY_SIZE(input))
+                          : 0;
+   unsigned vertex_slots = 1, primitive_slots = 1;
+   for (unsigned i = 0; i < nr_output; i++)
+      vertex_slots = MAX2(vertex_slots, output[i].id + output[i].rows);
+   for (unsigned i = 0; i < nr_primitive; i++)
+      primitive_slots =
+         MAX2(primitive_slots, primitive[i].id + primitive[i].rows);
+   bool has_flat_integer = false, has_flat_float = false;
+   for (unsigned i = 0; i < nr_input; i++) {
+      if (input[i].interpolation != 1)
+         continue;
+      has_flat_integer |=
+         input[i].component_type == 1 || input[i].component_type == 2;
+      has_flat_float |= input[i].component_type == 3;
+   }
+   bool lower_integer_transport = has_flat_integer && has_flat_float;
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_VERTEX, &agx_nir_options, "d12 mesh rast");
    b.shader->info.internal = false;
@@ -3951,47 +4246,136 @@ build_ms_rast(uint64_t outputs)
    nir_def *verts = nir_load_global(
       &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_VERTICES),
       .align_mul = 8);
+   nir_def *prims = nir_load_global(
+      &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_PRIMITIVES),
+      .align_mul = 8);
+   nir_def *indices =
+      nir_load_global(&b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_INDICES),
+                      .align_mul = 8);
+   nir_def *counts = nir_load_global(
+      &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_COUNTS), .align_mul = 8);
 
-   nir_def *vid = nir_load_vertex_id(&b);
-
-   /* The per-vertex stride is FIXED at D12_MESH_MAX_SLOTS slots, not the
-    * live slot count -- that is what the translator emits for
-    * storeVertexOutput, and the two have to agree. Striding by the live
-    * count instead put vertex 1 at byte 16 while the shader wrote it at
-    * byte 512, so only vertex 0 was ever read back.
+   /* Rasterize an expanded, non-indexed list.  That gives every hardware
+    * vertex a stable primitive number while the original index still selects
+    * the mesh shader's vertex output.  Per-primitive attributes can then be
+    * duplicated onto the three vertices and consumed with flat interpolation.
     */
-   unsigned nr_slots = MAX2(util_last_bit64(outputs), 1);
-   nir_def *base = nir_iadd(
-      &b, verts,
-      nir_u2u64(&b, nir_imul_imm(&b, vid,
-                                 D12_MESH_MAX_SLOTS * D12_MESH_SLOT_STRIDE)));
+   nir_def *linear_vid = nir_load_vertex_id(&b);
+   nir_def *prim_id = nir_udiv_imm(&b, linear_vid, 3);
+   nir_def *group_id = nir_udiv_imm(&b, prim_id, max_prims);
+   nir_def *local_prim = nir_umod_imm(&b, prim_id, max_prims);
+   nir_def *group_counts =
+      nir_iadd(&b, counts, nir_u2u64(&b, nir_imul_imm(&b, group_id, 8)));
+   nir_def *primitive_count = nir_load_global(
+      &b, 1, 32, nir_iadd_imm(&b, group_counts, 4), .align_mul = 4);
+   nir_def *vid = nir_load_global(
+      &b, 1, 32,
+      nir_iadd(&b, indices, nir_u2u64(&b, nir_imul_imm(&b, linear_vid, 4))),
+      .align_mul = 4);
+   nir_def *position = NULL;
 
-   for (unsigned slot = 0; slot < nr_slots; slot++) {
-      /* Slot 0 is POSITION by the mesh output layout and is ALWAYS
-       * present. The mask cannot be consulted for it: a mesh shader
-       * writes its outputs with global stores, so its NIR
-       * outputs_written is empty and gating on it emitted a shader that
-       * wrote nothing but the default point size.
-       */
-      if (slot != 0 && !(outputs & BITFIELD64_BIT(slot)))
-         continue;
+   for (unsigned i = 0; i < nr_output; i++) {
+      const struct d12_input_sig_elem *out = &output[i];
+      const struct d12_input_sig_elem *in =
+         d12_find_signature_semantic(input, nr_input, out);
 
-      nir_def *v = nir_load_global(
-         &b, 4, 32, nir_iadd_imm(&b, base, slot * D12_MESH_SLOT_STRIDE),
-         .align_mul = 16);
+      for (unsigned row = 0; row < out->rows; row++) {
+         unsigned slot = out->id + row;
+         if (slot >= D12_MESH_MAX_SLOTS)
+            continue;
 
-      unsigned location = slot == 0 ? VARYING_SLOT_POS
-                                    : VARYING_SLOT_VAR0 + (slot - 1);
+         nir_def *value =
+            d12_mesh_load_output(&b, verts, vid, slot, vertex_slots);
 
-      nir_store_output(&b, v, nir_imm_int(&b, 0), .base = slot,
-                       .write_mask = 0xf, .src_type = nir_type_float32,
-                       .io_semantics.location = location,
-                       .io_semantics.num_slots = 1);
-
-      b.shader->info.outputs_written |= BITFIELD64_BIT(location);
+         if (!strcasecmp(out->name, "SV_Position")) {
+            position = value;
+         } else if (!strcasecmp(out->name, "SV_ClipDistance")) {
+            unsigned location =
+               VARYING_SLOT_CLIP_DIST0 + out->semantic_index + row;
+            unsigned components = MIN2(out->component_count, 4);
+            for (unsigned c = 0; c < components; c++) {
+               nir_store_output(&b, nir_channel(&b, value, c),
+                                nir_imm_int(&b, 0), .base = out->id + row,
+                                .component = c, .write_mask = 1,
+                                .src_type = nir_type_float32,
+                                .io_semantics.location = location,
+                                .io_semantics.num_slots = out->rows);
+            }
+            b.shader->info.outputs_written |= BITFIELD64_BIT(location);
+            b.shader->info.clip_distance_array_size += components;
+         } else if (in) {
+            d12_mesh_store_linked_output(&b, value, out, in, row,
+                                         lower_integer_transport);
+         }
+      }
    }
 
+   nir_def *culled = nir_inot(&b, nir_ult(&b, local_prim, primitive_count));
+   for (unsigned i = 0; i < nr_primitive; i++) {
+      const struct d12_input_sig_elem *out = &primitive[i];
+      const struct d12_input_sig_elem *in =
+         d12_find_signature_semantic(input, nr_input, out);
+
+      for (unsigned row = 0; row < out->rows; row++) {
+         unsigned slot = out->id + row;
+         if (slot >= D12_MESH_MAX_SLOTS)
+            continue;
+
+         nir_def *value =
+            d12_mesh_load_output(&b, prims, prim_id, slot, primitive_slots);
+         if (!strcasecmp(out->name, "SV_CullPrimitive")) {
+            culled = nir_ior(&b, culled,
+                             nir_ine_imm(&b, nir_channel(&b, value, 0), 0));
+         } else if (!strcasecmp(out->name, "SV_RenderTargetArrayIndex")) {
+            nir_store_output(&b, nir_channel(&b, value, 0), nir_imm_int(&b, 0),
+                             .base = 0, .write_mask = 1,
+                             .src_type = nir_type_uint32,
+                             .io_semantics.location = VARYING_SLOT_LAYER,
+                             .io_semantics.num_slots = 1);
+            b.shader->info.outputs_written |= VARYING_BIT_LAYER;
+         } else if (in) {
+            d12_mesh_store_linked_output(&b, value, out, in, row,
+                                         lower_integer_transport);
+         }
+      }
+   }
+
+   if (!position)
+      position = nir_imm_vec4(&b, 0.0, 0.0, 0.0, 0.0);
+   position =
+      nir_bcsel(&b, culled, nir_imm_vec4(&b, 0.0, 0.0, 0.0, 0.0), position);
+   nir_store_output(&b, position, nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0xf, .src_type = nir_type_float32,
+                    .io_semantics.location = VARYING_SLOT_POS,
+                    .io_semantics.num_slots = 1);
+   b.shader->info.outputs_written |= VARYING_BIT_POS;
+
    return b.shader;
+}
+
+/*
+ * Mesh output stores are lowered to global memory, so nir_shader_info cannot
+ * discover them and outputs_written is necessarily zero.  Recover the live
+ * per-vertex slots from the DXIL signature instead.  The backing-memory ABI
+ * is deliberately indexed by (signature id + row), exactly like the
+ * STORE_VERTEX_OUTPUT lowering, rather than by the packed output register.
+ */
+static uint64_t
+d12_mesh_output_mask(const void *dxil, size_t size, enum d12_sig_section kind)
+{
+   struct d12_input_sig_elem sig[D12_MAX_SIG_ELEMENTS] = {0};
+   unsigned nr = d12_read_signature(dxil, size, kind, sig, ARRAY_SIZE(sig));
+   uint64_t mask = 0;
+
+   for (unsigned i = 0; i < nr; i++) {
+      for (unsigned row = 0; row < sig[i].rows; row++) {
+         unsigned slot = sig[i].id + row;
+         if (slot < D12_MESH_MAX_SLOTS)
+            mask |= BITFIELD64_BIT(slot);
+      }
+   }
+
+   return mask;
 }
 
 HRESULT
@@ -4009,10 +4393,21 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
                                const struct d12_binding_map *map, REFIID riid,
                                void **out)
 {
+   if (!d12_validate_mesh_ps_link(ms_dxil, ms_size, ps_dxil, ps_size)) {
+      mesa_loge("CreatePipelineState: incompatible mesh/pixel signatures");
+      return E_INVALIDARG;
+   }
+
    /* Build the pipeline the ordinary way first: the pixel shader, the
     * depth/stencil and rasterizer state and the tilebuffer layout are
     * all identical to a vertex pipeline. The MESH-specific programs are
-    * then attached, and the rasterization VS replaces pso->vs.
+    * then attached alongside, in ms_rast/ms_uvs/ms_varyings, which is what
+    * the draw path binds for a mesh pipeline.
+    *
+    * NO vertex shader is passed. Handing the mesh bytecode to the VS slot
+    * (which this did until 2026-08-10) made every DXC-produced mesh
+    * container fail PSO creation: kind 13 is reported as COMPUTE, and the
+    * VS stage-equality check refused it.
     *
     * A mesh shader translates to plain compute writing through
     * D12_UNIFORM_MESH_PARAMS, so it needs no lowering of its own -- but
@@ -4020,15 +4415,13 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
     * no poly emulation for mesh. Both internal programs are built here.
     */
    HRESULT hr = d12_pipeline_state_create_graphics(
-      device, ms_dxil, ms_size, ps_dxil, ps_size, NULL, 0, NULL, 0, NULL, 0,
+      device, NULL, 0, true, ps_dxil, ps_size, NULL, 0, NULL, 0, NULL, 0,
       rt_format, nr_rt, rt_formats, nr_samples, sample_mask, ds_desc,
-      dsv_format, rs_desc, rs_desc ? (float)rs_desc->DepthBias : 0.0f,
-      true, true,
-      ds_desc ? ds_desc->StencilReadMask : UINT8_MAX,
+      dsv_format, rs_desc, rs_desc ? (float)rs_desc->DepthBias : 0.0f, true,
+      true, ds_desc ? ds_desc->StencilReadMask : UINT8_MAX,
       ds_desc ? ds_desc->StencilWriteMask : UINT8_MAX,
       ds_desc ? ds_desc->StencilReadMask : UINT8_MAX,
-      ds_desc ? ds_desc->StencilWriteMask : UINT8_MAX,
-      blend_desc, NULL, NULL,
+      ds_desc ? ds_desc->StencilWriteMask : UINT8_MAX, blend_desc, NULL, NULL,
       D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED,
       D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,
       D3D12_PIPELINE_STATE_FLAG_NONE, map, riid, out);
@@ -4043,25 +4436,38 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    struct agx_shader_part as_part = {0}, as_setup_part = {0};
 
    /* The mesh shader itself, as compute. */
-   nir_shader *ms = dxil_to_nir_stage(
-      map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-      ms_dxil, ms_size, MESA_SHADER_COMPUTE, NULL);
+   nir_shader *ms = dxil_to_nir_stage_vis(
+      map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip), ms_dxil,
+      ms_size, MESA_SHADER_COMPUTE, NULL, D3D12_SHADER_VISIBILITY_MESH);
    if (!ms) {
       hr = E_INVALIDARG;
       goto fail;
    }
 
+   const nir_lower_compute_system_values_options mesh_csv = {
+      .shuffle_local_ids_for_quad_derivatives = true,
+      .lower_local_invocation_index = true,
+   };
+   d12_dxil_bound_mesh_workgroups(ms, false);
+   if (ms->info.derivative_group == DERIVATIVE_GROUP_QUADS)
+      NIR_PASS(_, ms, nir_lower_compute_system_values, &mesh_csv);
+
    pso->ms_workgroup[0] = MAX2(ms->info.workgroup_size[0], 1);
    pso->ms_workgroup[1] = MAX2(ms->info.workgroup_size[1], 1);
    pso->ms_workgroup[2] = MAX2(ms->info.workgroup_size[2], 1);
-   pso->ms_outputs = ms->info.outputs_written;
-
+   const unsigned ms_payload_size = ms->info.task_payload_size;
+   pso->ms_max_vertices = MAX2(ms->info.mesh.max_vertices_out, 1);
+   pso->ms_max_primitives = MAX2(ms->info.mesh.max_primitives_out, 1);
+   pso->ms_outputs = d12_mesh_output_mask(ms_dxil, ms_size, D12_SIG_OUTPUT);
+   pso->ms_primitive_outputs =
+      d12_mesh_output_mask(ms_dxil, ms_size, D12_SIG_PATCH);
    if (!compile_poly_program(device, ms, NULL, &ms_part)) {
       hr = E_INVALIDARG;
       goto fail;
    }
 
-   if (!compile_poly_program(device, build_ms_setup(), NULL, &setup_part)) {
+   if (!compile_poly_program(device, build_ms_setup(pso->ms_max_primitives),
+                             NULL, &setup_part)) {
       hr = E_INVALIDARG;
       goto fail;
    }
@@ -4092,8 +4498,11 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    }
 
    /* The rasterization vertex shader, linked like any other. */
-   if (!compile_poly_program(device, build_ms_rast(pso->ms_outputs),
-                             &pso->ms_uvs, &rast_part)) {
+   if (!compile_poly_program(
+          device,
+          d12_build_mesh_rast(ms_dxil, ms_size, ps_dxil, ps_size,
+                              pso->ms_max_primitives),
+          &pso->ms_uvs, &rast_part)) {
       hr = E_INVALIDARG;
       goto fail;
    }
@@ -4155,18 +4564,31 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
 
    /* The amplification shader, if there is one. */
    if (as_dxil && as_size) {
-      nir_shader *as =
-         dxil_to_nir_stage(
-            map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-            as_dxil, as_size, MESA_SHADER_COMPUTE, NULL);
+      nir_shader *as = dxil_to_nir_stage_vis(
+         map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
+         as_dxil, as_size, MESA_SHADER_COMPUTE, NULL,
+         D3D12_SHADER_VISIBILITY_AMPLIFICATION);
       if (!as) {
          hr = E_INVALIDARG;
          goto fail;
       }
 
+      d12_dxil_bound_mesh_workgroups(as, true);
+      if (as->info.derivative_group == DERIVATIVE_GROUP_QUADS)
+         NIR_PASS(_, as, nir_lower_compute_system_values, &mesh_csv);
+
       pso->as_workgroup[0] = MAX2(as->info.workgroup_size[0], 1);
       pso->as_workgroup[1] = MAX2(as->info.workgroup_size[1], 1);
       pso->as_workgroup[2] = MAX2(as->info.workgroup_size[2], 1);
+
+      /* compile_poly_program consumes the NIR. Save declarations first. */
+      pso->as_payload_size = as->info.task_payload_size;
+      if (pso->as_payload_size > D12_MESH_PAYLOAD_STRIDE ||
+          (ms_payload_size && ms_payload_size != pso->as_payload_size)) {
+         ralloc_free(as);
+         hr = E_INVALIDARG;
+         goto fail;
+      }
 
       if (!compile_poly_program(device, as, NULL, &as_part) ||
           !compile_poly_program(device, build_as_setup(pso->ms_workgroup),
@@ -4201,13 +4623,6 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
          }
       }
 
-      /* The payload size is declared in ASState, but the module is gone
-       * by the time the shader is compiled. Allocate a fixed bound: the
-       * D3D12 limit is 16 KB and the shader writes through the pointer
-       * at D12_MESH_OFF_PAYLOAD, so over-allocating is safe and
-       * under-allocating would corrupt whatever follows.
-       */
-      pso->as_payload_size = 16 * 1024;
       pso->has_amp = true;
       mesa_logi("  + amplification: as %u B, setup %u B, wg %ux%ux%u",
                 as_part.info.binary_size, as_setup_part.info.binary_size,
@@ -4239,35 +4654,24 @@ fail:
 }
 
 HRESULT
-d12_pipeline_state_create_graphics(struct d12_device *device,
-                                   const void *vs_dxil, size_t vs_size,
-                                   const void *ps_dxil, size_t ps_size,
-                                   const void *gs_dxil, size_t gs_size,
-                                   const void *hs_dxil, size_t hs_size,
-                                   const void *ds_dxil, size_t ds_size,
-                                   enum pipe_format rt_format, unsigned nr_rt,
-                                   const DXGI_FORMAT *rt_formats,
-                                   unsigned nr_samples, UINT sample_mask,
-                                   const D3D12_DEPTH_STENCIL_DESC *ds_desc,
-                                   DXGI_FORMAT dsv_format,
-                                   const D3D12_RASTERIZER_DESC *rs_desc,
-                                   float rasterizer_depth_bias,
-                                   bool front_stencil_enable,
-                                   bool back_stencil_enable,
-                                   uint8_t front_stencil_read_mask,
-                                   uint8_t front_stencil_write_mask,
-                                   uint8_t back_stencil_read_mask,
-                                   uint8_t back_stencil_write_mask,
-                                   const D3D12_BLEND_DESC *blend_desc,
-                                   const D3D12_INPUT_LAYOUT_DESC *input_layout,
-                                   const D3D12_STREAM_OUTPUT_DESC *so_desc,
-                                   D3D12_PRIMITIVE_TOPOLOGY_TYPE
-                                      primitive_topology_type,
-                                   D3D12_INDEX_BUFFER_STRIP_CUT_VALUE
-                                      strip_cut,
-                                   D3D12_PIPELINE_STATE_FLAGS flags,
-                                   const struct d12_binding_map *map,
-                                   REFIID riid, void **out)
+d12_pipeline_state_create_graphics(
+   struct d12_device *device, const void *vs_dxil, size_t vs_size,
+   bool vs_is_mesh, const void *ps_dxil, size_t ps_size, const void *gs_dxil,
+   size_t gs_size, const void *hs_dxil, size_t hs_size, const void *ds_dxil,
+   size_t ds_size, enum pipe_format rt_format, unsigned nr_rt,
+   const DXGI_FORMAT *rt_formats, unsigned nr_samples, UINT sample_mask,
+   const D3D12_DEPTH_STENCIL_DESC *ds_desc, DXGI_FORMAT dsv_format,
+   const D3D12_RASTERIZER_DESC *rs_desc, float rasterizer_depth_bias,
+   bool front_stencil_enable, bool back_stencil_enable,
+   uint8_t front_stencil_read_mask, uint8_t front_stencil_write_mask,
+   uint8_t back_stencil_read_mask, uint8_t back_stencil_write_mask,
+   const D3D12_BLEND_DESC *blend_desc,
+   const D3D12_INPUT_LAYOUT_DESC *input_layout,
+   const D3D12_STREAM_OUTPUT_DESC *so_desc,
+   D3D12_PRIMITIVE_TOPOLOGY_TYPE primitive_topology_type,
+   D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut,
+   D3D12_PIPELINE_STATE_FLAGS flags, const struct d12_binding_map *map,
+   REFIID riid, void **out)
 {
    if (!out)
       return E_POINTER;
@@ -4287,7 +4691,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       HRESULT hr = S_OK;
       for (unsigned i = 0; i < ARRAY_SIZE(variants); i++) {
          hr = d12_pipeline_state_create_graphics(
-            device, vs_dxil, vs_size, ps_dxil, ps_size, gs_dxil, gs_size,
+            device, vs_dxil, vs_size, false, ps_dxil, ps_size, gs_dxil, gs_size,
             hs_dxil, hs_size, ds_dxil, ds_size, rt_format, nr_rt, rt_formats,
             nr_samples, sample_mask, ds_desc, dsv_format, rs_desc,
             rasterizer_depth_bias, front_stencil_enable, back_stencil_enable,
@@ -4310,15 +4714,19 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       return hr;
    }
 
-   if (!vs_dxil || !vs_size || (!ps_dxil != !ps_size))
+   if ((vs_is_mesh ? (vs_dxil || vs_size) : (!vs_dxil || !vs_size)) ||
+       (!ps_dxil != !ps_size))
       return E_INVALIDARG;
    if (strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED &&
        strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF &&
        strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF)
       return E_INVALIDARG;
-   if (!d12_validate_graphics_signatures(
-          vs_dxil, vs_size, ps_dxil, ps_size, gs_dxil, gs_size,
-          hs_dxil, hs_size, ds_dxil, ds_size, input_layout)) {
+   /* Skipped for mesh: the pixel shader's inputs are produced by the mesh
+    * shader, which this validator has no vertex-side signature to match
+    * against. d12_pipeline_state_create_mesh checks the MS itself. */
+   if (!vs_is_mesh && !d12_validate_graphics_signatures(
+                         vs_dxil, vs_size, ps_dxil, ps_size, gs_dxil, gs_size,
+                         hs_dxil, hs_size, ds_dxil, ds_size, input_layout)) {
       mesa_loge("CreateGraphicsPipelineState: incompatible shader signatures");
       return E_INVALIDARG;
    }
@@ -4630,9 +5038,9 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       vs_entry = d12_shader_cache_find_stage(device, &vs_key, vs_dxil);
    if (!vs_entry) {
       struct d12_stage_outputs o = {0};
-      if (!compile_gfx_stage(device, map, vs_dxil, vs_size,
-                             MESA_SHADER_VERTEX, &tib, 0xffff, 0, &fetch,
-                             false, &o, &vs_part)) {
+      if (!compile_gfx_stage(device, map, vs_dxil, vs_size, MESA_SHADER_VERTEX,
+                             &tib, 0xffff, 0, &fetch, false, false, &o,
+                             &vs_part)) {
          hr = E_INVALIDARG;
          goto fail;
       }
@@ -4687,7 +5095,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    for (unsigned i = 0; i < ARRAY_SIZE(layout_formats); i++)
       fs_key.layout_formats[i] = layout_formats[i];
    fs_key.flags = (use_fs_epilog ? D12_STAGE_KEY_FS_EPILOG_REQUESTED : 0) |
-                  (allow_flat_geometry ? D12_STAGE_KEY_FLAT_TRANSPORT : 0);
+                  (allow_flat_geometry ? D12_STAGE_KEY_FLAT_TRANSPORT : 0) |
+                  (vs_is_mesh ? D12_STAGE_KEY_LOSSLESS_FLAT : 0);
    if (!bypass_cache)
       fs_entry = d12_shader_cache_find_stage(device, &fs_key, ps_dxil);
    if (!fs_entry) {
@@ -4695,7 +5104,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       o.use_fs_epilog = use_fs_epilog;
       if (!compile_gfx_stage(device, map, ps_dxil, ps_size,
                              MESA_SHADER_FRAGMENT, &tib, active_sample_mask,
-                             a8_mask, NULL, allow_flat_geometry, &o,
+                             a8_mask, NULL, allow_flat_geometry, vs_is_mesh, &o,
                              &fs_part)) {
          hr = E_INVALIDARG;
          goto fail;
@@ -5080,7 +5489,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    bool has_app_gs = gs_dxil && gs_size;
    bool has_so = so_desc && so_desc->NumEntries;
    bool has_flat_geometry = flat_transport.enabled;
-   if (has_app_gs || has_so || has_flat_geometry) {
+   if (!vs_is_mesh && (has_app_gs || has_so || has_flat_geometry)) {
       uint8_t clip_size = 0, cull_size = 0;
 
       nir_xfb_info *xfb = NULL;
@@ -5132,10 +5541,23 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                           : MESA_PRIM_TRIANGLES)
                : d12_so_primitive(primitive_topology_type);
          if (prim == MESA_PRIM_UNKNOWN) {
-            mesa_loge("graphics PSO: stream output needs a point, line, or "
-                      "triangle primitive topology type");
-            compiled = false;
-         } else {
+            /*
+             * D3D12 CREATES this pipeline. A stream-output PSO that omits
+             * the PRIMITIVE_TOPOLOGY subobject leaves the type UNDEFINED,
+             * and the runtime accepts it -- the topology only has to be
+             * valid by the time something is drawn with it. Refusing
+             * creation here failed test_create_pipeline_state's third
+             * stream, which is exactly that pipeline and expects S_OK.
+             *
+             * Assume triangles for the passthrough geometry shader, which
+             * is the topology every such pipeline in the suite goes on to
+             * draw, and say so rather than assuming silently.
+             */
+            mesa_logw("graphics PSO: stream output with an UNDEFINED "
+                      "primitive topology type; assuming triangles");
+            prim = MESA_PRIM_TRIANGLES;
+         }
+         {
             nir_shader *passthrough = d12_build_so_passthrough_gs(
                gs_input_outputs, clip_size, cull_size, prim, xfb,
                has_flat_geometry);

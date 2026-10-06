@@ -519,8 +519,13 @@ enum d12_resource_class {
 enum d12_resource_kind {
    D12_RES_KIND_TEXTURE_1D = 1,
    D12_RES_KIND_TEXTURE_2D = 2,
+   D12_RES_KIND_TEXTURE_2DMS = 3,
+   D12_RES_KIND_TEXTURE_3D = 4,
+   D12_RES_KIND_TEXTURE_CUBE = 5,
    D12_RES_KIND_TEXTURE_1D_ARRAY = 6,
    D12_RES_KIND_TEXTURE_2D_ARRAY = 7,
+   D12_RES_KIND_TEXTURE_2DMS_ARRAY = 8,
+   D12_RES_KIND_TEXTURE_CUBE_ARRAY = 9,
    D12_RES_KIND_TYPED_BUFFER = 10,
    D12_RES_KIND_RAW_BUFFER = 11,
    D12_RES_KIND_STRUCTURED_BUFFER = 12,
@@ -857,10 +862,14 @@ struct nir_shader;
  *    +48  u64  draw        the indirect draw descriptor ms_setup fills
  *    +56  u64  grid        6-word indirect-local grid for the mesh
  *                          dispatch, filled by as_setup
+ *    +64  u64  group_dims  { u32 x, y, z } mesh workgroup counts
+ *    +72  u64  group_map   per-mesh-group {local x,y,z, AS group}
+ *    +80  u64  as_dims     original amplification workgroup counts
  *
- * The last two are driver-side only -- the translator never reads them.
- * They are separate slots because an AMPLIFICATION shader writes the
- * dispatch grid at +40 itself, so the draw descriptor cannot share it.
+ * The draw and grid slots are driver-side only -- the translator never reads
+ * them. group_dims is separate from the dispatch slot because a direct or
+ * indirect mesh dispatch already has its dimensions elsewhere, while an
+ * amplification shader writes its DispatchMesh dimensions at +40.
  */
 #define D12_UNIFORM_MESH_PARAMS     40
 #define D12_UNIFORM_MESH_REGS       4
@@ -873,6 +882,10 @@ struct nir_shader;
 #define D12_MESH_OFF_DISPATCH       40
 #define D12_MESH_OFF_DRAW           48
 #define D12_MESH_OFF_GRID           56
+#define D12_MESH_OFF_GROUP_DIMS     64
+#define D12_MESH_OFF_GROUP_MAP      72
+#define D12_MESH_OFF_AS_DIMS        80
+#define D12_MESH_OFF_CAPACITY       88
 
 /* One 16-byte vec4 per signature slot, indexed by slot then component. */
 #define D12_MESH_SLOT_STRIDE        16
@@ -883,7 +896,11 @@ struct nir_shader;
  * before it is known. Exceeding this overruns them, so the mesh shader
  * is dispatched indirectly but the ALLOCATION is bounded here.
  */
-#define D12_MESH_MAX_AMP_GROUPS     32
+#define D12_MESH_MAX_AMP_GROUPS 256
+#define D12_MESH_MAX_AS_GROUPS  64
+#define D12_MESH_MAX_TOTAL_GROUPS                                              \
+   (D12_MESH_MAX_AMP_GROUPS * D12_MESH_MAX_AS_GROUPS)
+#define D12_MESH_PAYLOAD_STRIDE (16 * 1024)
 
 /*
  * Work-graph node parameter block. SM 6.8 work graphs are GPU-scheduled:
@@ -1279,6 +1296,8 @@ d12_range_count(const struct d12_resource_binding *rb)
  * Translate a parsed module's entry point to NIR for the AGX backend.
  * Returns NULL with *error set on failure. Caller owns the shader.
  */
+void d12_dxil_bound_mesh_workgroups(struct nir_shader *nir, bool task);
+
 struct nir_shader *d12_dxil_to_nir(const struct d12_module *mod,
                                    mesa_shader_stage stage,
                                    const struct d12_binding_map *map,
@@ -1342,6 +1361,7 @@ struct d12_input_sig_elem {
    uint32_t component_type;
    uint32_t min_precision;
    uint32_t system_value;
+   uint32_t interpolation;
 };
 
 unsigned d12_dxbc_input_signature(const void *data, size_t size_B,

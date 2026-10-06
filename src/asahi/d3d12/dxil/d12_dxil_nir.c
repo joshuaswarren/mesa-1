@@ -2162,6 +2162,175 @@ emit_dxil_derivative(struct trans_ctx *ctx, nir_def *src,
 }
 
 /*
+ * Mesh shaders run as ordinary compute, so every output address must include
+ * the workgroup which produced it.  The API's DispatchMesh dimensions are
+ * published through the mesh parameter block; flatten the hardware group ID
+ * in D3D's x-major order.  Direct dispatches beyond the software limit are
+ * rejected by the command path. GPU-written dimensions cannot be rejected on
+ * the CPU, so saturate their address to the last allocated segment rather
+ * than permitting an out-of-bounds write.
+ */
+static unsigned
+d12_mesh_signature_slots(const struct d12_sig_element *sig, unsigned nr)
+{
+   unsigned slots = 1;
+   for (unsigned i = 0; i < nr; i++)
+      slots = MAX2(slots, sig[i].id + sig[i].rows);
+   return MIN2(slots, D12_MESH_MAX_SLOTS);
+}
+
+static nir_def *
+d12_mesh_group_index(nir_builder *b, nir_def *params)
+{
+   nir_def *dims_ptr = nir_load_global(
+      b, 1, 64, nir_iadd_imm(b, params, D12_MESH_OFF_GROUP_DIMS),
+      .align_mul = 8);
+   nir_def *dims = nir_load_global(b, 3, 32, dims_ptr, .align_mul = 4);
+   nir_def *gid = nir_load_workgroup_id(b);
+   nir_def *dim_x = nir_channel(b, dims, 0);
+   nir_def *dim_y = nir_channel(b, dims, 1);
+
+   nir_def *index = nir_iadd(b, nir_channel(b, gid, 0),
+                             nir_imul(b, nir_channel(b, gid, 1), dim_x));
+   index = nir_iadd(
+      b, index, nir_imul(b, nir_channel(b, gid, 2), nir_imul(b, dim_x, dim_y)));
+   return index;
+}
+
+/* The front end builds LLVM's unstructured CFG. Add workgroup predicates
+ * after structurization, when NIR permits inserting structured if nodes. */
+void
+d12_dxil_bound_mesh_workgroups(nir_shader *nir, bool task)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_cf_list(&impl->body),
+                  nir_after_cf_list(&impl->body));
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *params = nir_load_mesh_param_buffer_agx(&b);
+   nir_def *group;
+   nir_def *capacity;
+   if (task) {
+      nir_def *ptr = nir_load_global(
+         &b, 1, 64, nir_iadd_imm(&b, params, D12_MESH_OFF_AS_DIMS),
+         .align_mul = 8);
+      nir_def *dims = nir_load_global(&b, 3, 32, ptr, .align_mul = 4);
+      nir_def *id = nir_load_workgroup_id(&b);
+      group = nir_iadd(&b, nir_channel(&b, id, 0),
+                       nir_imul(&b, nir_channel(&b, dims, 0),
+                                nir_iadd(&b, nir_channel(&b, id, 1),
+                                         nir_imul(&b, nir_channel(&b, dims, 1),
+                                                  nir_channel(&b, id, 2)))));
+      capacity = nir_imm_int(&b, D12_MESH_MAX_AS_GROUPS);
+   } else {
+      group = d12_mesh_group_index(&b, params);
+      capacity = nir_load_global(
+         &b, 1, 32, nir_iadd_imm(&b, params, D12_MESH_OFF_CAPACITY),
+         .align_mul = 8);
+   }
+   nir_push_if(&b, nir_ult(&b, group, capacity));
+   nir_cf_reinsert(&body, b.cursor);
+   nir_pop_if(&b, NULL);
+   nir_progress(true, impl, nir_metadata_none);
+}
+
+static bool
+d12_as_handoff_pointer(nir_def *def)
+{
+   if (nir_def_instr(def)->type == nir_instr_type_alu) {
+      nir_alu_instr *alu = nir_instr_as_alu(nir_def_instr(def));
+      for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++)
+         if (d12_as_handoff_pointer(alu->src[i].src.ssa))
+            return true;
+      return false;
+   }
+   nir_intrinsic_instr *load = nir_def_as_intrinsic_or_null(def);
+   if (!load || load->intrinsic != nir_intrinsic_load_global)
+      return false;
+   nir_instr *address = nir_def_instr(load->src[0].ssa);
+   nir_alu_instr *addr =
+      address->type == nir_instr_type_alu ? nir_instr_as_alu(address) : NULL;
+   if (!addr || addr->op != nir_op_iadd)
+      return false;
+   for (unsigned i = 0; i < 2; i++) {
+      nir_src base = addr->src[i].src, offset = addr->src[1 - i].src;
+      nir_intrinsic_instr *param = nir_def_as_intrinsic_or_null(base.ssa);
+      if (param &&
+          param->intrinsic == nir_intrinsic_load_mesh_param_buffer_agx &&
+          nir_src_is_const(offset) &&
+          (nir_src_as_uint(offset) == D12_MESH_OFF_DISPATCH ||
+           nir_src_as_uint(offset) == D12_MESH_OFF_PAYLOAD))
+         return true;
+   }
+   return false;
+}
+
+static bool
+d12_as_first_lane_store(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+   if (store->intrinsic != nir_intrinsic_store_global ||
+       !d12_as_handoff_pointer(store->src[1].ssa))
+      return false;
+   b->cursor = nir_before_instr(instr);
+   nir_push_if(b, nir_ieq_imm(b, nir_load_local_invocation_index(b), 0));
+   nir_instr_remove(instr);
+   nir_builder_instr_insert(b, instr);
+   nir_pop_if(b, NULL);
+   return true;
+}
+
+/* An amplification launch is flattened into one bounded 1D mesh launch.
+ * as_setup writes the shader-visible local group ID and source AS group for
+ * every flattened workgroup. The hardware workgroup ID remains the storage
+ * index used by d12_mesh_group_index().
+ */
+static nir_def *
+d12_mesh_mapped_group(nir_builder *b)
+{
+   nir_def *params = nir_load_mesh_param_buffer_agx(b);
+   nir_def *map =
+      nir_load_global(b, 1, 64, nir_iadd_imm(b, params, D12_MESH_OFF_GROUP_MAP),
+                      .align_mul = 8);
+   nir_def *linear = nir_channel(b, nir_load_workgroup_id(b), 0);
+   nir_def *addr = nir_iadd(
+      b, map, nir_u2u64(b, nir_imul_imm(b, linear, 4 * sizeof(uint32_t))));
+   return nir_load_global(b, 4, 32, addr, .align_mul = 16);
+}
+
+static nir_def *
+d12_load_pointer_word(struct trans_ctx *ctx, uint32_t pointer, uint32_t off)
+{
+   nir_builder *b = ctx->b;
+   uint8_t space = pointer_for_value(ctx, pointer);
+   uint32_t base = ctx->ptr_base[pointer] + off;
+   nir_def *dyn = ctx->defs[pointer];
+
+   if (!dyn)
+      dyn = nir_imm_int(b, 0);
+
+   if (space == D12_PTR_SHARED) {
+      return nir_load_shared(b, 1, 32, dyn, .base = base, .align_mul = 4);
+   } else if (space == D12_PTR_GLOBAL) {
+      nir_def *addr = nir_iadd(b, ctx->ptr_global[pointer],
+                               nir_u2u64(b, nir_iadd_imm(b, dyn, base)));
+      return nir_load_global(b, 1, 32, addr, .align_mul = 4);
+   } else if (space == D12_PTR_SCRATCH) {
+      if (!ctx->defs[pointer] && ctx->num_blocks == 1 && !(base & 3) &&
+          base / 4 < ARRAY_SIZE(ctx->scratch_shadow) &&
+          ctx->scratch_shadow[base / 4])
+         return ctx->scratch_shadow[base / 4];
+
+      return nir_load_scratch(b, 1, 32, nir_iadd_imm(b, dyn, base),
+                              .align_mul = 4);
+   }
+
+   return NULL;
+}
+
+/*
  * dx.op call translation. `args` are the call's operands: args[0] is the
  * callee, args[1] the opcode constant, args[2..] the real parameters.
  */
@@ -2750,11 +2919,38 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          return false;
       }
 
-      nir_def *vec = opcode == D12_DXOP_THREAD_ID
-                        ? nir_load_global_invocation_id(b, 32)
-                        : (opcode == D12_DXOP_GROUP_ID
-                              ? nir_load_workgroup_id(b)
-                              : nir_load_local_invocation_id(b));
+      nir_def *vec;
+      bool mapped_mesh = ctx->mod->mesh_topology && ctx->mod->mesh_payload_size;
+
+      if (mapped_mesh &&
+          (opcode == D12_DXOP_THREAD_ID || opcode == D12_DXOP_GROUP_ID)) {
+         nir_def *group = d12_mesh_mapped_group(b);
+         if (opcode == D12_DXOP_GROUP_ID) {
+            vec = nir_trim_vector(b, group, 3);
+         } else {
+            nir_def *local = nir_load_local_invocation_id(b);
+            nir_def *wg = nir_imm_ivec3(b, ctx->mod->num_threads[0],
+                                        ctx->mod->num_threads[1],
+                                        ctx->mod->num_threads[2]);
+            vec = nir_iadd(b, nir_imul(b, nir_trim_vector(b, group, 3), wg),
+                           local);
+         }
+      } else if (b->shader->info.derivative_group == DERIVATIVE_GROUP_QUADS &&
+                 opcode == D12_DXOP_THREAD_ID) {
+         /* AGX has a hardware global ID. Expand it before shuffling local
+          * IDs so HLSL's 2D quads also apply to SV_DispatchThreadID. */
+         nir_def *wg =
+            nir_imm_ivec3(b, ctx->mod->num_threads[0], ctx->mod->num_threads[1],
+                          ctx->mod->num_threads[2]);
+         vec = nir_iadd(b, nir_imul(b, nir_load_workgroup_id(b), wg),
+                        nir_load_local_invocation_id(b));
+      } else {
+         vec = opcode == D12_DXOP_THREAD_ID
+                  ? nir_load_global_invocation_id(b, 32)
+                  : (opcode == D12_DXOP_GROUP_ID
+                        ? nir_load_workgroup_id(b)
+                        : nir_load_local_invocation_id(b));
+      }
 
       def_result(ctx, inst, nir_channel(b, vec, (unsigned)comp));
       return true;
@@ -2937,6 +3133,8 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          /* (numVertices, numPrimitives) */
          NEED(2);
          nir_def *counts = MESH_PTR(D12_MESH_OFF_COUNTS);
+         nir_def *group = d12_mesh_group_index(b, params);
+         counts = nir_iadd(b, counts, nir_u2u64(b, nir_imul_imm(b, group, 8)));
          nir_store_global(b, nir_u2u32(b, get_def(ctx, p[0])), counts,
                           .write_mask = 1, .align_mul = 8);
          nir_store_global(b, nir_u2u32(b, get_def(ctx, p[1])),
@@ -2951,11 +3149,17 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
           */
          NEED(4);
          nir_def *base = MESH_PTR(D12_MESH_OFF_INDICES);
-         nir_def *off =
-            nir_imul_imm(b, nir_u2u32(b, get_def(ctx, p[0])), 12);
+         nir_def *group = d12_mesh_group_index(b, params);
+         nir_def *group_base =
+            nir_imul_imm(b, group, MAX2(ctx->mod->mesh_max_vertices, 1));
+         nir_def *primitive_base =
+            nir_imul_imm(b, group, MAX2(ctx->mod->mesh_max_primitives, 1));
+         nir_def *primitive =
+            nir_iadd(b, primitive_base, nir_u2u32(b, get_def(ctx, p[0])));
+         nir_def *off = nir_imul_imm(b, primitive, 12);
          for (unsigned i = 0; i < 3; i++) {
             nir_store_global(
-               b, nir_u2u32(b, get_def(ctx, p[1 + i])),
+               b, nir_iadd(b, group_base, nir_u2u32(b, get_def(ctx, p[1 + i]))),
                nir_iadd(b, base, nir_u2u64(b, nir_iadd_imm(b, off, i * 4))),
                .write_mask = 1, .align_mul = 4);
          }
@@ -2970,8 +3174,13 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          if (inst->result_value < ctx->mod->num_values) {
             ctx->ptr_space[inst->result_value] = D12_PTR_GLOBAL;
             ctx->ptr_base[inst->result_value] = 0;
-            ctx->ptr_global[inst->result_value] =
-               MESH_PTR(D12_MESH_OFF_PAYLOAD);
+            nir_def *payload = MESH_PTR(D12_MESH_OFF_PAYLOAD);
+            nir_def *mapped = d12_mesh_mapped_group(b);
+            nir_def *source_as = nir_channel(b, mapped, 3);
+            ctx->ptr_global[inst->result_value] = nir_iadd(
+               b, payload,
+               nir_u2u64(b,
+                         nir_imul_imm(b, source_as, D12_MESH_PAYLOAD_STRIDE)));
             if (inst->result_type < ctx->mod->num_types &&
                 ctx->mod->types[inst->result_type].kind == D12_TYPE_POINTER) {
                ctx->ptr_pointee[inst->result_value] =
@@ -3007,9 +3216,20 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             MESH_PTR(prim ? D12_MESH_OFF_PRIMITIVES : D12_MESH_OFF_VERTICES);
 
          /* index * (slots * 16) + (slot * 16) + col * 4 */
-         nir_def *idx = nir_u2u32(b, get_def(ctx, p[4]));
+         nir_def *group = d12_mesh_group_index(b, params);
+         nir_def *idx =
+            nir_iadd(b,
+                     nir_imul_imm(b, group,
+                                  MAX2(prim ? ctx->mod->mesh_max_primitives
+                                            : ctx->mod->mesh_max_vertices,
+                                       1)),
+                     nir_u2u32(b, get_def(ctx, p[4])));
          nir_def *off = nir_imul_imm(
-            b, idx, D12_MESH_MAX_SLOTS * D12_MESH_SLOT_STRIDE);
+            b, idx,
+            d12_mesh_signature_slots(
+               prim ? ctx->mod->patch_sig : ctx->mod->output_sig,
+               prim ? ctx->mod->num_patch_sig : ctx->mod->num_output_sig) *
+               D12_MESH_SLOT_STRIDE);
          off = nir_iadd_imm(b, off,
                             (sig_id + row) * D12_MESH_SLOT_STRIDE + col * 4);
 
@@ -3020,15 +3240,61 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
 
       default: {
          /* dispatchMesh(x, y, z, payload): the amplification shader's
-          * hand-off. Record the grid; the payload buffer itself is
-          * written through the pointer operand by ordinary stores.
+          * hand-off. Each AS workgroup owns an independent grid and payload
+          * slot; as_setup later flattens those grids into one bounded mesh
+          * launch and records which payload belongs to each mesh group.
           */
-         NEED(3);
+         NEED(4);
+         /* DispatchMesh is a workgroup handoff: shared payload writes from
+          * every lane must complete before the first lane publishes it. */
+         nir_barrier(b, .execution_scope = SCOPE_WORKGROUP,
+                     .memory_scope = SCOPE_WORKGROUP,
+                     .memory_semantics = NIR_MEMORY_ACQ_REL,
+                     .memory_modes = nir_var_mem_shared);
+         nir_def *as_dims_ptr = MESH_PTR(D12_MESH_OFF_AS_DIMS);
+         nir_def *as_dims =
+            nir_load_global(b, 3, 32, as_dims_ptr, .align_mul = 4);
+         nir_def *gid = nir_load_workgroup_id(b);
+         nir_def *as_group = nir_iadd(
+            b, nir_channel(b, gid, 0),
+            nir_imul(b, nir_channel(b, gid, 1), nir_channel(b, as_dims, 0)));
+         as_group = nir_iadd(b, as_group,
+                             nir_imul(b, nir_channel(b, gid, 2),
+                                      nir_imul(b, nir_channel(b, as_dims, 0),
+                                               nir_channel(b, as_dims, 1))));
+
          nir_def *d = MESH_PTR(D12_MESH_OFF_DISPATCH);
+         d = nir_iadd(
+            b, d,
+            nir_u2u64(b, nir_imul_imm(b, as_group, 3 * sizeof(uint32_t))));
          for (unsigned i = 0; i < 3; i++) {
             nir_store_global(b, nir_u2u32(b, get_def(ctx, p[i])),
                              nir_iadd_imm(b, d, i * 4), .write_mask = 1,
                              .align_mul = 4);
+         }
+
+         uint8_t space = pointer_for_value(ctx, p[3]);
+         uint32_t payload_size = 0, payload_align = 0;
+         if (space == D12_PTR_NONE ||
+             !type_size_align(ctx->mod, ctx->ptr_pointee[p[3]], &payload_size,
+                              &payload_align) ||
+             payload_size > D12_MESH_PAYLOAD_STRIDE || (payload_size & 3)) {
+            trans_fail(ctx, "DispatchMesh payload has unsupported layout");
+            return false;
+         }
+
+         nir_def *payload = MESH_PTR(D12_MESH_OFF_PAYLOAD);
+         payload = nir_iadd(
+            b, payload,
+            nir_u2u64(b, nir_imul_imm(b, as_group, D12_MESH_PAYLOAD_STRIDE)));
+         for (uint32_t off = 0; off < payload_size; off += 4) {
+            nir_def *word = d12_load_pointer_word(ctx, p[3], off);
+            if (!word) {
+               trans_fail(ctx, "DispatchMesh payload is not addressable");
+               return false;
+            }
+            nir_store_global(b, word, nir_iadd_imm(b, payload, off),
+                             .write_mask = 1, .align_mul = 4);
          }
          return true;
       }
@@ -3913,8 +4179,17 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
                     th.kind == D12_RES_KIND_STRUCTURED_BUFFER;
       bool is_1d = th.kind == D12_RES_KIND_TEXTURE_1D ||
                    th.kind == D12_RES_KIND_TEXTURE_1D_ARRAY;
+      /* Texture3D and the cube kinds were absent from the kind enum, so
+       * they fell through as plain 2D and reported a third component of 1
+       * -- depth for a 3D texture, cube count for a cube array. That was
+       * every failure in test_resinfo. */
+      bool is_3d = th.kind == D12_RES_KIND_TEXTURE_3D;
+      bool is_cube = th.kind == D12_RES_KIND_TEXTURE_CUBE ||
+                     th.kind == D12_RES_KIND_TEXTURE_CUBE_ARRAY;
       bool is_array = th.kind == D12_RES_KIND_TEXTURE_1D_ARRAY ||
-                      th.kind == D12_RES_KIND_TEXTURE_2D_ARRAY;
+                      th.kind == D12_RES_KIND_TEXTURE_2D_ARRAY ||
+                      th.kind == D12_RES_KIND_TEXTURE_2DMS_ARRAY ||
+                      th.kind == D12_RES_KIND_TEXTURE_CUBE_ARRAY;
 
       /* Both finite root tables and shader-visible heaps expose the same
        * count/stride metadata. ByteAddressBuffer reports its byte size;
@@ -3943,15 +4218,18 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
        * 2D texture's is two, and a 2D array also returns the layer count.
        */
       unsigned txs_comps = is_buf     ? 1
+                           : is_3d    ? 3
                            : is_1d    ? (is_array ? 2 : 1)
                            : is_array ? 3
                                       : 2;
 
       nir_tex_instr *txs = nir_tex_instr_create(b->shader, 2);
       txs->op = nir_texop_txs;
-      txs->sampler_dim = is_buf  ? GLSL_SAMPLER_DIM_BUF
-                         : is_1d ? GLSL_SAMPLER_DIM_1D
-                                 : GLSL_SAMPLER_DIM_2D;
+      txs->sampler_dim = is_buf    ? GLSL_SAMPLER_DIM_BUF
+                         : is_3d   ? GLSL_SAMPLER_DIM_3D
+                         : is_cube ? GLSL_SAMPLER_DIM_CUBE
+                         : is_1d   ? GLSL_SAMPLER_DIM_1D
+                                   : GLSL_SAMPLER_DIM_2D;
       txs->is_array = is_array;
       txs->dest_type = nir_type_uint32;
       txs->src[0] =
@@ -3962,7 +4240,10 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
 
       nir_tex_instr *lv = nir_tex_instr_create(b->shader, 1);
       lv->op = nir_texop_query_levels;
-      lv->sampler_dim = is_1d ? GLSL_SAMPLER_DIM_1D : GLSL_SAMPLER_DIM_2D;
+      lv->sampler_dim = is_3d     ? GLSL_SAMPLER_DIM_3D
+                        : is_cube ? GLSL_SAMPLER_DIM_CUBE
+                        : is_1d   ? GLSL_SAMPLER_DIM_1D
+                                  : GLSL_SAMPLER_DIM_2D;
       lv->is_array = is_array;
       lv->dest_type = nir_type_uint32;
       lv->src[0] = nir_tex_src_for_ssa(
@@ -3974,7 +4255,8 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
       nir_def *width = nir_channel(b, &txs->def, 0);
       nir_def *second = is_1d ? (is_array ? nir_channel(b, &txs->def, 1) : one)
                               : (is_buf ? one : nir_channel(b, &txs->def, 1));
-      nir_def *third = !is_1d && is_array ? nir_channel(b, &txs->def, 2) : one;
+      nir_def *third =
+         (is_3d || (!is_1d && is_array)) ? nir_channel(b, &txs->def, 2) : one;
 
       /* AGX clamps an out-of-range TCS LOD to the last level.  D3D12
        * GetDimensions instead returns zero for every queried dimension while
@@ -5557,6 +5839,12 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
                 const struct d12_binding_map *map,
                 uint32_t descriptor_generation, const char **error)
 {
+   if (stage == MESA_SHADER_COMPUTE &&
+       (mod->mesh_max_vertices > 256 || mod->mesh_max_primitives > 256 ||
+        mod->mesh_payload_size > D12_MESH_PAYLOAD_STRIDE)) {
+      *error = "mesh declaration exceeds D3D12 output/payload limits";
+      return NULL;
+   }
    struct d12_native_descriptor_layout native_layout;
    if (!d12_native_descriptor_layout(descriptor_generation, &native_layout)) {
       *error = "unsupported native descriptor generation";
@@ -5816,6 +6104,18 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
          b.shader->info.workgroup_size[i] =
             mod->num_threads[i] ? mod->num_threads[i] : 1;
       }
+
+      /* Mesh and amplification modules are compiled through the compute
+       * backend, but their declaration bounds still belong to the driver ABI.
+       * Preserve them in shader_info so command recording can size the
+       * software handoff from the declarations instead of a blanket maximum.
+       */
+      b.shader->info.mesh.max_vertices_out = mod->mesh_max_vertices;
+      b.shader->info.mesh.max_primitives_out = mod->mesh_max_primitives;
+      b.shader->info.task_payload_size = mod->mesh_payload_size;
+      if ((mod->mesh_topology || mod->mesh_payload_size) &&
+          !(mod->num_threads[0] & 1) && !(mod->num_threads[1] & 1))
+         b.shader->info.derivative_group = DERIVATIVE_GROUP_QUADS;
    }
 
    /*
@@ -6541,6 +6841,11 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
     */
    nir_lower_reg_intrinsics_to_ssa(b.shader);
 
+   if (stage == MESA_SHADER_COMPUTE && !mod->mesh_topology &&
+       mod->mesh_payload_size)
+      nir_shader_instructions_pass(b.shader, d12_as_first_lane_store,
+                                   nir_metadata_none, NULL);
+
    nir_validate_shader(b.shader, "after DXIL translation");
    return b.shader;
 }
@@ -6788,6 +7093,7 @@ d12_dxil_copy_signature(const struct d12_sig_element *sig, unsigned count,
       out[i].component_count = se->cols;
       out[i].rows = MAX2(se->rows, 1);
       out[i].system_value = se->system_value;
+      out[i].interpolation = se->interpolation;
       d12_dxil_signature_type(se->component_type, &out[i].component_type,
                               &out[i].min_precision);
       out[i].name[0] = '\0';
