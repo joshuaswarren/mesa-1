@@ -5775,14 +5775,24 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
           * folds stay in the operand's own precision: the builder would size
           * the temporary from the leading immediate and make a 16-bit add of
           * a 32-bit quadrant, which neither keeps the precision nor packs. */
-         agx_index middle = agx_temp(b->shader, s0.size);
-         agx_fadd_to(b, middle, agx_immediate_f(2.0f), agx_neg(s0));
-         agx_index last = agx_fadd(b, s0, agx_immediate_f(-4.0f));
-         agx_index t = agx_fcmpsel(b, s0, agx_immediate_f(1.0f), s0,
+         /* The native sinc is a 32-bit funop with no half form, so a
+          * mediump quadrant is evaluated at full precision and narrowed. */
+         const bool half = s0.size == AGX_SIZE_16;
+         agx_index x = s0;
+         if (half) {
+            x = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, x, s0);
+         }
+         agx_index middle = agx_temp(b->shader, x.size);
+         agx_fadd_to(b, middle, agx_immediate_f(2.0f), agx_neg(x));
+         agx_index last = agx_fadd(b, x, agx_immediate_f(-4.0f));
+         agx_index t = agx_fcmpsel(b, x, agx_immediate_f(1.0f), x,
                                    middle, AGX_FCOND_LE);
-         t = agx_fcmpsel(b, s0, agx_immediate_f(3.0f), last, t,
+         t = agx_fcmpsel(b, x, agx_immediate_f(3.0f), last, t,
                          AGX_FCOND_GT);
-         return agx_fmul_to(b, dst, agx_sinc_agx3(b, t), t);
+         if (!half)
+            return agx_fmul_to(b, dst, agx_sinc_agx3(b, t), t);
+         return agx_fmov_to(b, dst, agx_fmul(b, agx_sinc_agx3(b, t), t));
       }
 
       agx_index fixup = agx_sin_pt_1(b, s0);
