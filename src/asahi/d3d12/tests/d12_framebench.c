@@ -908,6 +908,23 @@ run_frame(struct fb *b, enum scene_id scene, double *record_us,
    return true;
 }
 
+/* A list whose Close failed stays errored across Reset on some
+ * implementations: after a failed scene, idle the queue and record the
+ * next scene on a fresh list. */
+static bool
+replace_list(struct fb *b)
+{
+   wait_idle(b);
+   ID3D12GraphicsCommandList_Release(b->list);
+   b->list = NULL;
+   if (ID3D12Device_CreateCommandList(
+          b->dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, b->alloc[b->frame_index],
+          NULL, &IID_ID3D12GraphicsCommandList, (void **)&b->list) != S_OK)
+      return false;
+   ID3D12GraphicsCommandList_Close(b->list);
+   return true;
+}
+
 static struct scene_result
 run_scene(struct fb *b, enum scene_id scene, unsigned frames)
 {
@@ -1085,12 +1102,16 @@ main(int argc, char **argv)
    }
    ID3D12GraphicsCommandList_Close(b.list);
 
-   bool ready = setup_targets(&b) && setup_triangle(&b, &s) &&
-                setup_draws(&b, &s) && setup_dispatches(&b, &s);
-   if (!ready) {
+   if (!setup_targets(&b)) {
       printf("FRAMEBENCH_JSON {\"error\": \"setup\"}\n");
       return 1;
    }
+   /* Each scene group sets up on its own, so a device that cannot create
+    * one group's pipelines (the Neo's native G17P graphics admits no
+    * vertex-buffer PSO yet) still measures the others. */
+   const bool have_triangle = setup_triangle(&b, &s);
+   const bool have_draws = setup_draws(&b, &s);
+   const bool have_dispatches = setup_dispatches(&b, &s);
 
    printf("framebench %s, %ux%u, %u frames per scene, %u in flight\n",
           library, width, height, frames, inflight);
@@ -1100,7 +1121,21 @@ main(int argc, char **argv)
          continue;
       if (sc == SCENE_TEXLOAD && !b.pso_tex)
          continue;
+      const bool supported =
+         sc == SCENE_TRIANGLE || sc == SCENE_BUNDLES ? have_triangle
+         : sc == SCENE_TEXLOAD ? have_triangle && have_dispatches
+         : sc == SCENE_DISPATCHES ? have_dispatches
+                                  : have_draws;
+      if (!supported) {
+         printf("frame %-10s UNSUPPORTED (setup failed)\n", scene_names[sc]);
+         continue;
+      }
       results[sc] = run_scene(&b, sc, frames);
+      if (!results[sc].ok && !replace_list(&b)) {
+         printf("FAIL - recreate the command list after %s\n",
+                scene_names[sc]);
+         break;
+      }
       const struct scene_result *r = &results[sc];
       if (r->ok)
          printf("frame %-10s pipelined %8.1f us (%6.0f fps), serial %8.1f us; "

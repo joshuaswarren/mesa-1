@@ -1323,19 +1323,31 @@ main(int argc, char **argv)
 
    /* --- Submit: CPU cost of ExecuteCommandLists and GPU wall time ---- */
    double s, d, c;
-   REQUIRE(record_draw_list(&b, DRAW_PLAIN, &s, &d, &c),
-           "record 20k-draw list for submission");
    ID3D12CommandList *lists[] = {(ID3D12CommandList *)b.list};
-   double e0 = now_ns();
-   ID3D12CommandQueue_ExecuteCommandLists(b.queue, 1, lists);
-   double e1 = now_ns();
-   hr = wait_idle(&b);
-   double e2 = now_ns();
-   REQUIRE(hr == S_OK, "20k-draw list executes and signals");
-   double execute_call_us = (e1 - e0) / 1e3;
-   double gpu_wall_ms = (e2 - e0) / 1e6;
-   printf("submit ExecuteCommandLists(20k draws) call %.1f us, fence after %.2f ms\n",
-          execute_call_us, gpu_wall_ms);
+   double e0, e1, e2;
+   double execute_call_us = 0, gpu_wall_ms = 0;
+   /* A device that cannot record the draw list (the Neo's native G17P
+    * graphics) still prices its dispatches under --only submit. */
+   const bool draws_recorded =
+      only_submit ? record_draw_list(&b, DRAW_PLAIN, &s, &d, &c) : true;
+   if (!only_submit)
+      REQUIRE(record_draw_list(&b, DRAW_PLAIN, &s, &d, &c),
+              "record 20k-draw list for submission");
+   if (draws_recorded) {
+      e0 = now_ns();
+      ID3D12CommandQueue_ExecuteCommandLists(b.queue, 1, lists);
+      e1 = now_ns();
+      hr = wait_idle(&b);
+      e2 = now_ns();
+      REQUIRE(hr == S_OK, "20k-draw list executes and signals");
+      execute_call_us = (e1 - e0) / 1e3;
+      gpu_wall_ms = (e2 - e0) / 1e6;
+      printf("submit ExecuteCommandLists(20k draws) call %.1f us, fence after %.2f ms\n",
+             execute_call_us, gpu_wall_ms);
+   } else {
+      printf("submit ExecuteCommandLists(20k draws) skipped: the device cannot "
+             "record the draw list\n");
+   }
 
    REQUIRE(record_dispatch_list(&b, 2, &d),
            "record 20k-dispatch list for submission");
@@ -1350,6 +1362,13 @@ main(int argc, char **argv)
    double gpu_wall_cs_ms = (e2 - e0) / 1e6;
    printf("submit ExecuteCommandLists(20k dispatches x%u groups) call %.1f us, fence after %.2f ms\n",
           dispatch_groups, execute_call_cs_us, gpu_wall_cs_ms);
+   if (!draws_recorded) {
+      printf("MICROBENCH_JSON {\"only\": \"submit\", \"draws\": \"unsupported\", "
+             "\"dispatch_groups\": %u, \"execute_call_us_20k_dispatches\": %.2f, "
+             "\"gpu_wall_ms_20k_dispatches\": %.3f}\n",
+             dispatch_groups, execute_call_cs_us, gpu_wall_cs_ms);
+      return 0;
+   }
 
    /* Reset cost after a submitted list: the allocator must take fresh
     * storage rather than rewind what the GPU may still read. */
