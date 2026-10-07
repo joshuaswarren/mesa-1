@@ -1184,6 +1184,21 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_append_fragment_attachments(dev, &payload, cs);
             struct drm_asahi_cmd_render_with_prior cmd = {0};
             asahi_fill_vdm_command(dev, cs, &cmd.legacy);
+
+            /* The render's vertex half depends on no earlier render while its
+             * fragment half does (hk_sync: every render dependency targets
+             * fragment or attachment work alone): let the kernel order only
+             * the fragment half after them, so this render's vertex work can
+             * overlap their fragment work. Compute dependencies keep ordering
+             * the vertex half either way. */
+            if ((dev->dev.params.features &
+                 DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS) &&
+                cs->sync.ta_split &&
+                cs->sync.barrier_ta[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE &&
+                cs->sync.prior_ta[HK_SYNC_VDM] == 0 &&
+                (cs->sync.barrier[HK_SYNC_VDM] != DRM_ASAHI_BARRIER_NONE ||
+                 cs->sync.prior[HK_SYNC_VDM] != 0))
+               cmd.legacy.flags |= DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
             header.size = hk_drm_render_command_size(
                dev->dev.chip == AGX_CHIP_G17P, queue->sync.exact_prior);
             if (queue->sync.exact_prior) {

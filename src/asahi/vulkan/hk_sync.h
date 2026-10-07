@@ -62,9 +62,16 @@ enum hk_sync_kind {
    HK_SYNC_COMPUTE = 1 << 1,
    HK_SYNC_XFER = 1 << 2,
    HK_SYNC_ALL = HK_SYNC_GFX | HK_SYNC_COMPUTE | HK_SYNC_XFER,
+
+   /* Destination scopes only, never a stream's kind: graphics work in the
+    * fragment and attachment stages alone. A render's fragment half waits on
+    * requirements of both graphics classes, its vertex (tiling) half only on
+    * HK_SYNC_GFX ones. Every other graphics destination, and every stream
+    * kind, counts as HK_SYNC_GFX. */
+   HK_SYNC_GFX_FRAG = 1 << 3,
 };
 
-#define HK_SYNC_NUM_KINDS 3
+#define HK_SYNC_NUM_KINDS 4
 
 /* Subqueue index: 0 render (VDM), 1 compute (CDM). */
 enum hk_sync_sq {
@@ -169,6 +176,15 @@ struct hk_sync_stream {
    uint8_t kind;
 
    struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+
+   /* For a render: what its vertex (tiling) half needs, a subset of dep
+    * without the fragment-only requirements (HK_SYNC_GFX_FRAG) and tile
+    * hazards. Resolved like dep into barrier_ta/prior_ta; ta_split when
+    * they differ from barrier/prior. */
+   struct hk_sync_dep dep_ta[HK_SYNC_NUM_SQ];
+   uint16_t barrier_ta[HK_SYNC_NUM_SQ];
+   uint64_t prior_ta[HK_SYNC_NUM_SQ];
+   bool ta_split;
 };
 
 /* Per-command-buffer state. */
