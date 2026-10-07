@@ -385,3 +385,60 @@ TEST_F(nir_large_constants_test, bcsel_vec)
       }
    )"));
 }
+
+static unsigned
+count_load_deref(nir_function_impl *impl)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_deref)
+            count++;
+      }
+   }
+   return count;
+}
+
+/* The table is stored once in the first block and again, with the same or a
+ * different value at index 5, under a condition. Only the same value keeps it
+ * constant.
+ */
+static void
+store_table_twice(nir_builder *b, nir_variable *array, uint32_t length,
+                  uint32_t second_value_5)
+{
+   for (uint32_t i = 0; i < length; i++)
+      nir_store_array_var_imm(b, array, i, nir_imm_int(b, 1000003 * i), 0x1);
+
+   nir_push_if(b, nir_ieq_imm(b, nir_load_workgroup_index(b), 0));
+   for (uint32_t i = 0; i < length; i++) {
+      uint32_t v = i == 5 ? second_value_5 : 1000003 * i;
+      nir_store_array_var_imm(b, array, i, nir_imm_int(b, v), 0x1);
+   }
+   nir_pop_if(b, NULL);
+}
+
+TEST_F(nir_large_constants_test, same_store_in_another_block)
+{
+   uint32_t length = 8;
+   array = nir_local_variable_create(b->impl, glsl_array_type(glsl_uint_type(), length, 0), "array");
+   store_table_twice(b, array, length, 1000003 * 5);
+
+   run_test();
+
+   EXPECT_EQ(count_load_deref(b->impl), 0);
+   EXPECT_EQ(b->shader->constant_data_size, length * 4);
+}
+
+TEST_F(nir_large_constants_test, different_store_in_another_block)
+{
+   uint32_t length = 8;
+   array = nir_local_variable_create(b->impl, glsl_array_type(glsl_uint_type(), length, 0), "array");
+   store_table_twice(b, array, length, 7);
+
+   run_test();
+
+   EXPECT_EQ(count_load_deref(b->impl), 1);
+   EXPECT_EQ(b->shader->constant_data_size, 0);
+}
