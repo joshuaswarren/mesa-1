@@ -606,11 +606,11 @@ opt_large_constants_impl(nir_function_impl *impl,
                info->block = block;
 
             /* We only consider variables constant if they only have constant
-             * stores, all the stores come before any reads, and all stores
-             * come from the same block.  We also can't handle indirect stores.
-             * A store in another block that writes the bytes already collected
-             * changes no value, so it is allowed: SPIR-V producers store a
-             * constant array into a variable that also has it as initializer.
+             * stores, all the stores come before any reads, and every store
+             * outside the first store block rewrites bytes already collected,
+             * which changes no value (SPIR-V producers store a constant array
+             * into a variable that also has it as initializer). We also can't
+             * handle indirect stores.
              */
             if (!src_is_const || info->found_read ||
                 nir_deref_instr_has_indirect(dst_deref)) {
