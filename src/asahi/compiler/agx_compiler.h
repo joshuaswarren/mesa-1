@@ -675,6 +675,9 @@ typedef struct {
 
    /* Promoted constants. These will be appended to the binary at the end. */
    uint16_t rodata[512];
+   /* An intrinsic or ALU op this backend does not implement reached
+    * instruction selection; the compile is refused right after emission. */
+   bool unsupported_instruction;
 } agx_context;
 
 static inline void

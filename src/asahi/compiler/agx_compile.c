@@ -1939,7 +1939,8 @@ translate_atomic_opcode(nir_atomic_op op)
    case nir_atomic_op_ixor:    return AGX_ATOMIC_OPC_XOR;
    case nir_atomic_op_xchg:    return AGX_ATOMIC_OPC_XCHG;
    case nir_atomic_op_cmpxchg: return AGX_ATOMIC_OPC_CMPXCHG;
-   default: UNREACHABLE("unknown atomic opcode");
+   /* Float atomics: the caller refuses the shader. */
+   default: return (enum agx_atomic_opc)~0;
    }
    /* clang-format on */
 }
@@ -1983,6 +1984,11 @@ agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
 {
    enum agx_atomic_opc op =
       translate_atomic_opcode(nir_intrinsic_atomic_op(instr));
+   if (op == (enum agx_atomic_opc)~0) {
+      fprintf(stderr, "Unhandled atomic op %u\n", nir_intrinsic_atomic_op(instr));
+      b->shader->unsupported_instruction = true;
+      return;
+   }
    agx_index base =
       local ? agx_local_atomic_base(b, instr->src[0])
             : agx_src_index(&instr->src[0]);
@@ -3383,9 +3389,13 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       UNREACHABLE("Sample shading should have been lowered");
 
    default:
+      /* For instance per-primitive fragment inputs, which only mesh
+       * shading produces. Refuse the shader rather than run off the end
+       * of this switch, which is undefined behaviour in release builds. */
       fprintf(stderr, "Unhandled intrinsic %s\n",
               nir_intrinsic_infos[instr->intrinsic].name);
-      UNREACHABLE("Unhandled intrinsic");
+      b->shader->unsupported_instruction = true;
+      return NULL;
    }
 }
 
@@ -5992,8 +6002,11 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNREACHABLE("should've been lowered");
 
    default:
+      /* For instance 64-bit float conversions, which need shaderFloat64.
+       * Refuse the shader as for an unhandled intrinsic. */
       fprintf(stderr, "Unhandled ALU op %s\n", nir_op_infos[instr->op].name);
-      UNREACHABLE("Unhandled ALU instruction");
+      b->shader->unsupported_instruction = true;
+      return NULL;
    }
 }
 
@@ -6454,6 +6467,10 @@ emit_block(agx_context *ctx, nir_block *block)
    agx_builder _b = agx_init_builder(ctx, agx_after_block(blk));
 
    nir_foreach_instr(instr, block) {
+      /* After a refused instruction its value is undefined; stop selecting
+       * instructions (the compile is refused once emission returns). */
+      if (ctx->unsupported_instruction)
+         break;
       agx_emit_instr(&_b, instr);
    }
 
@@ -8744,6 +8761,12 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       nir_divergence_analysis(nir);
    emit_cf_list(ctx, &impl->body);
+   if (ctx->unsupported_instruction) {
+      agx_set_refusal(ctx, "unsupported instruction", __LINE__);
+      binary->size = initial_binary_size;
+      ralloc_free(ctx);
+      return false;
+   }
    agx_emit_phis_deferred(ctx);
 
    /* Index blocks now that we're done emitting so the order is consistent. Do
