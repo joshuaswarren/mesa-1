@@ -96,6 +96,15 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
+/* Large constant arrays become compute-shader constant data; HK_LARGE_CONSTANTS=0
+ * keeps the per-invocation scratch copy (A/B and bisect only).
+ */
+static bool
+hk_large_constants(void)
+{
+   return debug_get_bool_option("HK_LARGE_CONSTANTS", true);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -105,7 +114,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)(getenv("AGX_DECODE_Q4") != NULL) << 33) |
          ((uint64_t)(getenv("AGX_HWMAT_VEC2_OFF") != NULL) << 34) |
          ((uint64_t)(getenv("AGX_LOCAL_FOLD_OFF") != NULL) << 35) |
-         ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36);
+         ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36) |
+         ((uint64_t)hk_large_constants() << 40);
 }
 
 const nir_shader_compiler_options *
@@ -178,6 +188,18 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
+
+   /* Constant arrays that nir_lower_vars_to_scratch (in agx_preprocess_nir,
+    * same 256 B threshold) would give every invocation a scratch copy of
+    * become shader constant data read through the root table instead.
+    * Smaller indirectly indexed arrays keep their if-else lowering. Compute
+    * only: graphics stages have no root field for it.
+    * nir_opt_large_constants cannot see through copy_deref.
+    */
+   if (nir->info.stage == MESA_SHADER_COMPUTE && hk_large_constants()) {
+      NIR_PASS(_, nir, nir_lower_var_copies);
+      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 256);
+   }
 
    /* Optimize but allow copies because we haven't lowered them yet */
    agx_preprocess_nir(nir);
@@ -834,8 +856,6 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
 
-   // NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
-
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
 
@@ -955,6 +975,13 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       memcpy(agx_bo_map(shader->bo), shader->b.binary, size);
       shader->preamble_addr =
          shader->bo->va->addr + shader->b.info.preamble_offset;
+   }
+
+   if (shader->data_size) {
+      shader->data_bo =
+         agx_bo_create(&dev->dev, shader->data_size, 0, 0, "Shader constants");
+      memcpy(agx_bo_map(shader->data_bo), shader->data_ptr, shader->data_size);
+      shader->data_addr = shader->data_bo->va->addr;
    }
 
    if (!shader->linked.ht) {
@@ -1262,6 +1289,7 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
    agx_bo_unreference(&dev->dev, s->bo);
+   agx_bo_unreference(&dev->dev, s->data_bo);
 
    simple_mtx_destroy(&s->linked.lock);
 
