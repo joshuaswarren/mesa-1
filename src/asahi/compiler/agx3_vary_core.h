@@ -127,6 +127,15 @@ bool agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
                                    uint8_t out[AGX3_VARY_MAX_LENGTH],
                                    uint8_t *len);
 
+/* The same write with the index read from the 16-bit uniform half
+ * `uniform`, so an unlinked vertex shader's per-draw index needs no copy
+ * into a register. AGX3b only. */
+bool agx3_vary_uvsw_uniform_index(enum agx_isa_encoding enc, uint16_t value,
+                                  uint16_t uniform, uint8_t slot,
+                                  bool value_kill, uint16_t wait_mask,
+                                  uint8_t out[AGX3_VARY_MAX_LENGTH],
+                                  uint8_t *len);
+
 #ifdef __cplusplus
 }
 #endif

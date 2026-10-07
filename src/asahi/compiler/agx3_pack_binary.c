@@ -1192,16 +1192,18 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint16_t staging_half, uint8_t slot,
                uint16_t wait_mask, bool defer_writeout)
 {
-   /* An unlinked vertex shader computes its user outputs' indices from the
-    * linked varying layout, so the index is then a 16-bit register. */
+   /* An unlinked vertex shader reads its user outputs' indices from the
+    * linked varying layout: a 16-bit uniform, or a register when computed. */
    const agx_index index = I->src[0];
-   const bool register_index = agx3_src_is_register(index) &&
-      !index.memory && !index.abs && !index.neg &&
+   const bool plain_half = !index.memory && !index.abs && !index.neg &&
       index.size == AGX_SIZE_16 && agx_channels(index) == 1;
+   const bool register_index = agx3_src_is_register(index) && plain_half;
+   const bool uniform_index = index.type == AGX_INDEX_UNIFORM && plain_half;
    const bool fused = I->op != AGX_OPCODE_ST_VARY;
    if (I->nr_dests != 0 || (!fused && I->nr_srcs != 2) ||
-       (index.type != AGX_INDEX_IMMEDIATE && !register_index) ||
-       (register_index && defer_writeout) ||
+       (index.type != AGX_INDEX_IMMEDIATE && !register_index &&
+        !uniform_index) ||
+       ((register_index || uniform_index) && defer_writeout) ||
        (!fused && !agx3_vary_reg32(I->src[1])))
       return false;
 
@@ -1213,7 +1215,8 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
    if (fused) {
       const bool fma = I->op == AGX_OPCODE_ST_VARY_FMA_AGX3;
       if ((I->op != AGX_OPCODE_ST_VARY_MUL_AGX3 && !fma) ||
-          I->nr_srcs != (fma ? 4 : 3) || register_index || !defer_writeout)
+          I->nr_srcs != (fma ? 4 : 3) || register_index || uniform_index ||
+          !defer_writeout)
          return false;
       uint16_t src[3] = {0};
       bool live[3] = {0}, discard[3] = {0};
@@ -1245,6 +1248,9 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
    return (register_index
               ? agx3_vary_uvsw_register_index(enc, staging_half, index.value,
                                               slot, true, staged, bytes, &len)
+           : uniform_index
+              ? agx3_vary_uvsw_uniform_index(enc, staging_half, index.value,
+                                             slot, true, staged, bytes, &len)
               : agx3_vary_uvsw(enc, staging_half, index.value, slot, true,
                                staged, bytes, &len)) &&
           agx3_append(emission, bytes, len);

@@ -285,13 +285,32 @@ instr_cost(nir_instr *instr, const void *data)
    }
 }
 
+/* G17P's vertex output store reads its 16-bit index from the uniform file
+ * (agx_instr_accepts_uniform), so an index computed in the preamble -- an
+ * unlinked vertex shader's per-draw slot plus the component -- costs the
+ * main program nothing. */
+static bool
+g17p_uniform_uvs_index(const nir_src *use)
+{
+   nir_instr *parent = nir_src_parent_instr(use);
+   if (parent->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(parent);
+   return intr->intrinsic == nir_intrinsic_store_uvs_agx &&
+          use == &intr->src[1] && use->ssa->bit_size == 16 &&
+          use->ssa->num_components == 1;
+}
+
 static float
-rewrite_cost(nir_def *def, const void *data)
+rewrite_cost_impl(nir_def *def, bool g17p)
 {
    bool mov_needed = false, vectorizable = true;
    nir_foreach_use(use, def) {
       nir_instr *parent_instr = nir_src_parent_instr(use);
-      if (parent_instr->type == nir_instr_type_tex) {
+      if (g17p && g17p_uniform_uvs_index(use)) {
+         continue;
+      } else if (parent_instr->type == nir_instr_type_tex) {
          /* TODO: Maybe check the source index, but biases can be uniform */
          break;
       } else if (parent_instr->type == nir_instr_type_phi) {
@@ -318,6 +337,18 @@ rewrite_cost(nir_def *def, const void *data)
    return mov_needed ? ((float)(def->num_components * def->bit_size) /
                         (vectorizable ? 32.0 : 16.0))
                      : 0;
+}
+
+static float
+rewrite_cost(nir_def *def, const void *data)
+{
+   return rewrite_cost_impl(def, false);
+}
+
+static float
+rewrite_cost_g17p(nir_def *def, const void *data)
+{
+   return rewrite_cost_impl(def, true);
 }
 
 static bool
@@ -470,8 +501,10 @@ agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p)
 {
    bool progress = false;
    nir_opt_preamble_options options = preamble_options;
-   if (g17p)
+   if (g17p) {
       options.def_size = def_size_g17p;
+      options.rewrite_cost_cb = rewrite_cost_g17p;
+   }
    NIR_PASS(progress, nir, nir_opt_preamble, &options, sizes);
 
    struct preamble_image heap[512];

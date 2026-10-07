@@ -106,13 +106,18 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       return src_index == (op == AGX_OPCODE_LOCAL_LOAD ? 0 : 1);
    case AGX_OPCODE_IMAGE_WRITE:
       return src_index == 3;
+   case AGX_OPCODE_ST_VARY:
+      /* G17P's vertex output store reads a 16-bit index from the uniform
+       * file (agx3_vary_uvsw_uniform_index), as an unlinked vertex shader's
+       * per-draw output indices are. */
+      return encoding == AGX_ISA_ENCODING_AGX3B && src_index == 0 &&
+             size == AGX_SIZE_16;
    case AGX_OPCODE_BLOCK_IMAGE_STORE:
    case AGX_OPCODE_ZS_EMIT:
    case AGX_OPCODE_ZS_EMIT_AGX3:
    case AGX_OPCODE_ST_TILE:
    case AGX_OPCODE_LD_TILE:
    case AGX_OPCODE_UNIFORM_STORE:
-   case AGX_OPCODE_ST_VARY:
    case AGX_OPCODE_LOCAL_ATOMIC:
    case AGX_OPCODE_SAMPLE_MASK:
    case AGX_OPCODE_ITER:
