@@ -299,25 +299,6 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
 
    agx_g17p_va_lifetime_trace(&dev->dev, "hk-free-request", mem->bo);
 
-   /* Correctness A/B for a pending fragment reading an imported client
-    * image after its read-only shadow was unmapped. Shared/imported BOs skip
-    * the ordinary mapped BO cache and GEM-close immediately at refcount zero.
-    * Waiting every current queue before that close distinguishes a missing
-    * resource-retirement dependency from an unrelated GPU address bug.
-    *
-    * This is deliberately opt-in and G17P-only: it serializes shared-memory
-    * destruction and is a diagnostic containment, not the eventual
-    * per-resource timeline-retirement implementation.
-    */
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED)) &&
-       HK_ENV_BOOL_ONCE("HK_G17P_WAIT_SHARED_MEMORY_FREE", false)) {
-      mesa_logi_once("G17P shared-memory free queue-idle containment enabled");
-      VkResult result = vk_common_DeviceWaitIdle(device);
-      if (result != VK_SUCCESS)
-         mesa_loge("G17P shared-memory free wait failed: %d", result);
-   }
-
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);
 

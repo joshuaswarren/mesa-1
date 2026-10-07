@@ -461,18 +461,6 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (stride >= AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(desc.atomic_sw))
       memcpy(packed + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &desc.atomic_sw,
              sizeof(desc.atomic_sw));
-   if (HK_ENV_BOOL_ONCE("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
-      fprintf(stderr,
-              "G17P storage descriptor set=0x%" PRIx64
-              " binding=%u elem=%u offset=%u valid=%u bytes=",
-              set->addr, binding, elem,
-              set->layout->binding[binding].offset +
-                 elem * set->layout->binding[binding].stride,
-              supported);
-      for (unsigned i = 0; i < stride; ++i)
-         fprintf(stderr, "%02x", packed[i]);
-      fputc('\n', stderr);
-   }
    write_desc(set, binding, elem, packed, stride);
 }
 

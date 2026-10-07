@@ -85,17 +85,15 @@ hk_get_device_extensions(const struct hk_instance *instance,
     * executed on hardware, and an extension bit is a promise.  It stays off
     * until the exact-result oracle passes on a real G17P.
     */
-   const bool ray_query = hk_g17p_unverified_feature("ray_query");
+   const bool ray_query = false;
 
    /*
     * VK_KHR_ray_tracing_pipeline.  The whole pipeline compiles to one compute
     * megakernel over the same software traversal ray_query uses, so it needs
     * exactly what ray_query needs and nothing more -- but it has never
-    * executed on hardware either, and an extension bit is a promise.  It is
-    * advertised only for the probe that would let the default flip.
+    * executed on hardware either, and an extension bit is a promise.
     */
-   const bool ray_tracing_pipeline =
-      ray_query && hk_g17p_unverified_feature("ray_tracing_pipeline");
+   const bool ray_tracing_pipeline = ray_query;
 
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
@@ -280,35 +278,6 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .GOOGLE_user_type = true,
       .VALVE_mutable_descriptor_type = true,
    };
-}
-
-/*
- * G17P features whose implementation records correctly under the drm-shim
- * but has not yet executed on hardware.  They stay unadvertised by default: a
- * feature bit is a promise, and the only way to keep it is to flip the
- * default after the one-boot probe named next to each entry has passed.
- * Until then HK_G17P_UNVERIFIED_FEATURES=<name>[,<name>...] advertises one,
- * for exactly that probe.
- */
-bool
-hk_g17p_unverified_feature(const char *name)
-{
-   const char *list = debug_get_option("HK_G17P_UNVERIFIED_FEATURES", NULL);
-   if (!list)
-      return false;
-
-   const size_t len = strlen(name);
-   for (const char *p = list; *p;) {
-      const char *end = strchr(p, ',');
-      const size_t n = end ? (size_t)(end - p) : strlen(p);
-      if ((n == len && !strncmp(p, name, len)) ||
-          (n == 3 && !strncmp(p, "all", 3)))
-         return true;
-      if (!end)
-         break;
-      p = end + 1;
-   }
-   return false;
 }
 
 static void
@@ -844,14 +813,9 @@ hk_get_device_features(
        * graphics/compute counter now has a strict native helper or fragment-
        * prolog compiler oracle and shares the guarded compact-report ABI. */
       features->pipelineStatisticsQuery = true;
-      /* The graphics-stage descriptor, storage-write and atomic paths are
-       * complete and record through HAL200. Keep their public promise behind
-       * the exact side-effect qualification run; retain the older
-       * `graphics_memory` token as an alias for existing qualification jobs. */
-      features->vertexPipelineStoresAndAtomics =
-         instance->vertex_stores &&
-         (hk_g17p_unverified_feature("graphics_shader_side_effects") ||
-          hk_g17p_unverified_feature("graphics_memory"));
+      /* The graphics-stage descriptor, storage-write and atomic paths record
+       * through HAL200 but are not yet qualified on hardware. */
+      features->vertexPipelineStoresAndAtomics = false;
       /* Qualified on hardware: g17p-vulkan-fragment-side-effects renders
        * 1024/1024 exact pixels, 0 cleared, 0 wrong, with 0/256 mixed 2x2
        * quads and 0/32 mixed 8x4 SIMD groups, and its fragment stores,
@@ -876,10 +840,10 @@ hk_get_device_features(
        * a read-only shadow at +sparse_ro_offset, and a userspace sparse map
        * that the G17P texture descriptor points at in Sparse mode. The kernel
        * already accepts DRM_ASAHI_BIND_SINGLE_PAGE binds, and the G17P user VA
-       * window is split for the RO alias exactly as AGX2 is. Keep it behind
-       * the unverified-feature opt-in until the residency-query descriptor
-       * path is qualified on hardware; every piece below is chip-agnostic. */
-      const bool sparse = hk_g17p_unverified_feature("sparse");
+       * window is split for the RO alias exactly as AGX2 is. Keep it off until
+       * the residency-query descriptor path is qualified on hardware; every
+       * piece below is chip-agnostic. */
+      const bool sparse = false;
       features->shaderResourceResidency = sparse;
       features->sparseBinding = sparse;
       features->sparseResidencyAliased = sparse;
@@ -904,8 +868,7 @@ hk_get_device_features(
       /* VK_KHR_shader_quad_control permits quad operations and derivatives
        * inside divergent control flow.  The ordinary subgroup quad shuffles
        * exposed below do not establish that stronger execution guarantee. */
-      features->shaderQuadControl =
-         hk_g17p_unverified_feature("shader_quad_control");
+      features->shaderQuadControl = false;
    }
 
    /* A multiview promise for a stage this device does not expose is
@@ -1730,8 +1693,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
-      if (!hk_g17p_unverified_feature("shader_quad_control"))
-         supported_extensions.KHR_shader_quad_control = false;
+      supported_extensions.KHR_shader_quad_control = false;
    }
 
    struct vk_features supported_features;

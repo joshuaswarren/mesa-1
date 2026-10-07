@@ -611,48 +611,6 @@ hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
    return current;
 }
 
-int hk_g17p_launch_trace_state = -1;
-
-int
-hk_g17p_launch_trace_init(void)
-{
-   const int enabled = HK_ENV_BOOL_ONCE("HK_G17P_LAUNCH_TRACE", false) ? 1 : 0;
-   hk_g17p_launch_trace_state = enabled;
-   return enabled;
-}
-
-/* Single line, distinct tag. The multi-line dump below has twice been reported
- * as "only the header printed", so anything that must not be lost in a log
- * filter goes through this instead. */
-void
-hk_g17p_trace_line(const char *label, uint64_t base, const void *data,
-                   size_t len)
-{
-   const uint8_t *bytes = data;
-   fprintf(stderr, "G17P %s: base=%" PRIx64 " len=%zu bytes=", label, base,
-           len);
-   for (size_t i = 0; i < len; ++i)
-      fprintf(stderr, "%02x", bytes[i]);
-   fprintf(stderr, "\n");
-   fflush(stderr);
-}
-
-void
-hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,
-                      size_t len)
-{
-   const uint8_t *bytes = data;
-   fprintf(stderr, "G17P dump: %s base=%" PRIx64 " len=%zu\n", label, base,
-           len);
-   for (size_t off = 0; off < len; off += 16) {
-      fprintf(stderr, "G17P dump:   +%04zx ", off);
-      for (size_t i = 0; i < 16 && off + i < len; ++i)
-         fprintf(stderr, "%02x ", bytes[off + i]);
-      fprintf(stderr, "\n");
-   }
-   fflush(stderr);
-}
-
 void *
 hk_cmd_buffer_emit_cdm_terminate(struct hk_cmd_buffer *cmd, void *current)
 {
@@ -717,21 +675,6 @@ hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd, void *current)
              agx_chip_name(dev->dev.chip));
    vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
    return current;
-}
-
-
-/* See the macro in hk_cmd_buffer.h. Off unless HK_DEBUG names it, so this
- * costs one relaxed load on a path that is already failing the submission. */
-void
-hk_trace_cmd_error(const char *file, unsigned line, VkResult error)
-{
-   static int enabled = -1;
-   if (enabled < 0) {
-      const char *debug = getenv("HK_DEBUG");
-      enabled = debug && strstr(debug, "cmderr") != NULL;
-   }
-   if (enabled)
-      mesa_loge("command buffer error %d set at %s:%u", (int)error, file, line);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -1306,9 +1249,6 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
       const uint64_t push_set_addr = hk_pool_upload(
          cmd, push_set->data, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
 
-      if (hk_g17p_launch_trace_enabled())
-         hk_g17p_trace_line("push-descriptor-set", push_set_addr,
-                            push_set->data, sizeof(push_set->data));
 
       desc->root.sets[set_idx] = push_set_addr;
       desc->set_sizes[set_idx] = sizeof(push_set->data);
@@ -2141,25 +2081,6 @@ hk_g17p_graphics_uniform_ranges(
       if (!pointers_va)
          return hk_g17p_graphics_ranges_refused(range_count, count);
 
-      if (hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr,
-                 "G17P combined sampler: set=%" PRIx64 " size=%u "
-                 "texture_off=%u sampler_off=%u sampler_index=%u "
-                 "sampler_count=%u sampler_stride=%u pointers=%" PRIx64
-                 "/%" PRIx64 "\n",
-                 set_addr, set_size,
-                 binding->texture_offset_B,
-                 binding->sampler_index_offset_B, sampler_index,
-                 heap.sampler_count, heap.sampler_element_size_B,
-                 pointers[0], pointers[1]);
-         hk_g17p_trace_line(
-            "combined-texture-desc",
-            set_addr + binding->texture_offset_B,
-            (const uint8_t *)set_map + binding->texture_offset_B,
-            32);
-         hk_g17p_trace_line("combined-pointers", pointers_va,
-                            cached->published, sizeof(cached->published));
-      }
 
       sources[count] = HK_G17P_RANGE_SOURCE_UPLOADED;
       ranges[count++] = (struct agx3_ioto_uniform_range){
@@ -2183,31 +2104,6 @@ hk_g17p_graphics_uniform_ranges(
          dev->samplers.table.bo->va->addr,
       };
       const uint64_t pointers_va = dev->rodata.indexed_heap_pointers;
-      if (hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr,
-                 "G17P indexed sampler: texture_heap=%" PRIx64
-                 " texture_alloc=%u texture_next=%u sampler_heap=%" PRIx64
-                 " sampler_alloc=%u sampler_next=%u pointers=%" PRIx64 "\n",
-                 pointers[0], dev->sampled_images.alloc,
-                 dev->sampled_images.next_desc, pointers[1],
-                 dev->samplers.table.alloc, dev->samplers.table.next_desc,
-                 pointers_va);
-         hk_g17p_trace_line("indexed-pointers", pointers_va, pointers,
-                            sizeof(pointers));
-         if (dev->sampled_images.next_desc)
-            hk_g17p_trace_line(
-               "indexed-texture-heap", pointers[0],
-               hk_descriptor_table_entry(&dev->sampled_images, 0),
-               MIN2((size_t)dev->sampled_images.next_desc *
-                        dev->sampled_images.desc_size,
-                    (size_t)4096));
-         if (dev->samplers.table.map && dev->samplers.table.next_desc)
-            hk_g17p_trace_line(
-               "indexed-sampler-heap", pointers[1], dev->samplers.table.map,
-               MIN2((size_t)dev->samplers.table.next_desc *
-                        dev->samplers.table.desc_size,
-                    (size_t)4096));
-      }
       sources[count] = HK_G17P_RANGE_SOURCE_CONSTANT;
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = 0, .size_halfs = 8, .address = pointers_va,
@@ -3030,8 +2926,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          return 0;
       }
 
-      const bool diagnostics = (dev->dev.debug & AGX_DBG_FAULTTRACE) ||
-                               hk_g17p_launch_trace_enabled();
+      const bool diagnostics = dev->dev.debug & AGX_DBG_FAULTTRACE;
       const bool fast_cacheable =
          !diagnostics && !s->info.agx3_combined_sampler_valid &&
          !(s->info.stage == MESA_SHADER_FRAGMENT &&
@@ -3229,33 +3124,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          return 0;
       }
 
-      if (hk_g17p_launch_trace_enabled()) {
-         for (size_t r = 0; r < range_count; ++r) {
-            fprintf(stderr,
-                    "G17P graphics uniform range[%zu]: start_halfs=%u "
-                    "size_halfs=%u address=%" PRIx64 "\n",
-                    r, (unsigned)ranges[r].start_halfs,
-                    (unsigned)ranges[r].size_halfs, ranges[r].address);
-         }
-
-         /* Keep the source bytes next to the generated Ioto program in an
-          * explicit launch trace.  This distinguishes a bad root upload from
-          * corruption while LDDEV/COPY publishes the same qwords as vertex
-          * uniforms.  It is intentionally behind HK_G17P_LAUNCH_TRACE: the
-          * normal desktop path remains silent. */
-         if (s->info.stage == MESA_SHADER_VERTEX && cmd->state.gfx.root) {
-            const unsigned nr_attribs = DIV_ROUND_UP(
-               BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
-            const size_t bases_size =
-               MIN2((size_t)nr_attribs * sizeof(uint64_t),
-                    sizeof(cmd->state.gfx.descriptors.root.draw.attrib_base));
-            hk_g17p_trace_line(
-               "graphics-vbo-bases",
-               cmd->state.gfx.root +
-                  hk_root_descriptor_offset(draw.attrib_base),
-               cmd->state.gfx.descriptors.root.draw.attrib_base, bases_size);
-         }
-      }
 
       /* Same linked shader, render layout and uniform-range layout as the
        * last compact publication, with only range source addresses changed
@@ -3834,36 +3702,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          }
       }
 
-      if (hk_g17p_launch_trace_enabled()) {
-         const char *label = s->info.stage == MESA_SHADER_FRAGMENT
-                                ? "fragment-ioto"
-                                : "vertex-ioto";
-         hk_g17p_trace_line(label, published, program_map, program_length);
-
-         const char *shader_label = s->info.stage == MESA_SHADER_FRAGMENT
-                                       ? "fragment-shader"
-                                       : "vertex-shader";
-         void *shader_map = agx_bo_map(linked->b.bo);
-         fprintf(stderr,
-                 "G17P graphics shader: stage=%u va=%" PRIx64
-                 " size=%u entry=%u gprs=%u scratch=%u compiler_d=%u/%u\n",
-                 (unsigned)s->info.stage, desc.shader_va,
-                 (unsigned)linked->b.size, (unsigned)linked->b.entry_offset,
-                 (unsigned)linked->b.nr_gprs,
-                 (unsigned)linked->b.scratch_size,
-                 (unsigned)linked->b.g17p_compiler_d_valid,
-                 (unsigned)linked->b.g17p_compiler_d);
-         if (shader_map)
-            hk_g17p_trace_hexdump(
-               shader_label, desc.shader_va,
-               (uint8_t *)shader_map + linked->b.entry_offset,
-               MIN2((size_t)linked->b.size, (size_t)512));
-         if (s->info.stage == MESA_SHADER_FRAGMENT && cmd->state.gfx.root)
-            hk_g17p_trace_line("fragment-root", cmd->state.gfx.root,
-                               &cmd->state.gfx.descriptors.root,
-                               MIN2(sizeof(cmd->state.gfx.descriptors.root),
-                                    (size_t)128));
-      }
       return published;
    }
 
@@ -4319,9 +4157,6 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return false;
       }
-
-      if (hk_g17p_launch_trace_enabled())
-         hk_g17p_trace_line("ppp-initial", T.gpu, T.cpu, initial.length);
    } else {
       struct AGX_PPP_HEADER present = {
          .w_clamp = true,
@@ -4353,10 +4188,6 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return false;
       }
-
-      if (hk_g17p_launch_trace_enabled())
-         hk_g17p_trace_line("ppp-initial", ppp.gpu_base, ppp.cpu_base,
-                            ppp.total_size);
    }
    cs->current = map;
 
@@ -4529,14 +4360,6 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
          memset(bias, 0, AGX_DEPTH_BIAS_LENGTH);
       }
 
-      if (hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr, "G17P clear-only graphics: %ux%u samples=%u "
-                         "sample_control=%#x process_empty_tiles=1 "
-                         "scissor=%u zbias=%u direct_resolve=%u\n",
-                 cs->cr.width, cs->cr.height, MAX2(cs->tib.nr_samples, 1),
-                 cs->ppp_multisamplectl, cs->scissor.size,
-                 cs->depth_bias.size, g17p_output_only_through_eot);
-      }
       return false;
    }
 

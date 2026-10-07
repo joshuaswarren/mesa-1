@@ -642,20 +642,6 @@ static bool
 hk_g17p_compute_shader_supported(struct hk_shader *s,
                                  struct hk_linked_shader *linked)
 {
-   if (s && linked && hk_g17p_launch_trace_enabled())
-      fprintf(stderr,"G17P compute resources: txf=%u binding=%u storage=%u sampled_storage=%u preamble=%u local=%u texture=%u sampler=%u heap=%u scratch=%u/%u idx_samp=%u idx_store=%u combined=%u stage=%u/%u bo=%u va=%u size=%u gprs=%u pre_scratch=%u staging=%u sets=%u\n",
-         linked->b.uses_txf,s->info.agx3_txf_texture_valid,
-         s->info.agx3_storage_image_valid,s->info.agx3_sampled_storage_valid,
-         s->b.info.has_preamble,
-         s->b.info.local_size,s->b.info.texture_state_count,s->b.info.sampler_state_count,
-         s->b.info.uses_sampler_heap,s->b.info.scratch_size,linked->b.scratch_size,
-         s->info.agx3_indexed_sampler_valid,s->info.agx3_indexed_storage_valid,
-         s->info.agx3_combined_sampler_valid,
-         (unsigned)s->b.info.stage,(unsigned)s->info.stage,
-         linked->b.bo != NULL, linked->b.bo && linked->b.bo->va != NULL,
-         (unsigned)linked->b.size, linked->b.nr_gprs,
-         s->b.info.preamble_scratch_size, s->b.info.agx3_staging_known,
-         s->info.set_count);
    /* poly_nir_lower_gs preserves the API geometry stage on the main kernel,
     * even though Honeykrisp has always launched that binary through CDM. */
    return s && linked &&
@@ -1434,18 +1420,6 @@ hk_g17p_append_indirect_launch(
       return false;
    }
 
-   if (hk_g17p_launch_trace_enabled()) {
-      fprintf(stderr,
-              "G17P indirect launch: args=%" PRIx64 " geometry=%" PRIx64
-              " helper_program=%" PRIx64 " local=%ux%ux%u bytes=%zu\n",
-              grid.ptr, (uint64_t)geometry.gpu, helper_program_va,
-              local_size.x, local_size.y, local_size.z, sink->length - start);
-      hk_g17p_trace_line("indirect-pair",
-                         (uint64_t)(uintptr_t)(sink->data + start),
-                         (const uint8_t *)sink->data + start,
-                         sink->length - start);
-   }
-
    return true;
 }
 
@@ -1653,7 +1627,7 @@ hk_dispatch_prepared_precomp_g17p(
        data_size > sizeof(prepared->data) ||
        memcmp(prepared->data, data, data_size) != 0 ||
        agx_is_indirect(grid) || !grid.count[0] || !grid.count[1] ||
-       !grid.count[2] || hk_g17p_launch_trace_enabled())
+       !grid.count[2])
       return false;
 
    struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
@@ -1696,7 +1670,7 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    const bool checked_cache =
       data && data_size && !agx_is_indirect(grid) && grid.count[0] &&
-      grid.count[1] && grid.count[2] && !hk_g17p_launch_trace_enabled();
+      grid.count[1] && grid.count[2];
    const unsigned checked_cache_size = cmd->g17p_precomp_programs.size;
    if (checked_cache &&
        hk_g17p_append_prepared_precomp_direct(cmd, grid, barrier, idx, data,
@@ -1890,9 +1864,6 @@ hk_dispatch_prepared_g17p_native_impl(
        dev->dev.chip != AGX_CHIP_G17P || cs->type != HK_CS_CDM)
       return false;
 
-   if (hk_g17p_launch_trace_enabled())
-      return false;
-
    if (agx_is_indirect(grid)) {
       if (!prepared->indirect_local_valid ||
           prepared->indirect_local_consumed ||
@@ -2044,12 +2015,12 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* BeginRendering publishes exact internal-graphics loaders after the root
     * address is fixed. A direct draw can append that launch immediately,
     * avoiding the general compute resource-validation and composition path.
-    * Misses and launch tracing retain the authoritative slow path below. */
-   if (internal_graphics && !indirect && !hk_g17p_launch_trace_enabled() &&
+    * Misses take the general path below. */
+   if (internal_graphics && !indirect &&
        hk_g17p_append_prepared_graphics_direct(cmd, cs, s, linked, grid,
                                                local_size))
       return;
-   if (internal_graphics && indirect && !hk_g17p_launch_trace_enabled() &&
+   if (internal_graphics && indirect &&
        hk_g17p_append_prepared_graphics_indirect(
           cmd, cs, s, linked, grid, local_size, sparse_map_addr))
       return;
@@ -2374,17 +2345,6 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             }
          }
       }
-      if (s->info.agx3_storage_image_valid && hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr,
-                 "G17P storage pointers: set=0x%" PRIx64
-                 " size=%u tex_off=%u pbe_off=%u slot0=0x%" PRIx64
-                 " slot1=0x%" PRIx64 " slot2=0x%" PRIx64
-                 " slot3=0x%" PRIx64 "\n",
-                 set_address, set_size,
-                 s->info.agx3_storage_image.texture_offset_B,
-                 s->info.agx3_storage_image.pbe_offset_B,
-                 pointers[0], pointers[1], pointers[2], pointers[3]);
-      }
       const size_t pointer_count =
          s->info.agx3_storage_image_valid ? 4 : 2;
       texture_pointers =
@@ -2407,68 +2367,6 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                    : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
           "main", ranges, &range_count, &program_va, &program))
       return;
-
-   if (hk_g17p_launch_trace_enabled()) {
-      /* The Ioto program's whole job is to load these ranges into the uniform
-       * file before the shader runs. The shader reads uniform quad u0
-       * (halves 0..3) and u1 (halves 4..7) as 64-bit base pointers, so the
-       * root range must start at half 0 and cover at least 8 halves, and the
-       * 16 bytes at root_va must be those two pointers. If the uniform file is
-       * not populated the shader addresses nowhere and stores silently into
-       * the void -- which is indistinguishable, from the buffer side, from
-       * never having run. */
-      for (size_t r = 0; r < range_count; ++r)
-         fprintf(stderr,
-                 "G17P uniform range[%zu]: start_halfs=%u size_halfs=%u "
-                 "address=%" PRIx64 "\n",
-                 r, (unsigned)ranges[r].start_halfs,
-                 (unsigned)ranges[r].size_halfs,
-                 (uint64_t)ranges[r].address);
-      fprintf(stderr,
-              "G17P root: va=%" PRIx64 " set_count=%u push_count=%u "
-              "reserved_preamble_formula=%u rodata(base=%u size16=%u)\n",
-              root_ptr, (unsigned)s->info.set_count,
-              (unsigned)s->b.info.push_count,
-              (unsigned)(4 * (1 + s->info.set_count)),
-              (unsigned)s->b.info.rodata.base_uniform,
-              (unsigned)s->b.info.rodata.size_16);
-      /* Exactly the bytes hk_cmd_buffer_upload_root pushed to root_ptr. The
-       * first 16 are what the uniform range covers: root_desc_addr then
-       * sets[0]. Two plausible GPU VAs there mean the descriptor chain the
-       * shader dereferences is populated; sixteen zero bytes would settle the
-       * question on their own. */
-      hk_g17p_trace_line("rootdesc", root_ptr,
-                         &cmd->state.cs.descriptors.root, 32);
-      fprintf(stderr,
-              "G17P rootdesc fields: root_desc_addr=%" PRIx64
-              " sets[0]=%" PRIx64 " constant_data_addr=%" PRIx64 "\n",
-              (uint64_t)cmd->state.cs.descriptors.root.root_desc_addr,
-              (uint64_t)cmd->state.cs.descriptors.root.sets[0],
-              (uint64_t)cmd->state.cs.descriptors.root.cs.constant_data_addr);
-      hk_g17p_trace_hexdump("ioto-program", program_va,
-                            program.bytes, program.length);
-      fprintf(stderr,
-              "G17P shader: va=%" PRIx64 " size=%u nr_gprs=%u scratch=%u "
-              "uniform_ranges=%zu set_count=%u rodata(base=%u size16=%u "
-              "off=%u)\n",
-              linked->b.bo->va->addr + linked->b.entry_offset,
-              (unsigned)linked->b.size,
-              (unsigned)linked->b.nr_gprs, (unsigned)linked->b.scratch_size,
-              range_count, (unsigned)s->info.set_count,
-              (unsigned)s->b.info.rodata.base_uniform,
-              (unsigned)s->b.info.rodata.size_16,
-              (unsigned)s->b.info.rodata.offset);
-      /* The shader binary is what actually has to terminate; a wave that never
-       * stops is the one thing that produces a fault-free, completion-free
-       * per-queue restart request. Dump enough to see its tail. */
-      void *shader_map = agx_bo_map(linked->b.bo);
-      if (shader_map) {
-         hk_g17p_trace_hexdump("shader-binary",
-                               linked->b.bo->va->addr + linked->b.entry_offset,
-                               (uint8_t *)shader_map + linked->b.entry_offset,
-                               linked->b.size < 512 ? linked->b.size : 512);
-      }
-   }
 
    hk_ensure_cs_has_space(cmd, cs, 0x2000);
    struct agx3_compute_dispatch_sink sink = {
@@ -2530,39 +2428,6 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           &program.launch, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
-   }
-
-   /* One-shot ground truth for the GMMU fault forensics: the fault bank only
-    * reports a 64-byte-granular address, and reconstructing it by hand from
-    * dmesg has already produced two mutually inconsistent readings.  Print the
-    * pointers and the exact packed words so a single run decides whether a
-    * reported fault address is this dispatch's program pointer, its shader
-    * pointer, or neither (i.e. a stale/phantom latch).  Off unless asked for.
-    */
-   if (hk_g17p_launch_trace_enabled()) {
-      const uint8_t *packed = (const uint8_t *)sink.data;
-      uint32_t w[4];
-      for (unsigned i = 0; i < 4; ++i)
-         memcpy(&w[i], packed + i * 4, 4);
-      const uint64_t reconstructed =
-         ((uint64_t)(w[1] >> 22) << 38) | ((uint64_t)w[2] << 6);
-      /* Words 1 and 3 carry OVERLAPPING high address bits (47:38 and 47:40)
-       * and the add3 witness cannot say which the hardware consumes, because
-       * on its VA both encode the same 2^40.  Print the OR of both: it is the
-       * worst case the GPU can compute, so `pipeline_or == program_va` is the
-       * only state in which no model of the redundancy can fault. */
-      const uint64_t reconstructed_or =
-         reconstructed | ((uint64_t)(w[3] & 0xff) << 40);
-      fprintf(stderr,
-              "G17P launch: usc_window=[%" PRIx64 ",%" PRIx64 ") "
-              "program_va=%" PRIx64 " shader_va=%" PRIx64
-              " words=%08x %08x %08x %08x pipeline=%" PRIx64
-              " pipeline_or=%" PRIx64 "%s\n",
-              dev->dev.shader_base,
-              dev->dev.shader_base + AGX_USC_WINDOW_SIZE,
-              program_va, linked->b.bo->va->addr, w[0], w[1], w[2],
-              w[3], reconstructed, reconstructed_or,
-              reconstructed_or == program_va ? "" : " MISMATCH");
    }
 
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);

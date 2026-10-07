@@ -3061,36 +3061,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                NULL);
    }
 
-   /* Report every uniform half this shader actually reads.
-    *
-    * The disassembled G17P binary references uniform halves the declared
-    * footprint (`reserved_preamble = root + 4 * (1 + set_count)`) does not
-    * cover.  That is either the descriptor lowering emitting a set index the
-    * layout does not have, or the backend assigning uniforms above the
-    * reservation -- and the two need different fixes.  `lower_uniforms` has
-    * just rewritten every root/descriptor-set read into a load_preamble, so
-    * the bases here are exactly what the compiler believes it needs, from the
-    * compiler's own side rather than from a disassembly of its output.
-    */
-   if (hk_g17p_launch_trace_enabled()) {
-      fprintf(stderr,
-              "G17P uniforms: stage=%u set_count=%u root=%u reserved=%u ",
-              (unsigned)sw_stage, set_count, root,
-              root + (4 * (1 + set_count)));
-      nir_foreach_function_impl(impl, nir) {
-         nir_foreach_block(block, impl) {
-            nir_foreach_instr(instr, block) {
-               if (instr->type != nir_instr_type_intrinsic)
-                  continue;
-               nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
-               if (in->intrinsic == nir_intrinsic_load_preamble)
-                  fprintf(stderr, "half%u ", nir_intrinsic_base(in));
-            }
-         }
-      }
-      fprintf(stderr, "\n");
-   }
-
 #if 0
    /* TODO */
    nir_variable_mode robust2_modes = 0;
@@ -3273,19 +3243,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       hk_g17p_vertex_compile_info_init(shader, vs_cprog, &compiler_info);
       const bool state_ok = hk_agx3_g17p_vertex_program_info(
          dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
-      if (!state_ok && hk_g17p_launch_trace_enabled())
-         fprintf(stderr,
-                 "G17P vertex state refused: sw=%u pre=%u/%u/%u "
-                 "written=%" PRIx64 " off=%u/%u/%u/%u/%u size=%u user=%u\n",
-                 (unsigned)sw_stage,
-                 compiler_info.has_preamble, compiler_info.nr_preamble_gprs,
-                 compiler_info.preamble_scratch_size,
-                 compiler_info.uvs_written, compiler_info.position_off,
-                 compiler_info.varyings_off, compiler_info.psiz_off,
-                 compiler_info.layer_viewport_off, compiler_info.clip_off,
-                 compiler_info.uvs_size, compiler_info.user_size);
    }
-
 
    if (nir->constant_data_size > 0) {
       uint32_t data_size = align(nir->constant_data_size, HK_MIN_UBO_ALIGNMENT);
@@ -3378,7 +3336,6 @@ hk_shader_binary_cache_entry_unref(
    if (destroy)
       hk_shader_binary_cache_entry_destroy(dev, entry);
 }
-
 
 void
 hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,

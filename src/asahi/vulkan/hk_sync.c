@@ -25,15 +25,6 @@
 #include "util/u_debug.h"
 #include "util/log.h"
 
-bool
-hk_sync_trace_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_SYNC_TRACE", false);
-   return enabled != 0;
-}
-
 static inline unsigned
 kind_index(enum hk_sync_kind kind)
 {
@@ -140,9 +131,6 @@ hk_sync_pass_footprints_done(struct hk_cmd_buffer *cmd)
    }
 
    st->pass_tile_wait = wait;
-   if (wait && hk_sync_trace_enabled())
-      fprintf(stderr, "hk_sync: tile hazard: pass waits on seq=%u\n",
-              wait->sync.seq);
 }
 
 /* Record the footprints of the pass instance that ends, with its streams. */
@@ -336,13 +324,6 @@ hk_sync_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
    }
 
    cmd->sync.cs_check_pending = true;
-
-   if (hk_sync_trace_enabled()) {
-      fprintf(stderr,
-              "hk_sync: barrier src=%#x dst=%#x cut vdm=%u cdm=%u prior=%#x\n",
-              src_kinds, dst_kinds, dep[0].cut ? dep[0].cut->sync.seq : 0,
-              dep[1].cut ? dep[1].cut->sync.seq : 0, dep[0].prior);
-   }
 }
 
 void
@@ -516,16 +497,6 @@ hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       cs->timestamp.start = st->pending_start_ts;
       st->pending_start_ts = (struct agx_timestamp_req){0};
    }
-
-   if (hk_sync_trace_enabled()) {
-      fprintf(stderr,
-              "hk_sync: stream seq=%u %s kind=%#x dep vdm=%u/%#x cdm=%u/%#x\n",
-              cs->sync.seq, compute ? "cdm" : "vdm", cs->sync.kind,
-              cs->sync.dep[0].cut ? cs->sync.dep[0].cut->sync.seq : 0,
-              cs->sync.dep[0].prior,
-              cs->sync.dep[1].cut ? cs->sync.dep[1].cut->sync.seq : 0,
-              cs->sync.dep[1].prior);
-   }
 }
 
 /* Whether the open general compute stream may receive work of the given
@@ -554,9 +525,6 @@ hk_sync_check_cs(struct hk_cmd_buffer *cmd)
    const uint8_t kinds = stream_kind(cmd, &cmd->current_cs.cs, true);
 
    if (!cs_reusable(cmd, cs, kinds)) {
-      if (hk_sync_trace_enabled())
-         fprintf(stderr, "hk_sync: compute stream seq=%u ended for kind %#x\n",
-                 cs->sync.seq, kinds);
       hk_cmd_buffer_end_compute(cmd);
       return;
    }
@@ -1146,10 +1114,6 @@ hk_sync_resolve_submit(struct hk_queue *queue,
                mesa_logw_once("hk_sync: forward wait clamped (stream seq %u "
                               "waited on seq %u)", cs->sync.seq,
                               d->cut->sync.seq);
-               if (hk_sync_trace_enabled())
-                  fprintf(stderr, "hk_sync: forward wait clamped seq=%u -> "
-                                  "seq=%u\n", cs->sync.seq,
-                          d->cut->sync.seq);
                d->cut = latest_before(cmd, sq, cs);
             }
             cs->sync.prior[sq] = 0;
@@ -1191,12 +1155,8 @@ hk_sync_resolve_submit(struct hk_queue *queue,
          if (v == HK_SYNC_NONE &&
              recent_conflict(&queue->sync, &rec->fp, completed))
             v = 0;
-         if (v != HK_SYNC_NONE) {
+         if (v != HK_SYNC_NONE)
             barrier_at_least(&rec->first->sync.barrier[HK_SYNC_VDM], v);
-            if (hk_sync_trace_enabled())
-               fprintf(stderr, "hk_sync: tile hazard: cb=%u vdm #%u waits "
-                               "on %d\n", i, rec->first->sync.index, v);
-         }
       }
       util_dynarray_foreach(&cmd->sync_pass_records,
                             struct hk_sync_pass_record, rec) {
@@ -1287,29 +1247,6 @@ hk_sync_resolve_submit(struct hk_queue *queue,
    util_dynarray_foreach(&submitted, struct submit_footprint, e)
       recent_add(&queue->sync, &e->fp, queue->drm.timeline_value);
    util_dynarray_fini(&submitted);
-
-   if (hk_sync_trace_enabled()) {
-      for (unsigned i = 0; i < count; ++i) {
-         list_for_each_entry(struct hk_cs, cs, &cmdbufs[i]->control_streams,
-                             node) {
-            fprintf(stderr,
-                    "hk_sync: submit cb=%u %s #%u kind=%#x vdm_barrier=%d "
-                    "cdm_barrier=%d prior_vdm=%" PRIu64 " prior_cdm=%" PRIu64
-                    " base_vdm=%" PRIu64 " base_cdm=%" PRIu64 " exact=%u\n",
-                    i, cs->type == HK_CS_VDM ? "vdm" : "cdm", cs->sync.index,
-                    cs->sync.kind,
-                    cs->sync.barrier[0] == DRM_ASAHI_BARRIER_NONE
-                       ? -1
-                       : cs->sync.barrier[0],
-                    cs->sync.barrier[1] == DRM_ASAHI_BARRIER_NONE
-                       ? -1
-                       : cs->sync.barrier[1],
-                    cs->sync.prior[0], cs->sync.prior[1],
-                    queue->sync.submitted[0], queue->sync.submitted[1],
-                    queue->sync.exact_prior);
-         }
-      }
-   }
 
    if (queue->sync.exact_prior) {
       for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {

@@ -10,16 +10,9 @@ static unsigned unreference_calls;
 static unsigned error_calls;
 
 /* hk_cmd_buffer_retain_bo() reports allocation failure through
- * vk_command_buffer_set_error(), which hk routes through hk_trace_cmd_error()
- * and the runtime's __vk_errorf(). Neither runs on the paths below; count any
- * call so an unexpected error fails the test. */
-void
-hk_trace_cmd_error(UNUSED const char *file, UNUSED unsigned line,
-                   UNUSED VkResult error)
-{
-   error_calls++;
-}
-
+ * vk_command_buffer_set_error(), which reaches the runtime's __vk_errorf().
+ * It does not run on the paths below; count any call so an unexpected error
+ * fails the test. */
 VkResult
 __vk_errorf(UNUSED const void *obj, VkResult error, UNUSED const char *file,
             UNUSED int line, UNUSED const char *format, ...)

@@ -395,14 +395,12 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
  * signals that job's fence, exactly the ordering the per-wait query relies
  * on, and refuses registration whenever the query could report more than the
  * VM's own status. Any failure here leaves the query path in place.
- * HK_G17P_VM_STATUS_MIRROR=0 disables registration (A/B control).
  */
 static void
 hk_init_vm_status_mirror(struct hk_device *dev)
 {
    if (!(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS) ||
-       !(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS_MIRROR) ||
-       !debug_get_bool_option("HK_G17P_VM_STATUS_MIRROR", true))
+       !(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS_MIRROR))
       return;
 
    struct agx_bo *bo =
@@ -879,11 +877,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
              dev->dev.user_timestamp_to_ns.den &&
           "user timestamps are in ns");
 
-   if (debug_get_option("HK_PASS_PROFILE", NULL))
-      mesa_logw("HK_PASS_PROFILE was removed: its timestamp slots lacked "
-                "completion ownership. Use Vulkan timestamp queries after "
-                "their completion fence, or kernel completion tracing.");
-
    result = hk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)
       goto fail_dev;
@@ -925,9 +918,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_rodata;
    }
    hk_g17p_bg_eot_dev_cache_init(dev);
-
-   dev->g17p_diagnostics.launch_trace =
-      debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
 
    /* Geometry and tessellation are advertised core functionality on G17P.
     * Upload their immutable internal kernels with the device instead of

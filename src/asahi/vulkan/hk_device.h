@@ -167,13 +167,6 @@ struct hk_device {
       int32_t *word;
    } vm_status_mirror;
 
-   /* Immutable diagnostic selection. Never rescan the process environment
-    * from render-pass, draw, dispatch, or per-program publication paths. */
-
-   struct {
-      bool launch_trace;
-   } g17p_diagnostics;
-
    struct {
       /* Immutable for the device's lifetime: the native texel-fetch sampler
        * table. Its address is published to the GPU as a sampler table base by

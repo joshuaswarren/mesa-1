@@ -339,4 +339,3 @@ bool hk_sync_resolve_submit(struct hk_queue *queue,
                             unsigned count, bool first_cdm_is_flush,
                             bool chain_first, uint64_t completed);
 
-bool hk_sync_trace_enabled(void);
