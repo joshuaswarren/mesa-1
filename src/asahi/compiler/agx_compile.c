@@ -10729,10 +10729,79 @@ agx3_uniform_dma_constant_reserve(nir_shader *nir)
    return MIN2(halves, 128);
 }
 
+static /* Whether a vertex constant program only moves loaded data to its results:
+ * every instruction is a load (of the preamble's inputs or of constant
+ * memory), a constant, a result store, or plumbing that forwards values --
+ * moves, vectors, 64-bit packs, address masks and bounds checks -- apart
+ * from at most four other operations, which move into the main program.
+ *
+ * Copying such a program's data into the launch removes the program: its
+ * results become the copies (agx3_uniform_dma_forward_copies()). A program
+ * that also computes keeps running per vertex batch, and copying its raw
+ * inputs only adds them to the uniforms the vertex program declares -- each
+ * declared half costs per vertex batch too (hw/dbench d6: the same vertex
+ * program with 44 vs 116 uniform halves, 2.72 vs 3.4-3.6 ms). In Minecraft,
+ * whose vertex constant programs compute ProjMat * ModelViewMat, copying
+ * doubled the vertex uniforms and cost 0.42 ms of GPU time per frame. */
 static bool
+agx3_vertex_preamble_only_forwards(nir_shader *nir)
+{
+   /* As many other operations as agx3_inline_cheap_vertex_preamble() moves
+    * into the main program once the copies leave nothing else. */
+   unsigned other = 0;
+   nir_foreach_function_impl(impl, nir) {
+      if (!impl->function->is_preamble)
+         continue;
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            switch (instr->type) {
+            case nir_instr_type_load_const:
+            case nir_instr_type_undef:
+               continue;
+            case nir_instr_type_intrinsic: {
+               const nir_intrinsic_op op =
+                  nir_instr_as_intrinsic(instr)->intrinsic;
+               if (op == nir_intrinsic_load_preamble ||
+                   op == nir_intrinsic_store_preamble ||
+                   op == nir_intrinsic_load_constant_agx)
+                  continue;
+               return false;
+            }
+            case nir_instr_type_alu:
+               switch (nir_instr_as_alu(instr)->op) {
+               case nir_op_mov:
+               case nir_op_vec2:
+               case nir_op_vec3:
+               case nir_op_vec4:
+               case nir_op_pack_64_2x32_split:
+               case nir_op_unpack_64_2x32_split_x:
+               case nir_op_unpack_64_2x32_split_y:
+               case nir_op_iand:
+               case nir_op_bounds_agx:
+                  continue;
+               default:
+                  if (++other > 4)
+                     return false;
+                  continue;
+               }
+            default:
+               return false;
+            }
+         }
+      }
+   }
+   return true;
+}
+
+bool
 agx3_nir_lower_uniform_dma(nir_shader *nir, const struct agx_shader_key *key,
                            struct agx_shader_info *info)
 {
+   /* A vertex constant program that computes keeps its loads. */
+   if (nir->info.stage == MESA_SHADER_VERTEX &&
+       !agx3_vertex_preamble_only_forwards(nir))
+      return false;
+
    const unsigned exports_end = info->push_count;
    unsigned vdest = AGX3_UNIFORM_DMA_VIRTUAL;
    int set_pointer = -1;
