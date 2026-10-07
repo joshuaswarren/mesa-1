@@ -21,6 +21,7 @@
 #include "shader_enums.h"
 
 #include "asahi/compiler/agx3_ioto_uniform_program.h"
+#include "hk_agx3_ioto_program_core.h"
 #include "asahi/genxml/agx3_cmdstream.h"
 #include "asahi/lib/agx3_compute_program_core.h"
 #include "asahi/lib/agx_ppp_hal200_graphics_core.h"
@@ -410,38 +411,6 @@ enum hk_dirty {
    HK_DIRTY_VARYINGS = BITFIELD_BIT(3),
 };
 
-#define HK_G17P_GRAPHICS_IOTO_KEY_MAX 240
-
-#define HK_G17P_GRAPHICS_ROOT_VERSION 1u
-#define HK_G17P_GRAPHICS_ROOT_MAX_RANGES 7u
-
-enum hk_g17p_graphics_root_valid {
-   HK_G17P_GRAPHICS_ROOT_RANGE0 = BITFIELD_BIT(0),
-};
-
-/* Versioned, ordinary command-buffer memory consumed by a linked shader's
- * persistent G17P setup program.  Executable code never contains these
- * draw-varying values.  Every field is immutable once its launcher is
- * published and validity is explicit rather than inferred from zero values. */
-struct hk_g17p_graphics_root_record {
-   uint32_t version;
-   uint32_t size_B;
-   uint64_t valid;
-   uint32_t range_count;
-   uint32_t _pad;
-
-   /* Source VAs only.  The shader-owned setup template defines each range's
-    * destination and width, loads the VA through this fixed array, then
-    * dereferences it.  Direct and indirect draws therefore share one exact
-    * executable shape; address changes are ordinary data changes. */
-   uint64_t range_address[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-};
-
-static_assert(offsetof(struct hk_g17p_graphics_root_record, range_address) % 8 == 0,
-              "G17P root qwords must be naturally aligned");
-static_assert(sizeof(struct hk_g17p_graphics_root_record) <= 512,
-              "G17P graphics root must remain compact and bounded");
-
 /* Where a G17P graphics uniform range's source address comes from. */
 enum hk_g17p_range_source {
    /* Fixed for the shader and device (heap pointers, promoted constants). */
@@ -481,12 +450,12 @@ struct hk_g17p_launch {
    uint8_t flags;
    uint8_t count;
    bool valid;
-   uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-   uint8_t set[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-   uint16_t start_halfs[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-   uint16_t size_halfs[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+   uint8_t source[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   uint8_t set[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   uint16_t start_halfs[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   uint16_t size_halfs[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
    /* Root/set offset, or the address of a constant range. */
-   uint64_t offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+   uint64_t offset[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
 };
 
 struct hk_g17p_graphics_ioto_cache_entry {
@@ -496,8 +465,7 @@ struct hk_g17p_graphics_ioto_cache_entry {
    const struct hk_linked_shader *loader_linked;
    uint64_t loader_program;
    struct agx3_ioto_uniform_range
-      loader_ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-
+      loader_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
 
    /* Inputs of the last admitted program (hk_upload_usc_words_internal()). */
    struct {
@@ -508,119 +476,6 @@ struct hk_g17p_graphics_ioto_cache_entry {
       uint8_t topology;
       uint8_t provoking;
    } admit;
-
-   uint8_t key[HK_G17P_GRAPHICS_IOTO_KEY_MAX];
-   uint64_t program;
-   const void *source_shader;
-   uint64_t linked_shader_va;
-   uint64_t rodata_va;
-   uint64_t root;
-   uint64_t draw_params;
-   uint64_t draw_id_ptr;
-   uint16_t key_size;
-   uint16_t tile_size_px;
-   uint8_t sample_size_B;
-   uint8_t nr_samples;
-   bool root_dependent;
-   bool fast_valid;
-   bool valid;
-
-   /* Launcher inputs of the last compact publication for this stage.  A
-    * later draw of the same linked shader, render layout and range layout
-    * whose only change is range source addresses -- a new root after a
-    * descriptor push, or the next indexed-indirect record's draw parameters
-    * -- would re-derive exactly the same bounds, constant-program extent and
-    * setup template.  The record keeps those so such a draw rebuilds only
-    * its root record and launcher. */
-   struct {
-      struct agx3_ioto_uniform_range ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      /* The same ranges after hk_g17p_graphics_compact_ranges(), their root
-       * record, and where each source address came from (enum
-       * hk_g17p_range_source) with its root-relative offset.  When no source
-       * is an upload made while collecting (patchable), a draw can re-derive
-       * every address from the root, draw-parameter and draw-ID pointers. */
-      struct agx3_ioto_uniform_range
-         compact_ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      struct hk_g17p_graphics_root_record root;
-      /* Patchable address r is base[source[r]] + source_offset[r], with
-       * base = {0, root, draw parameters, draw ID}; a constant's offset is
-       * its address. */
-      uint64_t source_offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      bool patchable;
-      bool uses_root;
-      bool has_draw_params;
-      bool has_draw_id;
-      /* Fragment admission inputs (hk_g17p_basic_graphics_program_supported):
-       * the varying-coefficient check reads the topology, provoking vertex
-       * and hardware vertex shader. */
-      const void *admit_hw_vs;
-      uint8_t admit_topology;
-      uint8_t admit_provoking;
-      bool external;
-      const void *source_shader;
-      const void *linked;
-      const void *setup;
-      uint64_t linked_shader_va;
-      uint64_t rodata_va;
-      uint8_t range_count;
-      uint16_t tile_size_px;
-      uint8_t sample_size_B;
-      uint8_t nr_samples;
-      bool blend;
-      bool spills;
-      bool valid;
-      /* hk_g17p_dma_set_base() when this record was made: a set-pointer
-       * uniform DMA span is recorded as a constant address, valid only
-       * while the same set stays bound. */
-      uint64_t dma_set_base;
-   } compact;
-   /* AGX_G17P_UNIFORM_DMA span source when it is a descriptor-set pointer
-    * (see hk_g17p_dma_set_base); 0 otherwise. */
-   uint64_t dma_set_base;
-
-   /* The last one-level (absolute-address) vertex
-    * setup published for an indexed-indirect multi-draw record.  The next
-    * record of the same linked shader, root, descriptor-set DMA base and
-    * render layout differs only in its draw-parameter / draw-ID addresses,
-    * so it relocates the same linked-shader template (`entry`, owned by
-    * `linked`) to those addresses instead of re-deriving every range. */
-   struct {
-      struct agx3_ioto_uniform_range ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      uint64_t source_offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
-      const void *entry;
-      const void *source_shader;
-      const void *linked;
-      uint64_t linked_shader_va;
-      uint64_t rodata_va;
-      uint64_t root;
-      uint64_t dma_set_base;
-      size_t capacity;
-      uint16_t tile_size_px;
-      uint8_t sample_size_B;
-      uint8_t nr_samples;
-      uint8_t range_count;
-      bool has_draw_params;
-      bool has_draw_id;
-      bool valid;
-      /* Patch form: the template's bytes at its published VA, valid for
-       * any record because the program is position-independent (checked
-       * by relocation at a second VA), with only the LDIMM pairs that
-       * address the draw-parameter/draw-ID ranges rewritten per record. */
-      bool patch;
-      uint8_t site_count;
-      uint16_t length;
-      struct {
-         uint16_t offset;
-         uint16_t dest_half;
-         uint8_t low_length;
-         uint8_t high_length;
-         uint8_t range;
-         uint64_t delta;
-      } sites[4];
-      uint8_t bytes[512];
-   } one_level;
 };
 
 struct hk_graphics_state {
@@ -646,9 +501,6 @@ struct hk_graphics_state {
    uint32_t g17p_draw_id_value;
    bool g17p_draw_params_host_valid;
    bool g17p_draw_id_host_valid;
-   /* Set only around the vertex-program upload of an
-    * indexed-indirect record in hk_g17p_emit_indirect_record(). */
-   bool g17p_vs_one_level;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
    /* Packed records of the last complete build of g17p_bind_tail, whose
