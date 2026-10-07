@@ -3174,10 +3174,17 @@ set_timestamp(struct wsi_wl_swapchain *chain,
       chain->present_ids.last_target_time = target;
       *timestamp = target;
 
-      /* Take back 500 us as a safety margin, to ensure we don't miss our
-       * target due to round-off error.
+      /* Timestamps are only sent along with a FIFO barrier, and the barrier
+       * already keeps this update from replacing the previous one before
+       * that one is presented at the refresh before the target. All the
+       * timestamp has to add is the throttling for an occluded surface, so
+       * ask for no later than that previous refresh. Asking for the target
+       * itself (minus a 500 us margin) made a compositor that picks the
+       * content for a refresh well before that refresh, as Hyprland does,
+       * hold back nearly every frame by one refresh; the display-error
+       * correction then skipped refreshes to catch up.
        */
-      timespec_from_nsec(&target_ts, target - 500000);
+      timespec_from_nsec(&target_ts, target - refresh);
    }
 
    wp_commit_timer_v1_set_timestamp(chain->commit_timer,
