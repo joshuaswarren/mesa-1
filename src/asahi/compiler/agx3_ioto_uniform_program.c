@@ -207,6 +207,7 @@ agx3_ioto_uniform_program_body_generate(
 
    core.relocations = workspace.relocations;
    core.relocation_capacity = workspace.relocation_capacity;
+   core.long_ldimm = desc->patchable;
    if (desc->preloaded_base_valid &&
        !agx_ioto_load_core_set_fixed_base(
           &core, desc->preloaded_base_address,
@@ -222,6 +223,8 @@ agx3_ioto_uniform_program_body_generate(
    for (size_t i = 0; i < desc->range_count; ++i) {
       const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
       uint32_t dword = 0;
+      if (desc->patchable)
+         agx_ioto_load_core_forget_bases(&core);
       const uint32_t dword_count = range->size_halfs / 2;
       while (dword < dword_count) {
          const uint8_t count =

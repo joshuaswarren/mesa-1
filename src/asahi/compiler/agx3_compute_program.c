@@ -62,6 +62,8 @@ agx3_g17p_compute_program_generate(
 
    struct agx3_g17p_compute_program staged = {0};
    size_t written = 0;
+   if (desc->relocation_count)
+      *desc->relocation_count = 0;
    if (!desc->uniform_range_count) {
       if (!agx_ioto_g17p_no_resource_program_compose_trusted(
              desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
@@ -84,6 +86,7 @@ agx3_g17p_compute_program_generate(
          .ranges = desc->uniform_ranges,
          .range_count = desc->uniform_range_count,
          .cprog_inputs = desc->cprog_inputs,
+         .patchable = desc->patchable,
       };
       const struct agx3_ioto_uniform_program_workspace workspace = {
          .body = body,
@@ -94,6 +97,9 @@ agx3_g17p_compute_program_generate(
          .sort_capacity = ARRAY_SIZE(sort),
          .cache = cache,
          .cache_capacity = ARRAY_SIZE(cache),
+         .relocations = desc->relocations,
+         .relocation_capacity = desc->relocation_capacity,
+         .relocation_count = desc->relocation_count,
       };
       size_t body_size, copy_offset;
       if (!agx3_ioto_uniform_program_body_generate(
@@ -104,6 +110,14 @@ agx3_g17p_compute_program_generate(
              body_size - copy_offset, &tail, staged.bytes,
              sizeof(staged.bytes), &written))
          return false;
+
+      if (desc->relocation_count) {
+         for (size_t r = 0; r < *desc->relocation_count; ++r) {
+            const struct agx_ioto_load_relocation *rel = &desc->relocations[r];
+            if (rel->offset + rel->low_length + rel->high_length > copy_offset)
+               return false;
+         }
+      }
    }
 
    /* Every loader ends in the absent constant-program END. A constant

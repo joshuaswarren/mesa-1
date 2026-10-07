@@ -178,6 +178,9 @@ struct agx_ioto_load_core {
    uint8_t initial_gpr_dwords;
    uint8_t current_gpr_dwords;
    bool fast_path_enabled;
+   /* Materialize every base with the fixed 8-byte LDIMM form, so a recorded
+    * relocation can be rewritten with any address. */
+   bool long_ldimm;
    bool gpu0_round_nops;
    /* v51y HK_G17P_NATIVE_ESL_WAIT: GPU0 without round NOPs; the packer puts
     * the slot wait on the first COPY.  A complete round that emits loads but
@@ -268,6 +271,14 @@ bool agx_ioto_load_core_init(struct agx_ioto_load_core *core,
 bool agx_ioto_load_core_set_fixed_base(struct agx_ioto_load_core *core,
                                        uint64_t address,
                                        uint16_t base_half);
+
+/* Drop every materialized base except the fixed one: later loads materialize
+ * their own. Used to give each patchable uniform range its own base. */
+void agx_ioto_load_core_forget_bases(struct agx_ioto_load_core *core);
+
+/* The 8-byte LDIMM form, valid for any immediate. */
+void agx_ioto_load_pack_ldimm_long(uint16_t dest_half, uint32_t immediate,
+                                   uint8_t out[AGX_IOTO_LOAD_LDIMM_MAX_SIZE]);
 
 bool agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
                               uint32_t immediate,

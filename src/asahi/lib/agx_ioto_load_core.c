@@ -155,6 +155,15 @@ agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
       return true;
    }
 
+   agx_ioto_load_pack_ldimm_long(dest_half, immediate, out);
+   *length = 8;
+   return true;
+}
+
+void
+agx_ioto_load_pack_ldimm_long(uint16_t dest_half, uint32_t immediate,
+                              uint8_t out[AGX_IOTO_LOAD_LDIMM_MAX_SIZE])
+{
    const uint16_t w0 = UINT16_C(0x800c) |
                        (uint16_t)(((dest_half >> 1) & 0xf) << 4) |
                        (uint16_t)((immediate & 0x7f) << 8);
@@ -170,8 +179,12 @@ agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
    store_u16(&out[2], w1);
    store_u16(&out[4], w2);
    store_u16(&out[6], w3);
-   *length = 8;
-   return true;
+}
+
+void
+agx_ioto_load_core_forget_bases(struct agx_ioto_load_core *core)
+{
+   core->cache_count = 0;
 }
 
 void
@@ -767,12 +780,19 @@ agx_ioto_load_absolute(struct agx_ioto_load_core *core,
    uint8_t low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE],
       high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
    uint8_t low_length = 0, high_length = 0;
-   if (!cache_hit &&
-       (!agx_ioto_load_pack_ldimm(core->chip, base_temp_half,
-                                  (uint32_t)load->address, low, &low_length) ||
-        !agx_ioto_load_pack_ldimm(
-           core->chip, (uint16_t)(base_temp_half + 2),
-           (uint32_t)(load->address >> 32), high, &high_length)))
+   if (!cache_hit && core->long_ldimm) {
+      agx_ioto_load_pack_ldimm_long(base_temp_half, (uint32_t)load->address,
+                                    low);
+      agx_ioto_load_pack_ldimm_long((uint16_t)(base_temp_half + 2),
+                                    (uint32_t)(load->address >> 32), high);
+      low_length = high_length = 8;
+   } else if (!cache_hit &&
+              (!agx_ioto_load_pack_ldimm(core->chip, base_temp_half,
+                                         (uint32_t)load->address, low,
+                                         &low_length) ||
+               !agx_ioto_load_pack_ldimm(
+                  core->chip, (uint16_t)(base_temp_half + 2),
+                  (uint32_t)(load->address >> 32), high, &high_length)))
       return false;
 
    size_t finish_size = 0;

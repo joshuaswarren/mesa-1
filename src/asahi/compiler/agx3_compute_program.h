@@ -34,6 +34,15 @@ struct agx3_g17p_compute_program_desc {
     * Its thread-invariant resources belong in launch_sources. */
    struct agx_ioto_constant_program constant_program;
    const struct agx3_cprog_inputs *cprog_inputs;
+
+   /* Optional: generate address-independent bytes (see
+    * agx3_ioto_uniform_program_desc::patchable) and record where each range
+    * base is materialized. Every relocation lies before the first COPY, at
+    * the same offset in the composed program. */
+   bool patchable;
+   struct agx_ioto_load_relocation *relocations;
+   size_t relocation_capacity;
+   size_t *relocation_count;
 };
 
 struct agx3_g17p_compute_program {
