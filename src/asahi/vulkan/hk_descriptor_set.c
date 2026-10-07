@@ -507,6 +507,38 @@ write_buffer_desc(struct hk_descriptor_set *set,
    write_desc(set, binding, elem, &desc, sizeof(desc));
 }
 
+/* Publish consecutive buffer records with one cache-clean operation. Mutable
+ * bindings with larger strides keep per-record publication, so strided writes
+ * do not clean unwritten gaps. All batching state stays local to this call.
+ */
+static void
+write_buffer_desc_array(struct hk_descriptor_set *set, const void *data,
+                        size_t data_stride, uint32_t binding,
+                        uint32_t first_elem, uint32_t count, bool read_only)
+{
+   if (count <= 1 || !set->cpu_cached ||
+       set->layout->binding[binding].stride != sizeof(struct hk_buffer_address)) {
+      for (uint32_t i = 0; i < count; ++i) {
+         const VkDescriptorBufferInfo *info =
+            (const void *)((const uint8_t *)data + i * data_stride);
+         write_buffer_desc(set, info, binding, first_elem + i, read_only);
+      }
+      return;
+   }
+
+   ASSERTED uint32_t available;
+   uint8_t *dst = desc_ubo_data(set, binding, first_elem, &available);
+   assert(count <= available / sizeof(struct hk_buffer_address));
+   for (uint32_t i = 0; i < count; ++i) {
+      const VkDescriptorBufferInfo *info =
+         (const void *)((const uint8_t *)data + i * data_stride);
+      const struct hk_buffer_address desc = get_buffer_address(info, read_only);
+      memcpy(dst + i * sizeof(desc), &desc, sizeof(desc));
+   }
+   hk_descriptor_set_publish(set, dst,
+                             (size_t)count * sizeof(struct hk_buffer_address));
+}
+
 static void
 write_dynamic_buffer_desc(struct hk_descriptor_set *set,
                           const VkDescriptorBufferInfo *const info,
@@ -595,6 +627,66 @@ write_inline_uniform_data(struct hk_descriptor_set *set,
    write_desc(set, binding, offset, info->pData, info->dataSize);
 }
 
+static ATTRIBUTE_NOINLINE void
+hk_copy_descriptor_sets(uint32_t descriptorCopyCount,
+                        const VkCopyDescriptorSet *pDescriptorCopies)
+{
+   for (uint32_t i = 0; i < descriptorCopyCount; i++) {
+      const VkCopyDescriptorSet *copy = &pDescriptorCopies[i];
+      VK_FROM_HANDLE(hk_descriptor_set, src, copy->srcSet);
+      VK_FROM_HANDLE(hk_descriptor_set, dst, copy->dstSet);
+
+      const struct hk_descriptor_set_binding_layout *src_binding_layout =
+         &src->layout->binding[copy->srcBinding];
+      const struct hk_descriptor_set_binding_layout *dst_binding_layout =
+         &dst->layout->binding[copy->dstBinding];
+
+      /* Equal strides make the existing per-record copies contiguous. Vulkan
+       * requires source and destination descriptor ranges not to overlap,
+       * including when they belong to the same descriptor set.
+       */
+      if (dst_binding_layout->stride > 0 &&
+          dst_binding_layout->stride == src_binding_layout->stride) {
+         ASSERTED uint32_t dst_max_size, src_max_size;
+         void *dst_map = desc_ubo_data(dst, copy->dstBinding,
+                                      copy->dstArrayElement, &dst_max_size);
+         const void *src_map = desc_ubo_data(src, copy->srcBinding,
+                                            copy->srcArrayElement, &src_max_size);
+         const size_t size =
+            (size_t)copy->descriptorCount * dst_binding_layout->stride;
+         assert(size <= dst_max_size && size <= src_max_size);
+         if (size == sizeof(struct hk_buffer_address))
+            memcpy(dst_map, src_map, sizeof(struct hk_buffer_address));
+         else
+            memcpy(dst_map, src_map, size);
+         hk_descriptor_set_publish(dst, dst_map, size);
+      } else if (dst_binding_layout->stride > 0 && src_binding_layout->stride > 0) {
+         for (uint32_t j = 0; j < copy->descriptorCount; j++) {
+            ASSERTED uint32_t dst_max_size, src_max_size;
+            void *dst_map = desc_ubo_data(
+               dst, copy->dstBinding, copy->dstArrayElement + j, &dst_max_size);
+            const void *src_map = desc_ubo_data(
+               src, copy->srcBinding, copy->srcArrayElement + j, &src_max_size);
+            const uint32_t copy_size =
+               MIN2(dst_binding_layout->stride, src_binding_layout->stride);
+            assert(copy_size <= dst_max_size && copy_size <= src_max_size);
+            memcpy(dst_map, src_map, copy_size);
+            hk_descriptor_set_publish(dst, dst_map, copy_size);
+         }
+      }
+
+      if (vk_descriptor_type_is_dynamic(src_binding_layout->type)) {
+         const uint32_t dst_dyn_start =
+            dst_binding_layout->dynamic_buffer_index + copy->dstArrayElement;
+         const uint32_t src_dyn_start =
+            src_binding_layout->dynamic_buffer_index + copy->srcArrayElement;
+         typed_memcpy(&dst->dynamic_buffers[dst_dyn_start],
+                      &src->dynamic_buffers[src_dyn_start],
+                      copy->descriptorCount);
+      }
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                         const VkWriteDescriptorSet *pDescriptorWrites,
@@ -637,10 +729,15 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
 
       case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
       case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-         for (uint32_t j = 0; j < write->descriptorCount; j++) {
-            write_buffer_desc(
-               set, write->pBufferInfo + j, write->dstBinding,
-               write->dstArrayElement + j,
+         if (likely(write->descriptorCount == 1)) {
+            write_buffer_desc(set, write->pBufferInfo, write->dstBinding,
+                              write->dstArrayElement,
+                              write->descriptorType ==
+                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+         } else {
+            write_buffer_desc_array(
+               set, write->pBufferInfo, sizeof(*write->pBufferInfo),
+               write->dstBinding, write->dstArrayElement, write->descriptorCount,
                write->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
          }
          break;
@@ -684,41 +781,8 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
       }
    }
 
-   for (uint32_t i = 0; i < descriptorCopyCount; i++) {
-      const VkCopyDescriptorSet *copy = &pDescriptorCopies[i];
-      VK_FROM_HANDLE(hk_descriptor_set, src, copy->srcSet);
-      VK_FROM_HANDLE(hk_descriptor_set, dst, copy->dstSet);
-
-      const struct hk_descriptor_set_binding_layout *src_binding_layout =
-         &src->layout->binding[copy->srcBinding];
-      const struct hk_descriptor_set_binding_layout *dst_binding_layout =
-         &dst->layout->binding[copy->dstBinding];
-
-      if (dst_binding_layout->stride > 0 && src_binding_layout->stride > 0) {
-         for (uint32_t j = 0; j < copy->descriptorCount; j++) {
-            ASSERTED uint32_t dst_max_size, src_max_size;
-            void *dst_map = desc_ubo_data(
-               dst, copy->dstBinding, copy->dstArrayElement + j, &dst_max_size);
-            const void *src_map = desc_ubo_data(
-               src, copy->srcBinding, copy->srcArrayElement + j, &src_max_size);
-            const uint32_t copy_size =
-               MIN2(dst_binding_layout->stride, src_binding_layout->stride);
-            assert(copy_size <= dst_max_size && copy_size <= src_max_size);
-            memcpy(dst_map, src_map, copy_size);
-            hk_descriptor_set_publish(dst, dst_map, copy_size);
-         }
-      }
-
-      if (vk_descriptor_type_is_dynamic(src_binding_layout->type)) {
-         const uint32_t dst_dyn_start =
-            dst_binding_layout->dynamic_buffer_index + copy->dstArrayElement;
-         const uint32_t src_dyn_start =
-            src_binding_layout->dynamic_buffer_index + copy->srcArrayElement;
-         typed_memcpy(&dst->dynamic_buffers[dst_dyn_start],
-                      &src->dynamic_buffers[src_dyn_start],
-                      copy->descriptorCount);
-      }
-   }
+   if (descriptorCopyCount)
+      hk_copy_descriptor_sets(descriptorCopyCount, pDescriptorCopies);
 }
 
 void
@@ -1182,13 +1246,15 @@ hk_descriptor_set_write_template(
 
       case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
       case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-         for (uint32_t j = 0; j < entry->array_count; j++) {
-            const VkDescriptorBufferInfo *info =
-               data + entry->offset + j * entry->stride;
-
-            write_buffer_desc(set, info, entry->binding,
-                              entry->array_element + j,
-                              entry->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+         if (likely(entry->array_count == 1)) {
+            write_buffer_desc(
+               set, data + entry->offset, entry->binding, entry->array_element,
+               entry->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+         } else {
+            write_buffer_desc_array(
+               set, data + entry->offset, entry->stride, entry->binding,
+               entry->array_element, entry->array_count,
+               entry->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
          }
          break;
 
