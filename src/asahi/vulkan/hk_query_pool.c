@@ -172,20 +172,32 @@ hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       util_dynarray_num_elements(&cs->imm_writes, struct libagx_imm_write);
    assert(count > 0);
 
+   uint64_t params =
+      hk_pool_upload(cmd, cs->imm_writes.data, cs->imm_writes.size, 16);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
+
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      struct hk_cs *target = cs;
+      /* End-of-stream writes belong to this exact post-graphics stream.
+       * Pin it while the common native helper obtains its CDM stream; it
+       * must not move availability ahead of the VDM producer. */
+      struct hk_cs *saved = cmd->current_cs.cs;
+      bool pinned = cmd->sync.pin_cs;
+      cmd->current_cs.cs = cs;
+      cmd->sync.pin_cs = true;
+      libagx_write_u32s(cmd, agx_1d(count), AGX_BARRIER_ALL, params);
+      cmd->current_cs.cs = saved;
+      cmd->sync.pin_cs = pinned;
+
+      if (vk_command_buffer_has_error(&cmd->vk))
+         return;
       util_dynarray_foreach(&cs->imm_writes, struct libagx_imm_write, write) {
-         hk_g17p_meta_fill_addr(cmd, &target, write->address,
-                                sizeof(write->value), write->value);
-         if (vk_command_buffer_has_error(&cmd->vk))
-            return;
+         hk_drm_attachment_set_add(&cs->compute_attachments, write->address,
+                                    sizeof(write->value));
       }
-      assert(target == cs);
       return;
    }
 
-   uint64_t params =
-      hk_pool_upload(cmd, cs->imm_writes.data, cs->imm_writes.size, 16);
    libagx_write_u32s(cmd, agx_1d(count), AGX_BARRIER_ALL | AGX_POSTGFX, params);
 }
 
@@ -245,93 +257,64 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    if (num_queries == 0)
       return;
 
-   switch (pool->vk.query_type) {
-   case VK_QUERY_TYPE_TIMESTAMP: {
-      if (hk_reports_per_query(pool) != 1 || pool->query_stride != 8) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      const uint64_t address = pool->bo->va->addr +
-                               hk_query_offset(pool, first_index);
-      const uint64_t size = (uint64_t)num_queries * pool->query_stride;
-      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, address, size,
-                             set_available ? 0 : UINT32_MAX);
-      return;
-   }
-
-   case VK_QUERY_TYPE_OCCLUSION: {
-      if (hk_reports_per_query(pool) != 1 || pool->query_stride != 8 ||
-          pool->oq_queries != pool->vk.query_count) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      const uint64_t availability =
-         pool->bo->va->addr + (uint64_t)first_index * sizeof(uint32_t);
-      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
-                             (uint64_t)num_queries * sizeof(uint32_t), 0);
-      if (vk_command_buffer_has_error(&cmd->vk))
-         return;
-
-      /* The hardware counters live in a shared descriptor heap and the query
-       * pool contains a CPU-populated u16 remap.  Clear each exact 64-bit
-       * counter address; never assume separately allocated slots are adjacent. */
-      for (uint32_t i = 0; i < num_queries; ++i) {
-         uint64_t report =
-            hk_query_report_addr(dev, pool, first_index + i);
-         hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, report,
-                                sizeof(uint64_t), 0);
-         if (vk_command_buffer_has_error(&cmd->vk))
-            return;
-      }
-
-      /* Availability is the publication store: when synthesizing available
-       * multiview results, write it only after every report is initialized. */
-      if (set_available)
-         hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
-                                (uint64_t)num_queries * sizeof(uint32_t), 1);
-      return;
-   }
-
-   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
-   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
-      const uint32_t reports = hk_reports_per_query(pool);
-      if (!reports || pool->query_stride !=
-                         (uint64_t)reports * sizeof(struct hk_query_report)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      /* These pools have a dense u32 availability array followed by dense,
-       * fixed-stride u64 reports. Reset both address domains explicitly. A
-       * multiview-generated zero uses the same path with availability set. */
-      const uint64_t availability =
-         pool->bo->va->addr + (uint64_t)first_index * sizeof(uint32_t);
-      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
-                             (uint64_t)num_queries * sizeof(uint32_t), 0);
-      if (vk_command_buffer_has_error(&cmd->vk))
-         return;
-
-      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
-                             pool->bo->va->addr +
-                                hk_query_offset(pool, first_index),
-                             (uint64_t)num_queries * pool->query_stride, 0);
-      if (vk_command_buffer_has_error(&cmd->vk))
-         return;
-
-      /* Publish synthesized available results only after their reports. */
-      if (set_available)
-         hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
-                                (uint64_t)num_queries * sizeof(uint32_t), 1);
-      return;
-   }
-
-   default:
-      /* No native reset encoding is grounded for any future query layout. */
+   if (pool->vk.query_type != VK_QUERY_TYPE_TIMESTAMP &&
+       pool->vk.query_type != VK_QUERY_TYPE_OCCLUSION &&
+       pool->vk.query_type != VK_QUERY_TYPE_PIPELINE_STATISTICS &&
+       pool->vk.query_type != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
+   }
+
+   const uint32_t reports = hk_reports_per_query(pool);
+   if (!reports || pool->query_stride !=
+                      (uint64_t)reports * sizeof(struct hk_query_report) ||
+       (pool->vk.query_type == VK_QUERY_TYPE_OCCLUSION &&
+        pool->oq_queries != pool->vk.query_count)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
+   /* Use the same indexed batch as AGX2. The hardware counter heap is not
+    * necessarily contiguous, so the kernel follows the pool's u16 remap.
+    * Publishing availability is a separate operation when synthesizing
+    * multiview results: the helper's strong barrier makes every zero report
+    * visible before the following availability store. */
+   const bool publish_available = set_available && hk_has_available(pool);
+   struct libagx_reset_query_args info = {
+      .availability = hk_has_available(pool) ? pool->bo->va->addr : 0,
+      .results = pool->oq_queries ? dev->occlusion_queries.bo->va->addr
+                                  : pool->bo->va->addr + pool->query_start,
+      .oq_index = pool->oq_queries ? pool->bo->va->addr + pool->query_start : 0,
+      .first_query = first_index,
+      .reports_per_query = reports,
+      .set_available = set_available && !publish_available,
+   };
+   libagx_reset_query_struct(cmd, agx_1d(num_queries), AGX_BARRIER_ALL, info);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return;
+
+   struct hk_cs *cs = cmd->current_cs.cs;
+   assert(cs);
+   if (hk_has_available(pool)) {
+      hk_drm_attachment_set_add(&cs->compute_attachments,
+         hk_query_available_addr(pool, first_index),
+         (uint64_t)num_queries * sizeof(uint32_t));
+   }
+   if (pool->oq_queries) {
+      for (uint32_t i = 0; i < num_queries; ++i) {
+         hk_drm_attachment_set_add(&cs->compute_attachments,
+            hk_query_report_addr(dev, pool, first_index + i), sizeof(uint64_t));
+      }
+   } else {
+      hk_drm_attachment_set_add(&cs->compute_attachments,
+         hk_query_report_addr(dev, pool, first_index),
+         (uint64_t)num_queries * pool->query_stride);
+   }
+
+   if (publish_available) {
+      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
+         hk_query_available_addr(pool, first_index),
+         (uint64_t)num_queries * sizeof(uint32_t), 1);
    }
 }
 

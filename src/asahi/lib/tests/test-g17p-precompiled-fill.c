@@ -89,6 +89,8 @@ main(void)
           i == LIBAGX_INCREMENT_IA ||
           i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
           i == LIBAGX_COPY_QUERY ||
+          i == LIBAGX_WRITE_U32S ||
+          i == LIBAGX_RESET_QUERY ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
           i == LIBAGX_COPY_TIMESTAMP ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||

@@ -296,6 +296,10 @@ target_supports_program(const char *target, const nir_function *func)
            * staging/TPS/rodata metadata before native Ioto publication.
            * Enabling this exact catalogue entry is not an execution claim. */
           !strcmp(func->name, "libagx_write_u64") ||
+          /* Query batches use the same native pointer loads/global stores as
+           * the existing copy-query helpers; qualify their batch launch too. */
+          !strcmp(func->name, "libagx_write_u32s") ||
+          !strcmp(func->name, "libagx_reset_query") ||
           !strcmp(func->name, "libagx_copy_uchar") ||
           !strcmp(func->name, "libagx_copy_uint4") ||
           !strcmp(func->name, "libagx_fill") ||
