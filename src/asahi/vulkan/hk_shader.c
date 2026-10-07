@@ -187,6 +187,17 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
+   /* Large constant arrays become shader constant data read through the root
+    * table. This must run before agx_preprocess_nir, whose
+    * nir_lower_vars_to_scratch would otherwise give every invocation a scratch
+    * copy of the whole array (compute only: graphics stages have no root field
+    * for it). nir_opt_large_constants cannot see through copy_deref.
+    */
+   if (nir->info.stage == MESA_SHADER_COMPUTE && hk_large_constants()) {
+      NIR_PASS(_, nir, nir_lower_var_copies);
+      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   }
+
    /* Optimize but allow copies because we haven't lowered them yet */
    agx_preprocess_nir(nir);
 
@@ -841,13 +852,6 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    /* Lower push constants before lower_descriptors */
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
-
-   /* Large constant arrays become shader constant data read through the root
-    * table instead of per-invocation scratch copies (compute only for now;
-    * graphics stages have no root field for it). Prototype, opt-in.
-    */
-   if (nir->info.stage == MESA_SHADER_COMPUTE && hk_large_constants())
-      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
 
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
