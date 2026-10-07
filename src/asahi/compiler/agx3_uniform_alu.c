@@ -117,6 +117,11 @@ uniform_float_encode(enum agx_isa_encoding encoding,
        * for multiple producers, without draining unrelated outstanding work. */
       const unsigned first_ep = (wait_mask & (wait_mask - 1)) ? last_ep : 0;
       for (unsigned ep = first_ep; ep <= last_ep; ++ep) {
+         /* Only a strictly shorter encoding can replace the first swap's,
+          * and the endpoints grow in length: stop trying once they reach it. */
+         if (best_length &&
+             agx3_bind_form_size(encoding, mnemonic, ep) >= best_length)
+            break;
          uint8_t bytes[16], size;
          if (agx3_bind_compose(encoding, mnemonic, ep, NULL, 0, fields, n,
                                bytes, &size)) {

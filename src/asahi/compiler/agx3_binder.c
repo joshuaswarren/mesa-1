@@ -5,6 +5,26 @@
 
 #include "agx3_binder.h"
 
+static const agx3_table *
+agx3_bind_table(enum agx_isa_encoding encoding)
+{
+   if (encoding == AGX_ISA_ENCODING_AGX3B)
+      return &agx3b_table;
+   else if (encoding == AGX_ISA_ENCODING_AGX3C)
+      return &agx3c_table;
+   else
+      return NULL;
+}
+
+unsigned
+agx3_bind_form_size(enum agx_isa_encoding encoding, const char *mnemonic,
+                    int ep)
+{
+   const agx3_table *t = agx3_bind_table(encoding);
+   const int32_t form = t ? agx3_form_index(t, mnemonic, (uint8_t)ep) : -1;
+   return form < 0 ? 0 : t->forms[form].size;
+}
+
 bool
 agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic, int ep,
                   const struct agx3_field_kv *baseline, unsigned nbaseline,
@@ -14,12 +34,8 @@ agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic, int ep,
    if (out == NULL || len == NULL || mnemonic == NULL)
       return false;
 
-   const agx3_table *t;
-   if (encoding == AGX_ISA_ENCODING_AGX3B)
-      t = &agx3b_table;
-   else if (encoding == AGX_ISA_ENCODING_AGX3C)
-      t = &agx3c_table;
-   else
+   const agx3_table *t = agx3_bind_table(encoding);
+   if (!t)
       return false;
 
    const int32_t form = agx3_form_index(t, mnemonic, (uint8_t)ep);
