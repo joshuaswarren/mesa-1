@@ -3764,19 +3764,14 @@ hk_prolog_epilog_disk_key(struct hk_device *dev, const struct hk_internal_key *k
 
 /* A stored part is its agx_shader_info followed by the binary. */
 static struct agx_shader_part *
-hk_prolog_epilog_disk_get(struct hk_device *dev, const cache_key disk_key)
+hk_part_from_blob(const uint8_t *data, size_t size, void *mem_ctx)
 {
-   size_t size = 0;
-   uint8_t *data = disk_cache_get(dev->vk.physical->disk_cache, disk_key, &size);
-   if (!data)
-      return NULL;
-
    struct agx_shader_part *part = NULL;
    struct agx_shader_info info;
    if (size >= sizeof(info)) {
       memcpy(&info, data, sizeof(info));
       if (size == sizeof(info) + info.binary_size && info.binary_size) {
-         part = rzalloc(dev->prolog_epilog.ht, struct agx_shader_part);
+         part = rzalloc(mem_ctx, struct agx_shader_part);
          void *binary = part ? malloc(info.binary_size) : NULL;
          if (binary) {
             part->info = info;
@@ -3788,13 +3783,25 @@ hk_prolog_epilog_disk_get(struct hk_device *dev, const cache_key disk_key)
          }
       }
    }
+   return part;
+}
+
+static struct agx_shader_part *
+hk_part_disk_get(struct hk_device *dev, const cache_key disk_key, void *mem_ctx)
+{
+   size_t size = 0;
+   uint8_t *data = disk_cache_get(dev->vk.physical->disk_cache, disk_key, &size);
+   if (!data)
+      return NULL;
+
+   struct agx_shader_part *part = hk_part_from_blob(data, size, mem_ctx);
    free(data);
    return part;
 }
 
 static void
-hk_prolog_epilog_disk_put(struct hk_device *dev, const cache_key disk_key,
-                          const struct agx_shader_part *part)
+hk_part_disk_put(struct hk_device *dev, const cache_key disk_key,
+                 const struct agx_shader_part *part)
 {
    const size_t size = sizeof(part->info) + part->info.binary_size;
    uint8_t *data = malloc(size);
@@ -3854,7 +3861,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       hk_prolog_epilog_disk_key(dev, key, preprocess_nir, stop, cf_base,
                                 g17p_tile_partitions, nr_samples, disk_key);
    struct agx_shader_part *cached =
-      disk ? hk_prolog_epilog_disk_get(dev, disk_key) : NULL;
+      disk ? hk_part_disk_get(dev, disk_key, dev->prolog_epilog.ht) : NULL;
    if (cached) {
       if (hk_prolog_epilog_insert(dev, key, cached))
          return cached;
@@ -3959,7 +3966,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    }
 
    if (disk)
-      hk_prolog_epilog_disk_put(dev, disk_key, part);
+      hk_part_disk_put(dev, disk_key, part);
    return part;
 }
 
@@ -4246,17 +4253,89 @@ hk_g17p_mono_resolve_exports(nir_shader *nir)
    return true;
 }
 
+/* Every G17P fragment program that touches the tile opens the pixel
+ * transaction with the entry gate and ends it with a final release
+ * (PIXREL with 0x200) just before END. The packer only emits that
+ * protocol for shapes it has proven; a shape it does not recognise
+ * would come back without it rather than failing, so check the bytes. */
+static const char *
+hk_g17p_mono_part_refusal(const struct hk_shader *shader,
+                          const struct agx_shader_part *part)
+{
+   static const uint8_t gate[6] = {0x87, 0x02, 0x54, 0x00, 0x06, 0x00};
+   const uint8_t *code = (const uint8_t *)part->binary + part->info.main_offset;
+   const size_t n = part->info.main_size;
+   bool has_gate = false;
+   for (size_t o = 0; o + sizeof(gate) <= n && !has_gate; o += 2)
+      has_gate = !memcmp(code + o, gate, sizeof(gate));
+   const bool final_release = n >= 10 && code[n - 4] == 0x0e &&
+      code[n - 10] == 0x07 && code[n - 9] == 0x02 && code[n - 8] == 0x54 &&
+      (code[n - 6] & 0x02) && code[n - 5] == 0x00;
+   if (!has_gate || !final_release)
+      return "pixel protocol not proven";
+
+   return hk_g17p_mono_layout_mismatch(&shader->b, part);
+}
+
+/* An inline-blend program is a function of the main's NIR and compile key,
+ * the colour epilog key and the tile partitions (the build is part of the
+ * cache's own identity). */
+static bool
+hk_g17p_mono_disk_key(struct hk_device *dev, const struct hk_shader *shader,
+                      const struct agx_fs_epilog_key *ekey,
+                      const BITSET_WORD *partitions, cache_key out)
+{
+   struct disk_cache *cache = dev->vk.physical->disk_cache;
+   if (!cache)
+      return false;
+
+   BITSET_DECLARE(parts, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
+   if (partitions)
+      memcpy(parts, partitions, sizeof(parts));
+
+   const char magic[8] = "hkmono1";
+   const size_t size = sizeof(magic) + sizeof(shader->g17p_mono_key) +
+                       sizeof(*ekey) + sizeof(parts) + shader->g17p_mono_nir_size;
+   uint8_t *buf = malloc(size);
+   if (!buf)
+      return false;
+
+   uint8_t *p = buf;
+   memcpy(p, magic, sizeof(magic));
+   p += sizeof(magic);
+   memcpy(p, &shader->g17p_mono_key, sizeof(shader->g17p_mono_key));
+   p += sizeof(shader->g17p_mono_key);
+   memcpy(p, ekey, sizeof(*ekey));
+   p += sizeof(*ekey);
+   memcpy(p, parts, sizeof(parts));
+   p += sizeof(parts);
+   memcpy(p, shader->g17p_mono_nir, shader->g17p_mono_nir_size);
+
+   disk_cache_compute_key(cache, buf, size, out);
+   free(buf);
+   return true;
+}
+
 static struct agx_shader_part *
 hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
                            const struct agx_fs_epilog_key *ekey,
                            const BITSET_WORD *partitions)
 {
-#define HK_MONO_REFUSE(why) goto fail
+   /* A refusal of these inputs is final: remember it with the programs. */
+#define HK_MONO_REFUSE(why)                                                    \
+   do {                                                                        \
+      final_refusal = true;                                                    \
+      goto fail;                                                               \
+   } while (0)
+#define HK_MONO_FAIL(why) goto fail
+   static const char refused_marker[8] = "hkmonoN";
 
    void *mem = ralloc_context(NULL);
    struct agx_shader_part *part = NULL;
    nir_shader *nir = NULL;
    nir_builder eb = {0};
+   cache_key disk_key;
+   bool disk = false, final_refusal = false;
 
    if (!mem)
       return NULL;
@@ -4265,11 +4344,32 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
        MAX2(ekey->nr_samples, 1) != main_samples)
       HK_MONO_REFUSE("epilog shape");
 
+   disk = hk_g17p_mono_disk_key(dev, shader, ekey, partitions, disk_key);
+   if (disk) {
+      size_t size = 0;
+      uint8_t *data =
+         disk_cache_get(dev->vk.physical->disk_cache, disk_key, &size);
+      if (data) {
+         const bool refused = size == sizeof(refused_marker) &&
+                              !memcmp(data, refused_marker, size);
+         part = refused ? NULL : hk_part_from_blob(data, size, NULL);
+         free(data);
+         if (refused)
+            HK_MONO_FAIL("refused before");
+         if (part) {
+            if (hk_g17p_mono_part_refusal(shader, part))
+               HK_MONO_FAIL("cached program");
+            ralloc_free(mem);
+            return part;
+         }
+      }
+   }
+
    struct blob_reader reader;
    blob_reader_init(&reader, shader->g17p_mono_nir, shader->g17p_mono_nir_size);
    nir = nir_deserialize(mem, &agx_nir_options, &reader);
    if (!nir || reader.overrun)
-      HK_MONO_REFUSE("nir");
+      HK_MONO_FAIL("nir");
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_foreach_block(block, impl) {
@@ -4340,7 +4440,7 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
 
    part = rzalloc(NULL, struct agx_shader_part);
    if (!part)
-      HK_MONO_REFUSE("oom");
+      HK_MONO_FAIL("oom");
    if (!agx_compile_shader_nir(nir, &key, part)) {
       /* agx_compile_shader_nir frees nothing it did not allocate. */
       nir = NULL;
@@ -4348,34 +4448,19 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
    }
    nir = NULL; /* consumed */
 
-   /* Every G17P fragment program that touches the tile opens the pixel
-    * transaction with the entry gate and ends it with a final release
-    * (PIXREL with 0x200) just before END. The packer only emits that
-    * protocol for shapes it has proven; a shape it does not recognise
-    * would come back without it rather than failing, so check the bytes. */
-   {
-      static const uint8_t gate[6] = {0x87, 0x02, 0x54, 0x00, 0x06, 0x00};
-      const uint8_t *code =
-         (const uint8_t *)part->binary + part->info.main_offset;
-      const size_t n = part->info.main_size;
-      bool has_gate = false;
-      for (size_t o = 0; o + sizeof(gate) <= n && !has_gate; o += 2)
-         has_gate = !memcmp(code + o, gate, sizeof(gate));
-      const bool final_release = n >= 10 && code[n - 4] == 0x0e &&
-         code[n - 10] == 0x07 && code[n - 9] == 0x02 && code[n - 8] == 0x54 &&
-         (code[n - 6] & 0x02) && code[n - 5] == 0x00;
-      if (!has_gate || !final_release)
-         HK_MONO_REFUSE("pixel protocol not proven");
-   }
-
-   const char *why = hk_g17p_mono_layout_mismatch(&shader->b, part);
+   const char *why = hk_g17p_mono_part_refusal(shader, part);
    if (why)
       HK_MONO_REFUSE(why);
 
+   if (disk)
+      hk_part_disk_put(dev, disk_key, part);
    ralloc_free(mem);
    return part;
 
 fail:
+   if (disk && final_refusal)
+      disk_cache_put(dev->vk.physical->disk_cache, disk_key, refused_marker,
+                     sizeof(refused_marker), NULL);
    if (eb.shader)
       ralloc_free(eb.shader);
    if (part) {
@@ -4385,6 +4470,7 @@ fail:
    ralloc_free(mem);
    return NULL;
 #undef HK_MONO_REFUSE
+#undef HK_MONO_FAIL
 }
 
 static struct hk_linked_shader *

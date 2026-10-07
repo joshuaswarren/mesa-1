@@ -4113,7 +4113,8 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
    mesa_shader_stage stage = blob_read_uint8(blob);
    const unsigned variant_flags = blob_read_uint8(blob);
    const bool sample_variants = variant_flags & 1;
-   if (blob->overrun || stage >= MESA_SHADER_STAGES || variant_flags > 1 ||
+   const bool has_mono = variant_flags & 4;
+   if (blob->overrun || stage >= MESA_SHADER_STAGES || (variant_flags & ~5u) ||
        (variant_flags && (stage != MESA_SHADER_FRAGMENT ||
                           dev->dev.chip != AGX_CHIP_G17P)))
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
@@ -4145,6 +4146,30 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
          return result;
       }
    }
+
+   if (has_mono) {
+      hk_foreach_variant(obj, shader) {
+         const uint32_t mono_size = blob_read_uint32(blob);
+         if (!mono_size)
+            continue;
+         const void *mono_nir = blob_read_bytes(blob, mono_size);
+         const void *mono_key =
+            blob_read_bytes(blob, sizeof(shader->g17p_mono_key));
+         shader->g17p_mono_nir = blob->overrun ? NULL : malloc(mono_size);
+         if (!shader->g17p_mono_nir) {
+            const VkResult result = blob->overrun
+               ? VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT
+               : VK_ERROR_OUT_OF_HOST_MEMORY;
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return vk_error(dev, result);
+         }
+         memcpy(shader->g17p_mono_nir, mono_nir, mono_size);
+         shader->g17p_mono_nir_size = mono_size;
+         memcpy(&shader->g17p_mono_key, mono_key,
+                sizeof(shader->g17p_mono_key));
+      }
+   }
+
    VkResult result = hk_shader_prepare_device_for_stage(dev, stage);
    if (result != VK_SUCCESS) {
       hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
@@ -4391,13 +4416,33 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    struct hk_api_shader *obj =
       container_of(vk_shader, struct hk_api_shader, vk);
 
+   bool mono = false;
+   hk_foreach_variant(obj, shader)
+      mono |= shader->g17p_mono_nir != NULL;
    blob_write_uint8(blob, vk_shader->stage);
-   blob_write_uint8(blob, obj->g17p_sample_variants);
+   blob_write_uint8(blob, obj->g17p_sample_variants | (mono ? 4 : 0));
 
    hk_foreach_variant(obj, shader) {
       blob_write_uint8(blob, shader->compiled ? HK_SERIALIZED_COMPILED
                                               : HK_SERIALIZED_ABSENT);
       hk_shader_serialize(vk_dev, shader, blob);
+   }
+
+   /* The NIR an inline-blend fragment program is rebuilt from at fast-link,
+    * so a shader that comes from a cache or a binary blends inline exactly
+    * like a freshly compiled one. */
+   if (mono) {
+      hk_foreach_variant(obj, shader) {
+         const uint32_t size = shader->compiled && shader->g17p_mono_nir
+                                  ? shader->g17p_mono_nir_size
+                                  : 0;
+         blob_write_uint32(blob, size);
+         if (size) {
+            blob_write_bytes(blob, shader->g17p_mono_nir, size);
+            blob_write_bytes(blob, &shader->g17p_mono_key,
+                             sizeof(shader->g17p_mono_key));
+         }
+      }
    }
 
    return !blob->out_of_memory;
