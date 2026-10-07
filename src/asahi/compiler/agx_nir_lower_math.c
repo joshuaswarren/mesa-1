@@ -32,7 +32,7 @@ rcp_normal(nir_builder *b, nir_def *x)
 /* Normalize before refinement; exponent restoration must flush the exact
  * quotient before rounding, including values just below the normal boundary. */
 static nir_def *
-div_rn(nir_builder *b, nir_def *a, nir_def *d)
+div_rn_normalized(nir_builder *b, nir_def *a, nir_def *d)
 {
    nir_def *aa = nir_iand_imm(b, a, 0x7fffffff);
    nir_def *dd = nir_iand_imm(b, d, 0x7fffffff);
@@ -63,6 +63,41 @@ div_rn(nir_builder *b, nir_def *a, nir_def *d)
 }
 
 /*
+ * Inside an exponent window every value div_rn_normalized forms, scaled by
+ * 2^(ea - ed), is a normal float, so the same refinement on the unscaled
+ * operands rounds to the same bits: |a| >= 2^-79 keeps the residual normal
+ * (its lowest bit is 2^-47 of a), |d| < 2^126 keeps 1/d normal, and
+ * ea - ed in [-125, 127] keeps both quotient estimates normal. This needs the
+ * hardware rcp to commute with powers of two and with sign; tests/div_window.py
+ * compares 2^32 quotients against the normalized path. Lanes outside the
+ * window take the normalized path in a branch that stays a branch, so it is
+ * skipped when no lane of the group needs it. Reciprocals do not come here:
+ * they sit in hot loops, where the branch costs more than it saves.
+ */
+static nir_def *
+div_rn(nir_builder *b, nir_def *a, nir_def *d)
+{
+   nir_def *ea = nir_ubfe_imm(b, a, 23, 8);
+   nir_def *ed = nir_ubfe_imm(b, d, 23, 8);
+   nir_def *e = nir_isub(b, ea, ed);
+   nir_def *inside =
+      nir_iand(b, nir_ult(b, nir_iadd_imm(b, ea, -48), nir_imm_int(b, 207)),
+               nir_iand(b, nir_ult(b, nir_iadd_imm(b, ed, -1), nir_imm_int(b, 252)),
+                        nir_ult(b, nir_iadd_imm(b, e, 125), nir_imm_int(b, 253))));
+
+   nir_def *y = nir_frcp(b, d);
+   nir_def *q = nir_fmul(b, a, y);
+   nir_def *r = nir_ffma(b, nir_fneg(b, d), q, a);
+   q = nir_ffma(b, r, y, q);
+
+   nir_if *nif = nir_push_if(b, nir_inot(b, nir_ball(b, inside)));
+   nif->control = nir_selection_control_dont_flatten;
+   nir_def *slow = div_rn_normalized(b, a, d);
+   nir_pop_if(b, nif);
+   return nir_if_phi(b, slow, q);
+}
+
+/*
  * 1/x, bit for bit div_rn(1, x): one Newton step on the hardware rcp, which
  * flushes denormal inputs to +-inf and results below 2^-126 to +-0. Where the
  * step is NaN (x zero, denormal, infinite or NaN), the hardware rcp already
@@ -87,24 +122,25 @@ is_one(const nir_alu_instr *alu, unsigned i)
 }
 
 static bool
-lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *data)
+wants_fdiv_lowering(const nir_alu_instr *alu, bool fdiv_only)
 {
-   bool fdiv_only = *(bool *)data;
-
    if (alu->op != nir_op_fdiv && (alu->op != nir_op_frcp || fdiv_only))
       return false;
 
    if (alu->def.bit_size == 64)
       return false;
 
+   return alu->op != nir_op_frcp || alu->def.bit_size == 32;
+}
+
+static void
+lower_fdiv(nir_builder *b, nir_alu_instr *alu)
+{
    b->cursor = nir_before_instr(&alu->instr);
    b->fp_math_ctrl = nir_fp_no_fast_math;
 
    nir_def *res;
    if (alu->op == nir_op_frcp) {
-      if (alu->def.bit_size != 32)
-         return false;
-
       res = rcp_rn(b, nir_ssa_for_alu_src(b, alu, 0));
    } else {
       nir_def *a = nir_ssa_for_alu_src(b, alu, 0);
@@ -120,15 +156,42 @@ lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *data)
    }
 
    nir_def_replace(&alu->def, res);
-   return true;
+}
+
+/* div_rn inserts control flow whose blocks hold hardware frcp, so collect the
+ * divisions first rather than lowering while walking the blocks. */
+static bool
+lower_fdiv_shader(nir_shader *s, bool fdiv_only)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, s) {
+      struct util_dynarray work;
+      util_dynarray_init(&work, NULL);
+
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_alu &&
+                wants_fdiv_lowering(nir_instr_as_alu(instr), fdiv_only))
+               util_dynarray_append(&work, nir_instr_as_alu(instr));
+         }
+      }
+
+      nir_builder b = nir_builder_create(impl);
+      util_dynarray_foreach(&work, nir_alu_instr *, alu)
+         lower_fdiv(&b, *alu);
+
+      progress |= nir_progress(work.size > 0, impl, nir_metadata_none);
+      util_dynarray_fini(&work);
+   }
+
+   return progress;
 }
 
 bool
 agx_nir_lower_fdiv(nir_shader *s)
 {
-   bool fdiv_only = false;
-   return nir_shader_alu_pass(s, lower_fdiv, nir_metadata_control_flow,
-                              &fdiv_only);
+   return lower_fdiv_shader(s, false);
 }
 
 /*
@@ -141,9 +204,7 @@ agx_nir_lower_fdiv(nir_shader *s)
 bool
 agx_nir_lower_fdiv_late(nir_shader *s)
 {
-   bool fdiv_only = true;
-   return nir_shader_alu_pass(s, lower_fdiv, nir_metadata_control_flow,
-                              &fdiv_only);
+   return lower_fdiv_shader(s, true);
 }
 
 /*
