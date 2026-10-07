@@ -2992,6 +2992,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Hardware oracle for 32-byte-aligned texture-state pointers: vkcube's
+    # set shape (buffer at binding 0, texture at binding 1) and its offset-0
+    # controls, through the fragment and compute texture ABIs.
+    executable(
+      'g17p-vulkan-sampler-offset',
+      files('tests/g17p_vulkan_sampler_offset.c'),
+      include_directories : [inc_include],
+      dependencies : [cc.find_library('vulkan')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-pipeline-robustness',
       files('tests/g17p_vulkan_robust_buffer2.c'),
