@@ -189,6 +189,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    }
 
    hk_ioto_arena_finish(cmd);
+   _mesa_hash_table_clear(cmd->g17p_compute_index, NULL);
    util_dynarray_clear(&cmd->g17p_compute_programs);
    _mesa_hash_table_clear(cmd->g17p_precomp_index, NULL);
    util_dynarray_clear(&cmd->g17p_precomp_programs);
@@ -203,6 +204,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
 
    hk_free_resettable_cmd_buffer(cmd);
+   _mesa_hash_table_destroy(cmd->g17p_compute_index, NULL);
    util_dynarray_fini(&cmd->g17p_compute_programs);
    _mesa_hash_table_destroy(cmd->g17p_precomp_index, NULL);
    util_dynarray_fini(&cmd->g17p_precomp_programs);

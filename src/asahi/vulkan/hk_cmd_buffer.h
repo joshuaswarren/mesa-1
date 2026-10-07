@@ -1370,6 +1370,7 @@ struct hk_cmd_buffer {
    /* Exact command-buffer-local G17P compute programs prepared before draw.
     * Entries own no storage outside the command buffer's Ioto arena. */
    struct util_dynarray g17p_compute_programs;
+   struct hash_table *g17p_compute_index;
 
    /* Exact immutable libagx argument/program pairs. Their argument bytes live
     * in the command uploader and their loaders live in the Ioto arena, so

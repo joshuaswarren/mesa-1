@@ -14,6 +14,7 @@
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_g17p_precomp_cache.h"
+#include "hk_g17p_exact_compute_cache.h"
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
@@ -994,14 +995,7 @@ hk_g17p_build_compute_program_raw(
 }
 
 struct hk_g17p_exact_compute_program {
-   const struct hk_shader *shader;
-   const struct hk_linked_shader *linked;
-   uint64_t root_ptr;
-   uint64_t texture_pointers;
-   uint64_t draw_params;
-   uint64_t draw_id_ptr;
-   enum agx_ioto_g17p_compute_ldshdr_f1 kind;
-   bool internal_graphics;
+   struct hk_g17p_exact_compute_cache_entry cache;
    size_t range_count;
    struct agx3_ioto_uniform_range
       ranges[HK_G17P_COMPUTE_MAX_RANGES];
@@ -1011,6 +1005,21 @@ struct hk_g17p_exact_compute_program {
    struct agx3_compute_program launch;
 };
 
+static struct hk_g17p_exact_compute_key
+hk_g17p_exact_compute_key(struct hk_cmd_buffer *cmd, const struct hk_shader *s,
+                          const struct hk_linked_shader *linked,
+                          uint64_t root_ptr, uint64_t texture_pointers,
+                          bool internal_graphics,
+                          enum agx_ioto_g17p_compute_ldshdr_f1 kind)
+{
+   return (struct hk_g17p_exact_compute_key){.words = {
+      (uintptr_t)s, (uintptr_t)linked, root_ptr, texture_pointers,
+      s->info.stage == MESA_SHADER_VERTEX ? cmd->state.gfx.draw_params : 0,
+      s->info.stage == MESA_SHADER_VERTEX ? cmd->state.gfx.draw_id_ptr : 0,
+      kind, internal_graphics,
+   }};
+}
+
 static struct hk_g17p_exact_compute_program *
 hk_g17p_find_exact_compute_program(
    struct hk_cmd_buffer *cmd, const struct hk_shader *s,
@@ -1018,23 +1027,15 @@ hk_g17p_find_exact_compute_program(
    uint64_t texture_pointers, bool internal_graphics,
    enum agx_ioto_g17p_compute_ldshdr_f1 kind)
 {
-   const uint64_t draw_params =
-      s->info.stage == MESA_SHADER_VERTEX ? cmd->state.gfx.draw_params : 0;
-   const uint64_t draw_id_ptr =
-      s->info.stage == MESA_SHADER_VERTEX ? cmd->state.gfx.draw_id_ptr : 0;
-   util_dynarray_foreach(&cmd->g17p_compute_programs,
-                         struct hk_g17p_exact_compute_program, cached) {
-      if (cached->shader == s && cached->linked == linked &&
-          cached->root_ptr == root_ptr &&
-          cached->texture_pointers == texture_pointers &&
-          cached->draw_params == draw_params &&
-          cached->draw_id_ptr == draw_id_ptr &&
-          cached->internal_graphics == internal_graphics &&
-          cached->kind == kind)
-         return cached;
-   }
-
-   return NULL;
+   const struct hk_g17p_exact_compute_key key = hk_g17p_exact_compute_key(
+      cmd, s, linked, root_ptr, texture_pointers, internal_graphics, kind);
+   const uint32_t hash = hk_g17p_exact_compute_cache_hash(&key);
+   const uint32_t hit = hk_g17p_exact_compute_cache_search(
+      cmd->g17p_compute_index, util_dynarray_begin(&cmd->g17p_compute_programs),
+      sizeof(struct hk_g17p_exact_compute_program), &key, hash);
+   return hit ? util_dynarray_element(&cmd->g17p_compute_programs,
+                                      struct hk_g17p_exact_compute_program,
+                                      hit - 1) : NULL;
 }
 
 static bool
@@ -1050,10 +1051,16 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
 {
-   struct hk_g17p_exact_compute_program *cached =
-      hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
-                                         texture_pointers, internal_graphics,
-                                         kind);
+   const struct hk_g17p_exact_compute_key key = hk_g17p_exact_compute_key(
+      cmd, s, linked, root_ptr, texture_pointers, internal_graphics, kind);
+   const uint32_t hash = hk_g17p_exact_compute_cache_hash(&key);
+   const uint32_t hit = hk_g17p_exact_compute_cache_search(
+      cmd->g17p_compute_index, util_dynarray_begin(&cmd->g17p_compute_programs),
+      sizeof(struct hk_g17p_exact_compute_program), &key, hash);
+   struct hk_g17p_exact_compute_program *cached = hit
+      ? util_dynarray_element(&cmd->g17p_compute_programs,
+                              struct hk_g17p_exact_compute_program, hit - 1)
+      : NULL;
    if (cached) {
       memcpy(ranges, cached->ranges,
              cached->range_count * sizeof(cached->ranges[0]));
@@ -1105,18 +1112,7 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    if (ok) {
       *range_count_out = range_count;
       const struct hk_g17p_exact_compute_program exact = {
-         .shader = s,
-         .linked = linked,
-         .root_ptr = root_ptr,
-         .texture_pointers = texture_pointers,
-         .draw_params = s->info.stage == MESA_SHADER_VERTEX
-                           ? cmd->state.gfx.draw_params
-                           : 0,
-         .draw_id_ptr = s->info.stage == MESA_SHADER_VERTEX
-                           ? cmd->state.gfx.draw_id_ptr
-                           : 0,
-         .kind = kind,
-         .internal_graphics = internal_graphics,
+         .cache.key = key,
          .range_count = range_count,
          .program_va = *program_va_out,
       };
@@ -1133,6 +1129,13 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       stored->launch = out->launch;
       memcpy(stored->ranges, ranges,
              range_count * sizeof(stored->ranges[0]));
+      const uint32_t position = util_dynarray_num_elements(
+         &cmd->g17p_compute_programs, struct hk_g17p_exact_compute_program);
+      if (!hk_g17p_exact_compute_cache_insert(
+             &cmd->g17p_compute_index, &stored->cache, position, hash)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return false;
+      }
    }
    return ok;
 }
