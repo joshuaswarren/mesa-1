@@ -1255,6 +1255,11 @@ agx3_retire_slots_noop(struct util_dynarray *emission,
                        enum agx_isa_encoding enc, uint16_t mask);
 
 static bool
+agx3_retire_result_wait(struct util_dynarray *emission,
+                        enum agx_isa_encoding enc, const agx_instr *I,
+                        uint16_t mask);
+
+static bool
 agx3_tex_plain_reg(agx_index index)
 {
    return agx3_src_is_register(index) && !index.memory && !index.abs &&
@@ -4268,7 +4273,7 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
 
       /* AGX3c has no witnessed wait on this form: settle any producer first. */
       if (op != AGX3_SUBGROUP_SHUFFLE_BROADCAST && wait_mask != 0) {
-         if (!agx3_retire_slots_noop(emission, enc, wait_mask))
+         if (!agx3_retire_result_wait(emission, enc, I, wait_mask))
             return false;
          wait_mask = 0;
       }
@@ -4308,7 +4313,7 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
     * producer slots through the same synchronous identity prelude used by
     * other no-wait subgroup forms. */
    if (wait_mask != 0 &&
-       !agx3_retire_slots_noop(emission, enc, wait_mask))
+       !agx3_retire_result_wait(emission, enc, I, wait_mask))
       return false;
 
    const struct agx3_subgroup_shuffle_desc d = {
@@ -4537,7 +4542,7 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
     * load, so retire those exact producer slots with the existing synchronous
     * identity prelude before issuing the unchanged no-wait ballot. */
    if (wait_mask != 0 &&
-       !agx3_retire_slots_noop(emission, enc, wait_mask))
+       !agx3_retire_result_wait(emission, enc, I, wait_mask))
       return false;
 
    const struct agx3_subgroup_ballot_desc d = {
@@ -5136,6 +5141,45 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
           agx3_append(emission, bytes, len);
 }
 
+/* Carry a result-producing instruction's complete logical wait on its own
+ * destination. The slot pass already includes WAW producers and outstanding
+ * payload readers of that footprint, in addition to the instruction's RAW
+ * dependencies. An identity preserves an in-place source without touching an
+ * unrelated r0 generation. Before any part of I writes its destination, this
+ * must receive the full wait, or the caller must have already retired that
+ * full wait without issuing any new readers/writers of the destination. The
+ * latter permits resource-only waits during operand staging, when the result
+ * footprint is already ready. A partial mask alone is not sufficient.
+ *
+ * Only touch one half for a half result: its adjacent half may still belong
+ * to an independent asynchronous load. Keep the existing slot-6 carrier
+ * contract; changing that protocol requires separate hardware qualification.
+ */
+static bool
+agx3_retire_result_wait(struct util_dynarray *emission,
+                        enum agx_isa_encoding enc, const agx_instr *I,
+                        uint16_t mask)
+{
+   if (!mask)
+      return true;
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return agx3_retire_slots_noop(emission, enc, mask);
+   if (I->nr_dests != 1 || !agx3_src_is_register(I->dest[0]) ||
+       I->dest[0].memory)
+      return false;
+
+   const agx_index dest = I->dest[0];
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   /* The immediate halfword form also reaches high registers unavailable to
+    * the word bitop form. The full destination wait covers this subset too. */
+   const bool half = dest.size == AGX_SIZE_16 || dest.value >= 192;
+   const bool ok = half
+      ? agx3_alu_bit_imm(enc, AGX3_ALU_BOR, true, dest.value, dest.value, 0,
+                          AGX3_ALU_HINT_NONE, mask | (1u << 5), bytes, &len)
+      : agx3_alu_band_identity_wait(enc, dest.value, mask, bytes, &len);
+   return ok && agx3_append(emission, bytes, len);
+}
+
 /* The COMPACT register+minifloat ALU forms -- agx3_alu_fadd_minifloat(),
  * agx3_alu_fadd_minifloat_mod() at ep1 (unsaturated) and every
  * agx3_alu_fmul_minifloat_narrow() form -- accept only an empty wait, ONE
@@ -5154,14 +5198,16 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
  * and matrix_subscript.mat3x2 dynamic_write_dynamic_read, all _vertex --
  * as VK_ERROR_FEATURE_NOT_PRESENT out of vkCreateGraphicsPipelines.
  *
- * Retire the excess generations through the grounded identity prelude and keep
- * one wait fused on the operation itself. Waiting early is semantically safe,
- * and the extra instruction is emitted only for a mask that has no encoding at
- * all -- a single slot and the native pair still encode in one instruction, so
- * no shader that packs today gains an instruction. */
+ * Retire the complete operation wait through an identity on its destination.
+ * A partial wait on r0 can race an unrelated producer of r0, and a partial
+ * wait on the real destination can miss its own WAW dependency. The carrier
+ * is emitted only for a mask with no direct encoding; a single slot and the
+ * native pair still encode in one instruction. No independent generation is
+ * added beyond the existing carrier's slot-6 contract. */
 static bool
 agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
-                                 enum agx_isa_encoding enc, uint16_t *wait)
+                                 enum agx_isa_encoding enc, const agx_instr *I,
+                                 uint16_t *wait)
 {
    const uint16_t mask = *wait;
 
@@ -5169,21 +5215,24 @@ agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
    if (mask == 3 || !(mask & (mask - 1)))
       return true;
 
-   const uint16_t fused = mask & (uint16_t)-mask;
-   if (!agx3_retire_slots_noop(emission, enc, mask & (uint16_t)~fused))
+   /* The destination can itself carry one of these pending generations.
+    * Complete the full instruction wait before the identity touches it. */
+   if (!agx3_retire_result_wait(emission, enc, I, mask))
       return false;
 
-   *wait = fused;
+   *wait = 0;
    return true;
 }
 
 /* Allocate the actual operand footprint from the sampler-private register
  * file. Lifetimes follow the consuming operations' scoreboard slots, shared
  * with texel fetches and image writes, rather than three fixed sample groups.
+ * The caller has already retired I's complete operand/result wait and has not
+ * started its staging or result write, so I's result is a ready carrier.
  */
 static bool
 agx3_allocate_staging(struct util_dynarray *emission,
-                      enum agx_isa_encoding enc,
+                      enum agx_isa_encoding enc, const agx_instr *I,
                       struct agx3_staging_banks *banks,
                       uint16_t *outstanding, uint8_t slot,
                       unsigned span, uint16_t *base)
@@ -5193,7 +5242,7 @@ agx3_allocate_staging(struct util_dynarray *emission,
       return false;
 
    if (waits) {
-      if (!agx3_retire_slots_noop(emission, enc, waits))
+      if (!agx3_retire_result_wait(emission, enc, I, waits))
          return false;
       *outstanding &= (uint16_t)~waits;
       *outstanding |= (uint16_t)(1u << (slot - 1));
@@ -9412,7 +9461,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                           interp_wait, bytes, &len) ||
                       !agx3_append(emission, bytes, len))
                      AGX3_REFUSE(I);
-               } else if (!agx3_retire_slots_noop(emission, enc, interp_wait)) {
+               } else if (!agx3_retire_result_wait(emission, enc, I, interp_wait)) {
                   AGX3_REFUSE(I);
                }
                outstanding &= (uint16_t)~interp_wait;
@@ -9722,6 +9771,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_TEXTURE_SAMPLE) {
+            const bool staged_sample =
+               !I->query_lod && !I->agx3_tex_coords_staged &&
+               !agx_texture_resource(I);
             {
                /* A texture sample's planned scoreboard wait is retired on a
                 * carrier instruction instead of being encoded in the sample's
@@ -9747,12 +9799,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * its coordinate-slot wait below; moving the wait to a
                 * carrier would retire it before the sample can consume it.
                 * Only the late COPY publication needs the carrier. */
-               const bool staged_sample =
-                  !I->query_lod && !I->agx3_tex_coords_staged &&
-                  !agx_texture_resource(I);
                const uint16_t live = staged_sample ? wait : 0;
                if (live) {
-                  if (!agx3_retire_slots_noop(emission, enc, live))
+                  if (!agx3_retire_result_wait(emission, enc, I, live))
                      AGX3_REFUSE(I);
                   wait &= (uint16_t)~live;
                   outstanding &= (uint16_t)~live;
@@ -9907,7 +9956,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * still consumed by a fetch (and vice versa). */
                agx3_staging_release(&staging_banks, outstanding_here);
                if (relocatable_coordinates) {
-                  if (!agx3_allocate_staging(emission, enc, &staging_banks,
+                  assert(staged_sample);
+                  if (!agx3_allocate_staging(emission, enc, I, &staging_banks,
                                              &outstanding, slot, sample_span,
                                              &bank_base))
                      AGX3_REFUSE(I);
@@ -9915,7 +9965,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   const uint16_t retire = agx3_staging_conflicts(
                      &staging_banks, 0, sample_span);
                   if (retire) {
-                     if (!agx3_retire_slots_noop(emission, enc, retire))
+                     /* Ordinary samples retired their complete GPR wait
+                      * above. No staging has issued yet, so the result
+                      * remains ready for a resource-only carrier. Native
+                      * coordinate/query transactions do not have this proof. */
+                     const bool retired = staged_sample
+                        ? agx3_retire_result_wait(emission, enc, I, retire)
+                        : agx3_retire_slots_noop(emission, enc, retire);
+                     if (!retired)
                         AGX3_REFUSE(I);
                      outstanding &= (uint16_t)~retire;
                      if (slot)
@@ -11241,7 +11298,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * the byte-exact zero-wait gradient encoding. */
             if ((fop == AGX3_FUNOP_DFDX || fop == AGX3_FUNOP_DFDY) &&
                 funop_wait) {
-               if (!agx3_retire_slots_noop(emission, enc, funop_wait))
+               if (!agx3_retire_result_wait(emission, enc, I, funop_wait))
                   AGX3_REFUSE(I);
                outstanding &= (uint16_t)~funop_wait;
                funop_wait = 0;
@@ -11769,7 +11826,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    condition, dest_16, I->dest[0].cache, fsel_wait, bytes,
                    &len)) {
                if (retire_wait &&
-                   !agx3_retire_slots_noop(emission, enc, wait))
+                   !agx3_retire_result_wait(emission, enc, I, wait))
                   AGX3_REFUSE(I);
                if (!agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
@@ -13070,7 +13127,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->src[0].cache, I->src[0].discard, wait, lo, &lo_len);
             bool retired = false;
             if (!copied && wait) {
-               retired = agx3_retire_slots_noop(emission, enc, wait);
+               retired = agx3_retire_result_wait(emission, enc, I, wait);
                copied = retired && agx3_copy_encode_reg16(
                                      enc, I->dest[0].value, I->src[0].value,
                                      I->dest[0].cache, I->src[0].cache,
@@ -13156,7 +13213,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * form that has none in the corpus. Meta image copies reach this
              * when global IDs and pushed extents share a scoreboard slot. */
             const bool retired =
-               wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
+               wait == 0 || agx3_retire_result_wait(emission, enc, I, wait);
             if (!retired ||
                 !agx3_copy_encode_uniform_to_reg32(enc, I->dest[0].value,
                                                    I->src[0].value, bytes,
@@ -13187,7 +13244,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t bytes[AGX3_COPY_MAX_LENGTH];
             uint8_t len = 0;
             const bool retired =
-               wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
+               wait == 0 || agx3_retire_result_wait(emission, enc, I, wait);
             if (!retired ||
                 !agx3_copy_encode_uniform_to_reg16(enc, I->dest[0].value,
                                                    I->src[0].value,
@@ -13390,7 +13447,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * directly after an async producer, so retire its dependency
              * through the established native no-op before loading it. */
             if (I->imm > 0xffff ||
-                (wait && !agx3_retire_slots_noop(emission, enc, wait)) ||
+                (wait && !agx3_retire_result_wait(emission, enc, I, wait)) ||
                 !agx3_alu_mov16(enc, I->dest[0].value, I->imm, 0, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
@@ -13821,7 +13878,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
                uint16_t immediate_wait = wait;
                if (imm.neg && immediate_wait != 0 && immediate_wait != 32) {
-                  if (!agx3_retire_slots_noop(emission, enc, immediate_wait))
+                  if (!agx3_retire_result_wait(emission, enc, I, immediate_wait))
                      AGX3_REFUSE(I);
                   immediate_wait = 0;
                }
@@ -13860,7 +13917,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              !(I->src[1].cache && I->src[1].discard)) {
             uint16_t convert_wait = wait;
             if (convert_wait != 0 && convert_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, convert_wait))
+               if (!agx3_retire_result_wait(emission, enc, I, convert_wait))
                   AGX3_REFUSE(I);
                convert_wait = 0;
             }
@@ -14138,7 +14195,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * bits; a bare negation stays on the compact ep1. */
                uint16_t encoded_wait = wait;
                if (!I->saturate &&
-                   !agx3_fuse_compact_minifloat_wait(emission, enc,
+                   !agx3_fuse_compact_minifloat_wait(emission, enc, I,
                                                      &encoded_wait))
                   AGX3_REFUSE(I);
                encoded = agx3_alu_fadd_minifloat_mod(
@@ -14174,7 +14231,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * destination widths, so a multi-slot wait needs the identity
                 * prelude here exactly as it does on the compact ADD below. */
                uint16_t encoded_wait = wait;
-               if (!agx3_fuse_compact_minifloat_wait(emission, enc,
+               if (!agx3_fuse_compact_minifloat_wait(emission, enc, I,
                                                      &encoded_wait))
                   AGX3_REFUSE(I);
                encoded = agx3_alu_fmul_minifloat_narrow(
@@ -14192,7 +14249,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * dependency and an independent write-after-write dependency
                 * on its retained destination. */
                uint16_t encoded_wait = wait;
-               if (!agx3_fuse_compact_minifloat_wait(emission, enc,
+               if (!agx3_fuse_compact_minifloat_wait(emission, enc, I,
                                                      &encoded_wait))
                   AGX3_REFUSE(I);
                encoded = agx3_alu_fadd_minifloat(
@@ -14603,16 +14660,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
                if (!agx3_alu_float_reg(enc, op, I->dest[0].value, src, hints,
                                         wait, bytes, &len)) {
-                  /* Compact forms cannot carry every wait combination. Drain
-                   * all outstanding work before the r0-preserving prelude,
-                   * then retry the same operands/hints without waits. */
+                  /* Carry exactly this operation's dependencies on its
+                   * destination, then retry the unchanged operands/hints.
+                   * Independent outstanding work remains in flight. */
                   if (wait == 0 ||
-                      !agx3_retire_slots_noop(emission, enc,
-                                              wait | outstanding_here) ||
+                      !agx3_retire_result_wait(emission, enc, I, wait) ||
                       !agx3_alu_float_reg(enc, op, I->dest[0].value, src,
                                            hints, 0, bytes, &len))
                      AGX3_REFUSE(I);
-                  outstanding = 0;
                }
                if (!agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
