@@ -658,6 +658,33 @@ agx_interp_for_bary(nir_intrinsic_instr *bary, agx_index *sample_index)
  * scalar channel. G17P centroid interpolation computes the token from the
  * coverage word instead. Dynamic coefficient indices remain on the legacy IR
  * path so the AGX3 packer rejects them instead of guessing. */
+/* Pixel-centre 1/W is the same for every input of a fragment program, so
+ * compute it once at the top, as Apple's compiler does, instead of once per
+ * load in every block that interpolates. */
+static agx_index
+agx3_center_rcp_w(agx_context *ctx, agx_index rhw_cf)
+{
+   if (agx_is_null(ctx->agx3_center_rcp_w)) {
+      agx_block *start = agx_start_block(ctx);
+      agx_builder b = agx_init_builder(ctx, agx_after_block(start));
+
+      /* Preloads stay first in the program. */
+      agx_foreach_instr_in_block(start, I) {
+         if (I->op != AGX_OPCODE_PRELOAD) {
+            b.cursor = agx_before_instr(I);
+            break;
+         }
+      }
+
+      agx_index rhw = agx_temp(ctx, AGX_SIZE_32);
+      agx_rhw_interp_agx3_to(&b, rhw, rhw_cf, agx_zero(),
+                             AGX_INTERPOLATION_CENTER);
+      ctx->agx3_center_rcp_w = agx_persp_rcp_agx3(&b, rhw, rhw_cf.value);
+   }
+
+   return ctx->agx3_center_rcp_w;
+}
+
 static bool
 agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
                         agx_index sample_index, unsigned components,
@@ -712,14 +739,19 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
       if (rhw_cf.type != AGX_INDEX_IMMEDIATE)
          return false;
 
-      agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
-         agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
-      else
-         agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);
-      reciprocal_w = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
-                        ? agx_persp_rcp_agx3(b, rhw, rhw_cf.value)
-                        : agx_rcp(b, rhw);
+      if (interp == AGX_INTERPOLATION_CENTER &&
+          b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+         reciprocal_w = agx3_center_rcp_w(b->shader, rhw_cf);
+      } else {
+         agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
+         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+            agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
+         else
+            agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);
+         reciprocal_w = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
+                           ? agx_persp_rcp_agx3(b, rhw, rhw_cf.value)
+                           : agx_rcp(b, rhw);
+      }
    }
 
    agx_index channels[4];

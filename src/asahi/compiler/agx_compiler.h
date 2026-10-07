@@ -634,6 +634,9 @@ typedef struct {
     */
    agx_index preloaded[AGX_NUM_REGS];
 
+   /* AGX3B pixel-centre 1/W, computed once in the start block. */
+   agx_index agx3_center_rcp_w;
+
    /* AGX_G17P_SR32_PIXEL_COORD: the 32-bit native pixel-coordinate special
     * registers read by load_pixel_coord and the 16-bit halves NIR sees, so a
     * zero extension of a half can reuse the register (Apple reads SR80/81 as
