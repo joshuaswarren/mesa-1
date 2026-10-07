@@ -2786,7 +2786,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
             } else {
                ralloc_free(candidate);
                candidate = nir_shader_clone(NULL, nir);
-               if (candidate &&
+               if (candidate && !HK_PERF(dev, TXF) &&
                    agx_nir_lower_g17p_indexed_samplers(candidate)) {
                   /* Keep the storage image BINDLESS alongside indexed
                    * samplers.

@@ -131,12 +131,13 @@ create_buffer(VkDevice device, const VkPhysicalDeviceMemoryProperties *mem,
 
 static VkImage
 create_image(VkDevice device, const VkPhysicalDeviceMemoryProperties *mem,
-             uint32_t dim, VkImageUsageFlags usage, VkDeviceMemory *memory)
+             VkFormat format, uint32_t dim, VkImageUsageFlags usage,
+             VkDeviceMemory *memory)
 {
    const VkImageCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = format,
       .extent = {dim, dim, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
@@ -208,6 +209,11 @@ main(int argc, char **argv)
    if (strcmp(mode, "graphics") && strcmp(mode, "graphics-control") &&
        strcmp(mode, "compute") && strcmp(mode, "compute-control"))
       die("unknown mode");
+
+   /* Indexed-heap lowering normally wins for this shader.  Force the narrower
+    * direct txf ABI so this probe covers its set-relative texture pointer. */
+   if (compute && setenv("HK_PERFTEST", "txf", 1))
+      die("setenv(HK_PERFTEST=txf) failed");
    /* G17P_PROBE_RT_DIM (4..64, a multiple of 4) sizes the render target;
     * below 16x16 hk does not compress it. */
    const char *rt_env = getenv("G17P_PROBE_RT_DIM");
@@ -319,7 +325,9 @@ main(int argc, char **argv)
    }
 
    VkDeviceMemory tex_memory;
-   VkImage tex = create_image(device, &mem, TEX_DIM,
+   const VkFormat tex_format = compute ? VK_FORMAT_R8G8B8A8_UINT
+                                       : VK_FORMAT_R8G8B8A8_UNORM;
+   VkImage tex = create_image(device, &mem, tex_format, TEX_DIM,
                               VK_IMAGE_USAGE_SAMPLED_BIT |
                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                               &tex_memory);
@@ -327,7 +335,7 @@ main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = tex,
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = tex_format,
       .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
    };
    VkImageView tex_view;
@@ -461,12 +469,13 @@ main(int argc, char **argv)
             "vkCreateComputePipelines");
       vkDestroyShaderModule(device, cs, NULL);
    } else {
-      rt = create_image(device, &mem, rt_dim,
+      rt = create_image(device, &mem, VK_FORMAT_R8G8B8A8_UNORM, rt_dim,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                         &rt_memory);
       VkImageViewCreateInfo rt_view_info = tex_view_info;
       rt_view_info.image = rt;
+      rt_view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
       check(vkCreateImageView(device, &rt_view_info, NULL, &rt_view),
             "vkCreateImageView(target)");
       const VkAttachmentDescription attachment = {

@@ -12,8 +12,11 @@ The probe samples a 4x4 RGBA8 texture with NEAREST filtering and checks every
 texel exactly. The default graphics mode uses vkcube's layout. Each mode has a
 `-control` variant that places a dynamic buffer at binding 0. A dynamic buffer
 takes no set space, so the texture word moves to offset 0 while the shaders
-stay the same. The compute modes repeat the layout with a storage buffer and a
-`texelFetch`. Run one mode per process:
+stay the same. The compute modes repeat the layout with a storage buffer and an
+unsigned sampled image read by `texelFetch`. They set `HK_PERFTEST=txf` before
+device creation, selecting the direct texture-state txf ABI instead of the
+indexed heap ABI that would otherwise win for this shader. Run one mode per
+process:
 
 ```sh
 cc -O2 -Wall -Wextra -Werror g17p_vulkan_sampler_offset.c -o sampler-offset -lvulkan
@@ -38,12 +41,13 @@ and with either viewport mode. Only the 82852 build was measured failing.
 Other bases that publish the unaligned set-relative pointer (anything before
 `2e8f5f5987c`, including `6895114e17a`) are expected to fail the same way.
 
-hk chooses the ABI, not the probe. On `651f448cf0d`, `HK_G17P_LAUNCH_TRACE=1`
-shows that the compute shader was lowered to the indexed sampler ABI
-(`idx_samp=1`). That ABI addresses the device-wide texture heap, which is
-aligned by construction. The compute modes therefore guard the layout rather
-than the set-relative texel-fetch pointer. That path is still published
-unaligned, and it is selected only when the indexed lowering fails.
+Without the diagnostic `txf` selector, hk lowers this shader to the indexed
+sampler ABI (`idx_samp=1`). That ABI addresses the device-wide texture heap,
+which is aligned by construction. The explicit selector is needed because the
+direct txf lowering accepts a strict subset of the indexed lowering's shapes;
+there is no GLSL shader that naturally makes only the indexed pass decline.
+With the selector, `HK_G17P_LAUNCH_TRACE=1` reports `txf=1 idx_samp=0`, and the
+probe covers the set-relative pointer in `hk_cmd_dispatch.c`.
 
 A failing run costs a firmware queue slot until reboot. Never loop the probe
 against a driver that is known to fail. The probe is deliberately not

@@ -80,6 +80,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
    {"nobatch",   HK_PERF_NOBATCH,  "Disable submission batching"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
+   {"txf",       HK_PERF_TXF,      "Prefer the direct G17P txf ABI"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
