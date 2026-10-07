@@ -560,6 +560,7 @@ graphics_program_write_unpublished(
          .preloaded_base_valid = desc->preloaded_root,
          .preloaded_base_half = AGX3_G17P_GRAPHICS_ROOT_BASE_HALF,
          .preloaded_base_address = 0,
+         .patchable = desc->patchable,
       };
       const struct agx3_ioto_uniform_program_workspace workspace = {
          .body = body,
@@ -769,6 +770,7 @@ graphics_program_shape_equal(
        a->compiler_d_valid != b->compiler_d_valid ||
        a->compiler_d != b->compiler_d || a->fragment != b->fragment ||
        a->preloaded_root != b->preloaded_root ||
+       a->patchable != b->patchable ||
        a->writes_sample_mask != b->writes_sample_mask ||
        a->colour_classes != b->colour_classes ||
        a->imageblock.sample_size_B != b->imageblock.sample_size_B ||

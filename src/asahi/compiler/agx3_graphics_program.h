@@ -68,6 +68,11 @@ struct agx3_g17p_graphics_program_desc {
     * materialize every absolute range themselves. */
    bool preloaded_root;
 
+   /* Address-independent shape (agx3_ioto_uniform_program_desc::patchable):
+    * every range materializes its own base with fixed-size LDIMMs, so the
+    * recorded relocations can be patched for other addresses. */
+   bool patchable;
+
    /* Executed after resource publication and the terminal state protocol.
     * program_va must name the actual first byte for relative external
     * branches; absolute G17P branches can be copied unchanged to another
