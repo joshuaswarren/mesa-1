@@ -156,28 +156,6 @@ if with_tests
   )
 
   test(
-    'hk_g17p_precomp_cache',
-    executable(
-      'hk_g17p_precomp_cache_test',
-      files('tests/test-hk-g17p-precomp-cache.c'),
-      include_directories : [inc_include, inc_src],
-      dependencies : [idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'hk_g17p_exact_compute_cache',
-    executable(
-      'hk_g17p_exact_compute_cache_test',
-      files('tests/test-hk-g17p-exact-compute-cache.c'),
-      include_directories : [inc_include, inc_src],
-      dependencies : [idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'hk_shader_variants',
     executable(
       'hk_shader_variants_test',

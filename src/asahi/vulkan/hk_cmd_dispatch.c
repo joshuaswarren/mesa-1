@@ -13,8 +13,6 @@
 #include "agx_tilebuffer.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
-#include "hk_g17p_precomp_cache.h"
-#include "hk_g17p_exact_compute_cache.h"
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
@@ -94,83 +92,6 @@ struct hk_g17p_compute_program_ref {
    uint16_t length;
    struct agx3_compute_program launch;
 };
-
-struct hk_g17p_precomp_program {
-   struct hk_g17p_precomp_cache_key key;
-   struct agx_workgroup local_size;
-   struct hk_g17p_compute_program_ref program;
-};
-
-static __attribute__((hot)) struct hk_g17p_precomp_program *
-hk_g17p_find_precomp_program(struct hk_cmd_buffer *cmd,
-                             enum libagx_program idx, const void *data,
-                             size_t data_size)
-{
-   const uint32_t hash = hk_g17p_precomp_cache_hash(idx, data, data_size);
-   const uint32_t entry = hk_g17p_precomp_cache_search(
-      cmd->g17p_precomp_index, util_dynarray_begin(&cmd->g17p_precomp_programs),
-      sizeof(struct hk_g17p_precomp_program), idx, data, data_size, hash);
-   return entry ? util_dynarray_element(&cmd->g17p_precomp_programs,
-                                        struct hk_g17p_precomp_program,
-                                        entry - 1) : NULL;
-}
-
-static __attribute__((hot)) bool
-hk_g17p_append_precomp_direct(
-   struct hk_cmd_buffer *cmd, struct agx_grid grid, enum agx_barrier barrier,
-   struct agx_workgroup local_size,
-   const struct agx3_compute_program *program)
-{
-   struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
-                           : (barrier & AGX_PREGFX) ? &cmd->current_cs.pre_gfx
-                                                    : &cmd->current_cs.cs;
-   struct hk_cs *cs = hk_cmd_buffer_get_cs_general(cmd, target, true);
-   if (!cs)
-      return true;
-
-   hk_ensure_cs_has_space(cmd, cs, 0x2000);
-   struct agx3_compute_dispatch_sink sink = {
-      .data = (uint8_t *)cs->current,
-      .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
-   };
-   const struct agx3_compute_direct_grid direct = {
-      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-      .size = {grid.count[0], grid.count[1], grid.count[2]},
-      .local_size = {local_size.x, local_size.y, local_size.z},
-      .dimensions = grid.count[2] != 1 || local_size.z != 1
-                       ? 3
-                    : grid.count[1] != 1 || local_size.y != 1 ? 2 : 1,
-   };
-   const uint8_t barrier_flags = (barrier & AGX_BARRIER_ALL) ? 0x5 : 0;
-   if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
-          program, &direct, barrier_flags, &sink)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return true;
-   }
-
-   cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   if (barrier_flags == 0x5) {
-      cs->strong_flush_end = cs->current;
-      cs->weak_barrier_end = NULL;
-   } else {
-      cs->weak_barrier_end = cs->current;
-   }
-   cs->stats.cmds++;
-   return true;
-}
-
-static __attribute__((hot)) bool
-hk_g17p_append_prepared_precomp_direct(
-   struct hk_cmd_buffer *cmd, struct agx_grid grid, enum agx_barrier barrier,
-   enum libagx_program idx, const void *data, size_t data_size)
-{
-   struct hk_g17p_precomp_program *cached =
-      hk_g17p_find_precomp_program(cmd, idx, data, data_size);
-   return cached &&
-          hk_g17p_append_precomp_direct(cmd, grid, barrier,
-                                         cached->local_size,
-                                         &cached->program.launch);
-}
 
 static void
 hk_g17p_loader_list_free(void **head)
@@ -914,50 +835,6 @@ hk_g17p_build_compute_program_raw(
                               out);
 }
 
-struct hk_g17p_exact_compute_program {
-   struct hk_g17p_exact_compute_cache_entry cache;
-   size_t range_count;
-   struct agx3_ioto_uniform_range
-      ranges[HK_G17P_COMPUTE_MAX_RANGES];
-   uint64_t program_va;
-   const uint8_t *program_bytes;
-   uint16_t program_length;
-   struct agx3_compute_program launch;
-};
-
-static struct hk_g17p_exact_compute_key
-hk_g17p_exact_compute_key(struct hk_cmd_buffer *cmd, const struct hk_shader *s,
-                          const struct hk_linked_shader *linked,
-                          uint64_t root_ptr, uint64_t texture_pointers,
-                          bool internal_graphics,
-                          enum agx_ioto_g17p_compute_ldshdr_f1 kind)
-{
-   return (struct hk_g17p_exact_compute_key){.words = {
-      (uintptr_t)s, (uintptr_t)linked, root_ptr, texture_pointers,
-      s->info.stage == MESA_SHADER_VERTEX ? cmd->state.gfx.draw_params : 0,
-      s->info.stage == MESA_SHADER_VERTEX ? cmd->state.gfx.draw_id_ptr : 0,
-      kind, internal_graphics,
-   }};
-}
-
-static struct hk_g17p_exact_compute_program *
-hk_g17p_find_exact_compute_program(
-   struct hk_cmd_buffer *cmd, const struct hk_shader *s,
-   const struct hk_linked_shader *linked, uint64_t root_ptr,
-   uint64_t texture_pointers, bool internal_graphics,
-   enum agx_ioto_g17p_compute_ldshdr_f1 kind)
-{
-   const struct hk_g17p_exact_compute_key key = hk_g17p_exact_compute_key(
-      cmd, s, linked, root_ptr, texture_pointers, internal_graphics, kind);
-   const uint32_t hash = hk_g17p_exact_compute_cache_hash(&key);
-   const uint32_t hit = hk_g17p_exact_compute_cache_search(
-      cmd->g17p_compute_index, util_dynarray_begin(&cmd->g17p_compute_programs),
-      sizeof(struct hk_g17p_exact_compute_program), &key, hash);
-   return hit ? util_dynarray_element(&cmd->g17p_compute_programs,
-                                      struct hk_g17p_exact_compute_program,
-                                      hit - 1) : NULL;
-}
-
 static bool
 hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               struct hk_linked_shader *linked,
@@ -971,27 +848,6 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
 {
-   const struct hk_g17p_exact_compute_key key = hk_g17p_exact_compute_key(
-      cmd, s, linked, root_ptr, texture_pointers, internal_graphics, kind);
-   const uint32_t hash = hk_g17p_exact_compute_cache_hash(&key);
-   const uint32_t hit = hk_g17p_exact_compute_cache_search(
-      cmd->g17p_compute_index, util_dynarray_begin(&cmd->g17p_compute_programs),
-      sizeof(struct hk_g17p_exact_compute_program), &key, hash);
-   struct hk_g17p_exact_compute_program *cached = hit
-      ? util_dynarray_element(&cmd->g17p_compute_programs,
-                              struct hk_g17p_exact_compute_program, hit - 1)
-      : NULL;
-   if (cached) {
-      memcpy(ranges, cached->ranges,
-             cached->range_count * sizeof(cached->ranges[0]));
-      *range_count_out = cached->range_count;
-      *program_va_out = cached->program_va;
-      out->bytes = cached->program_bytes;
-      out->length = cached->program_length;
-      out->launch = cached->launch;
-      return true;
-   }
-
    size_t range_count;
    const bool ranges_ok = internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
@@ -1019,34 +875,8 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 
    const bool ok = hk_g17p_build_compute_program_raw(
       cmd, &linked->g17p_compute_templates, &desc, program_va_out, out);
-   if (ok) {
+   if (ok)
       *range_count_out = range_count;
-      const struct hk_g17p_exact_compute_program exact = {
-         .cache.key = key,
-         .range_count = range_count,
-         .program_va = *program_va_out,
-      };
-      struct hk_g17p_exact_compute_program *stored =
-         util_dynarray_grow(&cmd->g17p_compute_programs,
-                            struct hk_g17p_exact_compute_program, 1);
-      if (!stored) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-         return false;
-      }
-      *stored = exact;
-      stored->program_bytes = out->bytes;
-      stored->program_length = out->length;
-      stored->launch = out->launch;
-      memcpy(stored->ranges, ranges,
-             range_count * sizeof(stored->ranges[0]));
-      const uint32_t position = util_dynarray_num_elements(
-         &cmd->g17p_compute_programs, struct hk_g17p_exact_compute_program);
-      if (!hk_g17p_exact_compute_cache_insert(
-             &cmd->g17p_compute_index, &stored->cache, position, hash)) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-         return false;
-      }
-   }
    return ok;
 }
 
@@ -1098,171 +928,6 @@ hk_g17p_prewarm_linked_compute_program_kind(
 }
 
 void
-hk_g17p_prewarm_linked_compute_program(struct hk_cmd_buffer *cmd,
-                                        struct hk_shader *s,
-                                        struct hk_linked_shader *linked,
-                                        bool internal_graphics)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (hk_g17p_compute_shader_supported(s, linked)) {
-      /* The recorded Ioto program will dereference these BOs. Take the
-       * command-buffer references alongside prewarming, outside the first
-       * vkCmdDraw, and let the normal retain calls deduplicate. */
-      hk_cmd_buffer_retain_bo(cmd, linked->b.bo);
-      if (s->b.info.rodata.size_16 != 0)
-         hk_cmd_buffer_retain_bo(cmd, s->bo);
-   }
-
-   hk_g17p_prewarm_linked_compute_program_kind(
-      dev, cmd, s, linked, internal_graphics,
-      AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3);
-   hk_g17p_prewarm_linked_compute_program_kind(
-      dev, cmd, s, linked, internal_graphics,
-      AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1);
-
-   /* Once the graphics root is final, publish the exact direct and indirect
-    * caller loaders into this command buffer's executable arena. The grid
-    * helper remains keyed to its draw-local argument address. A sampling
-    * kernel's loader depends on the draw's texture table; the draw builds it. */
-   if (internal_graphics && cmd->state.gfx.root &&
-       !hk_g17p_compute_uses_texture_pointers(s) &&
-       hk_g17p_compute_shader_supported(s, linked)) {
-      const enum agx_ioto_g17p_compute_ldshdr_f1 kinds[] = {
-         AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
-         AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1,
-      };
-      for (unsigned i = 0; i < ARRAY_SIZE(kinds); ++i) {
-         struct agx3_ioto_uniform_range
-            ranges[HK_G17P_COMPUTE_MAX_RANGES];
-         size_t range_count;
-         uint64_t program_va;
-         struct hk_g17p_compute_program_ref program;
-         hk_g17p_build_compute_program(
-            cmd, s, linked, cmd->state.gfx.root, 0, true, kinds[i],
-            "prewarm", ranges, &range_count, &program_va, &program);
-      }
-   }
-}
-
-bool
-hk_g17p_prepare_graphics_dispatch(
-   struct hk_cmd_buffer *cmd, struct hk_shader *s,
-   struct hk_linked_shader *linked, uint64_t indirect_local_grid,
-   struct agx_workgroup indirect_local_size,
-   struct hk_g17p_prepared_dispatch *out)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   *out = (struct hk_g17p_prepared_dispatch){0};
-
-   if (dev->dev.chip != AGX_CHIP_G17P || !cmd->state.gfx.root ||
-       hk_g17p_compute_uses_texture_pointers(s) ||
-       !hk_g17p_compute_shader_supported(s, linked))
-      return false;
-
-   struct agx3_ioto_uniform_range ranges[HK_G17P_COMPUTE_MAX_RANGES];
-   size_t range_count;
-   uint64_t program_va;
-   struct hk_g17p_compute_program_ref program;
-   if (!hk_g17p_build_compute_program(
-          cmd, s, linked, cmd->state.gfx.root, 0, true,
-          AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3, "prepare-draw",
-          ranges, &range_count, &program_va, &program))
-      return false;
-
-   out->program = program.launch;
-   out->shader = s;
-   out->linked = linked;
-   out->root = cmd->state.gfx.root;
-   out->draw_params = cmd->state.gfx.draw_params;
-   out->draw_id_ptr = cmd->state.gfx.draw_id_ptr;
-
-   const struct agx3_compute_direct_grid template_grid = {
-      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-      .size = {1, 1, 1},
-      .local_size = {1, 1, 1},
-      .dimensions = 3,
-   };
-   struct agx3_compute_dispatch_sink direct_sink = {
-      .data = out->direct_template,
-      .capacity = sizeof(out->direct_template),
-   };
-   if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
-          &out->program, &template_grid, 0, &direct_sink) ||
-       direct_sink.length != sizeof(out->direct_template))
-      return false;
-
-   out->valid = true;
-
-   if (!indirect_local_grid)
-      return true;
-
-   struct hk_g17p_compute_program_ref indirect_main;
-   if (!hk_g17p_build_compute_program(
-          cmd, s, linked, cmd->state.gfx.root, 0, true,
-          AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1, "prepare-indirect-local", ranges,
-          &range_count, &program_va, &indirect_main))
-      return true;
-
-   out->indirect_local_grid = indirect_local_grid;
-   out->indirect_local_size[0] = indirect_local_size.x;
-   out->indirect_local_size[1] = indirect_local_size.y;
-   out->indirect_local_size[2] = indirect_local_size.z;
-
-   struct hk_shader *helper_s = dev->g17p_geometry_copy_helper
-      ? hk_only_variant(dev->g17p_geometry_copy_helper)
-      : NULL;
-   if (!helper_s ||
-       !hk_g17p_compute_shader_supported(helper_s, helper_s->only_linked))
-      return true;
-
-   out->indirect_local_geometry =
-      hk_pool_alloc(cmd, AGX3_G17P_INDIRECT_GEOMETRY_SIZE,
-                    AGX3_G17P_INDIRECT_GEOMETRY_ALIGNMENT);
-   out->indirect_local_helper_root =
-      hk_pool_alloc(cmd, sizeof(struct hk_root_descriptor_table), 8);
-   if (!out->indirect_local_geometry.gpu ||
-       !out->indirect_local_helper_root.gpu)
-      return true;
-
-   struct hk_root_descriptor_table *helper_root =
-      out->indirect_local_helper_root.cpu;
-   *helper_root = cmd->state.cs.descriptors.root;
-   helper_root->root_desc_addr = out->indirect_local_helper_root.gpu;
-   helper_root->cs.grid_helper_geometry_addr =
-      out->indirect_local_geometry.gpu;
-   helper_root->cs.grid_helper_sparse_map_addr = 0;
-
-   struct agx3_ioto_uniform_range
-      helper_ranges[HK_G17P_COMPUTE_MAX_RANGES];
-   size_t helper_range_count;
-   uint64_t helper_program_va;
-   struct hk_g17p_compute_program_ref helper_program;
-   if (!hk_g17p_build_compute_program(
-          cmd, helper_s, helper_s->only_linked,
-          out->indirect_local_helper_root.gpu, 0, false,
-          AGX3_G17P_GRID_HELPER_LDSHDR_F1, "prepare-indirect-local-helper",
-          helper_ranges, &helper_range_count, &helper_program_va,
-          &helper_program))
-      return true;
-
-   const struct agx3_g17p_native_indirect_dispatch indirect_dispatch = {
-      .helper_program = &helper_program.launch,
-      .geometry_va = out->indirect_local_geometry.gpu,
-   };
-   struct agx3_compute_dispatch_sink indirect_sink = {
-      .data = out->indirect_local_template,
-      .capacity = sizeof(out->indirect_local_template),
-   };
-   if (!hk_agx3_g17p_native_indirect_compute_dispatch_append(
-          &indirect_main.launch, &indirect_dispatch, &indirect_sink) ||
-       indirect_sink.length != sizeof(out->indirect_local_template))
-      return true;
-
-   out->indirect_local_valid = true;
-   return true;
-}
-
-void
 hk_g17p_prewarm_linked_compute_shader(struct hk_device *dev,
                                        struct hk_shader *s,
                                        struct hk_linked_shader *linked)
@@ -1278,27 +943,6 @@ hk_g17p_prewarm_linked_compute_shader(struct hk_device *dev,
    for (unsigned i = 0; i < ARRAY_SIZE(kinds); ++i)
       hk_g17p_prewarm_linked_compute_program_kind(
          dev, NULL, s, linked, s->info.stage != MESA_SHADER_COMPUTE, kinds[i]);
-}
-
-void
-hk_g17p_prewarm_indirect_helpers(struct hk_cmd_buffer *cmd)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_api_shader *helpers[] = {
-      dev->g17p_grid_helper,
-      dev->g17p_grid_helper_sparse,
-      dev->g17p_geometry_copy_helper,
-   };
-
-   for (unsigned i = 0; i < ARRAY_SIZE(helpers); ++i) {
-      if (!helpers[i])
-         continue;
-
-      struct hk_shader *s = hk_only_variant(helpers[i]);
-      hk_g17p_prewarm_linked_compute_program_kind(
-         dev, cmd, s, s->only_linked, false,
-         AGX3_G17P_GRID_HELPER_LDSHDR_F1);
-   }
 }
 
 /*
@@ -1432,18 +1076,9 @@ hk_g17p_get_precomp_program(struct hk_cmd_buffer *cmd,
                              struct agx_precompiled_shader *prog,
                              enum libagx_program idx, const void *data,
                              size_t data_size, bool indirect,
-                             bool cache_lookup_missed,
                              struct hk_g17p_compute_program_ref *program)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (!indirect && !cache_lookup_missed) {
-      struct hk_g17p_precomp_program *cached =
-         hk_g17p_find_precomp_program(cmd, idx, data, data_size);
-      if (cached) {
-         *program = cached->program;
-         return true;
-      }
-   }
 
    size_t uniform_data_size;
    if (!hk_g17p_precompiled_uniform_data_size(prog, data_size,
@@ -1472,15 +1107,7 @@ hk_g17p_get_precomp_program(struct hk_cmd_buffer *cmd,
    }
    memcpy(uploaded.cpu, data, data_size);
    memset((uint8_t *)uploaded.cpu + data_size, 0, uploaded_size - data_size);
-   const void *cache_data = uploaded.cpu;
    if (prog->info.printf_uniform) {
-      struct agx_ptr key = hk_pool_alloc(cmd, data_size, 1);
-      if (!key.cpu) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return false;
-      }
-      memcpy(key.cpu, data, data_size);
-      cache_data = key.cpu;
       memcpy((uint8_t *)uploaded.cpu + printf_offset_B,
              &dev->dev.printf_buffer_address, sizeof(uint64_t));
    }
@@ -1530,135 +1157,6 @@ hk_g17p_get_precomp_program(struct hk_cmd_buffer *cmd,
           &program_va, program))
       return false;
 
-   if (!indirect) {
-      struct hk_g17p_precomp_program *stored =
-         util_dynarray_grow(&cmd->g17p_precomp_programs,
-                            struct hk_g17p_precomp_program, 1);
-      if (!stored) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-         return false;
-      }
-      *stored = (struct hk_g17p_precomp_program){
-         .key = {
-            .idx = idx,
-            .data_size = data_size,
-            .data = cache_data,
-         },
-         .local_size = prog->b.workgroup,
-         .program = *program,
-      };
-      const uint32_t entry = util_dynarray_num_elements(
-         &cmd->g17p_precomp_programs, struct hk_g17p_precomp_program);
-      const uint32_t hash = hk_g17p_precomp_cache_hash(idx, data, data_size);
-      if (!hk_g17p_precomp_cache_insert(&cmd->g17p_precomp_index,
-                                        &stored->key, entry, hash)) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-         return false;
-      }
-   }
-
-   return true;
-}
-
-bool
-hk_g17p_prepare_precomp(struct hk_cmd_buffer *cmd, enum libagx_program idx,
-                        const void *data, size_t data_size,
-                        struct hk_g17p_prepared_precomp *out)
-{
-   *out = (struct hk_g17p_prepared_precomp){0};
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct agx_precompiled_shader *prog =
-      (unsigned)idx < LIBAGX_NUM_PROGRAMS
-         ? agx_get_precompiled(&dev->bg_eot, idx)
-         : NULL;
-   if (dev->dev.chip != AGX_CHIP_G17P || !prog || !prog->bo ||
-       !prog->info.main_size || !prog->info.nr_gprs ||
-       prog->info.nr_preamble_gprs ||
-       (prog->info.rodata.size_16 && !prog->rodata_offset) ||
-       !prog->info.agx3_staging_known || !data || !data_size ||
-       data_size > HK_G17P_PREPARED_PRECOMP_DATA_MAX ||
-       prog->entry_offset > UINT64_MAX - prog->ptr)
-      return false;
-
-   struct hk_g17p_compute_program_ref program;
-   if (!hk_g17p_get_precomp_program(cmd, prog, idx, data, data_size, false, false,
-                                    &program))
-      return false;
-
-   out->program = program.launch;
-   out->local_size = prog->b.workgroup;
-   out->idx = idx;
-   out->data_size = data_size;
-   memcpy(out->data, data, data_size);
-
-   const struct agx3_compute_direct_grid template_grid = {
-      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-      .size = {1, 1, 1},
-      .local_size = {out->local_size.x, out->local_size.y,
-                     out->local_size.z},
-      .dimensions = 3,
-   };
-   struct agx3_compute_dispatch_sink template_sink = {
-      .data = out->direct_template,
-      .capacity = sizeof(out->direct_template),
-   };
-   if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
-          &out->program, &template_grid, 0, &template_sink) ||
-       template_sink.length != sizeof(out->direct_template))
-      return false;
-
-   out->valid = true;
-   return true;
-}
-
-void
-hk_g17p_prewarm_precomp(struct hk_cmd_buffer *cmd, enum libagx_program idx,
-                         const void *data, size_t data_size)
-{
-   struct hk_g17p_prepared_precomp prepared;
-   (void)hk_g17p_prepare_precomp(cmd, idx, data, data_size, &prepared);
-}
-
-__attribute__((hot)) bool
-hk_dispatch_prepared_precomp_g17p(
-   struct hk_cmd_buffer *cmd, struct agx_grid grid, enum agx_barrier barrier,
-   enum libagx_program idx, const void *data, size_t data_size,
-   const struct hk_g17p_prepared_precomp *prepared)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (dev->dev.chip != AGX_CHIP_G17P || !prepared->valid ||
-       prepared->idx != idx || prepared->data_size != data_size ||
-       data_size > sizeof(prepared->data) ||
-       memcmp(prepared->data, data, data_size) != 0 ||
-       agx_is_indirect(grid) || !grid.count[0] || !grid.count[1] ||
-       !grid.count[2])
-      return false;
-
-   struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
-                           : (barrier & AGX_PREGFX) ? &cmd->current_cs.pre_gfx
-                                                    : &cmd->current_cs.cs;
-   struct hk_cs *cs = hk_cmd_buffer_get_cs_general(cmd, target, true);
-   if (!cs)
-      return true;
-
-   hk_ensure_cs_has_space(cmd, cs, 0x2000);
-   uint8_t *out = (uint8_t *)cs->current;
-   memcpy(out, prepared->direct_template, sizeof(prepared->direct_template));
-   agx3_cmdstream_store_le32(out + 16, grid.count[0]);
-   agx3_cmdstream_store_le32(out + 20, grid.count[1]);
-   agx3_cmdstream_store_le32(out + 24, grid.count[2]);
-   const uint8_t barrier_flags = (barrier & AGX_BARRIER_ALL) ? 0x5 : 0;
-   agx3_cmdstream_store_le32(
-      out + AGX3_CDM_DIRECT_LAUNCH_SIZE,
-      agx3_cdm_barrier_word(barrier_flags));
-   cs->current = out + sizeof(prepared->direct_template);
-   if (barrier_flags == 0x5) {
-      cs->strong_flush_end = cs->current;
-      cs->weak_barrier_end = NULL;
-   } else {
-      cs->weak_barrier_end = cs->current;
-   }
-   cs->stats.cmds++;
    return true;
 }
 
@@ -1672,15 +1170,6 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
-   const bool checked_cache =
-      data && data_size && !agx_is_indirect(grid) && grid.count[0] &&
-      grid.count[1] && grid.count[2];
-   const unsigned checked_cache_size = cmd->g17p_precomp_programs.size;
-   if (checked_cache &&
-       hk_g17p_append_prepared_precomp_direct(cmd, grid, barrier, idx, data,
-                                               data_size))
-      return;
-
    struct agx_precompiled_shader *prog =
       agx_get_precompiled(&dev->bg_eot, idx);
    if (!prog) {
@@ -1727,13 +1216,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
 
    struct hk_g17p_compute_program_ref program;
-   /* The fast path already searched these exact arguments. Cache entries
-    * are immutable until command-buffer reset. Preserve a fresh lookup if
-    * intervening stream setup ever appends a precompiled program. */
-   const bool cache_lookup_missed = checked_cache &&
-      checked_cache_size == cmd->g17p_precomp_programs.size;
    if (!hk_g17p_get_precomp_program(cmd, prog, idx, data, data_size,
-                                    indirect, cache_lookup_missed, &program))
+                                    indirect, &program))
       return;
 
    if (indirect) {
@@ -1794,189 +1278,6 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    cs->stats.cmds++;
 }
 
-static __attribute__((hot)) bool
-hk_g17p_append_graphics_direct(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-   const struct agx3_compute_program *program, struct agx_grid grid,
-   struct agx_workgroup local_size)
-{
-   hk_ensure_cs_has_space(cmd, cs, 0x2000);
-   struct agx3_compute_dispatch_sink sink = {
-      .data = (uint8_t *)cs->current,
-      .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
-   };
-   const uint8_t dimensions =
-      grid.count[2] != 1 || local_size.z != 1
-         ? 3
-         : grid.count[1] != 1 || local_size.y != 1 ? 2 : 1;
-   const struct agx3_compute_direct_grid direct = {
-      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-      .size = {grid.count[0], grid.count[1], grid.count[2]},
-      .local_size = {local_size.x, local_size.y, local_size.z},
-      .dimensions = dimensions,
-   };
-   const uint8_t barrier_flags = 0;
-   if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
-          program, &direct, barrier_flags, &sink)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return true;
-   }
-
-   cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   if (barrier_flags == 0x5) {
-      cs->strong_flush_end = cs->current;
-      cs->weak_barrier_end = NULL;
-   } else {
-      cs->weak_barrier_end = cs->current;
-   }
-   cs->stats.cmds++;
-   return true;
-}
-
-static bool
-hk_g17p_append_prepared_graphics_direct(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
-   struct hk_linked_shader *linked, struct agx_grid grid,
-   struct agx_workgroup local_size)
-{
-   struct hk_g17p_exact_compute_program *cached =
-      hk_g17p_find_exact_compute_program(
-         cmd, s, linked, cmd->state.gfx.root, 0, true,
-         AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3);
-   if (!cached)
-      return false;
-
-   return hk_g17p_append_graphics_direct(cmd, cs, &cached->launch, grid,
-                                          local_size);
-}
-
-static __attribute__((hot)) bool
-hk_dispatch_prepared_g17p_native_impl(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
-   struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
-   struct agx_workgroup local_size)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_linked_shader *linked = s->only_linked;
-   if (!linked && s->info.stage == MESA_SHADER_VERTEX)
-      linked = cmd->state.gfx.linked[MESA_SHADER_VERTEX];
-   if (!prepared->valid ||
-       prepared->shader != s || prepared->linked != linked ||
-       prepared->root != cmd->state.gfx.root ||
-       prepared->draw_params != cmd->state.gfx.draw_params ||
-       prepared->draw_id_ptr != cmd->state.gfx.draw_id_ptr ||
-       dev->dev.chip != AGX_CHIP_G17P || cs->type != HK_CS_CDM)
-      return false;
-
-   if (agx_is_indirect(grid)) {
-      if (!prepared->indirect_local_valid ||
-          prepared->indirect_local_consumed ||
-          grid.mode != AGX_CDM_MODE_INDIRECT_LOCAL || !grid.ptr ||
-          (grid.ptr & 3) != 0 || grid.ptr != prepared->indirect_local_grid ||
-          local_size.x != prepared->indirect_local_size[0] ||
-          local_size.y != prepared->indirect_local_size[1] ||
-          local_size.z != prepared->indirect_local_size[2])
-         return false;
-
-      hk_reserve_scratch(cmd, cs, s);
-
-      memset(prepared->indirect_local_geometry.cpu, 0,
-             AGX3_G17P_INDIRECT_GEOMETRY_SIZE);
-      struct hk_root_descriptor_table *helper_root =
-         prepared->indirect_local_helper_root.cpu;
-      helper_root->cs.group_count_addr = grid.ptr;
-      helper_root->cs.grid_helper_geometry_addr =
-         prepared->indirect_local_geometry.gpu;
-      helper_root->cs.grid_helper_sparse_map_addr = 0;
-      helper_root->cs.grid_helper_local_size[0] = local_size.x;
-      helper_root->cs.grid_helper_local_size[1] = local_size.y;
-      helper_root->cs.grid_helper_local_size[2] = local_size.z;
-
-      hk_ensure_cs_has_space(cmd, cs, 0x2000);
-      memcpy(cs->current, prepared->indirect_local_template,
-             sizeof(prepared->indirect_local_template));
-      cs->current = (uint32_t *)((uint8_t *)cs->current +
-                                 sizeof(prepared->indirect_local_template));
-      cs->weak_barrier_end = cs->current;
-      cs->stats.cmds++;
-      prepared->indirect_local_consumed = true;
-      return true;
-   }
-
-   if (agx_is_shader_empty(&s->b) || grid.count[0] == 0 ||
-       grid.count[1] == 0 || grid.count[2] == 0 || !local_size.x ||
-       !local_size.y || !local_size.z)
-      return true;
-
-   hk_reserve_scratch(cmd, cs, s);
-   hk_ensure_cs_has_space(cmd, cs, 0x2000);
-   uint8_t *out = (uint8_t *)cs->current;
-   memcpy(out, prepared->direct_template, sizeof(prepared->direct_template));
-   const uint32_t local[3] = {local_size.x, local_size.y, local_size.z};
-   for (unsigned axis = 0; axis < 3; ++axis) {
-      agx3_cmdstream_store_le32(out + 16 + axis * 4, grid.count[axis]);
-      agx3_cmdstream_store_le32(out + 28 + axis * 4, local[axis]);
-   }
-   const uint8_t barrier_flags = 0;
-   agx3_cmdstream_store_le32(
-      out + AGX3_CDM_DIRECT_LAUNCH_SIZE,
-      agx3_cdm_barrier_word(barrier_flags));
-   cs->current = (uint32_t *)(out + sizeof(prepared->direct_template));
-   if (barrier_flags == 0x5) {
-      cs->strong_flush_end = cs->current;
-      cs->weak_barrier_end = NULL;
-   } else {
-      cs->weak_barrier_end = cs->current;
-   }
-   cs->stats.cmds++;
-   return true;
-}
-
-__attribute__((hot)) bool
-hk_dispatch_prepared_g17p_native(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
-   struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
-   struct agx_workgroup local_size)
-{
-   if (!hk_dispatch_prepared_g17p_native_impl(cmd, cs, s, prepared, grid,
-                                              local_size))
-      return false;
-   return true;
-}
-
-static bool
-hk_g17p_append_prepared_graphics_indirect(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
-   struct hk_linked_shader *linked, struct agx_grid grid,
-   struct agx_workgroup local_size, uint64_t sparse_map_addr)
-{
-   struct hk_g17p_exact_compute_program *cached =
-      hk_g17p_find_exact_compute_program(
-         cmd, s, linked, cmd->state.gfx.root, 0, true,
-         AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1);
-   if (!cached)
-      return false;
-
-   const struct hk_g17p_compute_program_ref program = {
-      .bytes = cached->program_bytes,
-      .length = cached->program_length,
-      .launch = cached->launch,
-   };
-   hk_ensure_cs_has_space(cmd, cs, 0x2000);
-   struct agx3_compute_dispatch_sink sink = {
-      .data = (uint8_t *)cs->current,
-      .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
-   };
-   if (!hk_g17p_append_indirect_launch(cmd, grid, local_size, sparse_map_addr,
-                                        &program, &sink))
-      return true;
-
-   cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   cs->weak_barrier_end = cs->current;
-   cs->stats.cmds++;
-   return true;
-}
-
 __attribute__((hot)) void
 hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         struct hk_shader *s, struct agx_grid grid,
@@ -2015,19 +1316,6 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
               grid.count[2] == 0) {
       return;
    }
-
-   /* BeginRendering publishes exact internal-graphics loaders after the root
-    * address is fixed. A direct draw can append that launch immediately,
-    * avoiding the general compute resource-validation and composition path.
-    * Misses take the general path below. */
-   if (internal_graphics && !indirect &&
-       hk_g17p_append_prepared_graphics_direct(cmd, cs, s, linked, grid,
-                                               local_size))
-      return;
-   if (internal_graphics && indirect &&
-       hk_g17p_append_prepared_graphics_indirect(
-          cmd, cs, s, linked, grid, local_size, sparse_map_addr))
-      return;
 
    if (!internal_graphics && s->data_size != 0) {
       const uint64_t constant_data = hk_pool_upload(

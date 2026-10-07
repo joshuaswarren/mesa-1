@@ -95,10 +95,6 @@
 #define IS_LINKED_DIRTY(bit)                                                   \
    (cmd->state.gfx.linked_dirty & BITFIELD_BIT(MESA_SHADER_##bit))
 
-static void
-hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
-                    enum agx_index_size index_size, bool restart,
-                    bool vertex_only);
 static void hk_flush_shaders(struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs(struct hk_cmd_buffer *cmd);
 static uint64_t hk_heap(struct hk_cmd_buffer *cmd);
@@ -120,8 +116,6 @@ hk_sw_tess_program(enum tess_primitive_mode prim, enum poly_tess_mode mode)
    }
 }
 
-static void hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd);
-static bool hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd);
 static uint64_t hk_upload_geometry_params(struct hk_cmd_buffer *cmd,
                                           struct agx_draw draw);
 static void hk_init_tess_params(struct hk_cmd_buffer *cmd,
@@ -129,507 +123,7 @@ static void hk_init_tess_params(struct hk_cmd_buffer *cmd,
 static void hk_flush_dynamic_state(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint32_t draw_id,
    struct agx_draw draw, bool ordinary_draw_path,
-   bool *g17p_native_bind_tail_emitted_out, bool prepare_only);
-
-static void hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd);
-
-static inline bool
-hk_gfx_transformed(const struct hk_graphics_state *gfx)
-{
-   return gfx->shaders[MESA_SHADER_GEOMETRY] ||
-          gfx->shaders[MESA_SHADER_TESS_EVAL];
-}
-
-void
-hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
-{
-   /* Preparation is speculative: the draw re-derives and validates everything
-    * it consumes, so a refusal seen here must not fail the command buffer.
-    *
-    * A pushed descriptor set is uploaded first, so the root and every launch
-    * program naming the set are built for the address the draw will use. */
-   struct hk_descriptor_state *gfx_desc = &cmd->state.gfx.descriptors;
-   if (gfx_desc->push_dirty && hk_gfx_transformed(&cmd->state.gfx) &&
-       hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P &&
-       cmd->current_cs.gfx && cmd->state.gfx.shaders[MESA_SHADER_VERTEX] &&
-       cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT] &&
-       !vk_command_buffer_has_error(&cmd->vk))
-      hk_cmd_buffer_flush_push_descriptors(cmd, gfx_desc);
-
-   const VkResult prior_result = cmd->vk.record_result;
-   hk_cmd_prepare_bound_graphics_impl(cmd);
-   if (prior_result == VK_SUCCESS)
-      cmd->vk.record_result = VK_SUCCESS;
-}
-
-/* Bind-time preparation points the root's parameter-block fields at the
- * blocks it reserves for the next draw. A published root is immutable and
- * hk_cmd_buffer_prepare_graphics_root() keeps reusing the last one while the
- * root is clean, so a moved pointer must dirty it. Otherwise the second
- * transformed draw after a shader or pipeline change runs its VS/TCS/
- * tessellator/GS launches against the previous draw's root, i.e. the
- * previous draw's parameter blocks, and leaves its own unwritten
- * (shader_object.binding.swap_*, pipeline.*.dynamic_control_points.*). */
-static inline void
-hk_set_root_draw_ptr(struct hk_graphics_state *gfx, uint64_t *field,
-                     uint64_t value)
-{
-   if (*field != value) {
-      *field = value;
-      gfx->descriptors.root_dirty = true;
-   }
-}
-
-/* Everything hk_upload_usc_words() builds a fragment program from: the
- * shader and its linked program, the root (descriptor bindings reach the
- * program through it, and it moves when they change), the uniform-DMA set
- * base, the tile-buffer layout (tile size, sample size and count, spilling)
- * and whether blending reads the blend constant. A bind-time fragment
- * program is valid for exactly this key. */
-static inline struct hk_g17p_prepared_fragment_key
-hk_g17p_prepared_fragment_key(const struct hk_cmd_buffer *cmd,
-                              const struct hk_shader *fs,
-                              const struct hk_linked_shader *linked)
-{
-   const struct agx_tilebuffer_layout *tib = &cmd->state.gfx.render.tilebuffer;
-   return (struct hk_g17p_prepared_fragment_key){
-      .shader = fs,
-      .linked = linked,
-      .root = cmd->state.gfx.root,
-      .dma_set_base = hk_g17p_dma_set_base(cmd, fs),
-      .tile_size_px = tib->tile_size,
-      .sample_size_B = tib->sample_size_B,
-      .nr_samples = tib->nr_samples,
-      .spills = agx_tilebuffer_spills(tib),
-      .blend_constant = hk_cmd_uses_blend_constant(cmd),
-   };
-}
-
-static inline bool
-hk_g17p_prepared_fragment_key_equal(
-   const struct hk_g17p_prepared_fragment_key *a,
-   const struct hk_g17p_prepared_fragment_key *b)
-{
-   return a->shader == b->shader && a->linked == b->linked &&
-          a->root == b->root && a->dma_set_base == b->dma_set_base &&
-          a->tile_size_px == b->tile_size_px &&
-          a->sample_size_B == b->sample_size_B &&
-          a->nr_samples == b->nr_samples && a->spills == b->spills &&
-          a->blend_constant == b->blend_constant;
-}
-
-static void
-hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-
-   memset(&gfx->g17p_precomp, 0, sizeof(gfx->g17p_precomp));
-   gfx->g17p_sw_tess_batch = (struct hk_g17p_prepared_sw_tess_batch){0};
-   gfx->prepared_vertex_params_filled = false;
-   gfx->prepared_tess_params_filled = false;
-   gfx->prepared_geometry_params_filled = false;
-   gfx->prepared_vdm_state_update_valid = false;
-
-   /* Only geometry and tessellation state is prepared when it is bound: those
-    * draws reserve parameter blocks and compute launches that the draw then
-    * fills. Ordinary state is built by the draw alone. Preparing it here as
-    * well doubled the work whenever the application changed any state between
-    * the bind and the draw, which D3D translation layers do for nearly every
-    * draw. */
-   if (!hk_gfx_transformed(gfx) || !cmd->current_cs.gfx ||
-       !gfx->shaders[MESA_SHADER_VERTEX] ||
-       !gfx->shaders[MESA_SHADER_FRAGMENT] ||
-       vk_command_buffer_has_error(&cmd->vk))
-      return;
-
-   /* Shader-object binding and rendering/subpass changes can retain the
-    * previous rasterization state. Do not combine a known attachment layout with a
-    * different sample count while preparing a speculative epilog: its spill
-    * decision and rebuilt tilebuffer layout would describe different draws.
-    * HK does not expose mixed-sample rendering. Unknown/attachmentless sample
-    * counts keep the existing path; the authoritative draw handles them.
-    */
-   const unsigned samples =
-      cmd->vk.dynamic_graphics_state.ms.rasterization_samples;
-   const unsigned render_samples = gfx->render.tilebuffer.nr_samples;
-   const bool samples_incomplete = dev->dev.chip == AGX_CHIP_G17P && samples &&
-                                   render_samples && samples != render_samples;
-
-   /* Shaders, dynamic state and attachment formats are now all known. Build
-    * the exact non-indexed immutable variants outside vkCmdDraw*. An indexed
-    * draw gets its width-specific VS variant when its index buffer is bound;
-    * the draw path still performs the authoritative lookup. */
-   hk_prelink_graphics(cmd, false, AGX_INDEX_SIZE_U16,
-                       cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable,
-                       samples_incomplete);
-
-   /* The vertex link is independent of framebuffer sample state. Preserve
-    * that useful preparation, but wait for coherent state before preparing
-    * the fragment link or any combined shader/root state.
-    */
-   if (samples_incomplete)
-      return;
-
-   /* Preparation must consume the same complete shader/root state as the
-    * authoritative draw path.  In particular, transformed pipelines use the
-    * post-tessellation or geometry raster variant for TES/GS -> FS UVS
-    * assignment.  Uploading either native program before this flush sees the
-    * previous (often zero) linked_varyings table and can both refuse a legal
-    * program and snapshot stale root indices.  Keep dirtiness intact: the
-    * draw remains authoritative and merely exact-matches these prepared
-    * objects when state has not changed. */
-   hk_flush_shaders(cmd);
-   if (vk_command_buffer_has_error(&cmd->vk))
-      return;
-
-   /* Shader objects bind stages one call at a time, so preparation can see
-    * an evaluation shader before (or after unbinding) its control shader.
-    * No draw can run with half a tessellation pair, and the transformed
-    * state below derives from both (hk_init_tess_params() reads the control
-    * shader's outputs): there is nothing to prepare yet. */
-   if (!gfx->shaders[MESA_SHADER_TESS_CTRL] !=
-       !gfx->shaders[MESA_SHADER_TESS_EVAL])
-      return;
-
-   if (!hk_cmd_ensure_geometry_heap(cmd))
-      return;
-
-   /* A tessellation/geometry draw necessarily records compute work before the
-    * graphics stream. Allocate both ordered streams while binding state, not
-    * in the first draw, preserving the established list order. */
-   (void)hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
-   struct hk_cs *post_gfx =
-      hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.post_gfx, true);
-   if (post_gfx &&
-       !util_dynarray_ensure_cap(&post_gfx->imm_writes,
-                                 sizeof(struct libagx_imm_write))) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-      return;
-   }
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return;
-
-   if (gfx->shaders[MESA_SHADER_TESS_CTRL] &&
-       gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-      struct hk_shader *tes =
-         hk_any_variant(gfx->shaders[MESA_SHADER_TESS_EVAL]);
-      struct hk_shader *tcs =
-         hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-      gfx->tess.info =
-         hk_tess_info_merge(tes->info.tess.info, tcs->info.tess.info);
-      gfx->tess.prim = gfx->tess.info.points
-         ? MESA_PRIM_POINTS
-         : gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES
-              ? MESA_PRIM_LINES
-              : MESA_PRIM_TRIANGLES;
-   }
-
-   if (!gfx->prepared_vertex_params.gpu) {
-      gfx->prepared_vertex_params =
-         hk_pool_alloc(cmd, sizeof(struct poly_vertex_params), 8);
-      if (!gfx->prepared_vertex_params.gpu)
-         return;
-   }
-   hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.vertex_params,
-                        gfx->prepared_vertex_params.gpu);
-   hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.vertex_outputs,
-                        hk_bound_sw_vs(gfx)->b.info.outputs);
-
-   /* The transformed vertex-parameter block is mostly shader-owned state.
-    * Initialize that immutable base while binding the shaders, leaving the
-    * actual draw to patch only counts, index metadata and the output address
-    * immediately before publication. */
-   const uint32_t vertex_wg_size[3] = {64, 1, 1};
-   poly_vertex_params_init(gfx->prepared_vertex_params.cpu,
-                           gfx->descriptors.root.draw.vertex_outputs,
-                           vertex_wg_size);
-   gfx->prepared_vertex_params_filled = true;
-
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-       !gfx->prepared_tess_params.gpu) {
-      gfx->prepared_tess_params =
-         hk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
-      if (!gfx->prepared_tess_params.gpu)
-         return;
-      hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.tess_params,
-                           gfx->prepared_tess_params.gpu);
-   }
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-      hk_init_tess_params(cmd, gfx->prepared_tess_params.cpu);
-      gfx->prepared_tess_params_filled = true;
-   }
-
-   /* Software tessellation always hands geometry a five-u32 indexed indirect
-    * draw. Reserve that exact record while bound state is complete, so the
-    * GS-setup argument block can name a stable command-buffer-owned address.
-    * The record is still filled by the tessellator and is unreachable until
-    * the matching draw publishes its launches. */
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-       !gfx->prepared_tess_out_draws.gpu) {
-      gfx->prepared_tess_out_draws =
-         hk_pool_alloc(cmd, 5 * sizeof(uint32_t), 4);
-      if (!gfx->prepared_tess_out_draws.gpu)
-         return;
-      gfx->tess.out_draws = gfx->prepared_tess_out_draws.gpu;
-   }
-
-   if (gfx->shaders[MESA_SHADER_GEOMETRY] &&
-       !gfx->prepared_geometry_params.gpu) {
-      gfx->prepared_geometry_params =
-         hk_pool_alloc(cmd, sizeof(struct poly_geometry_params), 8);
-      if (!gfx->prepared_geometry_params.gpu)
-         return;
-      hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.geometry_params,
-                           gfx->prepared_geometry_params.gpu);
-   }
-
-   /* With tessellation feeding geometry, the GS parameter block is indirect
-    * and therefore independent of the API draw counts.  Build that immutable
-    * block now when transform feedback and its queries are inactive.  Keep
-    * ownership of the reserved GPU record so the real draw only publishes it. */
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-       gfx->shaders[MESA_SHADER_GEOMETRY] && !gfx->xfb_enabled &&
-       gfx->prepared_geometry_params.gpu) {
-      bool no_xfb_queries = true;
-      for (unsigned i = 0; i < ARRAY_SIZE(gfx->xfb_query); ++i)
-         no_xfb_queries &= gfx->xfb_query[i] == 0;
-
-      if (no_xfb_queries) {
-         const struct agx_ptr reserved = gfx->prepared_geometry_params;
-         const uint64_t params = hk_upload_geometry_params(
-            cmd, (struct agx_draw){.b = agx_3d(1, 1, 1)});
-         if (params == reserved.gpu &&
-             !vk_command_buffer_has_error(&cmd->vk)) {
-            gfx->prepared_geometry_params = reserved;
-            gfx->prepared_geometry_params_filled = true;
-         }
-      }
-   }
-
-   struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
-   struct hk_linked_shader *sw_vs_linked =
-      sw_vs->only_linked ?: gfx->linked[MESA_SHADER_VERTEX];
-
-   if (sw_vs_linked->b.uses_base_param && !gfx->prepared_draw_params.gpu) {
-      gfx->prepared_draw_params = hk_pool_alloc(cmd, 8, 4);
-      if (!gfx->prepared_draw_params.gpu)
-         return;
-      gfx->draw_params = gfx->prepared_draw_params.gpu;
-   }
-   if (sw_vs->b.info.uses_draw_id && !gfx->prepared_draw_id.gpu) {
-      gfx->prepared_draw_id = hk_pool_alloc(cmd, 4, 4);
-      if (!gfx->prepared_draw_id.gpu)
-         return;
-      gfx->draw_id_ptr = gfx->prepared_draw_id.gpu;
-   }
-
-   if (!hk_cmd_buffer_prepare_graphics_root(cmd))
-      return;
-
-   /* Complete the draw-independent root and linkage while BeginRendering has
-    * the exact shader/render/dynamic state.  This preparation advances no
-    * stream and clears no Vulkan dirtiness; the draw remains authoritative.
-    * Mutable tessellation/geometry records already have stable addresses and
-    * are filled only by the real draw. */
-   bool prepared_tail_emitted = false;
-   hk_flush_dynamic_state(cmd, cmd->current_cs.gfx, 0,
-                          (struct agx_draw){.b = agx_3d(1, 1, 1)}, true,
-                          &prepared_tail_emitted, true);
-   if (vk_command_buffer_has_error(&cmd->vk))
-      return;
-
-   struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_linked_shader *linked_hw_vs =
-      hw_vs == sw_vs ? gfx->linked[MESA_SHADER_VERTEX] : hw_vs->only_linked;
-   if (!gfx->prepared_vertex_usc) {
-      gfx->prepared_vertex_usc =
-         hk_prepare_usc_words(cmd, hw_vs, linked_hw_vs,
-                              &gfx->prepared_vertex_compact_root);
-      if (gfx->prepared_vertex_usc) {
-         gfx->prepared_vertex_shader = hw_vs;
-         gfx->prepared_vertex_linked = linked_hw_vs;
-         gfx->prepared_vertex_root = gfx->root;
-         gfx->prepared_vertex_draw_params = gfx->draw_params;
-         gfx->prepared_vertex_draw_id_ptr = gfx->draw_id_ptr;
-         gfx->prepared_vertex_dma_set_base = hk_g17p_dma_set_base(cmd, hw_vs);
-      }
-   }
-
-   struct hk_shader *fs = hk_bound_fs(cmd);
-   if (!gfx->prepared_fragment_usc) {
-      gfx->prepared_fragment_usc =
-         hk_upload_usc_words(cmd, fs, gfx->linked[MESA_SHADER_FRAGMENT]);
-      gfx->prepared_fragment_key = hk_g17p_prepared_fragment_key(
-         cmd, fs, gfx->linked[MESA_SHADER_FRAGMENT]);
-   }
-
-   hk_g17p_prepare_native_bind_tail(cmd);
-   (void)hk_g17p_prepare_vdm_state_update(cmd);
-
-   hk_g17p_prewarm_linked_compute_program(cmd, sw_vs, sw_vs_linked, true);
-   hk_g17p_prepare_graphics_dispatch(
-      cmd, sw_vs, sw_vs_linked, 0, agx_workgroup(1, 1, 1),
-      &gfx->g17p_dispatch.tess_vs);
-
-   struct hk_api_shader *tcs_api = gfx->shaders[MESA_SHADER_TESS_CTRL];
-   if (tcs_api) {
-      struct hk_shader *tcs = hk_only_variant(tcs_api);
-      hk_g17p_prewarm_linked_compute_program(cmd, tcs, tcs->only_linked, true);
-      hk_g17p_prepare_graphics_dispatch(
-         cmd, tcs, tcs->only_linked, 0, agx_workgroup(1, 1, 1),
-         &gfx->g17p_dispatch.tess_tcs);
-   }
-
-   struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
-   if (gs) {
-      struct hk_shader *pre_gs_vs = hk_bound_sw_vs_before_gs(gfx);
-      struct hk_linked_shader *pre_gs_vs_linked =
-         pre_gs_vs->only_linked ?: gfx->linked[MESA_SHADER_VERTEX];
-      hk_g17p_prewarm_linked_compute_program(cmd, pre_gs_vs,
-                                              pre_gs_vs_linked, true);
-      const uint64_t vertex_grid = gfx->prepared_vertex_params.gpu +
-         offsetof(struct poly_vertex_params, grid);
-      const uint64_t geometry_grid = gfx->prepared_geometry_params.gpu +
-         offsetof(struct poly_geometry_params, grid);
-      hk_g17p_prepare_graphics_dispatch(
-         cmd, pre_gs_vs, pre_gs_vs_linked, vertex_grid,
-         agx_workgroup(64, 1, 1), &gfx->g17p_dispatch.gs_vs);
-
-      struct hk_shader *variants[] = {
-         &gs->variants[HK_GS_VARIANT_RAST], hk_main_gs_variant(gs),
-         hk_count_gs_variant(gs), hk_pre_gs_variant(gs),
-      };
-      for (unsigned i = 0; i < ARRAY_SIZE(variants); ++i) {
-         hk_g17p_prewarm_linked_compute_program(
-            cmd, variants[i], variants[i]->only_linked, true);
-      }
-      hk_g17p_prepare_graphics_dispatch(
-         cmd, hk_main_gs_variant(gs), hk_main_gs_variant(gs)->only_linked,
-         geometry_grid,
-         agx_workgroup(64, 1, 1), &gfx->g17p_dispatch.gs_main);
-      hk_g17p_prepare_graphics_dispatch(
-         cmd, hk_count_gs_variant(gs), hk_count_gs_variant(gs)->only_linked,
-         geometry_grid, agx_workgroup(64, 1, 1),
-         &gfx->g17p_dispatch.gs_count);
-      hk_g17p_prepare_graphics_dispatch(
-         cmd, hk_pre_gs_variant(gs), hk_pre_gs_variant(gs)->only_linked, 0,
-         agx_workgroup(1, 1, 1),
-         &gfx->g17p_dispatch.gs_pre);
-
-      /* A software-tessellation draw always becomes this exact indexed
-       * indirect draw before entering GS setup. Prepare the full 72-byte
-       * libagx argument identity now, but publish nothing until the actual
-       * draw exact-matches it. Any state change takes the ordinary fallback. */
-      if (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-          gfx->prepared_tess_out_draws.gpu) {
-         const uint64_t heap = hk_heap(cmd);
-         const struct agx_draw prepared_draw = agx_draw_indexed_indirect(
-            gfx->prepared_tess_out_draws.gpu, dev->heap->va->addr,
-            dev->heap->size, AGX_INDEX_SIZE_U32, false);
-         struct hk_shader *count = hk_count_gs_variant(gs);
-         const struct libagx_gs_setup_indirect_args gsi = {
-            .heap = heap,
-            .index_buffer = prepared_draw.index_buffer,
-            .draw = prepared_draw.b.ptr,
-            .vp = gfx->descriptors.root.draw.vertex_params,
-            .p = gfx->descriptors.root.draw.geometry_params,
-            .vs_outputs = pre_gs_vs->b.info.outputs,
-            .index_size_B = agx_index_size_to_B(prepared_draw.index_size),
-            .index_buffer_range_el = agx_draw_index_range_el(prepared_draw),
-            .prim = hk_gs_in_prim(cmd),
-            .is_prefix_summing = count->info.gs.prefix_sum,
-            .max_indices = count->info.gs.max_indices,
-            .shape = count->info.gs.shape,
-         };
-         hk_g17p_prepare_precomp(cmd, LIBAGX_GS_SETUP_INDIRECT, &gsi,
-                                 sizeof(gsi),
-                                 &gfx->g17p_precomp.gs_setup);
-      }
-   }
-
-   hk_g17p_prewarm_indirect_helpers(cmd);
-
-   /* Software tessellation's three libagx launches have immutable argument
-    * bytes once rendering state is fixed. Publish those exact command-local
-    * loaders now; the first draw then only appends their launch records. */
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-      const uint64_t state = gfx->descriptors.root.draw.tess_params;
-      const enum libagx_program count_program = hk_sw_tess_program(
-         gfx->tess.info.mode, POLY_TESS_MODE_COUNT);
-      const enum libagx_program final_program = hk_sw_tess_program(
-         gfx->tess.info.mode, POLY_TESS_MODE_WITH_COUNTS);
-      if (count_program == LIBAGX_NUM_PROGRAMS ||
-          final_program == LIBAGX_NUM_PROGRAMS)
-         return;
-
-      hk_g17p_prepare_precomp(cmd, count_program, &state, sizeof(state),
-                              &gfx->g17p_precomp.tess_count);
-
-      const uint64_t c_prims = gs ? 0 : hk_pipeline_stat_addr(
-         cmd, VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT);
-      const uint64_t c_invs = gs ? 0 : hk_pipeline_stat_addr(
-         cmd, VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT);
-      const struct libagx_prefix_sum_tess_args prefix = {
-         .p = state,
-         .c_prims = c_prims,
-         .c_invs = c_invs,
-      };
-      hk_g17p_prepare_precomp(
-         cmd, LIBAGX_PREFIX_SUM_TESS(c_prims || c_invs), &prefix,
-         sizeof(prefix), &gfx->g17p_precomp.tess_prefix);
-      hk_g17p_prepare_precomp(cmd, final_program, &state, sizeof(state),
-                              &gfx->g17p_precomp.tess_final);
-
-      const bool complete = gfx->g17p_dispatch.tess_vs.valid &&
-         gfx->g17p_dispatch.tess_tcs.valid &&
-         gfx->g17p_precomp.tess_count.valid &&
-         gfx->g17p_precomp.tess_prefix.valid &&
-         gfx->g17p_precomp.tess_final.valid;
-      if (complete) {
-         const void *templates[HK_G17P_SW_TESS_BATCH_LAUNCHES] = {
-            gfx->g17p_dispatch.tess_vs.direct_template,
-            gfx->g17p_dispatch.tess_tcs.direct_template,
-            gfx->g17p_precomp.tess_count.direct_template,
-            gfx->g17p_precomp.tess_prefix.direct_template,
-            gfx->g17p_precomp.tess_final.direct_template,
-         };
-         for (unsigned i = 0; i < ARRAY_SIZE(templates); ++i)
-            memcpy(gfx->g17p_sw_tess_batch.bytes[i], templates[i],
-                   AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE);
-         gfx->g17p_sw_tess_batch.vs = hk_bound_sw_vs(gfx);
-         gfx->g17p_sw_tess_batch.tcs =
-            hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-         gfx->g17p_sw_tess_batch.dynamic_generation =
-            cmd->vk.dynamic_graphics_state.generation;
-         gfx->g17p_sw_tess_batch.descriptor_generation =
-            gfx->descriptors.generation;
-         gfx->g17p_sw_tess_batch.root = gfx->root;
-         gfx->g17p_sw_tess_batch.draw_params = gfx->draw_params;
-         gfx->g17p_sw_tess_batch.draw_id_ptr = gfx->draw_id_ptr;
-         gfx->g17p_sw_tess_batch.state = state;
-         gfx->g17p_sw_tess_batch.c_prims = c_prims;
-         gfx->g17p_sw_tess_batch.c_invs = c_invs;
-         gfx->g17p_sw_tess_batch.count_program = count_program;
-         gfx->g17p_sw_tess_batch.final_program = final_program;
-         if (gs) {
-            struct hk_shader *main = hk_main_gs_variant(gs);
-            gfx->g17p_sw_tess_batch.gs_vs =
-               hk_bound_sw_vs_before_gs(gfx);
-            gfx->g17p_sw_tess_batch.gs_main = main;
-            gfx->g17p_sw_tess_batch.includes_gs =
-               gfx->g17p_precomp.gs_setup.valid &&
-               gfx->g17p_dispatch.gs_vs.indirect_local_valid &&
-               gfx->g17p_dispatch.gs_main.indirect_local_valid &&
-               !main->info.gs.xfb;
-         }
-         gfx->g17p_sw_tess_batch.valid = true;
-      }
-
-   }
-
-}
+   bool *g17p_native_bind_tail_emitted_out);
 
 /* CTS coverage of indirect draws is pretty bad, so it's helpful to be able to
  * get some extra smoke testing.
@@ -2673,7 +2167,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
-   cmd->state.gfx.g17p_index_prepared.valid = false;
 
    hk_sync_begin_rendering(
       cmd, pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT);
@@ -3210,9 +2703,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
        */
       cs->cr.process_empty_tiles = resolved_clear;
    }
-
-   hk_cmd_prepare_bound_graphics(cmd);
-
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3471,53 +2961,7 @@ hk_upload_vertex_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 
    desc->root.draw.vertex_outputs = params.outputs;
 
-   struct agx_ptr target = gfx->prepared_vertex_params.gpu
-      ? gfx->prepared_vertex_params
-      : hk_pool_alloc(cmd, sizeof(params), 8);
-   if (!target.cpu)
-      return 0;
-   memcpy(target.cpu, &params, sizeof(params));
-   gfx->prepared_vertex_params = (struct agx_ptr){0};
-   gfx->prepared_vertex_params_filled = false;
-   return target.gpu;
-}
-
-/* Finalize the prepared transformed-VS block without rebuilding its immutable
- * shader-owned fields.  Direct draws author only the count/index tuple and an
- * output allocation; indirect/restart setup remains on the general path. */
-static uint64_t
-hk_g17p_fill_prepared_direct_vertex_params(struct hk_cmd_buffer *cmd,
-                                           struct agx_draw draw)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-
-   if (agx_is_indirect(draw.b) || draw.restart ||
-       !gfx->prepared_vertex_params_filled ||
-       !gfx->prepared_vertex_params.gpu ||
-       !gfx->prepared_vertex_params.cpu)
-      return 0;
-
-   struct poly_vertex_params *params = gfx->prepared_vertex_params.cpu;
-   poly_vertex_params_set_draw(params, draw.b.count[0], draw.b.count[1]);
-
-   if (draw.indexed) {
-      const unsigned index_size_B = agx_index_size_to_B(draw.index_size);
-      const unsigned range_el = agx_draw_index_range_el(draw);
-      params->index_buffer = hk_index_buffer(agx_draw_index_buffer(draw),
-                                             range_el, 0, index_size_B);
-      params->index_size_B = index_size_B;
-      params->index_buffer_range_el = range_el;
-   }
-
-   const unsigned vb_size = poly_tcs_in_size(
-      draw.b.count[0] * draw.b.count[1], params->outputs);
-   params->output_buffer = vb_size ? hk_pool_alloc(cmd, vb_size, 4).gpu
-                                   : AGX_SCRATCH_PAGE_ADDRESS;
-
-   const uint64_t target = gfx->prepared_vertex_params.gpu;
-   gfx->prepared_vertex_params = (struct agx_ptr){0};
-   gfx->prepared_vertex_params_filled = false;
-   return target;
+   return hk_pool_upload(cmd, &params, sizeof(params), 8);
 }
 
 static enum mesa_prim
@@ -3669,15 +3113,7 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
          hk_pool_upload(cmd, count->info.gs.topology, gsi->max_indices * 4, 4);
    }
 
-   struct agx_ptr target = gfx->prepared_geometry_params.gpu
-      ? gfx->prepared_geometry_params
-      : hk_pool_alloc(cmd, sizeof(params), 8);
-   if (!target.cpu)
-      return 0;
-   memcpy(target.cpu, &params, sizeof(params));
-   gfx->prepared_geometry_params = (struct agx_ptr){0};
-   gfx->prepared_geometry_params_filled = false;
-   return target.gpu;
+   return hk_pool_upload(cmd, &params, sizeof(params), 8);
 }
 
 static void
@@ -3726,20 +3162,7 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
                       struct agx_draw draw)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct agx_ptr prepared_out_draws = gfx->prepared_tess_out_draws;
 
-   /* Always derive the state-dependent fields from this draw's state. The
-    * bind-time fill in hk_cmd_prepare_bound_graphics() runs from
-    * cmd_bind_shaders(), which vk_graphics_pipeline_cmd_bind() calls before
-    * it applies the pipeline's static dynamic state, so it saw a stale
-    * patch_control_points (0 on the first bind of a command buffer) and
-    * domain origin; both, and pipeline-statistics queries, may also change
-    * between bind and draw. With input_patch_size == 0 the first draw after a
-    * bind published nr_patches == 0 and a 20-byte TCS/count/coord blob while
-    * its launches, sized from the live state, still covered every patch, so
-    * the TCS output overran unrelated command-pool memory (e.g. the next
-    * draw's vertex and tessellation parameter blocks). Only tessellation
-    * draws reach this, and later draws of a binding already re-ran it. */
    hk_init_tess_params(cmd, out);
 
    uint32_t draw_stride_el = 5;
@@ -3768,23 +3191,17 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
       out->patches_per_instance = in_patches;
       out->coord_allocs = blob.gpu + patch_coord_offs;
       out->nr_patches = unrolled_patches;
-      out->out_draws = prepared_out_draws.gpu
-         ? prepared_out_draws.gpu
-         : blob.gpu + draw_offs;
+      out->out_draws = blob.gpu + draw_offs;
       out->counts = blob.gpu + count_offs;
    } else {
       /* Allocate 3x indirect global+local grids for VS/TCS/tess */
       uint32_t grid_stride = sizeof(uint32_t) * 6;
       gfx->tess.grids = hk_pool_alloc(cmd, grid_stride * 3, 4).gpu;
 
-      out->out_draws = prepared_out_draws.gpu
-         ? prepared_out_draws.gpu
-         : hk_pool_alloc(cmd, draw_stride_B, 4).gpu;
+      out->out_draws = hk_pool_alloc(cmd, draw_stride_B, 4).gpu;
    }
 
    gfx->tess.out_draws = out->out_draws;
-   gfx->prepared_tess_out_draws = (struct agx_ptr){0};
-   gfx->prepared_tess_params_filled = false;
 }
 
 static struct hk_api_shader *
@@ -3932,14 +3349,6 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    unsigned count_words = count->info.gs.count_words;
    struct agx_workgroup wg = agx_workgroup(64, 1, 1);
 
-   /* The software-tessellation fast path may already have appended exact GS
-    * setup, vertex and main launches in the same unpublished transaction.
-    * Only the final VDM draw description remains to be selected here. */
-   if (gfx->g17p_sw_tess_batch.gs_emitted) {
-      gfx->g17p_sw_tess_batch.gs_emitted = false;
-      assert(agx_is_indirect(draw.b));
-      goto gs_result;
-   }
 
    if (false /* TODO */)
       perf_debug(cmd, "Transform feedbck");
@@ -3975,13 +3384,9 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          gsi.index_buffer_range_el = agx_draw_index_range_el(draw);
       }
 
-      if (!hk_dispatch_prepared_precomp_g17p(
-             cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
-             LIBAGX_GS_SETUP_INDIRECT, &gsi, sizeof(gsi),
-             &gfx->g17p_precomp.gs_setup)) {
-         libagx_gs_setup_indirect_struct(cmd, agx_1d(1),
-                                         AGX_BARRIER_ALL | AGX_PREGFX, gsi);
-      }
+      libagx_gs_setup_indirect_struct(cmd, agx_1d(1),
+                                      AGX_BARRIER_ALL | AGX_PREGFX, gsi);
+
 
       grid_vs = agx_grid_indirect_local(
          vertex_params + offsetof(struct poly_vertex_params, grid));
@@ -3995,9 +3400,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Launch the vertex shader first */
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      if (!hk_dispatch_prepared_g17p_native(
-             cmd, cs, vs, &gfx->g17p_dispatch.gs_vs, grid_vs, wg))
-         hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, wg);
+      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, wg);
    } else {
       hk_reserve_scratch(cmd, cs, vs);
       hk_dispatch_with_usc(
@@ -4026,9 +3429,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* If we need counts, launch the count shader and prefix sum the results. */
       if (count_words) {
          perf_debug(dev, "Geometry shader count");
-         if (!hk_dispatch_prepared_g17p_native(
-                cmd, cs, count, &gfx->g17p_dispatch.gs_count, grid_gs, wg))
-            hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg);
+         hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg);
       }
 
       if (count->info.gs.prefix_sum) {
@@ -4039,19 +3440,13 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       /* Transform feedback / query program */
       perf_debug(dev, "Transform feedback / geometry query");
-      if (!hk_dispatch_prepared_g17p_native(
-             cmd, cs, pre_gs, &gfx->g17p_dispatch.gs_pre, agx_1d(1),
-             agx_workgroup(1, 1, 1)))
-         hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
-                                     agx_workgroup(1, 1, 1));
+      hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
+                                  agx_workgroup(1, 1, 1));
    }
 
    /* Pre-rast geometry shader */
-   if (!hk_dispatch_prepared_g17p_native(
-          cmd, cs, main, &gfx->g17p_dispatch.gs_main, grid_gs, wg))
-      hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg);
+   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg);
 
-gs_result:
    if (poly_gs_indexed(count->info.gs.shape)) {
       enum agx_index_size index_size =
          agx_translate_index_size(poly_gs_index_size(count->info.gs.shape));
@@ -4078,220 +3473,6 @@ gs_result:
    }
 }
 
-static inline void
-hk_g17p_materialize_prepared_indirect(
-   struct hk_g17p_prepared_dispatch *prepared, uint64_t grid,
-   struct agx_workgroup local_size)
-{
-   memset(prepared->indirect_local_geometry.cpu, 0,
-          AGX3_G17P_INDIRECT_GEOMETRY_SIZE);
-   struct hk_root_descriptor_table *helper_root =
-      prepared->indirect_local_helper_root.cpu;
-   helper_root->cs.group_count_addr = grid;
-   helper_root->cs.grid_helper_geometry_addr =
-      prepared->indirect_local_geometry.gpu;
-   helper_root->cs.grid_helper_sparse_map_addr = 0;
-   helper_root->cs.grid_helper_local_size[0] = local_size.x;
-   helper_root->cs.grid_helper_local_size[1] = local_size.y;
-   helper_root->cs.grid_helper_local_size[2] = local_size.z;
-   prepared->indirect_local_consumed = true;
-}
-
-static __attribute__((hot)) struct agx_draw
-hk_g17p_emit_prepared_sw_tess_batch(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *vs,
-   struct hk_shader *tcs, struct agx_grid grid_vs, struct agx_grid grid_tcs,
-   struct agx_grid grid_tess, uint64_t state, uint64_t c_prims,
-   uint64_t c_inv, enum libagx_program count_program,
-   enum libagx_program final_program)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct hk_g17p_prepared_sw_tess_batch *batch =
-      &gfx->g17p_sw_tess_batch;
-
-   if (!batch->valid || batch->vs != vs || batch->tcs != tcs ||
-       batch->dynamic_generation !=
-          cmd->vk.dynamic_graphics_state.generation ||
-       batch->descriptor_generation != gfx->descriptors.generation ||
-       batch->root != gfx->root || batch->draw_params != gfx->draw_params ||
-       batch->draw_id_ptr != gfx->draw_id_ptr || batch->state != state ||
-       batch->c_prims != c_prims || batch->c_invs != c_inv ||
-       batch->count_program != count_program ||
-       batch->final_program != final_program ||
-       hk_cmd_buffer_device(cmd)->dev.chip != AGX_CHIP_G17P ||
-       cs->type != HK_CS_CDM ||
-       agx_is_indirect(grid_vs) || agx_is_indirect(grid_tcs) ||
-       agx_is_indirect(grid_tess) || !grid_vs.count[0] ||
-       !grid_vs.count[1] || !grid_vs.count[2] || !grid_tcs.count[0] ||
-       !grid_tcs.count[1] || !grid_tcs.count[2] || !grid_tess.count[0] ||
-       !grid_tess.count[1] || !grid_tess.count[2])
-      return (struct agx_draw){0};
-
-   const struct agx_draw tess_draw = agx_draw_indexed_indirect(
-      gfx->tess.out_draws, hk_cmd_buffer_device(cmd)->heap->va->addr,
-      hk_cmd_buffer_device(cmd)->heap->size, AGX_INDEX_SIZE_U32, false);
-   bool emit_gs = false;
-   struct hk_g17p_prepared_dispatch *pgs_vs =
-      &gfx->g17p_dispatch.gs_vs;
-   struct hk_g17p_prepared_dispatch *pgs_main =
-      &gfx->g17p_dispatch.gs_main;
-   const struct hk_g17p_prepared_precomp *pgs_setup =
-      &gfx->g17p_precomp.gs_setup;
-   struct hk_shader *gs_vs = NULL;
-   struct hk_shader *gs_main = NULL;
-   const struct agx_workgroup gs_local = agx_workgroup(64, 1, 1);
-   const uint64_t vertex_grid =
-      gfx->descriptors.root.draw.vertex_params +
-      offsetof(struct poly_vertex_params, grid);
-   const uint64_t geometry_grid =
-      gfx->descriptors.root.draw.geometry_params +
-      offsetof(struct poly_geometry_params, grid);
-
-   struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
-   if (batch->includes_gs && gs) {
-      gs_vs = hk_bound_sw_vs_before_gs(gfx);
-      gs_main = hk_main_gs_variant(gs);
-      const VkQueryPipelineStatisticFlagBits gs_queries =
-         VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT |
-         VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT |
-         VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
-         VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT;
-      const bool xfb_or_queries =
-         gs_main->info.gs.xfb ||
-         (gfx->descriptors.root.draw.pipeline_stats_flags & gs_queries);
-      emit_gs = !xfb_or_queries && batch->gs_vs == gs_vs &&
-         batch->gs_main == gs_main && pgs_setup->valid &&
-         pgs_setup->idx == LIBAGX_GS_SETUP_INDIRECT &&
-         pgs_vs->indirect_local_valid &&
-         !pgs_vs->indirect_local_consumed &&
-         pgs_vs->indirect_local_grid == vertex_grid &&
-         pgs_main->indirect_local_valid &&
-         !pgs_main->indirect_local_consumed &&
-         pgs_main->indirect_local_grid == geometry_grid;
-   }
-
-   hk_reserve_scratch(cmd, cs, vs);
-   hk_reserve_scratch(cmd, cs, tcs);
-   if (emit_gs) {
-      hk_reserve_scratch(cmd, cs, gs_vs);
-      hk_reserve_scratch(cmd, cs, gs_main);
-   }
-   const size_t gs_bytes = emit_gs
-      ? AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE +
-           2 * AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE
-      : 0;
-   hk_ensure_cs_has_space(
-      cmd, cs, sizeof(gfx->g17p_sw_tess_batch.bytes) + gs_bytes + 64);
-   if (vk_command_buffer_has_error(&cmd->vk))
-      return (struct agx_draw){0};
-
-   uint8_t *out = cs->current;
-   memcpy(out, gfx->g17p_sw_tess_batch.bytes,
-          sizeof(gfx->g17p_sw_tess_batch.bytes));
-   const struct agx_grid grids[HK_G17P_SW_TESS_BATCH_LAUNCHES] = {
-      grid_vs, grid_tcs, grid_tess, agx_1d(1024), grid_tess,
-   };
-   const struct agx_workgroup locals[2] = {
-      agx_workgroup(64, 1, 1),
-      agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1),
-   };
-   const uint8_t graphics_barrier = 0;
-   for (unsigned launch = 0;
-        launch < HK_G17P_SW_TESS_BATCH_LAUNCHES; ++launch) {
-      uint8_t *record =
-         out + launch * AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE;
-      for (unsigned axis = 0; axis < 3; ++axis)
-         agx3_cmdstream_store_le32(record + 16 + axis * 4,
-                                    grids[launch].count[axis]);
-      if (launch < ARRAY_SIZE(locals)) {
-         const uint32_t local[3] = {
-            locals[launch].x, locals[launch].y, locals[launch].z,
-         };
-         for (unsigned axis = 0; axis < 3; ++axis)
-            agx3_cmdstream_store_le32(record + 28 + axis * 4, local[axis]);
-      }
-      agx3_cmdstream_store_le32(
-         record + AGX3_CDM_DIRECT_LAUNCH_SIZE,
-         agx3_cdm_barrier_word(launch < 2 ? graphics_barrier : 0x5));
-   }
-
-   uint8_t *cursor = out + sizeof(gfx->g17p_sw_tess_batch.bytes);
-   cs->strong_flush_end = cursor;
-   cs->weak_barrier_end = NULL;
-   cs->stats.cmds += HK_G17P_SW_TESS_BATCH_LAUNCHES;
-
-   if (emit_gs) {
-      hk_g17p_materialize_prepared_indirect(pgs_vs, vertex_grid, gs_local);
-      hk_g17p_materialize_prepared_indirect(pgs_main, geometry_grid,
-                                             gs_local);
-      memcpy(cursor, pgs_setup->direct_template,
-             AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE);
-      agx3_cmdstream_store_le32(
-         cursor + AGX3_CDM_DIRECT_LAUNCH_SIZE,
-         agx3_cdm_barrier_word(0x5));
-      cursor += AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE;
-      cs->strong_flush_end = cursor;
-      memcpy(cursor, pgs_vs->indirect_local_template,
-             AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE);
-      cursor += AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE;
-      memcpy(cursor, pgs_main->indirect_local_template,
-             AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE);
-      cursor += AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE;
-      cs->weak_barrier_end = cursor;
-      cs->stats.cmds += 3;
-      gfx->g17p_sw_tess_batch.gs_emitted = true;
-   }
-
-   cs->current = cursor;
-   return tess_draw;
-}
-
-static __attribute__((hot)) struct agx_draw
-hk_g17p_launch_prepared_sw_tess_gs(struct hk_cmd_buffer *cmd,
-                                   struct hk_cs *cs,
-                                   struct agx_draw draw)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
-
-   if (dev->dev.chip != AGX_CHIP_G17P || agx_is_indirect(draw.b) || !gs ||
-       !gfx->shaders[MESA_SHADER_TESS_EVAL] ||
-       !gfx->g17p_sw_tess_batch.valid ||
-       !gfx->g17p_sw_tess_batch.includes_gs)
-      return (struct agx_draw){0};
-
-   /* Pipeline statistics add a real extra dispatch which is deliberately not
-    * part of the ordinary prepared transaction. */
-   if (hk_stat_enabled(hk_pipeline_stat_addr(
-          cmd,
-          VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT)))
-      return (struct agx_draw){0};
-
-   struct hk_shader *vs = hk_bound_sw_vs(gfx);
-   struct hk_shader *tcs =
-      hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-   const uint32_t input_patch_size =
-      cmd->vk.dynamic_graphics_state.ts.patch_control_points;
-   if (!input_patch_size)
-      return (struct agx_draw){0};
-
-   const uint32_t patches = draw.b.count[0] / input_patch_size;
-   struct agx_grid grid_vs = draw.b;
-   struct agx_grid grid_tcs = draw.b;
-   grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
-   const struct agx_grid grid_tess = agx_1d(patches * draw.b.count[1]);
-   const uint64_t state = gfx->descriptors.root.draw.tess_params;
-   const enum libagx_program count_program =
-      hk_sw_tess_program(gfx->tess.info.mode, POLY_TESS_MODE_COUNT);
-   const enum libagx_program final_program =
-      hk_sw_tess_program(gfx->tess.info.mode, POLY_TESS_MODE_WITH_COUNTS);
-
-   return hk_g17p_emit_prepared_sw_tess_batch(
-      cmd, cs, vs, tcs, grid_vs, grid_tcs, grid_tess, state, 0, 0,
-      count_program, final_program);
-}
-
 static __attribute__((hot)) struct agx_draw
 hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                struct agx_draw draw, uint64_t c_prims, uint64_t c_inv)
@@ -4307,7 +3488,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t input_patch_size = dyn->ts.patch_control_points;
    uint64_t state = gfx->descriptors.root.draw.tess_params;
    struct hk_tess_info info = gfx->tess.info;
-   bool prepared_vs = false, prepared_tcs = false;
 
    perf_debug(cmd, "Tessellation");
 
@@ -4357,30 +3537,12 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   const enum libagx_program count_program =
-      hk_sw_tess_program(info.mode, POLY_TESS_MODE_COUNT);
-   const enum libagx_program final_program =
-      hk_sw_tess_program(info.mode, POLY_TESS_MODE_WITH_COUNTS);
-   struct agx_draw batched = hk_g17p_emit_prepared_sw_tess_batch(
-      cmd, cs, vs, tcs, grid_vs, grid_tcs, grid_tess, state, c_prims, c_inv,
-      count_program, final_program);
-   if (batched.b.ptr)
-      return batched;
-
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      prepared_vs = hk_dispatch_prepared_g17p_native(
-         cmd, cs, vs, &gfx->g17p_dispatch.tess_vs, grid_vs,
-         agx_workgroup(64, 1, 1));
-      if (!prepared_vs)
-         hk_dispatch_with_local_size(cmd, cs, vs, grid_vs,
-                                     agx_workgroup(64, 1, 1));
-      prepared_tcs = hk_dispatch_prepared_g17p_native(
-         cmd, cs, tcs, &gfx->g17p_dispatch.tess_tcs, grid_tcs,
+      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs,
+                                  agx_workgroup(64, 1, 1));
+      hk_dispatch_with_local_size(
+         cmd, cs, tcs, grid_tcs,
          agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
-      if (!prepared_tcs)
-         hk_dispatch_with_local_size(
-            cmd, cs, tcs, grid_tcs,
-            agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
    } else {
       /* Legacy launches do not reserve scratch in hk_dispatch_with_usc(). */
       hk_reserve_scratch(cmd, cs, vs);
@@ -4397,33 +3559,13 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
-   if (!hk_dispatch_prepared_precomp_g17p(
-          cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, count_program, &state,
-          sizeof(state), &gfx->g17p_precomp.tess_count)) {
-      libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
-                        info.mode, POLY_TESS_MODE_COUNT, state);
-   }
-
-   const struct libagx_prefix_sum_tess_args prefix = {
-      .p = state,
-      .c_prims = c_prims,
-      .c_invs = c_inv,
-   };
-   const enum libagx_program prefix_program =
-      LIBAGX_PREFIX_SUM_TESS(c_prims || c_inv);
-   if (!hk_dispatch_prepared_precomp_g17p(
-          cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, prefix_program,
-          &prefix, sizeof(prefix), &gfx->g17p_precomp.tess_prefix))
-      libagx_prefix_sum_tess(cmd, agx_1d(1024),
-                             AGX_BARRIER_ALL | AGX_PREGFX, state, c_prims,
-                             c_inv, c_prims || c_inv);
-
-   if (!hk_dispatch_prepared_precomp_g17p(
-          cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, final_program, &state,
-          sizeof(state), &gfx->g17p_precomp.tess_final)) {
-      libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
-                        info.mode, POLY_TESS_MODE_WITH_COUNTS, state);
-   }
+   libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
+                     info.mode, POLY_TESS_MODE_COUNT, state);
+   libagx_prefix_sum_tess(cmd, agx_1d(1024),
+                          AGX_BARRIER_ALL | AGX_PREGFX, state, c_prims,
+                          c_inv, c_prims || c_inv);
+   libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX,
+                     info.mode, POLY_TESS_MODE_WITH_COUNTS, state);
 
    return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
                                     dev->heap->size, AGX_INDEX_SIZE_U32, false);
@@ -5864,11 +5006,6 @@ translate_object_type(enum mesa_prim topology)
       return AGX_OBJECT_TYPE_TRIANGLE;
 }
 
-/* What bind-time preparation records when the bound state has no hardware
- * primitive yet (see hk_g17p_prepare_native_bind_tail()). Not a value of
- * enum agx_primitive, so no prepared bind tail ever matches it. */
-#define HK_G17P_NO_HW_TOPOLOGY ((enum agx_primitive)0xff)
-
 static enum agx_primitive
 translate_hw_primitive_topology(enum mesa_prim prim)
 {
@@ -5997,36 +5134,12 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if (!fs || !linked_fs)
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   /* Bind-time preparation leaves its fragment program behind whenever the
-    * bind tail it was prepared for already matched (or preparation stopped
-    * before building one). Consume it only while every input it was built
-    * from is unchanged: after a fragment shader swap with no other state
-    * change, the next tail would otherwise launch the previous fragment
-    * shader, and after a render pass with a different tile-buffer layout,
-    * a program built for the old one. */
-   bool prepared_fragment_exact = false;
-   if (gfx->prepared_fragment_usc) {
-      const struct hk_g17p_prepared_fragment_key key =
-         hk_g17p_prepared_fragment_key(cmd, fs, linked_fs);
-      prepared_fragment_exact =
-         hk_g17p_prepared_fragment_key_equal(&key,
-                                             &gfx->prepared_fragment_key);
-   }
-   const uint64_t fragment_program = prepared_fragment_exact
-      ? gfx->prepared_fragment_usc
-      : hk_upload_usc_words(cmd, fs, linked_fs);
-   gfx->prepared_fragment_usc = 0;
+   const uint64_t fragment_program = hk_upload_usc_words(cmd, fs, linked_fs);
    if (!fragment_program)
       return hk_g17p_bind_tail_refused(__LINE__);
    if ((fragment_program & UINT64_C(0x3f)) != 0 ||
        fragment_program >= (UINT64_C(1) << 48))
       return hk_g17p_bind_tail_refused(__LINE__);
-
-   /* No hardware primitive to describe (bind-time preparation, see
-    * hk_g17p_prepare_native_bind_tail()). The prepared fragment program is
-    * consumed above all the same; it was prepared for this binding only. */
-   if (gfx->topology == HK_G17P_NO_HW_TOPOLOGY)
-      return false;
 
    /* Every input below except the fragment stage program is identical to the
     * last successful build: only the root, descriptor or vertex-buffer
@@ -6761,168 +5874,6 @@ hk_provoking_selector(const struct vk_dynamic_graphics_state *dyn,
    if (topology == AGX_PRIMITIVE_TRIANGLE_FAN)
       return 1;
    return 0;
-}
-
-/* Resolve the draw-independent inputs needed by the first HAL200 state update
- * while recording is still outside vkCmdDraw*. Nothing here advances a
- * control stream. The allocation and tail remain unreachable by firmware
- * until hk_g17p_publish_native_bind_tail() runs in the draw path. */
-static void
-hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct vk_dynamic_graphics_state *dyn =
-      &cmd->vk.dynamic_graphics_state;
-   struct hk_g17p_prepared_bind_tail *prepared = &gfx->g17p_bind_tail;
-
-   if (dev->dev.chip != AGX_CHIP_G17P || !cmd->current_cs.gfx ||
-       !gfx->linked[MESA_SHADER_VERTEX] ||
-       !gfx->linked[MESA_SHADER_FRAGMENT] ||
-       vk_command_buffer_has_error(&cmd->vk))
-      return;
-
-   /* Bind-time preparation is speculative and may run while the bound state
-    * cannot be drawn yet: a patch-list topology still set while a meta
-    * operation binds its vertex and fragment shaders, say. That is no
-    * hardware primitive, and translate_hw_primitive_topology() treats it as
-    * unreachable (undefined behaviour without assertions). Record that there
-    * is none instead; nothing else here changes. In particular the steps
-    * below still run, since the draw relies on several of them (the
-    * tile-buffer sample count, the root's never-in-shader bit, the VS->FS
-    * varying linkage), and hk_g17p_build_native_bind_tail() still consumes
-    * the fragment program prepared for this binding before it declines.
-    * Skipping those (sweep2 0005) left that program to a later binding's
-    * bind tail and failed 245 tessellation render-pass cases on hardware.
-    * Optimised builds already behaved this way: the lookup the compiler made
-    * of the unreachable switch read a value that is no hardware primitive,
-    * and the build declined at the object-type field. */
-   const enum mesa_prim prim = hk_rast_prim(cmd);
-   const bool hw_prim =
-      prim <= MESA_PRIM_TRIANGLE_FAN && prim != MESA_PRIM_LINE_LOOP;
-   gfx->topology = hw_prim ? translate_hw_primitive_topology(prim)
-                           : HK_G17P_NO_HW_TOPOLOGY;
-   gfx->object_type = translate_object_type(prim);
-
-   unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
-
-   if (provoking != gfx->provoking) {
-      gfx->provoking = provoking;
-      gfx->dirty |= HK_DIRTY_PROVOKING;
-      gfx->descriptors.root.draw.provoking = provoking;
-      gfx->descriptors.root_dirty = true;
-   }
-
-   if (dyn->ms.rasterization_samples && !gfx->render.tilebuffer.nr_samples) {
-      agx_tilebuffer_set_samples(&gfx->render.tilebuffer,
-                                 dyn->ms.rasterization_samples);
-      gfx->render.g17p_rt0_layout_supported =
-         hk_agx3_g17p_rt0_tile_layout_supported(&gfx->render.tilebuffer);
-      if (!gfx->render.g17p_rt0_layout_supported)
-         return;
-      cmd->current_cs.gfx->tib = gfx->render.tilebuffer;
-   }
-
-   struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_shader *fs = hk_bound_fs(cmd);
-   const bool has_z =
-      gfx->render.depth_att.vk_format != VK_FORMAT_UNDEFINED;
-   const bool force_never_in_shader =
-      has_z && dyn->ds.depth.test_enable &&
-      dyn->ds.depth.compare_op == VK_COMPARE_OP_NEVER &&
-      fs->info.fs.writes_memory;
-   if (gfx->descriptors.root.draw.force_never_in_shader !=
-       force_never_in_shader) {
-      gfx->descriptors.root.draw.force_never_in_shader =
-         force_never_in_shader;
-      gfx->descriptors.root_dirty = true;
-   }
-
-   /* Publication only copies this command-buffer-owned immutable record and
-    * its inline viewport payloads. Reuse it when every input read by the
-    * builder, including the render identity, is still exact. */
-   if (hk_g17p_prepared_bind_tail_matches(cmd, prepared))
-      return;
-
-   struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
-   const unsigned bindings = linked_fs->b.cf.nr_bindings;
-   if (bindings) {
-      const size_t linkage_size =
-         AGX_CF_BINDING_HEADER_LENGTH + bindings * AGX_CF_BINDING_LENGTH;
-      struct agx_ptr t = hk_pool_usc_alloc(cmd, linkage_size, 64);
-      if (!t.cpu)
-         return;
-
-      agx_link_varyings_vs_fs(
-         t.cpu, &gfx->linked_varyings, hw_vs->info.uvs.user_size,
-         &linked_fs->b.cf, gfx->provoking, 0, &gfx->generate_primitive_id);
-      gfx->varyings = t.gpu;
-   } else {
-      gfx->varyings = 0;
-      gfx->generate_primitive_id = false;
-   }
-   gfx->dirty |= HK_DIRTY_VARYINGS;
-
-   if (!hk_g17p_build_native_bind_tail(cmd, prepared))
-      return;
-}
-
-/* Encode the complete immutable first-draw VDM state record while shader and
- * render binding work is already in progress.  The prepared transaction is
- * deliberately limited to the default direct, non-indexed path; indexed,
- * indirect and diagnostic context rotation retain the authoritative encoder. */
-static bool
-hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_cs *cs = cmd->current_cs.gfx;
-   struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   gfx->prepared_vdm_state_update_valid = false;
-
-   if (dev->dev.chip != AGX_CHIP_G17P || !cs || !hw_vs ||
-       !gfx->prepared_vertex_usc ||
-       !gfx->prepared_fast_link_vs.valid ||
-       gfx->prepared_fast_link_vs.indexed ||
-       gfx->prepared_fast_link_vs.restart ||
-       !cs->agx3_active_context_selector_valid)
-      return false;
-
-   const struct agx_vdm_state_update_program_info *program =
-      &hw_vs->agx3_vdm_state_update;
-   const uint64_t pipeline_program = gfx->prepared_vertex_usc;
-   const bool pipeline_va_valid =
-      pipeline_program < (UINT64_C(1) << 48) &&
-      (pipeline_program & UINT64_C(0x3f)) == 0;
-   const bool complete_program =
-      pipeline_va_valid &&
-      hk_agx3_vdm_live_source_layout(
-         program, cs->agx3_active_context_selector_valid, true) ==
-         AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
-   if (!complete_program)
-      return false;
-
-   struct agx_vdm_state_update_draw_info info = {
-      .source_layout =
-         AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT,
-      .draw_path = AGX_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
-      .rasterization_enabled =
-         !hk_rast_discard(cmd) ||
-         hk_g17p_xfb_vertex_side_effects(cmd, hw_vs),
-      .raw_provoking_selector = gfx->provoking,
-      .template_info = program->template_info,
-   };
-   info.template_info.pipeline = pipeline_program;
-   info.template_info.raw_vs_output_flag_6 = gfx->generate_primitive_id;
-   info.template_info.raw_vs_output_count_1_extra =
-      gfx->generate_primitive_id;
-   info.template_info.raw_active_context_selector =
-      cs->agx3_raw_active_context_selector;
-
-   gfx->prepared_vdm_state_update_valid =
-      hk_agx3_encode_vdm_state_update_draw(
-         dev->dev.chip, &info, &gfx->prepared_vdm_state_update);
-   return gfx->prepared_vdm_state_update_valid;
 }
 
 /*
@@ -7737,286 +6688,6 @@ hk_prelink_pipeline_fragment(struct hk_device *dev,
       hk_get_fast_linked(dev, fs, &key);
 }
 
-static void
-hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
-                    enum agx_index_size index_size, bool restart,
-                    bool vertex_only)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   if (!gfx->shaders[MESA_SHADER_VERTEX] ||
-       !gfx->shaders[MESA_SHADER_FRAGMENT] ||
-       vk_command_buffer_has_error(&cmd->vk))
-      return;
-
-   struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
-   struct hk_fast_link_key_vs vs_key;
-   hk_fill_fast_link_key_vs(cmd, sw_vs, hw_vs, indexed, index_size, restart,
-                            &vs_key);
-   if (!hk_update_fast_linked(cmd, sw_vs, &vs_key))
-      return;
-
-   gfx->prepared_fast_link_vs = (struct hk_prepared_fast_link_vs){
-      .sw_vs = sw_vs,
-      .hw_vs = hw_vs,
-      .dynamic_generation = cmd->vk.dynamic_graphics_state.generation,
-      .index_size = index_size,
-      .indexed = indexed,
-      .restart = restart,
-      .valid = true,
-   };
-
-   if (!vertex_only) {
-      struct hk_shader *fs = hk_bound_fs(cmd);
-      struct hk_fast_link_key_fs fs_key;
-      if (hk_fill_fast_link_key_fs(cmd, fs, hw_vs, &fs_key, false))
-         (void)hk_update_fast_linked(cmd, fs, &fs_key);
-   }
-}
-
-static inline bool
-hk_prelinked_vs_matches(const struct hk_cmd_buffer *cmd,
-                        const struct hk_shader *sw_vs,
-                        const struct hk_shader *hw_vs,
-                        const struct agx_draw draw)
-{
-   const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct hk_prepared_fast_link_vs *prepared =
-      &gfx->prepared_fast_link_vs;
-
-   return prepared->valid && gfx->fast_link_vs.valid &&
-          gfx->linked[MESA_SHADER_VERTEX] != NULL &&
-          prepared->sw_vs == sw_vs && prepared->hw_vs == hw_vs &&
-          prepared->dynamic_generation ==
-             cmd->vk.dynamic_graphics_state.generation &&
-          prepared->indexed == draw.indexed &&
-          (!draw.indexed ||
-           (prepared->index_size == draw.index_size &&
-           prepared->restart == draw.restart));
-}
-
-/* Consume a complete unpublished G17P state transaction without entering the
- * 20 KiB general dynamic-state builder.  This is deliberately an exact fast
- * path: binding/render setup has already derived every immutable field, while
- * this function only fills draw-authored records and publishes the prepared
- * state.  A mismatch returns before mutating any single-use allocation. */
-static __attribute__((hot, noinline)) bool
-hk_g17p_flush_prepared_dynamic_state(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint32_t draw_id,
-   struct agx_draw draw, bool ordinary_draw_path,
-   bool *g17p_native_bind_tail_emitted_out)
-{
-   /* Nothing was prepared since the last draw consumed it: the common case
-    * for every draw after the first of a binding, answered before any of the
-    * state below is looked up. */
-   if (!cmd->state.gfx.prepared_vertex_usc)
-      return false;
-
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_descriptor_state *desc = &gfx->descriptors;
-   struct vk_dynamic_graphics_state *dyn =
-      &cmd->vk.dynamic_graphics_state;
-   struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
-   struct hk_linked_shader *linked_vs = gfx->linked[MESA_SHADER_VERTEX];
-   struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
-   const bool transformed = gfx->shaders[MESA_SHADER_TESS_EVAL] ||
-                            gfx->shaders[MESA_SHADER_GEOMETRY] ||
-                            (linked_vs && linked_vs->sw_indexing);
-
-   if (dev->dev.chip != AGX_CHIP_G17P || !ordinary_draw_path ||
-       desc->root_dirty || !gfx->prepared_vertex_usc ||
-       /* A set-sourced UNIFORM_DMA span names the set bound at preparation. */
-       gfx->prepared_vertex_dma_set_base != hk_g17p_dma_set_base(cmd, hw_vs) ||
-       !gfx->prepared_vdm_state_update_valid || !linked_vs ||
-       !linked_fs || !hk_prelinked_vs_matches(cmd, sw_vs, hw_vs, draw) ||
-       !hk_g17p_prepared_bind_tail_matches(cmd, &gfx->g17p_bind_tail) ||
-       (transformed &&
-        (!gfx->prepared_vertex_params.gpu ||
-         desc->root.draw.vertex_params !=
-            gfx->prepared_vertex_params.gpu)) ||
-       (gfx->shaders[MESA_SHADER_TESS_EVAL] &&
-        (!gfx->prepared_tess_params.gpu ||
-         desc->root.draw.tess_params != gfx->prepared_tess_params.gpu)) ||
-       (gfx->shaders[MESA_SHADER_GEOMETRY] &&
-        (!gfx->prepared_geometry_params.gpu ||
-         desc->root.draw.geometry_params !=
-            gfx->prepared_geometry_params.gpu)) ||
-       (!agx_is_indirect(draw.b) && linked_vs->b.uses_base_param &&
-        !gfx->prepared_draw_params.gpu) ||
-       (sw_vs->b.info.uses_draw_id && !gfx->prepared_draw_id.gpu))
-      return false;
-
-   *g17p_native_bind_tail_emitted_out = false;
-   cs->g17p_state_publications++;
-   uint8_t *out = cs->current;
-
-   if (linked_vs->b.uses_base_param) {
-      if (agx_is_indirect(draw.b)) {
-         gfx->draw_params = draw.b.ptr +
-            (draw.indexed
-                ? offsetof(VkDrawIndexedIndirectCommand, vertexOffset)
-                : offsetof(VkDrawIndirectCommand, firstVertex));
-         gfx->g17p_draw_params_host_valid = false;
-      } else {
-         const uint32_t params[2] = {
-            draw.indexed ? draw.index_bias : draw.start,
-            draw.start_instance,
-         };
-         memcpy(gfx->g17p_draw_params_value, params, sizeof(params));
-         memcpy(gfx->prepared_draw_params.cpu, params, sizeof(params));
-         gfx->draw_params = gfx->prepared_draw_params.gpu;
-         gfx->prepared_draw_params = (struct agx_ptr){0};
-         gfx->g17p_draw_params_host_valid = true;
-      }
-   } else {
-      gfx->draw_params = 0;
-      gfx->g17p_draw_params_host_valid = false;
-   }
-
-   if (sw_vs->b.info.uses_draw_id) {
-      gfx->g17p_draw_id_value = draw_id;
-      gfx->g17p_draw_id_host_valid = true;
-      memcpy(gfx->prepared_draw_id.cpu, &draw_id, 4);
-      gfx->draw_id_ptr = gfx->prepared_draw_id.gpu;
-      gfx->prepared_draw_id = (struct agx_ptr){0};
-   } else {
-      gfx->draw_id_ptr = 0;
-      gfx->g17p_draw_id_host_valid = false;
-   }
-
-   if (IS_DIRTY(MS_SAMPLE_LOCATIONS) || IS_DIRTY(MS_SAMPLE_LOCATIONS_ENABLE) ||
-       IS_DIRTY(MS_RASTERIZATION_SAMPLES)) {
-      const uint32_t ctrl = dyn->ms.sample_locations_enable
-         ? hk_pack_ppp_multisamplectrl(dyn->ms.sample_locations)
-         : hk_default_sample_positions(dyn->ms.rasterization_samples);
-      const bool dont_commit =
-         cmd->in_meta || dyn->ms.rasterization_samples == 0;
-      if (!cs->has_sample_locations) {
-         cs->ppp_multisamplectl = ctrl;
-         cs->has_sample_locations |= !dont_commit;
-      } else {
-         assert(dont_commit || cs->ppp_multisamplectl == ctrl);
-      }
-      assert(desc->root.draw.ppp_multisamplectl == ctrl);
-   }
-
-   if (transformed) {
-      const uint64_t old_outputs = desc->root.draw.vertex_outputs;
-      uint64_t vertex_params = 0;
-      if (!agx_is_indirect(draw.b) && !draw.restart &&
-          gfx->prepared_vertex_params_filled)
-         vertex_params =
-            hk_g17p_fill_prepared_direct_vertex_params(cmd, draw);
-      else
-         vertex_params = hk_upload_vertex_params(cmd, draw);
-      if (!vertex_params || desc->root.draw.vertex_params != vertex_params ||
-          desc->root.draw.vertex_outputs != old_outputs) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return true;
-      }
-   }
-
-   struct agx_ptr tess_args = {0};
-   if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-      tess_args = gfx->prepared_tess_params;
-      gfx->prepared_tess_params = (struct agx_ptr){0};
-      hk_upload_tess_params(cmd, tess_args.cpu, draw);
-   }
-
-   if (gfx->shaders[MESA_SHADER_GEOMETRY]) {
-      uint64_t geometry_params;
-      if (gfx->prepared_geometry_params_filled && !gfx->xfb_enabled &&
-          !gfx->xfb_query[0] && !gfx->xfb_query[1] &&
-          !gfx->xfb_query[2] && !gfx->xfb_query[3]) {
-         geometry_params = gfx->prepared_geometry_params.gpu;
-         gfx->prepared_geometry_params = (struct agx_ptr){0};
-         gfx->prepared_geometry_params_filled = false;
-      } else {
-         geometry_params = hk_upload_geometry_params(cmd, draw);
-      }
-      if (!geometry_params ||
-          desc->root.draw.geometry_params != geometry_params) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return true;
-      }
-   }
-
-   assert(!desc->root_dirty);
-   hk_reserve_scratch(cmd, cs, hw_vs);
-
-   struct hk_linked_shader *linked_hw_vs =
-      hw_vs == sw_vs ? linked_vs : hw_vs->only_linked;
-   const bool vertex_program_exact =
-      gfx->prepared_vertex_shader == hw_vs &&
-      gfx->prepared_vertex_linked == linked_hw_vs;
-   bool vertex_exact = vertex_program_exact &&
-                       gfx->prepared_vertex_root == gfx->root;
-   /* The launcher's compact root record names the root and the per-draw
-    * parameter sources. A transformed (tessellation/geometry) draw uploads
-    * its parameters above and so republishes the root after preparation;
-    * that is a pointer change like any other, not a different program.
-    * Retarget the record instead of refusing the draw (shader-object
-    * vert/tesc/tese[/geom]/frag pipelines failed every draw this way). */
-   if (vertex_program_exact &&
-       (!vertex_exact ||
-        gfx->prepared_vertex_draw_params != gfx->draw_params ||
-        gfx->prepared_vertex_draw_id_ptr != gfx->draw_id_ptr)) {
-      vertex_exact = hk_retarget_prepared_usc_root(
-         cmd, hw_vs, linked_hw_vs, gfx->prepared_vertex_usc,
-         gfx->prepared_vertex_compact_root);
-   }
-   if (!vertex_exact) {
-      /* Nothing could be retargeted: the bind-time launcher has no compact
-       * root record (it came from the exact-last cache or the inline
-       * composer, which embed the preparation-time root and draw pointers),
-       * or it names another program. Nothing references it yet. Publish a
-       * launcher for this draw's root and pointers, as the authoritative
-       * builder does, and encode the prepared VDM state update around it
-       * instead of failing the command buffer. */
-      const uint64_t program = hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
-      if (program && !vk_command_buffer_has_error(&cmd->vk)) {
-         gfx->prepared_vertex_usc = program;
-         gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
-         vertex_exact = hk_g17p_prepare_vdm_state_update(cmd);
-      }
-   }
-   if (!vertex_exact) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return true;
-   }
-
-   gfx->prepared_vertex_usc = 0;
-   gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
-
-   memcpy(out, gfx->prepared_vdm_state_update.bytes,
-          gfx->prepared_vdm_state_update.length);
-   out += gfx->prepared_vdm_state_update.length;
-   gfx->prepared_vdm_state_update_valid = false;
-
-   /* The exact predicate above already validated the full tail identity.
-    * Publish it directly instead of walking the large snapshot a second time
-    * in hk_g17p_emit_native_bind_tail(). */
-   if (!hk_g17p_publish_native_bind_tail(
-          cmd, cs, &out, &gfx->g17p_bind_tail)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      cs->current = out;
-      return true;
-   }
-   *g17p_native_bind_tail_emitted_out = true;
-   cs->current = out;
-
-   vk_dynamic_graphics_state_clear_dirty(dyn);
-   gfx->shaders_dirty = 0;
-   gfx->linked_dirty = 0;
-   gfx->dirty = 0;
-   desc->root_dirty = false;
-   return true;
-}
-
 /*
  * Does this draw republish render state, or does it reuse what the previous
  * draw in the same stream latched?
@@ -8241,8 +6912,7 @@ static __attribute__((noinline)) void
 hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             uint32_t draw_id, struct agx_draw draw,
                             bool ordinary_draw_path,
-                            bool *g17p_native_bind_tail_emitted_out,
-                            bool prepare_only)
+                            bool *g17p_native_bind_tail_emitted_out)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    const struct hk_rendering_state *render = &cmd->state.gfx.render;
@@ -8274,8 +6944,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Past this point the draw installs a fresh vertex-program template, a
     * fresh HAL200 bind tail and a fresh draw-state selector, all into the
     * stream's one render-state context. Count it for fault traces. */
-   if (!prepare_only)
-      cs->g17p_state_publications++;
+   cs->g17p_state_publications++;
 
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
@@ -8287,29 +6956,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                    IS_SHADER_DIRTY(GEOMETRY);
    bool vgt_dirty = IS_SHADER_DIRTY(VERTEX) || gt_dirty;
    bool fs_dirty = IS_SHADER_DIRTY(FRAGMENT);
-   struct hk_linked_shader *prepared_linked_vs =
-      gfx->linked[MESA_SHADER_VERTEX];
-   struct hk_linked_shader *prepared_linked_fs =
-      gfx->linked[MESA_SHADER_FRAGMENT];
-
-   /* BeginRendering / shader binding already ran this exact state through the
-    * authoritative builder without publishing it.  When every identity still
-    * matches the draw, skip re-deriving the immutable root/link/tail state and
-    * continue at the genuinely draw-dependent parameter fill.  Indirect
-    * values remain GPU-authored: the later block installs the descriptor VA,
-    * and the compact-root retarget only changes that VA before publication.
-    *
-    * Any intervening state, descriptor, shader, root, or indexed-form change
-    * misses this predicate and takes the complete path below. */
-   const bool g17p_prepared_exact =
-      dev->dev.chip == AGX_CHIP_G17P && !prepare_only &&
-      !desc->root_dirty && gfx->prepared_vertex_usc && prepared_linked_vs &&
-      prepared_linked_fs &&
-      hk_prelinked_vs_matches(cmd, sw_vs, hw_vs, draw) &&
-      hk_g17p_prepared_bind_tail_matches(cmd, &gfx->g17p_bind_tail);
-   if (g17p_prepared_exact)
-      goto g17p_draw_parameters;
-
    if (IS_DIRTY(CB_BLEND_CONSTANTS) &&
        memcmp(desc->root.draw.blend_constant, dyn->cb.blend_constants,
               sizeof(dyn->cb.blend_constants))) {
@@ -8405,8 +7051,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    if ((IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) ||
         IS_DIRTY(VI_BINDING_STRIDES) || IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) ||
-        vgt_dirty || !gfx->fast_link_vs.valid) &&
-       !hk_prelinked_vs_matches(cmd, sw_vs, hw_vs, draw)) {
+        vgt_dirty || !gfx->fast_link_vs.valid)) {
       struct hk_fast_link_key_vs key;
       hk_fill_fast_link_key_vs(cmd, sw_vs, hw_vs, draw.indexed,
                                draw.index_size, draw.restart, &key);
@@ -8492,7 +7137,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        !gfx->fast_link_fs.valid) {
 
       struct hk_fast_link_key_fs key;
-      if (!hk_fill_fast_link_key_fs(cmd, fs, hw_vs, &key, !prepare_only)) {
+      if (!hk_fill_fast_link_key_fs(cmd, fs, hw_vs, &key, true)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          cs->current = out;
          return;
@@ -8504,15 +7149,13 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-g17p_draw_parameters:
    /* If the vertex shader uses draw parameters, vertex uniforms are dirty every
     * draw. Fragment uniforms are unaffected.
     *
     * For a direct draw, we upload the draw parameters as-if indirect to
     * avoid keying to indirectness.
     */
-   if (!prepare_only &&
-       gfx->linked[MESA_SHADER_VERTEX]->b.uses_base_param) {
+   if (gfx->linked[MESA_SHADER_VERTEX]->b.uses_base_param) {
       if (agx_is_indirect(draw.b)) {
          gfx->draw_params = draw.b.ptr;
          gfx->g17p_draw_params_host_valid = false;
@@ -8530,58 +7173,42 @@ g17p_draw_parameters:
          };
          memcpy(gfx->g17p_draw_params_value, params, sizeof(params));
          gfx->g17p_draw_params_host_valid = true;
-
-         if (gfx->prepared_draw_params.gpu) {
-            memcpy(gfx->prepared_draw_params.cpu, params, sizeof(params));
-            gfx->draw_params = gfx->prepared_draw_params.gpu;
-            gfx->prepared_draw_params = (struct agx_ptr){0};
-         } else {
-            gfx->draw_params =
-               hk_pool_upload(cmd, params, sizeof(params), 4);
-         }
+         gfx->draw_params = hk_pool_upload(cmd, params, sizeof(params), 4);
       }
-   } else if (!prepare_only) {
+   } else {
       gfx->draw_params = 0;
       gfx->g17p_draw_params_host_valid = false;
    }
 
-   if (!prepare_only && sw_vs->b.info.uses_draw_id) {
+   if (sw_vs->b.info.uses_draw_id) {
       gfx->g17p_draw_id_value = draw_id;
       gfx->g17p_draw_id_host_valid = true;
       /* Uploaded as a whole dword: the native G17P uniform range that
        * publishes it is loaded in 32-bit units, so a two-byte allocation
        * would leave the upper half of the loaded dword reading whatever
        * followed it in the pool. The shader only consumes the low half. */
-      if (gfx->prepared_draw_id.gpu) {
-         memcpy(gfx->prepared_draw_id.cpu, &draw_id, 4);
-         gfx->draw_id_ptr = gfx->prepared_draw_id.gpu;
-         gfx->prepared_draw_id = (struct agx_ptr){0};
-      } else {
-         gfx->draw_id_ptr = hk_pool_upload(cmd, &draw_id, 4, 4);
-      }
-   } else if (!prepare_only) {
+      gfx->draw_id_ptr = hk_pool_upload(cmd, &draw_id, 4, 4);
+   } else {
       gfx->draw_id_ptr = 0;
       gfx->g17p_draw_id_host_valid = false;
    }
 
-   if (!g17p_prepared_exact) {
-      if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || gt_dirty) {
-         enum mesa_prim prim = hk_rast_prim(cmd);
+   if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || gt_dirty) {
+      enum mesa_prim prim = hk_rast_prim(cmd);
 
-         gfx->topology = translate_hw_primitive_topology(prim);
-         gfx->object_type = translate_object_type(prim);
-      }
+      gfx->topology = translate_hw_primitive_topology(prim);
+      gfx->object_type = translate_object_type(prim);
+   }
 
-      if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || IS_DIRTY(RS_PROVOKING_VERTEX)) {
-         unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
+   if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || IS_DIRTY(RS_PROVOKING_VERTEX)) {
+      unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
 
-         if (provoking != gfx->provoking) {
-            gfx->provoking = provoking;
-            gfx->dirty |= HK_DIRTY_PROVOKING;
+      if (provoking != gfx->provoking) {
+         gfx->provoking = provoking;
+         gfx->dirty |= HK_DIRTY_PROVOKING;
 
-            gfx->descriptors.root.draw.provoking = provoking;
-            gfx->descriptors.root_dirty = true;
-         }
+         gfx->descriptors.root.draw.provoking = provoking;
+         gfx->descriptors.root_dirty = true;
       }
    }
 
@@ -8624,14 +7251,14 @@ g17p_draw_parameters:
 
       bool dont_commit = cmd->in_meta || dyn->ms.rasterization_samples == 0;
 
-      if (!prepare_only && !cs->has_sample_locations) {
+      if ( !cs->has_sample_locations) {
          cs->ppp_multisamplectl = ctrl;
 
          /* If we're in vk_meta, do not commit to the sample locations yet.
           * vk_meta doesn't care, but the app will!
           */
          cs->has_sample_locations |= !dont_commit;
-      } else if (!prepare_only) {
+      } else {
          assert(dont_commit || cs->ppp_multisamplectl == ctrl);
       }
 
@@ -8685,7 +7312,7 @@ g17p_draw_parameters:
       gfx->dirty |= HK_DIRTY_VARYINGS;
    }
 
-   if (!prepare_only &&
+   if (
        (gfx->shaders[MESA_SHADER_TESS_EVAL] ||
         gfx->shaders[MESA_SHADER_GEOMETRY] || linked_vs->sw_indexing)) {
       const uint64_t old_outputs = desc->root.draw.vertex_outputs;
@@ -8698,20 +7325,15 @@ g17p_draw_parameters:
    }
 
    struct agx_ptr tess_args = {0};
-   if (!prepare_only && gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-      if (gfx->prepared_tess_params.gpu) {
-         tess_args = gfx->prepared_tess_params;
-         gfx->prepared_tess_params = (struct agx_ptr){0};
-      } else {
-         tess_args = hk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
-      }
+   if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
+      tess_args = hk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
       if (gfx->descriptors.root.draw.tess_params != tess_args.gpu) {
          gfx->descriptors.root.draw.tess_params = tess_args.gpu;
          gfx->descriptors.root_dirty = true;
       }
    }
 
-   if (!prepare_only && gfx->shaders[MESA_SHADER_GEOMETRY]) {
+   if (gfx->shaders[MESA_SHADER_GEOMETRY]) {
       const uint64_t geometry_params = hk_upload_geometry_params(cmd, draw);
       if (gfx->descriptors.root.draw.geometry_params != geometry_params) {
          gfx->descriptors.root.draw.geometry_params = geometry_params;
@@ -8738,16 +7360,6 @@ g17p_draw_parameters:
       hk_upload_tess_params(cmd, tess_args.cpu, draw);
    }
 
-   if (prepare_only) {
-      if (!gfx->root) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
-      }
-      gfx->descriptors.root_dirty = false;
-      hk_g17p_prepare_native_bind_tail(cmd);
-      return;
-   }
-
    /* Hardware dynamic state must be deferred until after the root and fast
     * linking, since it will use the root address and the linked shaders.
     */
@@ -8771,28 +7383,8 @@ g17p_draw_parameters:
 
       struct hk_linked_shader *linked_hw_vs =
          (hw_vs == sw_vs) ? linked_vs : hw_vs->only_linked;
-      bool prepared_vertex_exact =
-         gfx->prepared_vertex_usc &&
-         gfx->prepared_vertex_shader == hw_vs &&
-         gfx->prepared_vertex_linked == linked_hw_vs &&
-         gfx->prepared_vertex_root == gfx->root &&
-         gfx->prepared_vertex_dma_set_base ==
-            hk_g17p_dma_set_base(cmd, hw_vs);
-      const bool prepared_vertex_pointers_exact =
-         gfx->prepared_vertex_draw_params == gfx->draw_params &&
-         gfx->prepared_vertex_draw_id_ptr == gfx->draw_id_ptr;
-      if (prepared_vertex_exact && !prepared_vertex_pointers_exact) {
-         prepared_vertex_exact = hk_retarget_prepared_usc_root(
-            cmd, hw_vs, linked_hw_vs,
-            gfx->prepared_vertex_usc,
-            gfx->prepared_vertex_compact_root);
-      }
       const uint64_t pipeline_program =
-         prepared_vertex_exact
-            ? gfx->prepared_vertex_usc
-            : hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
-      gfx->prepared_vertex_usc = 0;
-      gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
+         hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
 
       switch (agx_chip_command_stream_generation(dev->dev.chip)) {
       case AGX_CS_GENERATION_AGX2:
@@ -8950,18 +7542,11 @@ static __attribute__((hot)) void
 hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                        uint32_t draw_id, struct agx_draw draw,
                        bool ordinary_draw_path,
-                       bool *g17p_native_bind_tail_emitted_out,
-                       bool prepare_only)
+                       bool *g17p_native_bind_tail_emitted_out)
 {
-   if (!prepare_only &&
-       hk_g17p_flush_prepared_dynamic_state(
-          cmd, cs, draw_id, draw, ordinary_draw_path,
-          g17p_native_bind_tail_emitted_out))
-      return;
-
    hk_flush_dynamic_state_slow(
       cmd, cs, draw_id, draw, ordinary_draw_path,
-      g17p_native_bind_tail_emitted_out, prepare_only);
+      g17p_native_bind_tail_emitted_out);
 }
 
 static bool
@@ -9268,7 +7853,7 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
                           ordinary_draw_path || g17p_transformed_path,
-                          g17p_native_bind_tail_emitted, false);
+                          g17p_native_bind_tail_emitted);
    return cs;
 }
 
@@ -9289,99 +7874,6 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
    /* TODO: check if necessary, blob does this */
    cmd->state.gfx.index.buffer.range =
       align(cmd->state.gfx.index.buffer.range, 4);
-
-   /* For geometry and tessellation, binding supplies the last component of
-    * the compute vertex stage's key, prepared like the rest of their state
-    * (hk_cmd_prepare_bound_graphics). This emits no GPU state and never
-    * clears Vulkan dirtiness. */
-   if (cmd->current_cs.gfx && hk_gfx_transformed(&cmd->state.gfx)) {
-      struct hk_graphics_state *gfx = &cmd->state.gfx;
-      const bool restart =
-         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
-
-      /* D3D translation layers rebind the index buffer before nearly every
-       * draw, usually with the same width, and then rebind descriptors, which
-       * invalidates anything prepared here. When this render pass already
-       * prepared this exact index key and the bind tail still matches the
-       * current state, the prelink and tail below would recompute exactly
-       * what exists; skip them. The draw path still verifies and rebuilds
-       * whatever later binds invalidate. */
-      const bool same_index_key =
-         gfx->g17p_index_prepared.valid &&
-         gfx->g17p_index_prepared.size == gfx->index.size &&
-         gfx->g17p_index_prepared.restart == restart &&
-         hk_g17p_prepared_bind_tail_matches(cmd, &gfx->g17p_bind_tail);
-      gfx->g17p_index_prepared.valid = true;
-      gfx->g17p_index_prepared.size = gfx->index.size;
-      gfx->g17p_index_prepared.restart = restart;
-
-      if (!same_index_key)
-         hk_prelink_graphics(cmd, true, gfx->index.size, restart, true);
-
-      /* Software tessellation/geometry runs the API vertex stage as compute
-       * before rasterization.  The index width is part of that stage's exact
-       * fast-link identity, so the non-indexed dispatch prepared at
-       * BeginRendering cannot be consumed after this bind.  Rebuild only the
-       * affected immutable dispatch template here, while the application is
-       * already establishing indexed state, instead of falling back to the
-       * general encoder inside the first indexed draw. */
-      struct hk_device *dev = hk_cmd_buffer_device(cmd);
-      /* Index buffers may be bound before shaders (or after unbinding
-       * them). Linked shader cache entries can still refer to the previous
-       * draw, so they do not prove that warm-up has live API shaders. */
-      if (dev->dev.chip == AGX_CHIP_G17P &&
-          gfx->shaders[MESA_SHADER_VERTEX] &&
-          gfx->shaders[MESA_SHADER_FRAGMENT] &&
-          !vk_command_buffer_has_error(&cmd->vk)) {
-         /* The indexed fast link also changes the vertex identity captured by
-          * the immutable HAL200 tail.  Refresh it alongside the dispatch so
-          * varying linkage and tail construction stay out of the first draw.
-          *
-          * Index binding prelinks only the vertex stage. Fragment selection
-          * or render state may have changed since the last complete binding,
-          * leaving a valid cache entry for a different fragment transaction.
-          * In particular, a sampled colour draw followed by a depth-only draw
-          * must not pair the old linked code with the new shader's metadata.
-          * Only refresh the tail when the complete fragment key is current;
-          * the draw resolves any incomplete binding before publishing it.
-          */
-         if (!same_index_key) {
-            struct hk_shader *fs = hk_bound_fs(cmd);
-            struct hk_fast_link_key_fs fs_key;
-            const bool fragment_exact =
-               gfx->fast_link_fs.valid &&
-               gfx->fast_link_fs.shader == fs &&
-               gfx->linked[MESA_SHADER_FRAGMENT] &&
-               hk_fill_fast_link_key_fs(cmd, fs, hk_bound_hw_vs(gfx),
-                                        &fs_key, false) &&
-               memcmp(&gfx->fast_link_fs.key, &fs_key, sizeof(fs_key)) == 0;
-            if (fragment_exact)
-               hk_g17p_prepare_native_bind_tail(cmd);
-            else
-               gfx->g17p_bind_tail.valid = false;
-         }
-
-         if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-            struct hk_shader *vs = hk_bound_sw_vs(gfx);
-            struct hk_linked_shader *linked =
-               vs->only_linked ?: gfx->linked[MESA_SHADER_VERTEX];
-
-            hk_g17p_prepare_graphics_dispatch(
-               cmd, vs, linked, 0, agx_workgroup(1, 1, 1),
-               &gfx->g17p_dispatch.tess_vs);
-         } else if (gfx->shaders[MESA_SHADER_GEOMETRY]) {
-            struct hk_shader *vs = hk_bound_sw_vs_before_gs(gfx);
-            struct hk_linked_shader *linked =
-               vs->only_linked ?: gfx->linked[MESA_SHADER_VERTEX];
-            const uint64_t grid = gfx->prepared_vertex_params.gpu +
-               offsetof(struct poly_vertex_params, grid);
-            hk_g17p_prepare_graphics_dispatch(
-               cmd, vs, linked, grid, agx_workgroup(64, 1, 1),
-               &gfx->g17p_dispatch.gs_vs);
-         }
-      }
-   }
-
 }
 
 void
@@ -9849,30 +8341,13 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
                       stat_c_prims, stat_c_inv);
       }
 
-      struct agx_draw prepared_tess_gs = {0};
-      if (tess && geom)
-         prepared_tess_gs =
-            hk_g17p_launch_prepared_sw_tess_gs(cmd, ccs, draw);
-      const bool prepared_tess_gs_emitted = prepared_tess_gs.b.ptr != 0;
-      if (prepared_tess_gs_emitted)
-         draw = prepared_tess_gs;
-
-      if (tess && !prepared_tess_gs_emitted) {
+      if (tess) {
          draw = hk_launch_tess(cmd, ccs, draw, geom ? 0 : stat_c_prims,
                                geom ? 0 : stat_c_inv);
       }
 
-      /* The prepared tessellation batch returns the tessellator's indexed
-       * draw, not the geometry shader's output draw, even when it appended
-       * the GS setup/vertex/main launches itself (gs_emitted). The GS
-       * prerast step must still run: with gs_emitted it only selects the
-       * rasterization draw (and consumes the flag); without it, the batch
-       * held tessellation only and the GS has not run at all. Skipping it
-       * rasterized the tessellator's index buffer through the GS rast
-       * program, so only part of patch 0 was drawn. */
-      if (geom) {
+      if (geom)
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
-      }
 
       if (adj) {
          assert(!geom && "geometry shaders handle adj directly");
@@ -10216,8 +8691,7 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
    if (gfx->shaders_dirty || gfx->linked_dirty || gfx->dirty ||
        desc->root_dirty || desc->push_dirty ||
        vk_dynamic_graphics_state_any_dirty(dyn) ||
-       !gfx->fast_link_vs.valid || !gfx->fast_link_fs.valid ||
-       gfx->prepared_vertex_usc)
+       !gfx->fast_link_vs.valid || !gfx->fast_link_fs.valid)
       return false;
 
    struct hk_api_shader *fs_obj = gfx->shaders[MESA_SHADER_FRAGMENT];
@@ -10301,13 +8775,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          const uint32_t draw_id_word = draw_id;
          gfx->g17p_draw_id_value = draw_id_word;
          gfx->g17p_draw_id_host_valid = true;
-         if (gfx->prepared_draw_id.gpu) {
-            memcpy(gfx->prepared_draw_id.cpu, &draw_id_word, 4);
-            gfx->draw_id_ptr = gfx->prepared_draw_id.gpu;
-            gfx->prepared_draw_id = (struct agx_ptr){0};
-         } else {
-            gfx->draw_id_ptr = hk_pool_upload(cmd, &draw_id_word, 4, 4);
-         }
+         gfx->draw_id_ptr = hk_pool_upload(cmd, &draw_id_word, 4, 4);
       } else {
          gfx->draw_id_ptr = 0;
          gfx->g17p_draw_id_host_valid = false;
@@ -10326,8 +8794,6 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       const uint64_t pipeline_program =
          hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
       gfx->g17p_vs_one_level = false;
-      gfx->prepared_vertex_usc = 0;
-      gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
       if (!hk_agx3_publish_vertex_state(
              cmd, cs, &out, hw_vs, pipeline_program, draw, true,

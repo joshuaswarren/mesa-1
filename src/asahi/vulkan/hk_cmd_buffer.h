@@ -78,67 +78,6 @@ struct hk_linked_shader;
 struct agx_usc_builder;
 struct vk_shader;
 
-/* Exact launch metadata selected while graphics state is prepared. Program
- * records, indirect helper roots and geometry blocks are command-buffer-owned
- * and remain unreachable by firmware until the matching draw copies the
- * launch bytes into its live stream. Mutable indirect backing is single-use. */
-struct hk_g17p_prepared_dispatch {
-   struct agx3_compute_program program;
-   uint8_t direct_template[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
-   uint8_t indirect_local_template
-      [AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE];
-   struct agx_ptr indirect_local_geometry;
-   struct agx_ptr indirect_local_helper_root;
-   struct hk_shader *shader;
-   struct hk_linked_shader *linked;
-   uint64_t root;
-   uint64_t draw_params;
-   uint64_t draw_id_ptr;
-   uint64_t indirect_local_grid;
-   uint32_t indirect_local_size[3];
-   bool indirect_local_valid;
-   bool indirect_local_consumed;
-   bool valid;
-};
-
-/* Exact command-buffer-owned precompiled launch selected while graphics state
- * is complete. Keep the key inline: the dynarray which owns the backing
- * loader may grow, so a hot-path pointer to one of its entries would be
- * unstable. The launch record itself is pointer-free. */
-#define HK_G17P_PREPARED_PRECOMP_DATA_MAX 72
-struct hk_g17p_prepared_precomp {
-   struct agx3_compute_program program;
-   struct agx_workgroup local_size;
-   enum libagx_program idx;
-   uint8_t data[HK_G17P_PREPARED_PRECOMP_DATA_MAX];
-   uint8_t direct_template[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
-   uint8_t data_size;
-   bool valid;
-};
-
-#define HK_G17P_SW_TESS_BATCH_LAUNCHES 5
-struct hk_g17p_prepared_sw_tess_batch {
-   uint8_t bytes[HK_G17P_SW_TESS_BATCH_LAUNCHES]
-                [AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
-   struct hk_shader *vs;
-   struct hk_shader *tcs;
-   struct hk_shader *gs_vs;
-   struct hk_shader *gs_main;
-   uint64_t dynamic_generation;
-   uint64_t descriptor_generation;
-   uint64_t root;
-   uint64_t draw_params;
-   uint64_t draw_id_ptr;
-   uint64_t state;
-   uint64_t c_prims;
-   uint64_t c_invs;
-   uint16_t count_program;
-   uint16_t final_program;
-   bool includes_gs;
-   bool gs_emitted;
-   bool valid;
-};
-
 /* A complete but unpublished HAL200 state update.  The referenced VDM state
  * is command-buffer-owned.  The scissor/depth records stay inline until the
  * draw chooses its live stream, so preparation cannot perturb stream-local
@@ -516,18 +455,6 @@ enum hk_g17p_range_source {
    HK_G17P_RANGE_SOURCE_UPLOADED,
 };
 
-struct hk_g17p_prepared_fragment_key {
-   const struct hk_shader *shader;
-   const struct hk_linked_shader *linked;
-   uint64_t root;
-   uint64_t dma_set_base;
-   uint16_t tile_size_px;
-   uint8_t sample_size_B;
-   uint8_t nr_samples;
-   bool spills;
-   bool blend_constant;
-};
-
 struct hk_g17p_gfx_loader;
 
 struct hk_g17p_graphics_ioto_cache_entry {
@@ -663,16 +590,6 @@ struct hk_g17p_graphics_ioto_cache_entry {
    } one_level;
 };
 
-struct hk_prepared_fast_link_vs {
-   struct hk_shader *sw_vs;
-   struct hk_shader *hw_vs;
-   uint64_t dynamic_generation;
-   enum agx_index_size index_size;
-   bool indexed;
-   bool restart;
-   bool valid;
-};
-
 struct hk_graphics_state {
    struct hk_rendering_state render;
    struct hk_descriptor_state descriptors;
@@ -690,67 +607,17 @@ struct hk_graphics_state {
    uint64_t root_vertex_buffer_generation;
 
    uint64_t root;
-   struct agx_ptr prepared_root;
    uint64_t draw_params;
    uint64_t draw_id_ptr;
    uint32_t g17p_draw_params_value[2];
    uint32_t g17p_draw_id_value;
    bool g17p_draw_params_host_valid;
    bool g17p_draw_id_host_valid;
-   struct agx_ptr prepared_draw_params;
-   struct agx_ptr prepared_draw_id;
-   struct agx_ptr prepared_vertex_params;
-   bool prepared_vertex_params_filled;
-   struct agx_ptr prepared_tess_params;
-   bool prepared_tess_params_filled;
-   struct agx_ptr prepared_tess_out_draws;
-   struct agx_ptr prepared_geometry_params;
-   bool prepared_geometry_params_filled;
-   uint64_t prepared_vertex_usc;
    /* Set only around the vertex-program upload of an
     * indexed-indirect record in hk_g17p_emit_indirect_record(). */
    bool g17p_vs_one_level;
-   struct agx_ptr prepared_vertex_compact_root;
-   const struct hk_shader *prepared_vertex_shader;
-   const struct hk_linked_shader *prepared_vertex_linked;
-   uint64_t prepared_vertex_root;
-   uint64_t prepared_vertex_draw_params;
-   uint64_t prepared_vertex_draw_id_ptr;
-   uint64_t prepared_vertex_dma_set_base;
-   struct agx_vdm_state_update prepared_vdm_state_update;
-   bool prepared_vdm_state_update_valid;
-   uint64_t prepared_fragment_usc;
-   /* What prepared_fragment_usc was published for: the inputs of
-    * hk_upload_usc_words() for a fragment shader. A leftover program must
-    * not be consumed once any of them changed. */
-   struct hk_g17p_prepared_fragment_key prepared_fragment_key;
-
-   struct {
-      struct hk_g17p_prepared_dispatch tess_vs;
-      struct hk_g17p_prepared_dispatch tess_tcs;
-      struct hk_g17p_prepared_dispatch gs_vs;
-      struct hk_g17p_prepared_dispatch gs_main;
-      struct hk_g17p_prepared_dispatch gs_count;
-      struct hk_g17p_prepared_dispatch gs_pre;
-   } g17p_dispatch;
-
-   struct {
-      struct hk_g17p_prepared_precomp tess_count;
-      struct hk_g17p_prepared_precomp tess_prefix;
-      struct hk_g17p_prepared_precomp tess_final;
-      struct hk_g17p_prepared_precomp gs_setup;
-   } g17p_precomp;
-   struct hk_g17p_prepared_sw_tess_batch g17p_sw_tess_batch;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
-   /* Index key (width, restart) whose vertex prelink and bind tail the last
-    * index-buffer bind of the current render pass prepared. */
-   struct {
-      bool valid;
-      bool restart;
-      uint8_t size;
-   } g17p_index_prepared;
-
    /* The last successfully built HAL200 bind tail's inputs and packed
     * records.  A rebuild whose only changed inputs are the root, descriptor
     * or vertex-buffer identity (a descriptor push or vertex-buffer bind)
@@ -853,12 +720,6 @@ struct hk_graphics_state {
       struct hk_fast_link_key_vs key;
       bool valid;
    } fast_link_vs;
-   /* Exact inputs of the most recent successful VS prelink.  This lets the
-    * authoritative draw consume bind-time preparation without rebuilding the
-    * same vertex-input key merely because its pre-existing dirty bits have
-    * not yet been cleared.  Any later dynamic-state mutation changes the
-    * generation; stage or indexed-state changes are matched separately. */
-   struct hk_prepared_fast_link_vs prepared_fast_link_vs;
    struct {
       struct hk_shader *shader;
       struct hk_fast_link_key_fs key;
@@ -1271,10 +1132,6 @@ struct hk_cmd_buffer {
    /* Set by hk_reset_cmd_buffer, cleared by vkBeginCommandBuffer. */
    bool g17p_pristine;
 
-   /* Defer speculative preparation until a pipeline applies its static state. */
-   bool defer_graphics_prepare;
-   bool graphics_prepare_pending;
-
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
@@ -1360,17 +1217,6 @@ struct hk_cmd_buffer {
     * large_bos, so it dies with the recording like every other program
     * reference. */
    struct hk_ioto_arena ioto;
-
-   /* Exact command-buffer-local G17P compute programs prepared before draw.
-    * Entries own no storage outside the command buffer's Ioto arena. */
-   struct util_dynarray g17p_compute_programs;
-   struct hash_table *g17p_compute_index;
-
-   /* Exact immutable libagx argument/program pairs. Their argument bytes live
-    * in the command uploader and their loaders live in the Ioto arena, so
-    * both have precisely command-recording lifetime. */
-   struct util_dynarray g17p_precomp_programs;
-   struct hash_table *g17p_precomp_index;
 
    /* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3 per-command-buffer draw index. */
    uint32_t g17p_trace_draws;
@@ -1954,11 +1800,6 @@ void hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
                                  const mesa_shader_stage stage,
                                  struct hk_api_shader *shader);
 
-/* Prepare immutable G17P graphics-compute records once a complete shader bind
- * is visible. This is called both when rendering starts and after a batched
- * vkCmdBindShadersEXT, so no shader set pays lazy setup in vkCmdDraw*. */
-void hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd);
-
 void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
                                 struct hk_api_shader *shader);
 
@@ -1989,7 +1830,6 @@ void hk_meta_resolve_rendering(struct hk_cmd_buffer *cmd,
 
 uint64_t hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
                                    VkPipelineBindPoint bind_point);
-bool hk_cmd_buffer_prepare_graphics_root(struct hk_cmd_buffer *cmd);
 
 void hk_reserve_scratch_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              struct hk_shader *s);
@@ -2019,14 +1859,6 @@ uint64_t hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
 
 uint64_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked);
-uint64_t hk_prepare_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
-                              struct hk_linked_shader *linked,
-                              struct agx_ptr *compact_root);
-bool hk_retarget_prepared_usc_root(struct hk_cmd_buffer *cmd,
-                                   struct hk_shader *s,
-                                   struct hk_linked_shader *linked,
-                                   uint64_t prepared_program,
-                                   struct agx_ptr compact_root);
 
 void hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
                                     struct hk_cmd_buffer *cmd);
@@ -2047,20 +1879,6 @@ void hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              struct hk_shader *s, struct agx_grid grid,
                              struct agx_workgroup local_size);
 
-void hk_g17p_prewarm_linked_compute_program(struct hk_cmd_buffer *cmd,
-                                             struct hk_shader *s,
-                                             struct hk_linked_shader *linked,
-                                             bool internal_graphics);
-bool hk_g17p_prepare_graphics_dispatch(
-   struct hk_cmd_buffer *cmd, struct hk_shader *s,
-   struct hk_linked_shader *linked, uint64_t indirect_local_grid,
-   struct agx_workgroup indirect_local_size,
-   struct hk_g17p_prepared_dispatch *out);
-bool hk_dispatch_prepared_g17p_native(
-   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
-   struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
-   struct agx_workgroup local_size);
-void hk_g17p_prewarm_indirect_helpers(struct hk_cmd_buffer *cmd);
 void hk_g17p_prewarm_linked_compute_shader(struct hk_device *dev,
                                             struct hk_shader *s,
                                             struct hk_linked_shader *linked);
@@ -2139,17 +1957,6 @@ void hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                               enum agx_barrier barrier,
                               enum libagx_program idx, const void *data,
                               size_t data_size);
-void hk_g17p_prewarm_precomp(struct hk_cmd_buffer *cmd,
-                             enum libagx_program idx, const void *data,
-                             size_t data_size);
-bool hk_g17p_prepare_precomp(struct hk_cmd_buffer *cmd,
-                             enum libagx_program idx, const void *data,
-                             size_t data_size,
-                             struct hk_g17p_prepared_precomp *out);
-bool hk_dispatch_prepared_precomp_g17p(
-   struct hk_cmd_buffer *cmd, struct agx_grid grid, enum agx_barrier barrier,
-   enum libagx_program idx, const void *data, size_t data_size,
-   const struct hk_g17p_prepared_precomp *prepared);
 
 /* Turn a three/four/five-word indirect argument record into an execution-time
  * conditional record. `barrier` selects the ordered compute stream which must

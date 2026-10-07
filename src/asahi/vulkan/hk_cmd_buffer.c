@@ -189,10 +189,6 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    }
 
    hk_ioto_arena_finish(cmd);
-   _mesa_hash_table_clear(cmd->g17p_compute_index, NULL);
-   util_dynarray_clear(&cmd->g17p_compute_programs);
-   _mesa_hash_table_clear(cmd->g17p_precomp_index, NULL);
-   util_dynarray_clear(&cmd->g17p_precomp_programs);
    hk_cmd_buffer_release_bos(cmd, &dev->dev);
 }
 
@@ -204,10 +200,6 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
 
    hk_free_resettable_cmd_buffer(cmd);
-   _mesa_hash_table_destroy(cmd->g17p_compute_index, NULL);
-   util_dynarray_fini(&cmd->g17p_compute_programs);
-   _mesa_hash_table_destroy(cmd->g17p_precomp_index, NULL);
-   util_dynarray_fini(&cmd->g17p_precomp_programs);
    util_dynarray_fini(&cmd->large_bos);
    free(cmd->retained_set);
    util_dynarray_fini(&cmd->sync_pass_records);
@@ -243,8 +235,6 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    }
 
    cmd->large_bos = UTIL_DYNARRAY_INIT;
-   cmd->g17p_compute_programs = UTIL_DYNARRAY_INIT;
-   cmd->g17p_precomp_programs = UTIL_DYNARRAY_INIT;
 
    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
    cmd->vk.dynamic_graphics_state.ms.sample_locations =
@@ -966,41 +956,6 @@ hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
          hk_cmd_bind_graphics_shader(cmd, stages[i], shader);
    }
 
-   if (cmd->current_cs.gfx) {
-      if (cmd->defer_graphics_prepare)
-         cmd->graphics_prepare_pending = true;
-      else
-         hk_cmd_prepare_bound_graphics(cmd);
-   }
-}
-
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdBindPipeline(VkCommandBuffer commandBuffer,
-                   VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline)
-{
-   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
-   if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS ||
-       hk_cmd_buffer_device(cmd)->dev.chip != AGX_CHIP_G17P) {
-      vk_common_CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
-      return;
-   }
-
-   /* The common implementation binds shaders before applying the pipeline's
-    * static graphics state. Preparing in the shader callback can upload
-    * a bind tail for the previous state, discarded by a later state update
-    * or draw.
-    * Keep shader-object preparation unchanged and run this pipeline's exact
-    * same preparation after both parts of the bind have completed.
-    */
-   assert(!cmd->defer_graphics_prepare);
-   cmd->graphics_prepare_pending = false;
-   cmd->defer_graphics_prepare = true;
-   vk_common_CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
-   cmd->defer_graphics_prepare = false;
-   const bool prepare = cmd->graphics_prepare_pending;
-   cmd->graphics_prepare_pending = false;
-   if (prepare)
-      hk_cmd_prepare_bound_graphics(cmd);
 }
 
 /* Only ordinary G17P graphics programs whose descriptor values are fetched
@@ -1292,26 +1247,13 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    struct hk_root_descriptor_table *root = &desc->root;
 
-   struct agx_ptr root_ptr = {0};
-   if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
-       cmd->state.gfx.prepared_root.gpu) {
-      root_ptr = cmd->state.gfx.prepared_root;
-      cmd->state.gfx.prepared_root = (struct agx_ptr){0};
-   } else {
-      root_ptr = hk_pool_root_alloc(cmd, sizeof(*root), 8);
+   struct agx_ptr root_ptr = hk_pool_root_alloc(cmd, sizeof(*root), 8);
 
-      /* G17P may carry an immutable root across render boundaries.  If state
-       * becomes dirty after bind-time preparation, this allocation gives the
-       * draw a new root so older draws keep their exact bytes.  Any prepared
-       * program or HAL200 tail still names the old root and must be rebuilt
-       * before publication. */
-      if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
-          cmd->state.gfx.root && root_ptr.gpu != cmd->state.gfx.root) {
-         cmd->state.gfx.prepared_vertex_usc = 0;
-         cmd->state.gfx.prepared_fragment_usc = 0;
-         cmd->state.gfx.g17p_bind_tail.valid = false;
-      }
-   }
+   /* A HAL200 tail built for the old root names it and must be rebuilt
+    * before publication. */
+   if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+       cmd->state.gfx.root && root_ptr.gpu != cmd->state.gfx.root)
+      cmd->state.gfx.g17p_bind_tail.valid = false;
    if (!root_ptr.gpu)
       return 0;
 
@@ -1326,36 +1268,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    if (dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops())
       util_flush_range_no_fence(root_ptr.cpu, sizeof(*root));
 
-   /* Diagnostic: which descriptor sets each published graphics root names,
-    * so a launch's root range can be matched to the sets its constant
-    * program reads (the uniform DMA stale-set gate). */
-
    return root_ptr.gpu;
-}
-
-bool
-hk_cmd_buffer_prepare_graphics_root(struct hk_cmd_buffer *cmd)
-{
-   if (cmd->state.gfx.prepared_root.gpu)
-      return true;
-
-   /* A published root is immutable command-buffer storage.  Reuse it across
-    * render boundaries while the CPU-side logical root is unchanged.  This
-    * preserves the exact root identity used by cached G17P graphics programs
-    * and HAL200 state instead of cloning the same table for every pass.
-    * hk_cmd_buffer_upload_root() allocates a new table and invalidates those
-    * prepared objects if a later dynamic-state update dirties the root. */
-   if (!cmd->state.gfx.descriptors.root_dirty && cmd->state.gfx.root)
-      return true;
-
-   struct agx_ptr root =
-      hk_pool_root_alloc(cmd, sizeof(struct hk_root_descriptor_table), 8);
-   if (!root.gpu)
-      return false;
-
-   cmd->state.gfx.prepared_root = root;
-   cmd->state.gfx.root = root.gpu;
-   return true;
 }
 
 static uint64_t
@@ -4075,62 +3988,6 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                     struct hk_linked_shader *linked)
 {
    return hk_upload_usc_words_internal(cmd, s, linked, NULL);
-}
-
-uint64_t
-hk_prepare_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
-                     struct hk_linked_shader *linked,
-                     struct agx_ptr *compact_root)
-{
-   return hk_upload_usc_words_internal(cmd, s, linked, compact_root);
-}
-
-bool
-hk_retarget_prepared_usc_root(struct hk_cmd_buffer *cmd, struct hk_shader *s,
-                              struct hk_linked_shader *linked,
-                              uint64_t prepared_program,
-                              struct agx_ptr compact_root)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (dev->dev.chip != AGX_CHIP_G17P || !compact_root.cpu ||
-       !compact_root.gpu)
-      return false;
-
-   struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
-   size_t range_count = 0;
-   if (!hk_g17p_graphics_uniform_ranges(cmd, s, linked, ranges,
-                                         &range_count, NULL))
-      return false;
-
-   struct hk_g17p_graphics_root_record replacement;
-   if (!hk_g17p_graphics_compact_ranges(ranges, range_count, &replacement))
-      return false;
-
-   const struct hk_g17p_graphics_root_record *prepared = compact_root.cpu;
-   if (prepared->version != replacement.version ||
-       prepared->size_B != replacement.size_B ||
-       prepared->valid != replacement.valid ||
-       prepared->range_count != replacement.range_count)
-      return false;
-
-   /* No VDM state record references this prepared launcher yet. Retarget only
-    * its command-buffer-owned pointer record, then consume it exactly once.
-    * Payload data, including GPU-authored indirect parameters, is never
-    * copied or inspected by the CPU. */
-   memcpy(compact_root.cpu, &replacement, sizeof(replacement));
-
-   /* Keep the exact-last cache coherent with the record just retargeted. A
-    * future hit is legal only for these new source pointers; a different
-    * indirect descriptor must allocate its own immutable root. */
-   struct hk_g17p_graphics_ioto_cache_entry *cached =
-      &cmd->state.gfx.g17p_ioto[0];
-   if (cached->valid && cached->program == prepared_program) {
-      cached->draw_params = cmd->state.gfx.draw_params;
-      cached->draw_id_ptr = cmd->state.gfx.draw_id_ptr;
-   } else {
-      cached->valid = false;
-   }
-   return true;
 }
 
 void
