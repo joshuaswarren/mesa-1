@@ -556,6 +556,16 @@ struct agx_shader_key {
     */
    bool secondary;
 
+   /* G17P inline blending compiles a fragment program again with its colour
+    * epilog inlined. The draw keeps loading the split main program's uniform
+    * window, so promoted constants must sit where that program's rodata has
+    * them. When ordinary promotion does not produce a prefix of this table,
+    * place each constant at its slot here (or leave it unpromoted). NULL
+    * outside that recompile. */
+   const uint16_t *g17p_rodata_hint;
+   uint16_t g17p_rodata_hint_base;
+   uint16_t g17p_rodata_hint_size_16;
+
    union {
       struct agx_fs_shader_key fs;
    };

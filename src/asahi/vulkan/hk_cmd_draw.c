@@ -4312,9 +4312,12 @@ hk_g17p_mono_disk_key(struct hk_device *dev, const struct hk_shader *shader,
    if (partitions)
       memcpy(parts, partitions, sizeof(parts));
 
-   const char magic[8] = "hkmono1";
+   const char magic[8] = "hkmono2";
+   const size_t rodata_size =
+      shader->b.binary ? shader->b.info.rodata.size_16 * 2 : 0;
    const size_t size = sizeof(magic) + sizeof(shader->g17p_mono_key) +
-                       sizeof(*ekey) + sizeof(parts) + shader->g17p_mono_nir_size;
+                       sizeof(*ekey) + sizeof(parts) + rodata_size +
+                       shader->g17p_mono_nir_size;
    uint8_t *buf = malloc(size);
    if (!buf)
       return false;
@@ -4328,6 +4331,10 @@ hk_g17p_mono_disk_key(struct hk_device *dev, const struct hk_shader *shader,
    p += sizeof(*ekey);
    memcpy(p, parts, sizeof(parts));
    p += sizeof(parts);
+   if (rodata_size)
+      memcpy(p, (const uint8_t *)shader->b.binary + shader->b.info.rodata.offset,
+             rodata_size);
+   p += rodata_size;
    memcpy(p, shader->g17p_mono_nir, shader->g17p_mono_nir_size);
 
    disk_cache_compute_key(cache, buf, size, out);
@@ -4453,6 +4460,13 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
    key.no_stop = false;
    key.secondary = false;
    key.g17p_emrt = false;
+   if (shader->b.info.rodata.size_16 && shader->b.binary) {
+      key.g17p_rodata_hint =
+         (const uint16_t *)((const uint8_t *)shader->b.binary +
+                            shader->b.info.rodata.offset);
+      key.g17p_rodata_hint_base = shader->b.info.rodata.base_uniform;
+      key.g17p_rodata_hint_size_16 = shader->b.info.rodata.size_16;
+   }
    if (partitions)
       memcpy(key.g17p_tile_partitions, partitions,
              sizeof(key.g17p_tile_partitions));

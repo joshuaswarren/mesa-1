@@ -4,6 +4,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 #include "util/bitset.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
@@ -123,6 +124,7 @@ pass(agx_context *ctx, void *memctx)
       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2
          ? ALIGN_POT(ctx->out->push_count, 2)
          : ctx->out->push_count;
+   const unsigned push_before = ctx->out->push_count;
 
    /* Gather constant definitions and use */
    agx_foreach_instr_global(ctx, I) {
@@ -203,6 +205,44 @@ pass(agx_context *ctx, void *memctx)
        (ctx->out->rodata.size_16 & 1)) {
       ctx->rodata[ctx->out->rodata.size_16++] = 0;
       ctx->out->push_count++;
+   }
+
+   /* An inline-blend recompile must leave its constants where the split
+    * main program has them (see agx_shader_key::g17p_rodata_hint). Keep the
+    * ordinary placement whenever it already does; otherwise take each
+    * constant's slot from the main's table. */
+   const uint16_t *hint = ctx->key->g17p_rodata_hint;
+   const unsigned hint_base = ctx->key->g17p_rodata_hint_base;
+   const unsigned hint_size = ctx->key->g17p_rodata_hint_size_16;
+   if (hint && hint_size && ctx->out->rodata.size_16 &&
+       !(ctx->out->rodata.base_uniform == hint_base &&
+         ctx->out->rodata.size_16 <= hint_size &&
+         !memcmp(ctx->rodata, hint, ctx->out->rodata.size_16 * 2)) &&
+       push_before <= hint_base) {
+      unsigned end = 0;
+      for (unsigned i = 0; i < flat_count; ++i) {
+         struct constant_info *info = flat[i];
+         info->promoted = false;
+         const unsigned align = info->align_16;
+         for (unsigned k = 0; k + align <= hint_size; ++k) {
+            if ((hint_base + k) % align ||
+                memcmp(&hint[k], &info->value, align * 2))
+               continue;
+            info->uniform = hint_base + k;
+            info->promoted = true;
+            end = MAX2(end, k + align);
+            break;
+         }
+      }
+
+      /* Whole 32-bit words, as above, taken from the main's table. */
+      if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 && (end & 1))
+         end++;
+      assert(end <= hint_size && end <= ARRAY_SIZE(ctx->rodata));
+      memcpy(ctx->rodata, hint, end * 2);
+      ctx->out->rodata.base_uniform = end ? hint_base : 0;
+      ctx->out->rodata.size_16 = end;
+      ctx->out->push_count = end ? hint_base + end : push_before;
    }
 
    /* Promote in the IR */
