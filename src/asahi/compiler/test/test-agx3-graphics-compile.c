@@ -786,6 +786,74 @@ fs_finish(nir_builder *b)
    return b->shader;
 }
 
+/* Output calculations can precede later structured control flow. EXPORT
+ * declares the terminal register ABI, so keep its SSA value live to the exit. */
+static bool
+test_g17p_fragment_export_tail(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P fragment exports across CF");
+   nir_def *value = nir_load_preamble(&b, 1, 32, .base = 0);
+   nir_export_agx(&b, value, .base = 16);
+   nir_def *address = nir_load_preamble(&b, 1, 64, .base = 4);
+   nir_push_if(&b, nir_flt(&b, value, nir_imm_float(&b, 0.5f)));
+   nir_def *loaded = nir_load_global(&b, 1, 32, address, .align_mul = 4);
+   nir_def *left = nir_fadd_imm(&b, loaded, 0.25f);
+   nir_push_else(&b, NULL);
+   nir_def *right = nir_fmul_imm(&b, value, 2.0f);
+   nir_pop_if(&b, NULL);
+   nir_export_agx(&b, nir_if_phi(&b, left, right), .base = 18);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                               .no_stop = true, .no_preamble = true};
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &key, &part);
+   if (!ok)
+      fprintf(stderr, "fragment export tail: %s\n", agx_last_compile_refusal());
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+test_g17p_colour_exports_across_cf(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P colour exports across CF");
+   b.shader->info.fs.early_fragment_tests = true;
+   b.shader->info.writes_memory = true;
+   nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
+                       nir_imm_intN_t(&b, 0xff, 16));
+   nir_def *value = nir_load_preamble(&b, 1, 32, .base = 0);
+   nir_store_local_pixel_agx(&b, nir_vec4(&b, value, value, value, value),
+      nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+      .base = 0, .write_mask = 15, .format = PIPE_FORMAT_R8_UNORM, .target = 0);
+   nir_def *address = nir_load_preamble(&b, 1, 64, .base = 4);
+   nir_push_if(&b, nir_flt(&b, value, nir_imm_float(&b, 0.5f)));
+   nir_store_local_pixel_agx(&b, nir_imm_vec4(&b, 0.5f, 0.0f, 0.75f, 0.0f),
+      nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+      .base = 0, .write_mask = 5, .format = PIPE_FORMAT_R8_UNORM, .target = 0);
+   nir_global_atomic(&b, 32, address, nir_imm_int(&b, 1),
+                     .atomic_op = nir_atomic_op_iadd);
+   nir_pop_if(&b, NULL);
+   nir_store_local_pixel_agx(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f),
+      nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+      .base = 4, .write_mask = 15, .format = PIPE_FORMAT_R8_UNORM, .target = 1);
+   b.shader->info.outputs_written =
+      BITFIELD64_BIT(FRAG_RESULT_DATA0) | BITFIELD64_BIT(FRAG_RESULT_DATA1);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                               .no_preamble = true, .has_scratch = true};
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &key, &part);
+   if (!ok)
+      fprintf(stderr, "colour export tail: %s\n", agx_last_compile_refusal());
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 /* A tested memory-effect prefix must remain before the colour-only MRT
  * tail. The tail's two stores start in API order and finish in partition order. */
 static bool
@@ -8831,6 +8899,10 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--colour-export-only"))
+      return test_g17p_colour_exports_across_cf() ? 0 : 1;
+   if (argc == 2 && !strcmp(argv[1], "--fragment-export-only"))
+      return test_g17p_fragment_export_tail() ? 0 : 1;
    if (argc == 2 && !strcmp(argv[1], "--reconverged-mrt-only"))
       return test_g17p_reconverged_mrt() ? 0 : 1;
    if (argc == 2 && !strcmp(argv[1], "--sparse-uvs-only")) {
@@ -9266,6 +9338,8 @@ main(int argc, char **argv)
       }                                                                        \
    } while (0)
 
+   RUN(test_g17p_colour_exports_across_cf);
+   RUN(test_g17p_fragment_export_tail);
    RUN(test_g17p_reconverged_mrt);
    RUN(test_g17p_eot_block_store);
    RUN(test_indexed_sampler_sets);

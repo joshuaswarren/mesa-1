@@ -4011,13 +4011,22 @@ agx3_lower_large_fetch_indices(agx_context *ctx)
       return false;
    bool progress = false;
    agx_foreach_instr_global_safe(ctx, I) {
-      if (I->op != AGX_OPCODE_TEXTURE_LOAD || I->nr_srcs != 6 ||
-          I->src[2].type != AGX_INDEX_IMMEDIATE || I->src[2].value != 0 ||
-          I->src[3].type != AGX_INDEX_IMMEDIATE || I->src[3].value <= 15)
+      if (I->op != AGX_OPCODE_TEXTURE_LOAD || I->nr_srcs != 6)
          continue;
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-      I->src[3] = agx_mov_imm(&b, 64, I->src[3].value);
-      progress = true;
+      if (I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE &&
+          (I->src[1].value > 31 || I->src[1].neg)) {
+         uint32_t level = I->src[1].neg ? -(uint32_t)I->src[1].value
+                                      : I->src[1].value;
+         I->src[1] = agx_mov_imm(&b, 32, level);
+         progress = true;
+      }
+      if (I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value == 0 &&
+          I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value > 15) {
+         I->src[3] = agx_mov_imm(&b, 64, I->src[3].value);
+         progress = true;
+      }
    }
    return progress;
 }
@@ -8568,6 +8577,122 @@ agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
    return progress;
 }
 
+/* Match Asahi's output-temporary model before selecting physical tile
+ * writes. Repeated and conditional whole-pixel stores are shader outputs,
+ * whose final value is written once at the reconverged exit. Tile reads and
+ * explicit/per-sample stores keep their original ordering. */
+static bool
+agx_nir_fragment_output_temporaries(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+      return false;
+   struct {
+      bool seen;
+      unsigned base, format, mask;
+      nir_variable *var;
+   } rt[8] = {0};
+   nir_variable *exports[256] = {0};
+   bool has_tile_store = false, has_export = false, needed = false;
+   unsigned tile_writes[8] = {0}, export_writes[256] = {0};
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_load_local_pixel_agx)
+               return false;
+            if (intr->intrinsic == nir_intrinsic_export_agx) {
+               if (intr->src[0].ssa->bit_size != 32 ||
+                   intr->src[0].ssa->num_components != 1 ||
+                   nir_intrinsic_base(intr) >= ARRAY_SIZE(exports))
+                  return false;
+               unsigned index = nir_intrinsic_base(intr);
+               needed |= export_writes[index]++ != 0 ||
+                  block != nir_impl_last_block(impl);
+               if (!exec_node_is_tail_sentinel(instr->node.next)) {
+                  nir_instr *next = nir_instr_next(instr);
+                  needed |= next->type != nir_instr_type_intrinsic ||
+                     nir_instr_as_intrinsic(next)->intrinsic != nir_intrinsic_export_agx;
+               }
+               has_export = true;
+            }
+            if (intr->intrinsic != nir_intrinsic_store_local_pixel_agx)
+               continue;
+            const unsigned target = nir_intrinsic_target(intr);
+            if (target >= ARRAY_SIZE(rt) || nir_intrinsic_explicit_coord(intr) ||
+                intr->src[0].ssa->bit_size != 32 ||
+                !nir_src_is_const(intr->src[1]) ||
+                nir_src_as_uint(intr->src[1]) != 0xff)
+               return false;
+            const unsigned base = nir_intrinsic_base(intr);
+            const unsigned format = nir_intrinsic_format(intr);
+            if (rt[target].seen &&
+                (rt[target].base != base || rt[target].format != format))
+               return false;
+            needed |= tile_writes[target]++ != 0 ||
+               block != nir_impl_last_block(impl);
+            rt[target].seen = true;
+            rt[target].base = base;
+            rt[target].format = format;
+            rt[target].mask |= nir_intrinsic_write_mask(intr);
+            has_tile_store = true;
+         }
+      }
+   }
+   if ((!has_tile_store && !has_export) || !needed)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   for (unsigned i = 0; i < ARRAY_SIZE(rt); ++i) {
+      if (rt[i].seen)
+         rt[i].var = nir_local_variable_create(impl, glsl_vec4_type(), NULL);
+   }
+   nir_builder b = nir_builder_create(impl);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
+            unsigned target = nir_intrinsic_target(intr);
+            b.cursor = nir_before_instr(instr);
+            nir_store_var(&b, rt[target].var,
+                          nir_pad_vector(&b, intr->src[0].ssa, 4),
+                          nir_intrinsic_write_mask(intr));
+            nir_instr_remove(instr);
+         } else if (intr->intrinsic == nir_intrinsic_export_agx) {
+            unsigned index = nir_intrinsic_base(intr);
+            if (!exports[index])
+               exports[index] = nir_local_variable_create(
+                  impl, glsl_float_type(), NULL);
+            b.cursor = nir_before_instr(instr);
+            nir_store_var(&b, exports[index], intr->src[0].ssa, 1);
+            nir_instr_remove(instr);
+         }
+      }
+   }
+   b.cursor = nir_after_impl(impl);
+   for (unsigned i = 0; i < ARRAY_SIZE(rt); ++i) {
+      if (rt[i].seen)
+         nir_store_local_pixel_agx(
+            &b, nir_load_var(&b, rt[i].var), nir_imm_intN_t(&b, 0xff, 16),
+            nir_undef(&b, 2, 16), .base = rt[i].base, .target = i,
+            .format = rt[i].format, .write_mask = rt[i].mask);
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(exports); ++i) {
+      if (exports[i])
+         nir_export_agx(&b, nir_load_var(&b, exports[i]), .base = i);
+   }
+   nir_progress(true, impl, nir_metadata_none);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_phis_to_scalar, NULL, NULL);
+   NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
+   NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+   NIR_PASS(_, nir, nir_opt_dce);
+   return true;
+}
+
 static bool
 agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
@@ -8575,6 +8700,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_info *out, unsigned *offset_out)
 {
    const unsigned initial_binary_size = binary->size;
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       !impl->function->is_preamble)
+      NIR_PASS(_, nir, agx_nir_fragment_output_temporaries);
+
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        nir->info.stage == MESA_SHADER_VERTEX && !impl->function->is_preamble &&
        exec_list_length(&impl->body) > 1)

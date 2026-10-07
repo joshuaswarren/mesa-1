@@ -126,6 +126,9 @@ agx_g17p_pack_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,
 #define AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX 28
 
 bool agx_nir_lower_g17p_indexed_samplers(struct nir_shader *s);
+/* Packed native32 array handles are byte offsets; sampler handles already
+ * name their native entry, including the reserved texel-fetch sampler0. */
+bool agx_nir_lower_g17p_native32_samplers(struct nir_shader *s, uint8_t texture_set);
 
 bool agx_nir_lower_g17p_cube_samples(struct nir_shader *s);
 

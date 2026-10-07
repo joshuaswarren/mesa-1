@@ -17,11 +17,16 @@ main(int argc, char **argv)
 {
    unsigned failed = 0, total = 0;
    bool print_nir = false;
+   bool lower_native32 = false;
 #ifdef AGX_REPLAY_D3D12
    bool lower_d3d12_fetch = false;
    bool lower_d3d12_vertex = false;
 #endif
    for (int i = 1; i < argc; ++i) {
+      if (!strcmp(argv[i], "--lower-native32-samplers")) {
+         lower_native32 = true;
+         continue;
+      }
       if (!strcmp(argv[i], "--print-nir")) {
          print_nir = true;
          continue;
@@ -78,6 +83,8 @@ main(int argc, char **argv)
          }
       }
 #endif
+      if (lower_native32 && key.dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         agx_nir_lower_g17p_native32_samplers(nir, 16);
       struct agx_shader_part part;
       bool ok = agx_compile_shader_nir(nir, &key, &part);
       printf("%s\t%s\t%s\n", argv[i], ok ? "PASS" : "REFUSED",
