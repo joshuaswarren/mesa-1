@@ -535,6 +535,18 @@ hk_g17p_native_cprog_qualified(const struct agx_shader_info *info)
            info->agx3_preamble_tps_inputs);
 }
 
+/* A null uniform buffer is based at the zero page, which spans
+ * maxUniformBufferRange, so null descriptors need no bounds when uniform
+ * buffer robustness is disabled. Null storage buffers still need them to
+ * discard stores. */
+static inline nir_address_format
+hk_ubo_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)
+{
+   return robustness == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT
+             ? nir_address_format_64bit_global_32bit_offset
+             : nir_address_format_64bit_bounded_global;
+}
+
 static inline nir_address_format
 hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness,
                       bool null_descriptor)

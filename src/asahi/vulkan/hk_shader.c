@@ -165,8 +165,7 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
       .ssbo_addr_format = hk_buffer_addr_format(
          rs->storage_buffers, rs->null_storage_buffer_descriptor),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
-      .ubo_addr_format = hk_buffer_addr_format(
-         rs->uniform_buffers, rs->null_uniform_buffer_descriptor),
+      .ubo_addr_format = hk_ubo_addr_format(rs->uniform_buffers),
       .shared_addr_format = nir_address_format_32bit_offset,
       .min_ssbo_alignment = HK_MIN_SSBO_ALIGNMENT,
       .min_ubo_alignment = HK_MIN_UBO_ALIGNMENT,
@@ -1878,8 +1877,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             hk_buffer_addr_format(rs->storage_buffers,
                                   rs->null_storage_buffer_descriptor));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
-            hk_buffer_addr_format(rs->uniform_buffers,
-                                  rs->null_uniform_buffer_descriptor));
+            hk_ubo_addr_format(rs->uniform_buffers));
 
    /* Ray queries lower to a software traversal loop of ALU and global loads.
     * It has to run after descriptor lowering, because rq_initialize's

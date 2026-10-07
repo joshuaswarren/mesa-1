@@ -1218,8 +1218,7 @@ hk_nir_lower_descriptors(nir_shader *nir,
 
       .ssbo_addr_format = hk_buffer_addr_format(
          rs->storage_buffers, rs->null_storage_buffer_descriptor),
-      .ubo_addr_format = hk_buffer_addr_format(
-         rs->uniform_buffers, rs->null_uniform_buffer_descriptor),
+      .ubo_addr_format = hk_ubo_addr_format(rs->uniform_buffers),
    };
 
    assert(set_layout_count <= HK_MAX_SETS);

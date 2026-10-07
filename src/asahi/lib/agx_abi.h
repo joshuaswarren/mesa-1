@@ -72,10 +72,12 @@
 
 /* This address is in our reservation, and can be
  * addressed with only small integers in the low/high. That lets us do some
- * robustness optimization even without soft fault.
+ * robustness optimization even without soft fault. It spans
+ * maxUniformBufferRange, so a null uniform buffer (based here) reads zero at
+ * every offset a shader can legally use without per-load bounds checks.
  */
 #define AGX_ZERO_PAGE_ADDRESS (((uint64_t)1) << 32)
-#define AGX_ZERO_PAGE_SIZE    (16384)
+#define AGX_ZERO_PAGE_SIZE    (65536)
 
 #define AGX_SCRATCH_PAGE_ADDRESS (AGX_ZERO_PAGE_ADDRESS + AGX_ZERO_PAGE_SIZE)
 
