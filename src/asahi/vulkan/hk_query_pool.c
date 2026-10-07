@@ -401,6 +401,19 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    if (!cs)
       return;
 
+   /* A dependency-tracked CDM barrier (cdm_barrier_pending) is normally
+    * emitted with the next launch, i.e. after the control stream this
+    * timestamp ends. The job's end time then excludes the drain of the work
+    * before the barrier, and that wait is charged to the next job. Emit the
+    * flush here so the end time covers the work it orders. The ordering is
+    * the same: the flush still sits between the two launches. */
+   if (!after_gfx && cs->type == HK_CS_CDM &&
+       cmd->state.cs.cdm_barrier_pending) {
+      hk_ensure_cs_has_space(cmd, cs, 0x2000);
+      hk_cdm_cache_flush(dev, cs);
+      cmd->state.cs.cdm_barrier_pending = false;
+   }
+
    if (cs->timestamp.end.addr) {
       assert(after_gfx && "compute is handled above");
 
