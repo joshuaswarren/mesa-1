@@ -1870,7 +1870,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
             set_layouts, dev->vk.enabled_features.sparseResidencyBuffer,
-            dev->dev.sparse_ro_offset);
+            dev->dev.sparse_ro_offset,
+            hk_device_physical(dev)->scaled_sampling);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,

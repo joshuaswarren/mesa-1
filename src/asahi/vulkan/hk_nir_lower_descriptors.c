@@ -34,6 +34,7 @@ struct lower_descriptors_ctx {
    nir_address_format ssbo_addr_format;
    uint64_t sparse_ro_offset;
    unsigned descriptor_generation;
+   bool scaled_sampling;
    mesa_shader_stage stage;
 };
 
@@ -764,12 +765,6 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       nir_alu_type T = nir_alu_type_get_base_type(tex->dest_type);
       nir_def *kind = NULL;
       if (ctx->descriptor_generation == 9 && T == nir_type_float) {
-         /* Look up the image independently: separate samplers have no
-          * format. */
-         kind = load_resource_deref_desc(
-            b, 1, 16, nir_src_as_deref(nir_src_for_ssa(texture)),
-            plane_offset_B + native.texture + 32 +
-               offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion), ctx);
          /* An integer border (INT_OPAQUE_*, INT_CUSTOM) sampled as float
           * names the texel value, so it is converted rather than
           * reinterpreted; on a scaled view that is before the scale
@@ -779,8 +774,20 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
             plane_offset_B + native.clamp_0_sampler_index, ctx);
          nir_def *is_int = nir_ine_imm(
             b, nir_iand_imm(b, clamp_0, HK_BORDER_IS_INT_BIT), 0);
-         nir_def *as_int = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, kind, 3), 1),
-                                     nir_i2f32(b, border), nir_u2f32(b, border));
+         nir_def *as_int = nir_u2f32(b, border);
+
+         /* Only a scaled view has a nonzero scaled_conversion kind. Without
+          * sampleable scaled formats it is zero in every valid descriptor. */
+         if (ctx->scaled_sampling) {
+            /* Look up the image independently: separate samplers have no
+             * format. */
+            kind = load_resource_deref_desc(
+               b, 1, 16, nir_src_as_deref(nir_src_for_ssa(texture)),
+               plane_offset_B + native.texture + 32 +
+                  offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion), ctx);
+            as_int = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, kind, 3), 1),
+                               nir_i2f32(b, border), as_int);
+         }
          border = nir_bcsel(b, is_int, as_int, border);
       }
       if (kind && !(tex->backend_flags & AGX_TEXTURE_FLAG_BORDER_UNFILTERED)) {
@@ -1201,10 +1208,11 @@ hk_nir_lower_descriptors(nir_shader *nir,
                          uint32_t set_layout_count,
                          struct vk_descriptor_set_layout *const *set_layouts,
                          bool sparse_buffer_residency,
-                         uint64_t sparse_ro_offset)
+                         uint64_t sparse_ro_offset, bool scaled_sampling)
 {
    struct lower_descriptors_ctx ctx = {
       .stage = nir->info.stage,
+      .scaled_sampling = scaled_sampling,
       .sparse_buffer_residency = sparse_buffer_residency,
       .sparse_ro_offset = sparse_ro_offset,
       .clamp_desc_array_bounds =
