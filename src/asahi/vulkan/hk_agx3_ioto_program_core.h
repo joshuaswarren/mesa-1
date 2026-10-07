@@ -407,6 +407,10 @@ struct hk_agx3_g17p_compute_program_desc {
     * so both records of that pair must set this explicitly.  Only the three
     * witnessed values are accepted; anything else fails the compose. */
    enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1;
+
+   /* Optional native constant program and its TPS inputs. */
+   struct agx_ioto_constant_program constant_program;
+   const struct agx3_cprog_inputs *cprog_inputs;
 };
 
 struct hk_agx3_g17p_compute_program {

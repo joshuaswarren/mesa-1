@@ -8,6 +8,8 @@
 #include "asahi/lib/agx_ioto_program_core.h"
 #include "util/macros.h"
 
+#include <string.h>
+
 static bool
 agx3_g17p_compute_state_tail(
    const struct agx3_g17p_compute_program_desc *desc,
@@ -48,7 +50,10 @@ agx3_g17p_compute_program_generate(
    struct agx3_g17p_compute_program *program)
 {
    if (!program || chip != AGX_CHIP_G17P || !desc ||
-       (desc->uniform_range_count && !desc->uniform_ranges))
+       (desc->uniform_range_count && !desc->uniform_ranges) ||
+       (desc->constant_program.code_size & 1) ||
+       (desc->cprog_inputs && desc->cprog_inputs->count &&
+        (!desc->constant_program.code_size || !desc->uniform_range_count)))
       return false;
 
    struct agx_ioto_state_tail_output tail;
@@ -78,6 +83,7 @@ agx3_g17p_compute_program_generate(
          .program_va = desc->program_va,
          .ranges = desc->uniform_ranges,
          .range_count = desc->uniform_range_count,
+         .cprog_inputs = desc->cprog_inputs,
       };
       const struct agx3_ioto_uniform_program_workspace workspace = {
          .body = body,
@@ -98,6 +104,23 @@ agx3_g17p_compute_program_generate(
              body_size - copy_offset, &tail, staged.bytes,
              sizeof(staged.bytes), &written))
          return false;
+   }
+
+   /* Every loader ends in the absent constant-program END. A constant
+    * program replaces exactly that suffix, as in the graphics loaders. */
+   if (desc->constant_program.code_size) {
+      static const uint8_t absent[] = {0x0e, 0, 0, 0};
+      const size_t offset = written - sizeof(absent);
+      struct agx_ioto_preshader_output suffix;
+      if (written < sizeof(absent) ||
+          memcmp(staged.bytes + offset, absent, sizeof(absent)) ||
+          !agx_ioto_constant_program_emit(chip, &desc->constant_program,
+                                          desc->program_va + offset,
+                                          &suffix) ||
+          suffix.length > sizeof(staged.bytes) - offset)
+         return false;
+      memcpy(staged.bytes + offset, suffix.bytes, suffix.length);
+      written = offset + suffix.length;
    }
 
    if (written > UINT16_MAX)

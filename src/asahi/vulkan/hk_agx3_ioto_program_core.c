@@ -904,6 +904,8 @@ hk_agx3_g17p_compute_program_generate(
       .threadgroup_memory_size_B = desc->threadgroup_memory_size_B,
       .launch_sources = desc->launch_sources,
       .ldshdr_f1 = desc->ldshdr_f1,
+      .constant_program = desc->constant_program,
+      .cprog_inputs = desc->cprog_inputs,
    };
    struct agx3_g17p_compute_program common;
    if (!agx3_g17p_compute_program_generate(chip, &common_desc, &common))
