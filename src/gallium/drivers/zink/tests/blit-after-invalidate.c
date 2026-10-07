@@ -5,6 +5,8 @@
  * separates those operations.
  * cc -O2 -Wall -Wextra blit-after-invalidate.c -o blit-after-invalidate \
  *    $(pkg-config --cflags --libs gl x11)
+ * Run with FRAME_COUNT and MODE: 0 full resolve, 1 partial resolve after
+ * population blit, or 2 partial resolve without the population blit.
  */
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
@@ -78,7 +80,9 @@ int
 main(int argc, char **argv)
 {
    int frames = argc > 1 ? atoi(argv[1]) : 1;
-   if (frames < 1)
+   int mode = argc > 2 ? atoi(argv[2]) : 0;
+   bool partial = mode != 0;
+   if (frames < 1 || mode < 0 || mode > 2)
       return 2;
    Display *dpy = XOpenDisplay(NULL);
    if (!dpy)
@@ -109,8 +113,8 @@ main(int argc, char **argv)
    GLXContext ctx = glXCreateNewContext(dpy, configs[0], GLX_RGBA_TYPE, NULL, True);
    if (!ctx || !glXMakeCurrent(dpy, win, ctx))
       return 77;
-   printf("renderer=%s version=%s frames=%d\n",
-          glGetString(GL_RENDERER), glGetString(GL_VERSION), frames);
+   printf("renderer=%s version=%s frames=%d mode=%d\n",
+          glGetString(GL_RENDERER), glGetString(GL_VERSION), frames, mode);
 
    GLuint solid = program("#version 330\nout vec4 c; void main(){c=vec4(1,0,0,1);}");
    GLuint sample = program("#version 330\nuniform sampler2D s; out vec4 c;"
@@ -132,6 +136,11 @@ main(int argc, char **argv)
    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
       return 77;
    glViewport(0, 0, SIZE, SIZE);
+   if (mode == 2) {
+      glBindFramebuffer(GL_FRAMEBUFFER, resolved);
+      glClearColor(1, 0, 0, 1);
+      glClear(GL_COLOR_BUFFER_BIT);
+   }
    glBindFramebuffer(GL_FRAMEBUFFER, output);
    glClearColor(0, 1, 0, 1);
    glClear(GL_COLOR_BUFFER_BIT);
@@ -139,25 +148,33 @@ main(int argc, char **argv)
 
    unsigned failed = 0;
    for (int frame = 0; frame < frames; ++frame) {
-      glBindFramebuffer(GL_FRAMEBUFFER, bait);
-      glDisable(GL_SCISSOR_TEST);
-      glUseProgram(solid);
-      glDrawArrays(GL_TRIANGLES, 0, 3);
-      glBindFramebuffer(GL_READ_FRAMEBUFFER, bait);
-      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolved);
-      glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
-                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
-      glBindFramebuffer(GL_FRAMEBUFFER, bait);
       GLenum attachment = GL_COLOR_ATTACHMENT0;
-      glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &attachment);
+      if (mode == 2) {
+         glBindFramebuffer(GL_FRAMEBUFFER, bait);
+         glDisable(GL_SCISSOR_TEST);
+         glClearColor(0, 1, 0, 1);
+         glClear(GL_COLOR_BUFFER_BIT);
+      } else {
+         glBindFramebuffer(GL_FRAMEBUFFER, bait);
+         glDisable(GL_SCISSOR_TEST);
+         glUseProgram(solid);
+         glDrawArrays(GL_TRIANGLES, 0, 3);
+         glBindFramebuffer(GL_READ_FRAMEBUFFER, bait);
+         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolved);
+         glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+         glBindFramebuffer(GL_FRAMEBUFFER, bait);
+         glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &attachment);
 
-      /* Populate the multisample attachment using an internal blitter pass.
-       * The following partial draw needs its preserved green background.
-       */
-      glBindFramebuffer(GL_READ_FRAMEBUFFER, output);
-      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bait);
-      glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
-                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+         /* Populate the multisample attachment using an internal blitter pass.
+          * The following partial draw needs its preserved green background.
+          */
+         glBindFramebuffer(GL_READ_FRAMEBUFFER, output);
+         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bait);
+         glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+         glBindFramebuffer(GL_FRAMEBUFFER, bait);
+      }
       glBindFramebuffer(GL_FRAMEBUFFER, bait);
       glEnable(GL_SCISSOR_TEST);
       glScissor(16, 16, 64, 64);
@@ -166,7 +183,8 @@ main(int argc, char **argv)
       glDisable(GL_SCISSOR_TEST);
       glBindFramebuffer(GL_READ_FRAMEBUFFER, bait);
       glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolved);
-      glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
+      int lo = partial ? 8 : 0, hi = partial ? SIZE - 8 : SIZE;
+      glBlitFramebuffer(lo, lo, hi, hi, lo, lo, hi, hi,
                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
       glBindFramebuffer(GL_FRAMEBUFFER, bait);
       glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &attachment);
@@ -180,7 +198,8 @@ main(int argc, char **argv)
       unsigned bad = 0;
       for (int y = 0; y < SIZE; ++y) {
          for (int x = 0; x < SIZE; ++x) {
-            bool red = x >= 16 && x < 80 && y >= 16 && y < 80;
+            bool outside = partial && (x < 8 || x >= SIZE - 8 || y < 8 || y >= SIZE - 8);
+            bool red = outside || (x >= 16 && x < 80 && y >= 16 && y < 80);
             const unsigned char *p = pixels + (y * SIZE + x) * 4;
             bad += abs((int)p[0] - (red ? 255 : 0)) > 1;
             bad += abs((int)p[1] - (red ? 0 : 255)) > 1;
