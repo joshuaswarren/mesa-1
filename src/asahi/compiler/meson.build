@@ -112,6 +112,7 @@ if with_tests
          'test/test-lower-address.cpp',
          'test/test-lower-cmat.cpp',
          'test/test-lower-math.cpp',
+         'test/test-lower-simdmat.cpp',
          'test/test-minifloat.cpp',
          'test/test-optimizer.cpp',
          'test/test-lower-pseudo.cpp',

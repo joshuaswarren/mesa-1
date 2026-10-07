@@ -203,6 +203,20 @@ lower_load_store(nir_builder *b, struct hash_table *tm, nir_intrinsic_instr *int
                                 glsl_vector_type(desc.element_type, 2), 2 * tsz)
          : NULL;
 
+   /* COLUMN-MAJOR PAIRS (prototype, AGX_HWMAT_COLPAIR=1 enables): a lane's
+    * elements (r,c),(r,c+1) sit a stride apart in a column-major matrix, but
+    * (r&~1,c') and (r|1,c') are adjacent. Lane L (r even) and lane L^2 (r|1,
+    * same col, same quad) each load one vec2 down column c + ((lane>>1)&1)
+    * and trade one half with quad_swap_vertical (lane xor 2):
+    *   L   loads (r,c),(r+1,c)     keeps x, receives (r,c+1)   from L^2
+    *   L^2 loads (r,c+1),(r+1,c+1) keeps y, receives (r+1,c)   from L
+    * One vec2 load and one quad swap replace two scalar loads. The pair is
+    * vec2-aligned under the same even-stride rule as the row-major path. */
+   const bool colpair = is_load && v2dref &&
+                        layout == GLSL_MATRIX_LAYOUT_COLUMN_MAJOR &&
+                        getenv("AGX_HWMAT_COLPAIR") != NULL;
+   nir_def *odd_row = colpair ? nir_i2b(b, nir_iand_imm(b, lane, 2)) : NULL;
+
    /* Walk the nblk x nblk grid of 8x8 sub-blocks; each lane handles its 2
     * fragment elements per sub-block. Sub-block (bi,bj) -> matrix rows/cols
     * [bi*8,..) x [bj*8,..), stored at vec channels [sb*2, sb*2+1]. */
@@ -267,6 +281,31 @@ lower_load_store(nir_builder *b, struct hash_table *tm, nir_intrinsic_instr *int
                   nir_def *fhi = nir_i2f16(b, nir_iadd_imm(b, nir_u2u32(b, nhi), -8));
                   vals[sb * 2 + 0] = nir_fmul(b, flo, d);
                   vals[sb * 2 + 1] = nir_fmul(b, fhi, d);
+               }
+            } else if (colpair) {
+               if (e == 0) {
+                  nir_def *pc = nir_u2uN(
+                     b, nir_iadd(b, nir_iadd_imm(b, col, bj * 8),
+                                 nir_b2i32(b, odd_row)),
+                     idx_bits);
+                  nir_def *pr = nir_u2uN(
+                     b, nir_iadd_imm(b, nir_iand_imm(b, row, ~1u), bi * 8),
+                     idx_bits);
+                  nir_def *pflat = nir_iadd(
+                     b,
+                     nir_udiv_imm(b, nir_imul_imm(b, nir_imul(b, pc, str),
+                                                  scalar_bytes * nvec),
+                                  tsz),
+                     pr);
+                  nir_def *pv = nir_load_deref(
+                     b, nir_build_deref_ptr_as_array(b, v2dref,
+                                                     nir_ushr_imm(b, pflat, 1)));
+                  nir_def *x = nir_channel(b, pv, 0);
+                  nir_def *y = nir_channel(b, pv, 1);
+                  nir_def *other =
+                     nir_quad_swap_vertical(b, nir_bcsel(b, odd_row, x, y));
+                  vals[sb * 2 + 0] = nir_bcsel(b, odd_row, other, x);
+                  vals[sb * 2 + 1] = nir_bcsel(b, odd_row, y, other);
                }
             } else if (is_load && v2dref && !colmaj) {
                /* VEC2: load the contiguous (col,col+1) row-major pair as one
