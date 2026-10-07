@@ -5145,7 +5145,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
     * last successful build: only the root, descriptor or vertex-buffer
     * identity moved (a descriptor push or vertex-buffer bind), and those reach
     * the tail only through fragment_program above.  Repack the fragment
-    * record and upload the same bind group with the same allocation. */
+    * record into a copy of the last state block. */
    if (gfx->g17p_bind_tail_memo.valid &&
        gfx->g17p_bind_tail_memo.fs == fs &&
        gfx->g17p_bind_tail_memo.hw_vs == hk_bound_hw_vs(gfx) &&
@@ -5158,28 +5158,31 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
                                              &memo_fs_record))
          return hk_g17p_bind_tail_refused(__LINE__);
 
-      uint8_t memo_bind_group[0x80];
-      memcpy(memo_bind_group, gfx->g17p_bind_tail_memo.bind_group,
-             sizeof(memo_bind_group));
-      memcpy(&memo_bind_group[0x00], memo_fs_record.bytes,
-             memo_fs_record.length);
-
-      const struct agx_ppp_viewport_payload_core *memo_viewport =
-         &gfx->g17p_bind_tail_memo.viewport_record;
-      const size_t memo_state_size =
-         agx_g17p_bind_state_size(memo_viewport->length);
+      /* The tail's record pointers all name that block: move them to the
+       * copy. */
+      const uint32_t memo_state_size = gfx->g17p_bind_tail_memo.state_size;
       struct agx_ptr memo_state =
          hk_pool_vdm_alloc(cmd, memo_state_size, 64);
-      struct hk_g17p_bind_state_upload memo_uploaded;
-      if (!memo_state_size || !memo_state.cpu ||
-          !hk_g17p_upload_bind_state(
-             memo_state.cpu, memo_state_size, memo_state.gpu,
-             memo_bind_group, memo_viewport->bytes, memo_viewport->length,
-             gfx->linked_varyings.counts_32.opaque[0],
-             gfx->linked_varyings.counts_16.opaque[0], &memo_uploaded))
+      if (!memo_state.cpu ||
+          !agx_g17p_draw_state_range_valid(memo_state.gpu, memo_state_size))
          return hk_g17p_bind_tail_refused(__LINE__);
 
-      prepared->tail = memo_uploaded.tail;
+      memcpy(memo_state.cpu, gfx->g17p_bind_tail_memo.state_cpu,
+             memo_state_size);
+      memcpy(memo_state.cpu, memo_fs_record.bytes, memo_fs_record.length);
+
+      const uint32_t delta =
+         (uint32_t)memo_state.gpu - gfx->g17p_bind_tail_memo.state_compact;
+      for (unsigned i = 0; i < AGX_VDM_HAL200_BIND_COUNT; ++i) {
+         uint8_t *offset = &prepared->tail.bytes[4 + 8 * i];
+         uint32_t value;
+         memcpy(&value, offset, sizeof(value));
+         value += delta;
+         memcpy(offset, &value, sizeof(value));
+      }
+      gfx->g17p_bind_tail_memo.state_cpu = memo_state.cpu;
+      gfx->g17p_bind_tail_memo.state_compact = (uint32_t)memo_state.gpu;
+
       prepared->dynamic_generation = dyn->generation;
       prepared->descriptor_generation = gfx->descriptors.generation;
       prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
@@ -5671,6 +5674,9 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       return hk_g17p_bind_tail_refused(__LINE__);
 
    prepared->tail = uploaded.tail;
+   gfx->g17p_bind_tail_memo.state_cpu = state.cpu;
+   gfx->g17p_bind_tail_memo.state_compact = (uint32_t)state.gpu;
+   gfx->g17p_bind_tail_memo.state_size = state_size;
    prepared->dynamic_generation = dyn->generation;
    prepared->descriptor_generation = gfx->descriptors.generation;
    prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
@@ -5708,11 +5714,6 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    prepared->valid = true;
 
    gfx->g17p_bind_tail_memo.fs_fields = fs_fields;
-   gfx->g17p_bind_tail_memo.viewport_record.length = viewport_record.length;
-   memcpy(gfx->g17p_bind_tail_memo.viewport_record.bytes,
-          viewport_record.bytes, viewport_record.length);
-   memcpy(gfx->g17p_bind_tail_memo.bind_group, bind_group,
-          sizeof(bind_group));
    gfx->g17p_bind_tail_memo.fs = fs;
    gfx->g17p_bind_tail_memo.hw_vs = vs;
    gfx->g17p_bind_tail_memo.valid = true;

@@ -503,16 +503,19 @@ struct hk_graphics_state {
    bool g17p_draw_id_host_valid;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
-   /* Packed records of the last complete build of g17p_bind_tail, whose
-    * other fields still describe its inputs. A rebuild whose only changed
-    * inputs are the root, descriptor or vertex-buffer identity (a descriptor
-    * push or vertex-buffer bind) reads exactly the same state for every
-    * record except the fragment record's stage program, which is
-    * recomputed; see hk_g17p_build_native_bind_tail(). */
+   /* The last complete build of g17p_bind_tail, whose other fields still
+    * describe its inputs. A rebuild whose only changed inputs are the root,
+    * descriptor or vertex-buffer identity (a descriptor push or vertex-buffer
+    * bind) reads exactly the same state for every record except the fragment
+    * record's stage program, which is recomputed from fs_fields; see
+    * hk_g17p_build_native_bind_tail(). */
    struct {
       struct agx_ppp_hal200_fragment_fields fs_fields;
-      struct agx_ppp_viewport_payload_core viewport_record;
-      uint8_t bind_group[0x80];
+      /* The state block of the last build or memo rebuild: CPU copy, its
+       * compact address and size. */
+      const uint8_t *state_cpu;
+      uint32_t state_compact;
+      uint32_t state_size;
       const struct hk_shader *fs;
       const struct hk_shader *hw_vs;
       bool valid;
