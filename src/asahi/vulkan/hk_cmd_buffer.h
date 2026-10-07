@@ -450,12 +450,44 @@ enum hk_g17p_range_source {
    HK_G17P_RANGE_SOURCE_ROOT = 1,
    HK_G17P_RANGE_SOURCE_DRAW_PARAMS = 2,
    HK_G17P_RANGE_SOURCE_DRAW_ID = 3,
+   /* A bound descriptor set's address plus a fixed offset, or the zero page
+    * when the set is not bound (uniform DMA spans). */
+   HK_G17P_RANGE_SOURCE_SET = 4,
    /* Uploaded while collecting the ranges (combined-sampler pointers,
     * spilled render-target descriptors): not re-derivable. */
    HK_G17P_RANGE_SOURCE_UPLOADED,
 };
 
 struct hk_g17p_gfx_loader;
+
+/* How a stage's uniform ranges derive from the draw state, recorded from a
+ * collection by hk_g17p_graphics_uniform_ranges(), and the loader they were
+ * published with. A draw with the same shader, linked executable, imageblock,
+ * range-selecting state (hk_g17p_launch_flags()) and, for a fragment shader,
+ * admission inputs derives its ranges from it. Every BO the loader names was
+ * retained when it was recorded. */
+#define HK_G17P_LAUNCH_SLOTS 8
+
+struct hk_g17p_launch {
+   const struct hk_shader *s;
+   const struct hk_linked_shader *linked;
+   const struct hk_g17p_gfx_loader *loader;
+   const struct hk_shader *hw_vs;
+   uint16_t tile_size_px;
+   uint8_t sample_size_B;
+   uint8_t nr_samples;
+   uint8_t topology;
+   uint8_t provoking;
+   uint8_t flags;
+   uint8_t count;
+   bool valid;
+   uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+   uint8_t set[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+   uint16_t start_halfs[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+   uint16_t size_halfs[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+   /* Root/set offset, or the address of a constant range. */
+   uint64_t offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+};
 
 struct hk_g17p_graphics_ioto_cache_entry {
    /* The loader of the last draw, the program published from it and the
@@ -465,6 +497,7 @@ struct hk_g17p_graphics_ioto_cache_entry {
    uint64_t loader_program;
    struct agx3_ioto_uniform_range
       loader_ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+
 
    /* Inputs of the last admitted program (hk_upload_usc_words_internal()). */
    struct {
@@ -729,6 +762,7 @@ struct hk_graphics_state {
     * the published programs and every referenced BO remain command-buffer-
     * owned. Submission never mutates or consults this cache. */
    struct hk_g17p_graphics_ioto_cache_entry g17p_ioto[2];
+   struct hk_g17p_launch g17p_launch[2][HK_G17P_LAUNCH_SLOTS];
    /* Exact command-buffer-owned uploads for combined texture/sampler pointer
     * pairs.  Shader/material switches may revisit the same pair thousands of
     * times; a fresh upload address would otherwise force a fresh Ioto program

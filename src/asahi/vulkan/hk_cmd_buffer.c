@@ -2096,11 +2096,11 @@ hk_g17p_graphics_uniform_ranges(
           (s->b.info.agx3_uniform_dma_dest & 1) ||
           (s->b.info.agx3_uniform_dma_halfs & 1))
          return hk_g17p_graphics_ranges_refused(range_count, count);
-      /* A root-relative span follows the root. A set-pointer span is the
-       * set's address value: constant while hk_g17p_dma_set_base() is
-       * unchanged, which every reuse of a published launcher requires. */
+      /* A root-relative span follows the root, a set-pointer span the set's
+       * address (hk_g17p_dma_set_base(), which every reuse of a published
+       * launcher still compares). */
       sources[count] = pointer == root_uniform ? HK_G17P_RANGE_SOURCE_ROOT
-                                               : HK_G17P_RANGE_SOURCE_CONSTANT;
+                                               : HK_G17P_RANGE_SOURCE_SET;
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = s->b.info.agx3_uniform_dma_dest,
          .size_halfs = s->b.info.agx3_uniform_dma_halfs,
@@ -2538,6 +2538,196 @@ hk_g17p_graphics_program_desc_init(
    struct hk_linked_shader *linked, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, struct hk_agx3_g17p_graphics_program_desc *desc);
 
+/* Publish l with the draw's range addresses, or the last program when they
+ * are the addresses it was published with. */
+static uint64_t
+hk_g17p_gfx_loader_publish(struct hk_cmd_buffer *cmd,
+                           struct hk_linked_shader *linked,
+                           struct hk_g17p_graphics_ioto_cache_entry *cached,
+                           const struct hk_g17p_gfx_loader *l,
+                           const struct agx3_ioto_uniform_range *ranges,
+                           size_t range_count)
+{
+   /* The program is a function of the loader and the range addresses. */
+   if (cached->loader == l && cached->loader_linked == linked &&
+       cached->loader_program &&
+       !memcmp(cached->loader_ranges, ranges, range_count * sizeof(ranges[0])))
+      return cached->loader_program;
+
+   const uint64_t published = hk_g17p_gfx_loader_emit(cmd, l, ranges);
+   if (!published)
+      return 0;
+
+   cached->loader = l;
+   cached->loader_linked = linked;
+   cached->loader_program = published;
+   memcpy(cached->loader_ranges, ranges, range_count * sizeof(ranges[0]));
+   return published;
+}
+
+/* The draw state that selects which ranges hk_g17p_graphics_uniform_ranges()
+ * collects for a shader; everything else in their layout is the shader's. */
+static inline uint8_t
+hk_g17p_launch_flags(const struct hk_cmd_buffer *cmd, const struct hk_shader *s)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   uint8_t flags = gfx->root ? 1 : 0;
+   if (s->info.stage == MESA_SHADER_VERTEX) {
+      flags |= (gfx->draw_params ? 2 : 0) | (gfx->draw_id_ptr ? 4 : 0);
+   } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
+      flags |= (hk_cmd_uses_blend_constant(cmd) ? 8 : 0) |
+               (agx_tilebuffer_spills(&gfx->render.tilebuffer) ? 16 : 0);
+   }
+   return flags;
+}
+
+static inline struct hk_g17p_launch *
+hk_g17p_launch_slot(struct hk_cmd_buffer *cmd, unsigned stage,
+                    const struct hk_linked_shader *linked)
+{
+   const uintptr_t key = (uintptr_t)linked;
+   return &cmd->state.gfx.g17p_launch[stage][((key >> 6) ^ (key >> 12)) &
+                                             (HK_G17P_LAUNCH_SLOTS - 1)];
+}
+
+/* Remember how ranges, just collected with sources and published with l,
+ * derive from the draw state. */
+static void
+hk_g17p_launch_record(struct hk_cmd_buffer *cmd, struct hk_g17p_launch *launch,
+                      const struct hk_shader *s,
+                      const struct hk_linked_shader *linked,
+                      const struct hk_g17p_gfx_loader *l, uint8_t flags,
+                      const struct hk_shader *hw_vs,
+                      const struct agx3_ioto_uniform_range *ranges,
+                      size_t count, const uint8_t *sources)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct agx_tilebuffer_layout *tib = &gfx->render.tilebuffer;
+
+   launch->valid = false;
+   if (count > ARRAY_SIZE(launch->source))
+      return;
+
+   for (unsigned i = 0; i < count; ++i) {
+      uint64_t offset = 0;
+      uint8_t set = 0;
+      switch (sources[i]) {
+      case HK_G17P_RANGE_SOURCE_CONSTANT:
+         offset = ranges[i].address;
+         break;
+      case HK_G17P_RANGE_SOURCE_ROOT:
+         offset = ranges[i].address - gfx->root;
+         break;
+      case HK_G17P_RANGE_SOURCE_DRAW_PARAMS:
+      case HK_G17P_RANGE_SOURCE_DRAW_ID:
+         break;
+      case HK_G17P_RANGE_SOURCE_SET:
+         set = (s->b.info.agx3_uniform_dma_pointer -
+                s->info.agx3_root_uniform - 4) / 4;
+         offset = s->b.info.agx3_uniform_dma_offset_B;
+         break;
+      default:
+         return;
+      }
+      launch->source[i] = sources[i];
+      launch->set[i] = set;
+      launch->offset[i] = offset;
+      launch->start_halfs[i] = ranges[i].start_halfs;
+      launch->size_halfs[i] = ranges[i].size_halfs;
+   }
+
+   launch->s = s;
+   launch->linked = linked;
+   launch->loader = l;
+   launch->hw_vs = hw_vs;
+   launch->tile_size_px = tib->tile_size;
+   launch->sample_size_B = tib->sample_size_B;
+   launch->nr_samples = tib->nr_samples;
+   launch->topology = gfx->topology;
+   launch->provoking = gfx->provoking;
+   launch->flags = flags;
+   launch->count = count;
+   launch->valid = true;
+}
+
+/* Whether the recorded launch applies to this draw, admission included: the
+ * admission of a vertex program depends only on the program, that of a
+ * fragment program also on the spill state (in the flags), the native RT0
+ * layout and the varying-coefficient inputs (hk_g17p_basic_graphics_
+ * program_supported()). */
+static inline bool
+hk_g17p_launch_matches(const struct hk_cmd_buffer *cmd,
+                       const struct hk_g17p_launch *launch,
+                       const struct hk_shader *s,
+                       const struct hk_linked_shader *linked, uint8_t flags,
+                       const struct hk_shader *hw_vs)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct agx_tilebuffer_layout *tib = &gfx->render.tilebuffer;
+
+   if (!launch->valid || launch->s != s || launch->linked != linked ||
+       launch->flags != flags || launch->tile_size_px != tib->tile_size ||
+       launch->sample_size_B != tib->sample_size_B ||
+       launch->nr_samples != tib->nr_samples)
+      return false;
+
+   return s->info.stage != MESA_SHADER_FRAGMENT ||
+          (gfx->render.g17p_rt0_layout_supported && hw_vs &&
+           launch->hw_vs == hw_vs && launch->topology == gfx->topology &&
+           launch->provoking == gfx->provoking);
+}
+
+/* The stage program of s from a matching recorded launch: the ranges
+ * hk_g17p_graphics_uniform_ranges() would collect, published with the loader
+ * of the recording. 0 when they do not fit that loader. */
+static inline uint64_t
+hk_g17p_launch_replay(struct hk_cmd_buffer *cmd,
+                      const struct hk_g17p_launch *launch,
+                      struct hk_linked_shader *linked,
+                      struct hk_g17p_graphics_ioto_cache_entry *cached)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const unsigned count = launch->count;
+   struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   for (unsigned i = 0; i < count; ++i) {
+      uint64_t address;
+      switch (launch->source[i]) {
+      case HK_G17P_RANGE_SOURCE_ROOT:
+         address = gfx->root + launch->offset[i];
+         break;
+      case HK_G17P_RANGE_SOURCE_DRAW_PARAMS:
+         address = gfx->draw_params;
+         break;
+      case HK_G17P_RANGE_SOURCE_DRAW_ID:
+         address = gfx->draw_id_ptr;
+         break;
+      case HK_G17P_RANGE_SOURCE_SET: {
+         /* As hk_g17p_graphics_uniform_ranges(): an unbound set reads the
+          * zero page. */
+         const uint64_t base = gfx->descriptors.root.sets[launch->set[i]];
+         address = base ? base + launch->offset[i] : AGX_ZERO_PAGE_ADDRESS;
+         if (address & 3)
+            return 0;
+         break;
+      }
+      default:
+         address = launch->offset[i];
+         break;
+      }
+      ranges[i] = (struct agx3_ioto_uniform_range){
+         .start_halfs = launch->start_halfs[i],
+         .size_halfs = launch->size_halfs[i],
+         .address = address,
+      };
+   }
+
+   if (!hk_g17p_patch_plan_fits(&launch->loader->plan, ranges))
+      return 0;
+
+   return hk_g17p_gfx_loader_publish(cmd, linked, cached, launch->loader,
+                                     ranges, count);
+}
+
 /* The stage program of s for the current draw: the loader of its range
  * layout, copied with the draw's range addresses. 0 if the layout has no
  * loader (or on error, which is then set on the command buffer). */
@@ -2600,20 +2790,10 @@ hk_g17p_publish_gfx_loader(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       l = created;
    }
 
-   /* The program is a function of the loader and the range addresses. */
-   if (cached->loader == l && cached->loader_linked == linked &&
-       cached->loader_program &&
-       !memcmp(cached->loader_ranges, ranges, range_count * sizeof(ranges[0])))
-      return cached->loader_program;
-
-   const uint64_t published = hk_g17p_gfx_loader_emit(cmd, l, ranges);
+   const uint64_t published =
+      hk_g17p_gfx_loader_publish(cmd, linked, cached, l, ranges, range_count);
    if (!published)
       return 0;
-
-   cached->loader = l;
-   cached->loader_linked = linked;
-   cached->loader_program = published;
-   memcpy(cached->loader_ranges, ranges, range_count * sizeof(ranges[0]));
 
    /* The program names the linked executable, and promoted constants and the
     * constant program live with the shader's code. */
@@ -3080,9 +3260,31 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
        * earlier compact publication in this recording with the same inputs
        * was already admitted. */
       struct hk_graphics_state *agfx = &cmd->state.gfx;
-      const bool spills = agx_tilebuffer_spills(&agfx->render.tilebuffer);
+      const bool diagnostics = dev->dev.debug & AGX_DBG_FAULTTRACE;
       const struct hk_shader *hw_vs =
          agfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(agfx) : NULL;
+      const uint8_t flags = hk_g17p_launch_flags(cmd, s);
+      struct hk_g17p_launch *launch = hk_g17p_launch_slot(cmd, stage, linked);
+      if (!diagnostics &&
+          hk_g17p_launch_matches(cmd, launch, s, linked, flags, hw_vs)) {
+         const uint64_t published =
+            hk_g17p_launch_replay(cmd, launch, linked, cached);
+         if (published) {
+            /* The paths below must not reuse their own last program. */
+            cached->valid = false;
+            return published;
+         }
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return 0;
+      }
+
+      /* The admission below depends only on the shader and its linked
+       * program for a vertex shader, plus the tile-buffer spill state, the
+       * native RT0 layout and the varying-coefficient inputs (topology,
+       * provoking vertex, hardware vertex shader) for a fragment shader.  An
+       * earlier compact publication in this recording with the same inputs
+       * was already admitted. */
+      const bool spills = agx_tilebuffer_spills(&agfx->render.tilebuffer);
       const bool same_program = dev->dev.chip == AGX_CHIP_G17P &&
                                 cached->admit.s == s &&
                                 cached->admit.linked == linked;
@@ -3110,16 +3312,19 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          cached->admit.hw_vs = hw_vs;
       }
 
-      const bool diagnostics = dev->dev.debug & AGX_DBG_FAULTTRACE;
       if (!diagnostics) {
          struct agx3_ioto_uniform_range
             loader_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+         uint8_t sources[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
          size_t loader_range_count = 0;
          if (hk_g17p_graphics_uniform_ranges(cmd, s, linked, loader_ranges,
-                                             &loader_range_count, NULL)) {
+                                             &loader_range_count, sources)) {
             const uint64_t published = hk_g17p_publish_gfx_loader(
                cmd, s, linked, cached, loader_ranges, loader_range_count);
             if (published) {
+               hk_g17p_launch_record(cmd, launch, s, linked, cached->loader,
+                                     flags, hw_vs, loader_ranges,
+                                     loader_range_count, sources);
                /* The paths below must not reuse their own last program. */
                cached->valid = false;
                return published;
