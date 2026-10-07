@@ -89,6 +89,15 @@ main(void)
           i == LIBAGX_INCREMENT_IA ||
           i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
           i == LIBAGX_COPY_QUERY ||
+          /* Compilation admission is not execution qualification. These
+           * D3D12 argument/publication helpers are explicitly admitted by
+           * agx_supports_precompiled(); runtime ownership and metadata checks
+           * remain required, as documented there. */
+          i == LIBAGX_WRITE_U64 ||
+          i == LIBAGX_D3D12_INDIRECT_PATCH ||
+          i == LIBAGX_D3D12_INDIRECT_CONSTANT ||
+          i == LIBAGX_D3D12_INDIRECT_ROOT ||
+          i == LIBAGX_D3D12_INDIRECT_DISPATCH ||
           i == LIBAGX_WRITE_U32S ||
           i == LIBAGX_RESET_QUERY ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
