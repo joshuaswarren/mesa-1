@@ -65,10 +65,73 @@ agx_bo_cache_remove_locked(struct agx_device *dev, struct agx_bo *bo)
  * cache. If it fails, it returns NULL signaling the caller to allocate a new
  * BO. */
 
+/* Tell the kernel a cached BO is not needed. Only DRM backends with the
+ * ioctl do anything; the first ENOTTY/EINVAL disables it for the device. */
+static void
+agx_bo_cache_advise_dontneed(struct agx_device *dev, struct agx_bo *bo)
+{
+   /* Only VM-private objects accept advice; shareable ones are exportable. */
+   if (dev->bo_cache.madvise < 0 || !dev->ops.bo_madvise ||
+       (bo->flags & (AGX_BO_SHARED | AGX_BO_SHAREABLE)))
+      return;
+
+   bool retained;
+   int ret = dev->ops.bo_madvise(dev, bo->handle, true, &retained);
+   if (ret == -ENOTTY || ret == -EINVAL) {
+      dev->bo_cache.madvise = -1;
+      return;
+   }
+   if (ret)
+      return;
+   dev->bo_cache.madvise = 1;
+   bo->purgeable = true;
+}
+
+/* Advice costs the kernel work on both ends, roughly proportional to the
+ * BO's pages (on A18 Pro a 4 MiB BO's DONTNEED + WILLNEED added 7.5 us to an
+ * allocate/free round trip), so advise only BOs that have stayed in the
+ * cache for a while; a BO reused at once is never advised. The LRU is in
+ * insertion order, so stop at the first BO younger than the threshold. */
+#define AGX_BO_CACHE_ADVISE_NS (250ll * 1000 * 1000)
+
+static void
+agx_bo_cache_advise_aged(struct agx_device *dev, int64_t now_ns)
+{
+   if (dev->bo_cache.madvise < 0 || !dev->ops.bo_madvise)
+      return;
+
+   list_for_each_entry(struct agx_bo, entry, &dev->bo_cache.lru, lru_link) {
+      if (now_ns - entry->cached_ns < AGX_BO_CACHE_ADVISE_NS)
+         break;
+      if (!entry->purgeable)
+         agx_bo_cache_advise_dontneed(dev, entry);
+   }
+}
+
+/* Reclaim a cached BO; returns false if the kernel purged its contents, in
+ * which case the caller must free the BO instead of handing it out. */
+static bool
+agx_bo_cache_advise_willneed(struct agx_device *dev, struct agx_bo *bo)
+{
+   if (!bo->purgeable)
+      return true;
+
+   bo->purgeable = false;
+   bool retained = false;
+   /* If the kernel did not confirm the object is needed again, it may still
+    * be purgeable: never hand it out. */
+   if (dev->ops.bo_madvise(dev, bo->handle, false, &retained))
+      return false;
+   return retained;
+}
+
 struct agx_bo *
 agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
                    uint32_t flags, const bool dontwait)
 {
+   struct list_head purged;
+   list_inithead(&purged);
+
    simple_mtx_lock(&dev->bo_cache.lock);
    struct list_head *bucket = agx_bucket(dev, size, flags);
    struct agx_bo *bo = NULL;
@@ -85,12 +148,30 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
       if (align > entry->align)
          continue;
 
-      /* This one works, use it */
       agx_bo_cache_remove_locked(dev, entry);
+
+      /* The kernel may have discarded a purgeable BO's contents under
+       * memory pressure. Such a BO is dead: free it below and keep looking. */
+      if (!agx_bo_cache_advise_willneed(dev, entry)) {
+         list_addtail(&entry->bucket_link, &purged);
+         continue;
+      }
+
+      /* This one works, use it */
       bo = entry;
       break;
    }
    simple_mtx_unlock(&dev->bo_cache.lock);
+
+   if (!list_is_empty(&purged)) {
+      /* Match the unreference lock order: bo_map_lock, then the cache. */
+      simple_mtx_lock(&dev->bo_map_lock);
+      list_for_each_entry_safe(struct agx_bo, entry, &purged, bucket_link) {
+         list_del(&entry->bucket_link);
+         agx_bo_free(dev, entry);
+      }
+      simple_mtx_unlock(&dev->bo_map_lock);
+   }
 
    return bo;
 }
@@ -228,6 +309,11 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
 
    /* Update label for debug */
    bo->label = "Unused (BO cache)";
+
+   /* Let the kernel discard BOs that stay cached under memory pressure;
+    * nothing references them until agx_bo_cache_fetch() hands them out. */
+   bo->cached_ns = os_time_get_nano();
+   agx_bo_cache_advise_aged(dev, bo->cached_ns);
 
    /* Let's do some cleanup in the BO cache while we hold the lock. */
    agx_bo_cache_evict_stale_bos(dev, bo->last_used);

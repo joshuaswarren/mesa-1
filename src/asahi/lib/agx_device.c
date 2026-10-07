@@ -149,6 +149,23 @@ agx_drm_bo_close(struct agx_device *dev, uint32_t handle)
    struct drm_gem_close args = {.handle = handle};
    drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &args);
 }
+
+static int
+agx_drm_bo_madvise(struct agx_device *dev, uint32_t handle, bool dontneed,
+                   bool *retained)
+{
+   struct drm_asahi_gem_madvise args = {
+      .handle = handle,
+      .madv = dontneed ? DRM_ASAHI_GEM_MADV_DONTNEED
+                       : DRM_ASAHI_GEM_MADV_WILLNEED,
+   };
+
+   if (drmIoctl(dev->fd, DRM_IOCTL_ASAHI_GEM_MADVISE, &args))
+      return -errno;
+
+   *retained = args.retained != 0;
+   return 0;
+}
 #endif /* HAVE_LIBDRM */
 
 /* clang-format off */
@@ -816,6 +833,7 @@ const agx_device_ops_t agx_device_drm_ops = {
    .bo_munmap = agx_drm_bo_munmap,
    .bo_sync_for_device = agx_drm_bo_sync_for_device,
    .bo_free = agx_drm_bo_close,
+   .bo_madvise = agx_drm_bo_madvise,
 };
 #else /* !HAVE_LIBDRM */
 /*

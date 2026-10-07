@@ -137,6 +137,16 @@ typedef struct {
    int (*bo_unbind_object)(struct agx_device *dev, uint32_t object_handle);
 
    /*
+    * Purge advice for a VM-private BO (DRM_IOCTL_ASAHI_GEM_MADVISE). On
+    * success *retained says whether the contents survived (false once the
+    * kernel purged them). Returns -errno; -ENOTTY/-EINVAL from a kernel
+    * without the ioctl disables the BO cache's use of it. NULL when the
+    * backend has no equivalent.
+    */
+   int (*bo_madvise)(struct agx_device *dev, uint32_t handle, bool dontneed,
+                     bool *retained);
+
+   /*
     * honeykrisp-h1-execution.md SS1 "widen the table by three ops": lets
     * agx_device.c's remaining out-of-ops-table drm/OS call sites
     * (asahi_simple_ioctl's four callers -- VM_CREATE, QUEUE_CREATE,
@@ -347,6 +357,11 @@ struct agx_device {
 
       /* Number of hits/misses for the BO cache */
       uint64_t hits, misses;
+
+      /* Kernel purge advice for cached BOs: 0 untested, 1 works, -1 absent.
+       * With advice the kernel can discard cached BOs under memory pressure;
+       * without it they pin their pages until evicted. */
+      int madvise;
 
       /* DRM shmem pages remain pinned while a BO is cached. Wake only while
        * the cache has entries, so an idle client can release stale BOs. */
