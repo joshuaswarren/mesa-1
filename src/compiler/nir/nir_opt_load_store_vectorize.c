@@ -370,31 +370,48 @@ get_effective_alu_op(nir_scalar scalar)
  * sources is a constant, update "def" to be the non-constant source, fill "c"
  * with the constant and return true. */
 static bool
-parse_alu(nir_scalar *def, nir_op op, uint64_t *c, bool require_nuw)
+parse_alu(struct hash_table *numlsb_ht, nir_scalar *def, nir_op op,
+          uint64_t *c, bool require_nuw)
 {
    if (!nir_scalar_is_alu(*def) || get_effective_alu_op(*def) != op)
       return false;
 
-   if (require_nuw && !nir_def_as_alu(def->def)->no_unsigned_wrap)
-      return false;
-
    nir_scalar src0 = nir_scalar_chase_alu_src(*def, 0);
    nir_scalar src1 = nir_scalar_chase_alu_src(*def, 1);
+   nir_scalar variable;
+   uint64_t constant;
    if (op != nir_op_ishl && nir_scalar_is_const(src0)) {
-      *c = nir_scalar_as_uint(src0);
-      *def = src1;
+      constant = nir_scalar_as_uint(src0);
+      variable = src1;
    } else if (nir_scalar_is_const(src1)) {
-      *c = nir_scalar_as_uint(src1);
-      *def = src0;
+      constant = nir_scalar_as_uint(src1);
+      variable = src0;
    } else {
       return false;
    }
+
+   if (require_nuw && !nir_def_as_alu(def->def)->no_unsigned_wrap) {
+      if (op != nir_op_iadd)
+         return false;
+
+      /* Widening an unsigned address must preserve narrow arithmetic wrap.
+       * A value with k known zero low bits is at most UINT_MAX - (2^k - 1),
+       * so adding a constant below 2^k cannot wrap.  Keep this proof local:
+       * other components of a vector ALU may have different alignment.
+       */
+      unsigned zeros = nir_def_num_lsb_zero(numlsb_ht, variable);
+      if (constant > BITFIELD64_MASK(zeros))
+         return false;
+   }
+
+   *c = constant;
+   *def = variable;
    return true;
 }
 
 /* Parses an offset expression such as "a * 16 + 4" and "(a * 16 + 4) * 64 + 32". */
 static struct offset_term
-parse_offset(nir_scalar base, uint64_t *offset)
+parse_offset(struct hash_table *numlsb_ht, nir_scalar base, uint64_t *offset)
 {
    struct offset_term term;
    if (nir_scalar_is_const(base)) {
@@ -413,19 +430,19 @@ parse_offset(nir_scalar base, uint64_t *offset)
       uint64_t mul2 = 1, add2 = 0;
       progress = false;
 
-      if (parse_alu(&base, nir_op_imul, &mul2, require_nuw)) {
+      if (parse_alu(numlsb_ht, &base, nir_op_imul, &mul2, require_nuw)) {
          progress = true;
          uub = mul2 ? uub / mul2 : 0;
          mul *= mul2;
       }
 
-      if (parse_alu(&base, nir_op_ishl, &mul2, require_nuw)) {
+      if (parse_alu(numlsb_ht, &base, nir_op_ishl, &mul2, require_nuw)) {
          progress = true;
          uub >>= mul2 & (base.def->bit_size - 1);
          mul <<= mul2 & (base.def->bit_size - 1);
       }
 
-      if (parse_alu(&base, nir_op_iadd, &add2, require_nuw)) {
+      if (parse_alu(numlsb_ht, &base, nir_op_iadd, &add2, require_nuw)) {
          progress = true;
          uub = u_uintN_max(base.def->bit_size);
          add += add2 * mul;
@@ -447,7 +464,7 @@ parse_offset(nir_scalar base, uint64_t *offset)
 
    nir_scalar base32 = base;
    uint64_t add32 = 0;
-   if (require_nuw && parse_alu(&base32, nir_op_iadd, &add32, false)) {
+   if (require_nuw && parse_alu(numlsb_ht, &base32, nir_op_iadd, &add32, false)) {
       /* base32 + add32 is in [0,uub].
        *
        * The addition overflows if base32 is in:
@@ -588,7 +605,7 @@ create_entry_key_from_deref(struct vectorize_ctx *ctx, struct entry *entry,
          uint32_t stride = nir_deref_instr_array_stride(deref);
 
          uint64_t offset = 0;
-         struct offset_term term = parse_offset(nir_get_scalar(index, 0), &offset);
+         struct offset_term term = parse_offset(ctx->numlsb_ht, nir_get_scalar(index, 0), &offset);
          offset = util_mask_sign_extend(offset, index->bit_size);
 
          entry->offset += offset * stride;
@@ -623,11 +640,12 @@ create_entry_key_from_deref(struct vectorize_ctx *ctx, struct entry *entry,
 }
 
 static unsigned
-parse_entry_key_from_offset(struct offset_term *terms, unsigned size, unsigned left,
+parse_entry_key_from_offset(struct hash_table *numlsb_ht,
+                            struct offset_term *terms, unsigned size, unsigned left,
                             nir_scalar base, uint64_t base_mul, uint64_t *offset)
 {
    uint64_t new_offset;
-   struct offset_term term = parse_offset(base, &new_offset);
+   struct offset_term term = parse_offset(numlsb_ht, base, &new_offset);
    *offset += new_offset * base_mul;
 
    if (!term.s.def)
@@ -641,8 +659,8 @@ parse_entry_key_from_offset(struct offset_term *terms, unsigned size, unsigned l
       if (nir_scalar_is_alu(term.s) && nir_scalar_alu_op(term.s) == nir_op_iadd) {
          nir_scalar src0 = nir_scalar_chase_alu_src(term.s, 0);
          nir_scalar src1 = nir_scalar_chase_alu_src(term.s, 1);
-         unsigned amount = parse_entry_key_from_offset(terms, size, left - 1, src0, term.mul, offset);
-         amount += parse_entry_key_from_offset(terms, size + amount, left - amount, src1, term.mul, offset);
+         unsigned amount = parse_entry_key_from_offset(numlsb_ht, terms, size, left - 1, src0, term.mul, offset);
+         amount += parse_entry_key_from_offset(numlsb_ht, terms, size + amount, left - amount, src1, term.mul, offset);
          return amount;
       }
    }
@@ -667,7 +685,7 @@ create_entry_key_from_offset(struct vectorize_ctx *ctx, struct entry *entry,
    if (base) {
       nir_scalar scalar = { .def = base, .comp = 0 };
       uint64_t offset = 0;
-      key->offset_def_count = parse_entry_key_from_offset(terms, 0, 32, scalar, base_mul, &offset);
+      key->offset_def_count = parse_entry_key_from_offset(ctx->numlsb_ht, terms, 0, 32, scalar, base_mul, &offset);
       entry->offset += offset;
    }
 

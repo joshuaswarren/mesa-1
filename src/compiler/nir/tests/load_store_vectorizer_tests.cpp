@@ -1823,6 +1823,207 @@ TEST_F(nir_load_store_vectorize_test, shared_alias1)
    EXPECT_INSTR_SWIZZLES(movs[0x3], load, "x");
 }
 
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_0)
+{
+   /* stride=16, offsets=0,4; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, 0);
+   nir_def *high = nir_iadd_imm(b, aligned, 4);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 1);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_1)
+{
+   /* stride=16, offsets=0,4; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_amul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, 0);
+   nir_def *high = nir_iadd_imm(b, aligned, 4);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 1);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_2)
+{
+   /* stride=16, offsets=8,12; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, 8);
+   nir_def *high = nir_iadd_imm(b, aligned, 12);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 1);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_3)
+{
+   /* stride=16, offsets=12,16; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, 12);
+   nir_def *high = nir_iadd_imm(b, aligned, 16);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 2);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_4)
+{
+   /* stride=16, offsets=-4,0; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, -4);
+   nir_def *high = nir_iadd_imm(b, aligned, 0);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 2);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_5)
+{
+   /* stride=12, offsets=0,4; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 12));
+   nir_def *low = nir_iadd_imm(b, aligned, 0);
+   nir_def *high = nir_iadd_imm(b, aligned, 4);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 2);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_6)
+{
+   /* stride=24, offsets=0,4; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 24));
+   nir_def *low = nir_iadd_imm(b, aligned, 0);
+   nir_def *high = nir_iadd_imm(b, aligned, 4);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 1);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_7)
+{
+   /* stride=16, offsets=0,4; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, 0);
+   nir_def *high = nir_iadd_imm(b, aligned, 4);
+   low = nir_i2i64(b, low);
+   high = nir_i2i64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 2);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_offset_8)
+{
+   /* stride=16, offsets=0,8; retain narrow multiply wrap. */
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, index, nir_imm_int(b, 16));
+   nir_def *low = nir_iadd_imm(b, aligned, 0);
+   nir_def *high = nir_iadd_imm(b, aligned, 8);
+   low = nir_u2u64(b, low);
+   high = nir_u2u64(b, high);
+   nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+   nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 2);
+   EXPECT_FALSE(nir_def_as_alu(aligned)->no_unsigned_wrap);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_full_vector_16)
+{
+   nir_def *index = nir_u2uN(b, nir_load_local_invocation_index(b), 16);
+   nir_def *aligned = nir_imul_imm(b, index, 16);
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_def *offset = nir_u2u64(b, nir_iadd_imm(b, aligned, c * 4));
+      nir_mov(b, nir_load_global_constant(b, 1, 32, offset,
+                                         .align_mul = 16, .align_offset = c * 4));
+   }
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 1);
+   EXPECT_EQ(get_intrinsic(nir_intrinsic_load_global_constant, 0)->num_components, 4);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_full_vector_32)
+{
+   nir_def *index = nir_u2uN(b, nir_load_local_invocation_index(b), 32);
+   nir_def *aligned = nir_imul_imm(b, index, 16);
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_def *offset = nir_u2u64(b, nir_iadd_imm(b, aligned, c * 4));
+      nir_mov(b, nir_load_global_constant(b, 1, 32, offset,
+                                         .align_mul = 16, .align_offset = c * 4));
+   }
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 1);
+   EXPECT_EQ(get_intrinsic(nir_intrinsic_load_global_constant, 0)->num_components, 4);
+}
+
+TEST_F(nir_load_store_vectorize_test, widened_aligned_vector_components)
+{
+   nir_def *index = nir_load_local_invocation_index(b);
+   nir_def *aligned = nir_imul(b, nir_vec2(b, index, index),
+                              nir_imm_ivec2(b, 16, 1));
+   nir_def *offset = nir_iadd(b, aligned, nir_imm_ivec2(b, 4, 4));
+   for (unsigned c = 0; c < 2; ++c) {
+      nir_def *low = nir_u2u64(b, nir_channel(b, aligned, c));
+      nir_def *high = nir_u2u64(b, nir_channel(b, offset, c));
+      nir_mov(b, nir_load_global_constant(b, 1, 32, low, .align_mul = 4));
+      nir_mov(b, nir_load_global_constant(b, 1, 32, high, .align_mul = 4));
+   }
+   nir_validate_shader(b->shader, NULL);
+   run_vectorizer(nir_var_mem_global);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_global_constant), 3);
+   EXPECT_FALSE(nir_def_as_alu(offset)->no_unsigned_wrap);
+}
+
 TEST_F(nir_load_store_vectorize_test, ssbo_load_distant_64bit)
 {
    create_indirect_load(nir_var_mem_ssbo, 0, nir_imm_int64(b, 0x100000000), 0x1);
