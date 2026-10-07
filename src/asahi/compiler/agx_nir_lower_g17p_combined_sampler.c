@@ -483,14 +483,17 @@ g17p_rewrite_combined_texture_crawls(nir_shader *shader, uint8_t set,
    return true;
 }
 
-bool
-agx_nir_lower_g17p_combined_sampler(
-   nir_shader *shader, struct agx_g17p_combined_sampler_binding *binding)
+/* The checks of agx_nir_lower_g17p_combined_sampler() made before it
+ * changes anything: the shader's one texture instruction, a sample of the
+ * supported shape, through a Gen9 sampled descriptor. */
+static nir_tex_instr *
+g17p_combined_sampler_candidate(const nir_shader *shader,
+                                uint32_t *texture_offset_B,
+                                uint32_t *sampler_state_offset_B)
 {
-   if (!shader || !binding ||
-       (shader->info.stage != MESA_SHADER_FRAGMENT &&
-        shader->info.stage != MESA_SHADER_COMPUTE))
-      return false;
+   if (!shader || (shader->info.stage != MESA_SHADER_FRAGMENT &&
+                   shader->info.stage != MESA_SHADER_COMPUTE))
+      return NULL;
 
    nir_tex_instr *sample = NULL;
    nir_foreach_function_impl(impl, shader) {
@@ -500,29 +503,51 @@ agx_nir_lower_g17p_combined_sampler(
                continue;
 
             if (sample || !g17p_sample_shape(nir_instr_as_tex(instr)))
-               return false;
+               return NULL;
             sample = nir_instr_as_tex(instr);
          }
       }
    }
 
    if (!sample)
-      return false;
+      return NULL;
 
-   uint32_t texture_offset_B, sampler_state_offset_B;
    if (!g17p_handle_offset(sample, nir_tex_src_texture_handle,
                            nir_intrinsic_bindless_image_agx,
-                           &texture_offset_B) ||
+                           texture_offset_B) ||
        !g17p_handle_offset(sample, nir_tex_src_sampler_handle,
                            nir_intrinsic_bindless_sampler_agx,
-                           &sampler_state_offset_B))
-      return false;
+                           sampler_state_offset_B))
+      return NULL;
 
    /* Gen9 sampled descriptors contain one 32-byte texture followed by the
     * eight-byte native sampler word and its 16-bit global-heap index.
     */
-   if ((texture_offset_B & 7) != 0 ||
-       sampler_state_offset_B != texture_offset_B + 32)
+   if ((*texture_offset_B & 7) != 0 ||
+       *sampler_state_offset_B != *texture_offset_B + 32)
+      return NULL;
+
+   return sample;
+}
+
+bool
+agx_nir_g17p_combined_sampler_candidate(const nir_shader *shader)
+{
+   uint32_t texture_offset_B, sampler_state_offset_B;
+   return g17p_combined_sampler_candidate(shader, &texture_offset_B,
+                                          &sampler_state_offset_B) != NULL;
+}
+
+bool
+agx_nir_lower_g17p_combined_sampler(
+   nir_shader *shader, struct agx_g17p_combined_sampler_binding *binding)
+{
+   uint32_t texture_offset_B, sampler_state_offset_B;
+   nir_tex_instr *sample =
+      binding ? g17p_combined_sampler_candidate(shader, &texture_offset_B,
+                                                &sampler_state_offset_B)
+              : NULL;
+   if (!sample)
       return false;
 
    /* The Gen9 software LOD bias is at byte 12 of sampler state, and the

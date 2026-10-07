@@ -2700,10 +2700,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        * as hardware VS variants; legacy descriptor-base/index operands do
        * not encode as native G17P texture fetches. Lower before changing the
        * NIR stage so both variants retain the vertex preamble convention. */
-      nir_shader *candidate = nir_shader_clone(NULL, nir);
-      if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
-         ralloc_free(nir);
-         nir = candidate;
+      if (agx_nir_lower_g17p_indexed_samplers(nir)) {
          shader->info.agx3_indexed_sampler_valid = true;
 
          /* Native G17P publishes texture/sampler heap pointers in halves
@@ -2714,8 +2711,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                   hk_g17p_shift_vertex_preamble,
                   nir_metadata_control_flow, (void *)&base);
-      } else {
-         ralloc_free(candidate);
       }
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
               (nir->info.stage == MESA_SHADER_GEOMETRY ||
@@ -2725,20 +2720,19 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        * indexed texture/sampler heaps just like compute shaders. Metal has no
        * geometry stage, but its indexed explicit-level vertex witness emits
        * the same register-operand SMP form selected after this rewrite. */
-      nir_shader *candidate = nir_shader_clone(NULL, nir);
-      if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
-         ralloc_free(nir);
-         nir = candidate;
+      if (agx_nir_lower_g17p_indexed_samplers(nir))
          shader->info.agx3_indexed_sampler_valid = true;
-      } else {
-         ralloc_free(candidate);
-      }
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
               nir->info.stage == MESA_SHADER_FRAGMENT) {
-      nir_shader *candidate = nir_shader_clone(NULL, nir);
+      /* The combined-sampler lowering can refuse after changing the shader,
+       * so it works on a copy -- made only for a shader it may apply to. */
+      nir_shader *candidate =
+         !dev->vk.enabled_features.descriptorBindingSampledImageUpdateAfterBind &&
+               agx_nir_g17p_combined_sampler_candidate(nir)
+            ? nir_shader_clone(NULL, nir)
+            : NULL;
       struct agx_g17p_combined_sampler_binding binding;
       if (candidate &&
-          !dev->vk.enabled_features.descriptorBindingSampledImageUpdateAfterBind &&
           agx_nir_lower_g17p_combined_sampler(candidate, &binding)) {
          ralloc_free(nir);
          nir = candidate;
@@ -2752,14 +2746,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          set_count = 0;
       } else {
          ralloc_free(candidate);
-         candidate = nir_shader_clone(NULL, nir);
-         if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
-            ralloc_free(nir);
-            nir = candidate;
+         if (agx_nir_lower_g17p_indexed_samplers(nir))
             shader->info.agx3_indexed_sampler_valid = true;
-         } else {
-            ralloc_free(candidate);
-         }
       }
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
               nir->info.stage == MESA_SHADER_COMPUTE) {
