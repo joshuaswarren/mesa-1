@@ -134,28 +134,23 @@ static void hk_flush_dynamic_state(
 
 static void hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd);
 
+static inline bool
+hk_gfx_transformed(const struct hk_graphics_state *gfx)
+{
+   return gfx->shaders[MESA_SHADER_GEOMETRY] ||
+          gfx->shaders[MESA_SHADER_TESS_EVAL];
+}
+
 void
 hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
 {
-   /* Bind-time preparation is speculative. A G17P pipeline bind applies its
-    * static state before preparing; shader objects and rendering changes may
-    * still see incomplete state, and the application can change dynamic state,
-    * descriptors or attachments before the draw. The draw re-derives
-    * and validates everything it consumes, so a refusal seen here (e.g. a
-    * sample-shaded fragment program against the not-yet-applied sample
-    * count) must not fail the command buffer. */
-
-   /* A push descriptor set is complete once it is pushed; only its upload,
-    * and with it the set address in the root, waits for the next draw.
-    * Upload it before preparing, so the root and every launch program whose
-    * UNIFORM_DMA span names the set (hk_g17p_dma_set_base()) are built for
-    * the address the draw will use. A set pushed before vkCmdBindPipeline
-    * otherwise left the prepared fragment program reading the zero page:
-    * the draw-time flush rewrites the same prepared root and so moves no
-    * identity the bind tail is matched on. This upload is not speculative,
-    * so it runs outside the refusal-forgiving window below. */
+   /* Preparation is speculative: the draw re-derives and validates everything
+    * it consumes, so a refusal seen here must not fail the command buffer.
+    *
+    * A pushed descriptor set is uploaded first, so the root and every launch
+    * program naming the set are built for the address the draw will use. */
    struct hk_descriptor_state *gfx_desc = &cmd->state.gfx.descriptors;
-   if (gfx_desc->push_dirty &&
+   if (gfx_desc->push_dirty && hk_gfx_transformed(&cmd->state.gfx) &&
        hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P &&
        cmd->current_cs.gfx && cmd->state.gfx.shaders[MESA_SHADER_VERTEX] &&
        cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT] &&
@@ -237,7 +232,13 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    gfx->prepared_geometry_params_filled = false;
    gfx->prepared_vdm_state_update_valid = false;
 
-   if (!cmd->current_cs.gfx ||
+   /* Only geometry and tessellation state is prepared when it is bound: those
+    * draws reserve parameter blocks and compute launches that the draw then
+    * fills. Ordinary state is built by the draw alone. Preparing it here as
+    * well doubled the work whenever the application changed any state between
+    * the bind and the draw, which D3D translation layers do for nearly every
+    * draw. */
+   if (!hk_gfx_transformed(gfx) || !cmd->current_cs.gfx ||
        !gfx->shaders[MESA_SHADER_VERTEX] ||
        !gfx->shaders[MESA_SHADER_FRAGMENT] ||
        vk_command_buffer_has_error(&cmd->vk))
@@ -282,14 +283,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    hk_flush_shaders(cmd);
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
-
-   if (!gfx->shaders[MESA_SHADER_GEOMETRY] &&
-       !gfx->shaders[MESA_SHADER_TESS_EVAL]) {
-      if (!hk_cmd_buffer_prepare_graphics_root(cmd))
-         return;
-      hk_g17p_prepare_native_bind_tail(cmd);
-      return;
-   }
 
    /* Shader objects bind stages one call at a time, so preparation can see
     * an evaluation shader before (or after unbinding) its control shader.
@@ -9571,10 +9564,11 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
    cmd->state.gfx.index.buffer.range =
       align(cmd->state.gfx.index.buffer.range, 4);
 
-   /* Binding supplies the last draw-specific VS key component. This is a
-    * bounded cache warm-up only when a render is active; it emits no GPU
-    * state and never clears Vulkan dirtiness. */
-   if (cmd->current_cs.gfx) {
+   /* For geometry and tessellation, binding supplies the last component of
+    * the compute vertex stage's key, prepared like the rest of their state
+    * (hk_cmd_prepare_bound_graphics). This emits no GPU state and never
+    * clears Vulkan dirtiness. */
+   if (cmd->current_cs.gfx && hk_gfx_transformed(&cmd->state.gfx)) {
       struct hk_graphics_state *gfx = &cmd->state.gfx;
       const bool restart =
          cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
