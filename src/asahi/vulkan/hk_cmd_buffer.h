@@ -618,14 +618,13 @@ struct hk_graphics_state {
    bool g17p_vs_one_level;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
-   /* The last successfully built HAL200 bind tail's inputs and packed
-    * records.  A rebuild whose only changed inputs are the root, descriptor
-    * or vertex-buffer identity (a descriptor push or vertex-buffer bind)
-    * reads exactly the same state for every record except the fragment
-    * record's stage program, which is recomputed; see
-    * hk_g17p_build_native_bind_tail(). */
+   /* Packed records of the last complete build of g17p_bind_tail, whose
+    * other fields still describe its inputs. A rebuild whose only changed
+    * inputs are the root, descriptor or vertex-buffer identity (a descriptor
+    * push or vertex-buffer bind) reads exactly the same state for every
+    * record except the fragment record's stage program, which is
+    * recomputed; see hk_g17p_build_native_bind_tail(). */
    struct {
-      struct hk_g17p_prepared_bind_tail snapshot;
       struct agx_ppp_hal200_fragment_fields fs_fields;
       struct agx_ppp_viewport_payload_core viewport_record;
       uint8_t bind_group[0x80];

@@ -5149,8 +5149,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if (gfx->g17p_bind_tail_memo.valid &&
        gfx->g17p_bind_tail_memo.fs == fs &&
        gfx->g17p_bind_tail_memo.hw_vs == hk_bound_hw_vs(gfx) &&
-       hk_g17p_bind_tail_state_matches(cmd,
-                                       &gfx->g17p_bind_tail_memo.snapshot)) {
+       hk_g17p_bind_tail_state_matches(cmd, prepared)) {
       struct agx_ppp_hal200_fragment_fields memo_fs_fields =
          gfx->g17p_bind_tail_memo.fs_fields;
       memo_fs_fields.stage_program = fragment_program;
@@ -5180,7 +5179,6 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
              gfx->linked_varyings.counts_16.opaque[0], &memo_uploaded))
          return hk_g17p_bind_tail_refused(__LINE__);
 
-      *prepared = gfx->g17p_bind_tail_memo.snapshot;
       prepared->tail = memo_uploaded.tail;
       prepared->dynamic_generation = dyn->generation;
       prepared->descriptor_generation = gfx->descriptors.generation;
@@ -5191,6 +5189,9 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       prepared->valid = true;
       return true;
    }
+   /* The memo describes prepared, which the build below overwrites. */
+   gfx->g17p_bind_tail_memo.valid = false;
+
    if (!hk_g17p_smooth_varyings_supported(cmd, linked_fs)) {
       mesa_loge_once(
          "G17P varying layout refused: bindings=%u cf=%u reads_z=%u "
@@ -5384,13 +5385,14 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
                    (gfx->generate_primitive_id ? UINT32_C(0x1000) : 0),
    };
 
-   struct agx_ppp_viewport_payload_fields viewport_fields = {
-      .viewport_count = viewport_count,
-   };
-   unsigned minx[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
-   unsigned miny[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
-   unsigned maxx[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
-   unsigned maxy[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
+   /* Only the first viewport_count entries are written and read. */
+   struct agx_ppp_viewport_payload_fields viewport_fields;
+   viewport_fields.viewport_count = viewport_count;
+   viewport_fields.viewport_control_raw = 0;
+   unsigned minx[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS];
+   unsigned miny[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS];
+   unsigned maxx[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS];
+   unsigned maxy[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS];
    for (unsigned i = 0; i < viewport_count; ++i) {
       const VkViewport *vp = &dyn->vp.viewports[i];
       minx[i] = MIN2(vp->x, vp->x + vp->width);
@@ -5705,9 +5707,10 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    prepared->in_meta = cmd->in_meta;
    prepared->valid = true;
 
-   gfx->g17p_bind_tail_memo.snapshot = *prepared;
    gfx->g17p_bind_tail_memo.fs_fields = fs_fields;
-   gfx->g17p_bind_tail_memo.viewport_record = viewport_record;
+   gfx->g17p_bind_tail_memo.viewport_record.length = viewport_record.length;
+   memcpy(gfx->g17p_bind_tail_memo.viewport_record.bytes,
+          viewport_record.bytes, viewport_record.length);
    memcpy(gfx->g17p_bind_tail_memo.bind_group, bind_group,
           sizeof(bind_group));
    gfx->g17p_bind_tail_memo.fs = fs;
