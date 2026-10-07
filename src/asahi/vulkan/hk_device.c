@@ -101,14 +101,17 @@ hk_upload_rodata(struct hk_device *dev)
                        "%s has no known sampler heap element size",
                        agx_chip_name(dev->dev.chip));
 
+   VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
    const size_t rodata_size = align(sampler_size, sizeof(uint64_t));
    dev->rodata.bo =
       agx_bo_create(&dev->dev, rodata_size, 0, 0, "Read only data");
 
    if (!dev->rodata.bo)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail;
 
    uint8_t *map = agx_bo_map(dev->rodata.bo);
+   if (!map)
+      goto fail;
    uint32_t offs = 0;
 
    offs = align(offs, 8);
@@ -125,11 +128,10 @@ hk_upload_rodata(struct hk_device *dev)
 
    struct hk_native_sampler_descriptor txf;
    if (!hk_pack_native_txf_sampler(dev->dev.chip, &txf)) {
-      agx_bo_unreference(&dev->dev, dev->rodata.bo);
-      dev->rodata.bo = NULL;
-      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
-                       "%s cannot pack the texel-fetch sampler",
-                       agx_chip_name(dev->dev.chip));
+      result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                          "%s cannot pack the texel-fetch sampler",
+                          agx_chip_name(dev->dev.chip));
+      goto fail;
    }
    memcpy(map + offs, &txf, sampler_size);
    offs += sampler_size;
@@ -143,14 +145,13 @@ hk_upload_rodata(struct hk_device *dev)
       dev->rodata.indexed_heap_pointers_bo =
          agx_bo_create(&dev->dev, sizeof(pointers), 0, 0,
                        "Indexed descriptor heap pointers");
-      if (!dev->rodata.indexed_heap_pointers_bo) {
-         agx_bo_unreference(&dev->dev, dev->rodata.bo);
-         dev->rodata.bo = NULL;
-         return VK_ERROR_OUT_OF_HOST_MEMORY;
-      }
+      if (!dev->rodata.indexed_heap_pointers_bo)
+         goto fail;
 
-      memcpy(agx_bo_map(dev->rodata.indexed_heap_pointers_bo), pointers,
-             sizeof(pointers));
+      void *pointers_map = agx_bo_map(dev->rodata.indexed_heap_pointers_bo);
+      if (!pointers_map)
+         goto fail;
+      memcpy(pointers_map, pointers, sizeof(pointers));
       dev->rodata.indexed_heap_pointers =
          dev->rodata.indexed_heap_pointers_bo->va->addr;
    }
@@ -168,19 +169,23 @@ hk_upload_rodata(struct hk_device *dev)
     */
    dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
                                        0, "Geometry heap descriptor");
-   if (!dev->rodata.heap_bo) {
-      agx_bo_unreference(&dev->dev,
-                         dev->rodata.indexed_heap_pointers_bo);
-      dev->rodata.indexed_heap_pointers_bo = NULL;
-      agx_bo_unreference(&dev->dev, dev->rodata.bo);
-      dev->rodata.bo = NULL;
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
+   if (!dev->rodata.heap_bo)
+      goto fail;
 
-   memset(agx_bo_map(dev->rodata.heap_bo), 0, sizeof(struct poly_heap));
+   void *heap_map = agx_bo_map(dev->rodata.heap_bo);
+   if (!heap_map)
+      goto fail;
+   memset(heap_map, 0, sizeof(struct poly_heap));
    dev->rodata.heap = dev->rodata.heap_bo->va->addr;
 
    return VK_SUCCESS;
+
+fail:
+   agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   memset(&dev->rodata, 0, sizeof(dev->rodata));
+   return result;
 }
 
 static uint32_t

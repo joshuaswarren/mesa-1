@@ -52,15 +52,25 @@ hk_descriptor_table_alloc_single(struct hk_device *dev,
                        "Failed to allocate the descriptor table");
    }
 
-   table->bo = new_bo;
-   table->map = agx_bo_map(new_bo);
-   table->base_va = new_bo->va->addr;
+   void *map = agx_bo_map(new_bo);
+   if (map == NULL) {
+      agx_bo_unreference(&dev->dev, new_bo);
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "Failed to map the descriptor table");
+   }
 
    VkResult result =
       hk_descriptor_table_resize_free_table(dev, table, new_alloc);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      agx_bo_unreference(&dev->dev, new_bo);
       return result;
+   }
 
+   /* Publish only a fully initialized table. Init's failure cleanup must not
+    * release the local BO a second time. */
+   table->bo = new_bo;
+   table->map = map;
+   table->base_va = new_bo->va->addr;
    table->alloc = new_alloc;
    return VK_SUCCESS;
 }

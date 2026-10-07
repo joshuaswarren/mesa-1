@@ -2099,6 +2099,8 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
    if (!shader->linked.ht) {
       /* If we only have a single variant, link now. */
       shader->only_linked = hk_fast_link(dev, false, shader, NULL, NULL, 0);
+      if (!shader->only_linked)
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
 
    if (shader->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3414,12 +3416,14 @@ hk_shader_binary_cache_finish(struct hk_device *dev)
  * where a client expects to pay for one.  hk_heap() keeps its own
  * util_call_once(), so this is a warm-up, not a new requirement.
  */
-static void
+static VkResult
 hk_shader_prepare_device_for_stage(struct hk_device *dev,
                                    mesa_shader_stage stage)
 {
    if (stage == MESA_SHADER_GEOMETRY || stage == MESA_SHADER_TESS_EVAL)
-      hk_device_ensure_geometry_heap(dev);
+      return hk_device_ensure_geometry_heap(dev);
+
+   return VK_SUCCESS;
 }
 
 static VkResult
@@ -3774,7 +3778,11 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
    if (sw_stage == MESA_SHADER_FRAGMENT && g17p_collapsed_sample_shading)
       hk_only_variant(obj)->info.fs.uses_sample_shading = true;
 
-   hk_shader_prepare_device_for_stage(dev, sw_stage);
+   result = hk_shader_prepare_device_for_stage(dev, sw_stage);
+   if (result != VK_SUCCESS) {
+      hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+      return result;
+   }
 
    *shader_out = obj;
    return VK_SUCCESS;
@@ -4145,7 +4153,11 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
          return result;
       }
    }
-   hk_shader_prepare_device_for_stage(dev, stage);
+   VkResult result = hk_shader_prepare_device_for_stage(dev, stage);
+   if (result != VK_SUCCESS) {
+      hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+      return result;
+   }
 
    *shader_out = &obj->vk;
    return VK_SUCCESS;

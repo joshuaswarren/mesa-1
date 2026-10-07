@@ -285,7 +285,7 @@ void hk_device_finish_meta(struct hk_device *dev);
 
 /* Force the geometry/tessellation heap to exist now rather than inside the
  * first draw that needs it.  Idempotent and safe to call from any thread. */
-void hk_device_ensure_geometry_heap(struct hk_device *dev);
+VkResult hk_device_ensure_geometry_heap(struct hk_device *dev);
 
 VkResult hk_sampler_heap_add(struct hk_device *dev,
                              const struct hk_native_sampler_descriptor *desc,

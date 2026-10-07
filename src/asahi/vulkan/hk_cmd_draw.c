@@ -103,6 +103,7 @@ hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
 static void hk_flush_shaders(struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs(struct hk_cmd_buffer *cmd);
 static uint64_t hk_heap(struct hk_cmd_buffer *cmd);
+static bool hk_cmd_ensure_geometry_heap(struct hk_cmd_buffer *cmd);
 static enum mesa_prim hk_gs_in_prim(struct hk_cmd_buffer *cmd);
 
 static enum libagx_program
@@ -299,6 +300,9 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
     * shader's outputs): there is nothing to prepare yet. */
    if (!gfx->shaders[MESA_SHADER_TESS_CTRL] !=
        !gfx->shaders[MESA_SHADER_TESS_EVAL])
+      return;
+
+   if (!hk_cmd_ensure_geometry_heap(cmd))
       return;
 
    /* A tessellation/geometry draw necessarily records compute work before the
@@ -3401,17 +3405,25 @@ hk_init_heap(const void *data)
    perf_debug_dev(&dev->dev, "Allocating heap");
 
    size_t size = 128 * 1024 * 1024;
-   dev->heap = agx_bo_create(&dev->dev, size, 0, 0, "Geometry heap");
+   struct agx_bo *heap =
+      agx_bo_create(&dev->dev, size, 0, 0, "Geometry heap");
+   if (!heap)
+      return;
 
    /* The geometry state buffer is initialized here and then is treated by
     * the CPU as rodata, even though the GPU uses it for scratch internally.
     */
    struct poly_heap *map = agx_bo_map(dev->rodata.heap_bo);
+   if (!map) {
+      agx_bo_unreference(&dev->dev, heap);
+      return;
+   }
 
    *map = (struct poly_heap){
-      .base = dev->heap->va->addr,
+      .base = heap->va->addr,
       .size = size,
    };
+   dev->heap = heap;
 }
 
 /*
@@ -3424,13 +3436,25 @@ hk_init_heap(const void *data)
  *
  * Nothing about the heap depends on the draw, only on the device, so the
  * allocation can be forced as soon as we know the client has a stage that will
- * need it.  hk_heap() keeps the util_call_once(), so correctness never depends
- * on having predicted the stage.
+ * need it. Command preparation and draw admission also check the result,
+ * including heap users introduced by indirect adjacency or index robustness.
  */
-void
+VkResult
 hk_device_ensure_geometry_heap(struct hk_device *dev)
 {
    util_call_once_data(&dev->heap_init_once, hk_init_heap, dev);
+   return dev->heap ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+
+static bool
+hk_cmd_ensure_geometry_heap(struct hk_cmd_buffer *cmd)
+{
+   VkResult result = hk_device_ensure_geometry_heap(hk_cmd_buffer_device(cmd));
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return false;
+   }
+   return true;
 }
 
 static uint64_t
@@ -3438,7 +3462,7 @@ hk_heap(struct hk_cmd_buffer *cmd)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   util_call_once_data(&dev->heap_init_once, hk_init_heap, dev);
+   assert(dev->heap && "heap consumers require checked preparation/admission");
 
    /* We need to free all allocations after each command buffer execution */
    if (!cmd->uses_heap) {
@@ -9455,6 +9479,14 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    adj &= !geom;
    *needs_idx_robust =
       hk_needs_index_robustness(cmd, draw, conditional_direct);
+   /* Reject heap allocation failure before parameter upload or lowering can
+    * dereference the heap. Direct adjacency without restart uses no heap. */
+   const bool needs_heap = geom || tess || (*needs_idx_robust && !adj) ||
+      (adj && (draw->restart ||
+               (dev->dev.chip == AGX_CHIP_G17P && agx_is_indirect(draw->b))));
+   if (needs_heap && !hk_cmd_ensure_geometry_heap(cmd))
+      return NULL;
+
    /* The G17P robust-index producer emits the same native HAL200 indexed
     * body as an ordinary draw, only after a pre-graphics compute pass has
     * bounded the index range.  It therefore needs the ordinary render-state

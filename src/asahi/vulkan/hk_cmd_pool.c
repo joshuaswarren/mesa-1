@@ -133,9 +133,11 @@ hk_cmd_bo_destroy(struct hk_device *dev, const VkAllocationCallbacks *alloc,
                    struct hk_cmd_bo *bo)
 {
    if (bo->g17p_vdm_alias) {
-      agx_bo_bind(&dev->dev, NULL, bo->g17p_vdm_alias, bo->bo->size, 0,
-                  DRM_ASAHI_BIND_UNBIND);
-      hk_g17p_vdm_alias_free(&dev->dev, bo->g17p_vdm_alias, bo->bo->size);
+      /* A failed unbind may leave the old mapping installed. Keep its
+       * address reserved until VM teardown rather than alias a later BO. */
+      if (!agx_bo_bind(&dev->dev, NULL, bo->g17p_vdm_alias, bo->bo->size, 0,
+                       DRM_ASAHI_BIND_UNBIND))
+         hk_g17p_vdm_alias_free(&dev->dev, bo->g17p_vdm_alias, bo->bo->size);
    }
    agx_bo_unreference(&dev->dev, bo->bo);
    vk_free(alloc, bo);
@@ -159,6 +161,15 @@ hk_device_create_vdm_slab(struct hk_device *dev)
       return NULL;
    }
 
+   /* Map before creating the GPU alias so a failed CPU mapping cannot
+    * publish a slab with an invalid recording pointer. */
+   slab->map = agx_bo_map(slab->bo);
+   if (!slab->map) {
+      agx_bo_unreference(&dev->dev, slab->bo);
+      vk_free(&dev->vk.alloc, slab);
+      return NULL;
+   }
+
    slab->alias = hk_g17p_vdm_alias_alloc(&dev->dev, slab->bo->size);
    const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
    if (!slab->alias || agx_bo_bind(&dev->dev, slab->bo, slab->alias,
@@ -170,7 +181,6 @@ hk_device_create_vdm_slab(struct hk_device *dev)
       return NULL;
    }
 
-   slab->map = agx_bo_map(slab->bo);
    util_vma_heap_init(&slab->heap, slab->bo->va->addr, slab->bo->size);
    slab->heap.alloc_high = false;
    list_addtail(&slab->link, &dev->vdm.slabs);
@@ -255,9 +265,9 @@ hk_device_finish_vdm_slabs(struct hk_device *dev)
    list_for_each_entry_safe(struct hk_vdm_slab, slab, &dev->vdm.slabs, link) {
       list_del(&slab->link);
       util_vma_heap_finish(&slab->heap);
-      agx_bo_bind(&dev->dev, NULL, slab->alias, slab->bo->size, 0,
-                  DRM_ASAHI_BIND_UNBIND);
-      hk_g17p_vdm_alias_free(&dev->dev, slab->alias, slab->bo->size);
+      if (!agx_bo_bind(&dev->dev, NULL, slab->alias, slab->bo->size, 0,
+                       DRM_ASAHI_BIND_UNBIND))
+         hk_g17p_vdm_alias_free(&dev->dev, slab->alias, slab->bo->size);
       agx_bo_unreference(&dev->dev, slab->bo);
       vk_free(&dev->vk.alloc, slab);
    }

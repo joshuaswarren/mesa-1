@@ -53,7 +53,8 @@ hk_pool_oq_index_ptr(const struct hk_query_pool *pool)
     * -> hk_DestroyQueryPool, 2026-09-29 22:00Z). */
    if (!pool->bo)
       return NULL;
-   return agx_bo_map(pool->bo) + pool->query_start;
+   void *map = agx_bo_map(pool->bo);
+   return map ? (uint16_t *)((char *)map + pool->query_start) : NULL;
 }
 
 static uint32_t
@@ -463,7 +464,7 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
          flags |= AGX_BO_SHARED;
 
       pool->bo = agx_bo_create(&dev->dev, bo_size, 0, flags, "Query pool");
-      if (!pool->bo) {
+      if (!pool->bo || !agx_bo_map(pool->bo)) {
          hk_DestroyQueryPool(device, hk_query_pool_to_handle(pool), pAllocator);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       }

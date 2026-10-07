@@ -626,14 +626,25 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
       return NULL;
    }
 
+   /* A cache fetch owns this unreferenced, unlinked BO exclusively. Clear it
+    * before publishing the new reference; a failed map must neither expose
+    * stale contents nor put an unmappable object back into the cache. */
+   if (reused && (flags & AGX_BO_ZERO_ON_REUSE)) {
+      void *map = agx_bo_map(bo);
+      if (!map) {
+         simple_mtx_lock(&dev->bo_map_lock);
+         agx_bo_free(dev, bo);
+         simple_mtx_unlock(&dev->bo_map_lock);
+         return NULL;
+      }
+      memset(map, 0, bo->size);
+   }
+
    bo->label = label;
    if (reused)
       agx_g17p_va_lifetime_trace(dev, "cache-reuse", bo);
    p_atomic_set(&bo->refcnt, 1);
    agx_bo_read_set_changed(dev);
-
-   if (reused && (flags & AGX_BO_ZERO_ON_REUSE))
-      memset(agx_bo_map(bo), 0, bo->size);
 
    if (dev->debug &
        (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE)) {
