@@ -147,6 +147,9 @@ struct hk_shader {
    /* BO for any uploaded shader part */
    struct agx_bo *bo;
 
+   /* BO holding the constant data section (data_ptr), if any */
+   struct agx_bo *data_bo;
+
    /* Cache of fast linked variants */
    struct {
       simple_mtx_t lock;

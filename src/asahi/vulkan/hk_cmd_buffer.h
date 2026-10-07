@@ -107,6 +107,9 @@ struct hk_root_descriptor_table {
       } draw;
       struct {
          uint64_t group_count_addr;
+
+         /* Constant data section of the bound compute shader (load_constant) */
+         uint64_t const_data_addr;
          uint32_t base_group[3];
       } cs;
    };
