@@ -47,18 +47,6 @@
 #include "vk_drm_syncobj.h"
 #include "vk_sync.h"
 
-#define HK_G17P_FAULTTRACE_STREAM_MAGIC UINT64_C(0x314d414552545346)
-
-struct hk_g17p_faulttrace_stream_header {
-   uint64_t magic;
-   uint64_t submitted_full;
-   uint64_t submitted_base;
-   uint32_t stream_size;
-   uint32_t snapshot_size;
-   uint32_t draws;
-   uint32_t publications;
-};
-
 /* Signal scope includes all earlier commands on this Vulkan queue. A DRM
  * timeline point retains its predecessor fence chain; an individual submit's
  * aggregate fence covers only that submit. Transferring the queue point orders
@@ -176,8 +164,7 @@ hk_g17p_attachmentless_render(const struct hk_device *dev,
 
 static void
 asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
-                       struct drm_asahi_cmd_render *c,
-                       struct util_dynarray *faulttrace_extra)
+                       struct drm_asahi_cmd_render *c)
 {
    size_t len = cs->stream_linked ? hk_cs_root_size(dev->dev.chip, false)
                                   : (cs->current - cs->start);
@@ -318,33 +305,6 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->ts_frag.end.handle = cs->timestamp.end.handle;
       c->ts_frag.end.offset = cs->timestamp.end.offset_B;
    }
-
-   if ((dev->dev.debug & AGX_DBG_FAULTTRACE) && faulttrace_extra) {
-      const struct hk_g17p_faulttrace_stream_header header = {
-         .magic = HK_G17P_FAULTTRACE_STREAM_MAGIC,
-         .submitted_full = submitted_full,
-         .submitted_base = c->vdm_ctrl_stream_base,
-         .stream_size = cs->stream_linked ? 0 : len,
-         .snapshot_size = cs->g17p_faulttrace_snapshots.size,
-         .draws = cs->stats.cmds,
-         .publications = cs->g17p_state_publications,
-      };
-      const size_t total = sizeof(header) + header.stream_size +
-                           header.snapshot_size;
-      uint8_t *record =
-         util_dynarray_grow_bytes(faulttrace_extra, 1, total);
-      if (record) {
-         memcpy(record, &header, sizeof(header));
-         record += sizeof(header);
-         if (header.stream_size) {
-            memcpy(record, submitted_start, header.stream_size);
-            record += header.stream_size;
-         }
-         if (header.snapshot_size)
-            memcpy(record, cs->g17p_faulttrace_snapshots.data,
-                   header.snapshot_size);
-      }
-   }
 }
 
 static void
@@ -463,364 +423,6 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    return VK_SUCCESS;
 }
 
-/* Decode the exact ioctl slice that failed while all command-buffer BOs are
- * still alive.  AGX_DBG_FAULTTRACE already makes libagx retain the allocation
- * map, but until now nothing consumed that map: the ordinary trace runs before
- * submission and the failed payload was freed on return.  Keep this strictly
- * diagnostic and failure-only so production submission timing is unchanged. */
-static void
-hk_g17p_faulttrace_capture(struct hk_device *dev, struct hk_queue *queue,
-                           const void *cmdbuf, size_t cmdbuf_size,
-                           const void *extra, size_t extra_size)
-{
-   if (!(dev->dev.debug & AGX_DBG_FAULTTRACE) || cmdbuf_size == 0)
-      return;
-
-   struct hk_g17p_faulttrace_payload *slot =
-      &queue->g17p_faulttrace[queue->g17p_faulttrace_head];
-   void *data = malloc(cmdbuf_size);
-   if (!data)
-      return;
-
-   void *extra_data = extra_size ? malloc(extra_size) : NULL;
-   if (extra_size && !extra_data) {
-      free(data);
-      return;
-   }
-
-   memcpy(data, cmdbuf, cmdbuf_size);
-   if (extra_size)
-      memcpy(extra_data, extra, extra_size);
-   free(slot->data);
-   free(slot->extra);
-   slot->data = data;
-   slot->size = cmdbuf_size;
-   slot->extra = extra_data;
-   slot->extra_size = extra_size;
-   slot->sequence = ++queue->g17p_faulttrace_sequence;
-   queue->g17p_faulttrace_head =
-      (queue->g17p_faulttrace_head + 1) % HK_G17P_FAULTTRACE_HISTORY;
-   queue->g17p_faulttrace_count =
-      MIN2(queue->g17p_faulttrace_count + 1, HK_G17P_FAULTTRACE_HISTORY);
-}
-
-enum hk_g17p_faulttrace_compare_status {
-   HK_G17P_COMPARE_MATCH,
-   HK_G17P_COMPARE_MISMATCH,
-   HK_G17P_COMPARE_UNAVAILABLE,
-   HK_G17P_COMPARE_NOMEM,
-};
-
-static enum hk_g17p_faulttrace_compare_status
-hk_g17p_faulttrace_compare_bytes(struct agxdecode_ctx *ctx, uint64_t va,
-                                 const void *expected, size_t size,
-                                 size_t *first_mismatch)
-{
-   if (!size)
-      return HK_G17P_COMPARE_MATCH;
-
-   uint8_t *current = malloc(size);
-   if (!current)
-      return HK_G17P_COMPARE_NOMEM;
-   if (!agxdecode_copy_gpu_mem(ctx, va, size, current)) {
-      free(current);
-      return HK_G17P_COMPARE_UNAVAILABLE;
-   }
-
-   const uint8_t *recorded = expected;
-   for (size_t i = 0; i < size; ++i) {
-      if (current[i] != recorded[i]) {
-         *first_mismatch = i;
-         free(current);
-         return HK_G17P_COMPARE_MISMATCH;
-      }
-   }
-   free(current);
-   return HK_G17P_COMPARE_MATCH;
-}
-
-static const char *
-hk_g17p_faulttrace_compare_name(enum hk_g17p_faulttrace_compare_status status)
-{
-   switch (status) {
-   case HK_G17P_COMPARE_MATCH: return "match";
-   case HK_G17P_COMPARE_MISMATCH: return "mismatch";
-   case HK_G17P_COMPARE_UNAVAILABLE: return "unavailable";
-   case HK_G17P_COMPARE_NOMEM: return "nomem";
-   }
-   UNREACHABLE("invalid faulttrace comparison status");
-}
-
-static void
-hk_g17p_faulttrace_log_address(struct agxdecode_ctx *ctx, uint64_t sequence,
-                               unsigned stream, unsigned snapshot,
-                               const char *name, unsigned index,
-                               uint64_t address)
-{
-   if (!address)
-      return;
-
-   uint64_t allocation_base = 0;
-   size_t allocation_size = 0;
-   const bool mapped = agxdecode_gpu_mem_bounds(
-      ctx, address, &allocation_base, &allocation_size);
-   fprintf(stderr,
-           "G17P faulttrace root address: sequence=%" PRIu64
-           " stream=%u snapshot=%u field=%s index=%u address=%" PRIx64
-           " mapped=%u base=%" PRIx64 " allocation-size=%zu\n",
-           sequence, stream, snapshot, name, index, address, mapped,
-           allocation_base, allocation_size);
-}
-
-static void
-hk_g17p_faulttrace_compare_live(struct hk_device *dev,
-                                const struct hk_g17p_faulttrace_payload *slot)
-{
-   const uint8_t *at = slot->extra;
-   const uint8_t *end = at + slot->extra_size;
-   unsigned stream_index = 0;
-
-   while ((size_t)(end - at) >=
-          sizeof(struct hk_g17p_faulttrace_stream_header)) {
-      struct hk_g17p_faulttrace_stream_header stream;
-      memcpy(&stream, at, sizeof(stream));
-      at += sizeof(stream);
-      if (stream.magic != HK_G17P_FAULTTRACE_STREAM_MAGIC ||
-          stream.stream_size > (size_t)(end - at))
-         break;
-      at += stream.stream_size;
-      if (stream.snapshot_size > (size_t)(end - at))
-         break;
-
-      const uint8_t *snapshot_end = at + stream.snapshot_size;
-      unsigned snapshot_index = 0;
-      while ((size_t)(snapshot_end - at) >=
-             sizeof(struct hk_g17p_faulttrace_snapshot_header)) {
-         struct hk_g17p_faulttrace_snapshot_header snapshot;
-         memcpy(&snapshot, at, sizeof(snapshot));
-         at += sizeof(snapshot);
-         const size_t sizes[] = {
-            snapshot.ioto_size, snapshot.linked_size,
-            snapshot.main_size, snapshot.root_size,
-         };
-         size_t total = 0;
-         bool overflow = false;
-         for (unsigned i = 0; i < ARRAY_SIZE(sizes); ++i) {
-            if (sizes[i] > SIZE_MAX - total) {
-               overflow = true;
-               break;
-            }
-            total += sizes[i];
-         }
-         for (unsigned set = 0; set < HK_MAX_SETS && !overflow; ++set) {
-            if (snapshot.descriptor_capture_size[set] > SIZE_MAX - total) {
-               overflow = true;
-               break;
-            }
-            total += snapshot.descriptor_capture_size[set];
-         }
-         if (snapshot.magic != HK_G17P_FAULTTRACE_SNAPSHOT_MAGIC || overflow ||
-             total > (size_t)(snapshot_end - at))
-            break;
-
-         const uint8_t *ioto = at;
-         const uint8_t *linked = ioto + snapshot.ioto_size;
-         const uint8_t *main = linked + snapshot.linked_size;
-         const uint8_t *root = main + snapshot.main_size;
-         const uint8_t *descriptors = root + snapshot.root_size;
-         size_t ioto_at = 0, linked_at = 0, root_at = 0;
-         const enum hk_g17p_faulttrace_compare_status ioto_status =
-            hk_g17p_faulttrace_compare_bytes(
-               dev->dev.agxdecode, snapshot.program_va, ioto,
-               snapshot.ioto_size, &ioto_at);
-         const enum hk_g17p_faulttrace_compare_status linked_status =
-            hk_g17p_faulttrace_compare_bytes(
-               dev->dev.agxdecode, snapshot.shader_va, linked,
-               snapshot.linked_size, &linked_at);
-         const enum hk_g17p_faulttrace_compare_status root_status =
-            hk_g17p_faulttrace_compare_bytes(
-               dev->dev.agxdecode, snapshot.root_va, root,
-               snapshot.root_size, &root_at);
-         fprintf(stderr,
-                 "G17P faulttrace live: sequence=%" PRIu64
-                 " stream=%u snapshot=%u program=%" PRIx64
-                 " shader=%" PRIx64 " root=%" PRIx64
-                 " ioto=%s@%#zx linked=%s@%#zx root=%s@%#zx\n",
-                 slot->sequence, stream_index, snapshot_index,
-                 snapshot.program_va, snapshot.shader_va, snapshot.root_va,
-                 hk_g17p_faulttrace_compare_name(ioto_status), ioto_at,
-                 hk_g17p_faulttrace_compare_name(linked_status), linked_at,
-                 hk_g17p_faulttrace_compare_name(root_status), root_at);
-
-         if (root_status == HK_G17P_COMPARE_MATCH &&
-             snapshot.root_size == sizeof(struct hk_root_descriptor_table)) {
-            struct hk_root_descriptor_table launch_root;
-            memcpy(&launch_root, root, sizeof(launch_root));
-
-#define LOG_ROOT_ADDRESS(name, index, address)                                 \
-   hk_g17p_faulttrace_log_address(dev->dev.agxdecode, slot->sequence,          \
-                                  stream_index, snapshot_index, name, index,   \
-                                  address)
-            LOG_ROOT_ADDRESS("root", 0, launch_root.root_desc_addr);
-            for (unsigned i = 0; i < HK_MAX_SETS; ++i)
-               LOG_ROOT_ADDRESS("set", i, launch_root.sets[i]);
-            for (unsigned i = 0; i < AGX_MAX_VBUFS; ++i)
-               LOG_ROOT_ADDRESS("attrib", i,
-                                launch_root.draw.attrib_base[i]);
-            LOG_ROOT_ADDRESS("vertex-params", 0,
-                             launch_root.draw.vertex_params);
-            LOG_ROOT_ADDRESS("tess-params", 0,
-                             launch_root.draw.tess_params);
-            LOG_ROOT_ADDRESS("geometry-params", 0,
-                             launch_root.draw.geometry_params);
-            LOG_ROOT_ADDRESS("pipeline-stats", 0,
-                             launch_root.draw.pipeline_stats);
-            LOG_ROOT_ADDRESS("vs-constant", 0,
-                             launch_root.draw.vs_constant_data_addr);
-            LOG_ROOT_ADDRESS("fs-constant", 0,
-                             launch_root.draw.fs_constant_data_addr);
-            for (unsigned i = 0; i < HK_MAX_DYNAMIC_BUFFERS; ++i)
-               LOG_ROOT_ADDRESS("dynamic-buffer", i,
-                                launch_root.dynamic_buffers[i].base_addr);
-            LOG_ROOT_ADDRESS("printf", 0,
-                             launch_root.printf_buffer_address);
-#undef LOG_ROOT_ADDRESS
-         }
-
-         for (unsigned set = 0; set < HK_MAX_SETS; ++set) {
-            const size_t captured = snapshot.descriptor_capture_size[set];
-            if (!snapshot.descriptor_va[set] &&
-                !snapshot.descriptor_size[set] && !captured)
-               continue;
-
-            size_t descriptor_at = 0;
-            const enum hk_g17p_faulttrace_compare_status descriptor_status =
-               captured
-                  ? hk_g17p_faulttrace_compare_bytes(
-                       dev->dev.agxdecode, snapshot.descriptor_va[set],
-                       descriptors, captured, &descriptor_at)
-                  : HK_G17P_COMPARE_UNAVAILABLE;
-            fprintf(stderr,
-                    "G17P faulttrace descriptor: sequence=%" PRIu64
-                    " stream=%u snapshot=%u set=%u va=%" PRIx64
-                    " size=%u captured=%zu live=%s@%#zx\n",
-                    slot->sequence, stream_index, snapshot_index, set,
-                    snapshot.descriptor_va[set],
-                    snapshot.descriptor_size[set], captured,
-                    hk_g17p_faulttrace_compare_name(descriptor_status),
-                    descriptor_at);
-
-            for (size_t byte = 0; byte + sizeof(uint64_t) <= captured;
-                 byte += sizeof(uint64_t)) {
-               uint64_t word, allocation_base = 0, allocation_base_shift4 = 0;
-               size_t allocation_size = 0, allocation_size_shift4 = 0;
-               memcpy(&word, descriptors + byte, sizeof(word));
-               if (!word)
-                  continue;
-
-               const bool mapped = agxdecode_gpu_mem_bounds(
-                  dev->dev.agxdecode, word, &allocation_base,
-                  &allocation_size);
-               const bool mapped_shift4 = word <= (UINT64_MAX >> 4) &&
-                  agxdecode_gpu_mem_bounds(dev->dev.agxdecode, word << 4,
-                                           &allocation_base_shift4,
-                                           &allocation_size_shift4);
-               fprintf(stderr,
-                       "G17P faulttrace descriptor word: sequence=%" PRIu64
-                       " stream=%u snapshot=%u set=%u offset=%#zx"
-                       " value=%" PRIx64 " mapped=%u base=%" PRIx64
-                       " allocation-size=%zu shifted4=%u shifted4-base=%" PRIx64
-                       " shifted4-allocation-size=%zu\n",
-                       slot->sequence, stream_index, snapshot_index, set,
-                       byte, word, mapped, allocation_base,
-                       allocation_size, mapped_shift4,
-                       allocation_base_shift4, allocation_size_shift4);
-            }
-            descriptors += captured;
-         }
-         at += total;
-         snapshot_index++;
-      }
-      at = snapshot_end;
-      stream_index++;
-   }
-}
-
-static void
-hk_g17p_faulttrace_decode_history(struct hk_device *dev,
-                                  struct hk_queue *queue)
-{
-   if (!(dev->dev.debug & AGX_DBG_FAULTTRACE))
-      return;
-
-   const unsigned first =
-      (queue->g17p_faulttrace_head + HK_G17P_FAULTTRACE_HISTORY -
-       queue->g17p_faulttrace_count) % HK_G17P_FAULTTRACE_HISTORY;
-
-   /* Persist every exact graphics snapshot before verbose decoding.  A
-    * watchdog reboot follows the causal firmware fault within seconds, and
-    * active camera motion can leave more than a hundred later small submits
-    * to decode.  Losing the raw causal record to diagnostic output ordering
-    * would make the reproducer non-actionable. */
-   const char *raw_base = getenv("AGXDECODE_DUMP_FILE");
-   if (!raw_base || !raw_base[0] || !strcmp(raw_base, "stderr"))
-      raw_base = "/tmp/hk-g17p-faulttrace";
-   for (unsigned i = 0; i < queue->g17p_faulttrace_count; ++i) {
-      const unsigned index = (first + i) % HK_G17P_FAULTTRACE_HISTORY;
-      const struct hk_g17p_faulttrace_payload *slot =
-         &queue->g17p_faulttrace[index];
-      if (!slot->extra || !slot->extra_size)
-         continue;
-
-      char path[1024];
-      snprintf(path, sizeof(path), "%s.raw.%ld.%04" PRIu64, raw_base,
-               (long)getpid(), slot->sequence);
-      FILE *file = fopen(path, "wb");
-      if (file) {
-         const size_t written = fwrite(slot->extra, 1, slot->extra_size, file);
-         if (written == slot->extra_size)
-            fsync(fileno(file));
-         fclose(file);
-         fprintf(stderr,
-                 "G17P faulttrace: raw history sequence=%" PRIu64
-                 " path=%s bytes=%zu written=%zu\n",
-                 slot->sequence, path, slot->extra_size, written);
-      } else {
-         fprintf(stderr,
-                 "G17P faulttrace: raw history sequence=%" PRIu64
-                 " open failed path=%s errno=%d\n",
-                 slot->sequence, path, errno);
-      }
-   }
-
-   for (unsigned i = 0; i < queue->g17p_faulttrace_count; ++i) {
-      const unsigned index = (first + i) % HK_G17P_FAULTTRACE_HISTORY;
-      const struct hk_g17p_faulttrace_payload *slot =
-         &queue->g17p_faulttrace[index];
-      if (!slot->data || !slot->size)
-         continue;
-
-      struct util_dynarray payload;
-      util_dynarray_init(&payload, NULL);
-      void *copy = util_dynarray_grow_bytes(&payload, 1, slot->size);
-      if (copy) {
-         memcpy(copy, slot->data, slot->size);
-         fprintf(stderr,
-                 "G17P faulttrace: decoding history %u/%u sequence=%" PRIu64
-                 " payload=%zu bytes\n",
-                 i + 1, queue->g17p_faulttrace_count, slot->sequence,
-                 slot->size);
-         agxdecode_drm_cmdbuf(dev->dev.agxdecode, &dev->dev.params, &payload,
-                              true);
-         agxdecode_next_frame();
-      }
-      util_dynarray_fini(&payload);
-
-      if (slot->extra && slot->extra_size)
-         hk_g17p_faulttrace_compare_live(dev, slot);
-   }
-}
-
 /*
  * The kernel/firmware jointly impose a limit on commands per submit ioctl, but
  * we can build up arbitrarily large command buffers. We handle this here by
@@ -916,13 +518,9 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
          .out_sync_count = has_out_syncs ? submit->out_sync_count : 0,
       };
 
-      hk_g17p_faulttrace_capture(dev, queue, cmdbuf + base_offs,
-                                 offs - base_offs, NULL, 0);
       VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx);
-      if (result != VK_SUCCESS) {
-         hk_g17p_faulttrace_decode_history(dev, queue);
+      if (result != VK_SUCCESS)
          return result;
-      }
 
       submitted_cdm += cdm_count;
       submitted_vdm += vdm_count;
@@ -1482,7 +1080,6 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    /* Now setup the command structs */
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
-   struct util_dynarray faulttrace_extra = UTIL_DYNARRAY_INIT;
 
    unsigned nr_vdm = 0, nr_cdm = 0;
 
@@ -1529,7 +1126,6 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                             DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS),
                           completed)) {
       util_dynarray_fini(&payload);
-      util_dynarray_fini(&faulttrace_extra);
       return vk_device_set_lost(&dev->vk, "Asahi command ordinal overflow");
    }
 
@@ -1576,7 +1172,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
             asahi_append_fragment_attachments(dev, &payload, cs);
             struct drm_asahi_cmd_render_with_prior cmd = {0};
-            asahi_fill_vdm_command(dev, cs, &cmd.legacy, &faulttrace_extra);
+            asahi_fill_vdm_command(dev, cs, &cmd.legacy);
             header.size = hk_drm_render_command_size(
                dev->dev.chip == AGX_CHIP_G17P, queue->sync.exact_prior);
             if (queue->sync.exact_prior) {
@@ -1609,13 +1205,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    VkResult result;
    if (command_count <= max_commands_per_submit(dev)) {
-      hk_g17p_faulttrace_capture(dev, queue, payload.data, payload.size,
-                                 faulttrace_extra.data,
-                                 faulttrace_extra.size);
       result =
          queue_submit_single(dev, &submit_ioctl, queue->drm.virt_ring_idx);
-      if (result != VK_SUCCESS)
-         hk_g17p_faulttrace_decode_history(dev, queue);
    } else {
       result = queue_submit_looped(dev, queue, &submit_ioctl, command_count,
                                    queue->drm.virt_ring_idx, prior_base);
@@ -1630,7 +1221,6 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    }
 
    util_dynarray_fini(&payload);
-   util_dynarray_fini(&faulttrace_extra);
 
    return result;
 }
@@ -1789,10 +1379,6 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
 void
 hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
-   for (unsigned i = 0; i < HK_G17P_FAULTTRACE_HISTORY; ++i) {
-      free(queue->g17p_faulttrace[i].data);
-      free(queue->g17p_faulttrace[i].extra);
-   }
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
    agx_destroy_command_queue(&dev->dev, queue->drm.id);
    agx_bo_unreference(&dev->dev, queue->g17p_sstt_flush_bo);

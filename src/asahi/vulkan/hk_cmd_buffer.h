@@ -48,23 +48,6 @@
 
 #include "vk_command_buffer.h"
 
-#define HK_G17P_FAULTTRACE_SNAPSHOT_MAGIC UINT64_C(0x3250414e53474648)
-#define HK_G17P_FAULTTRACE_MAX_DESCRIPTOR_BYTES (64 * 1024)
-
-struct hk_g17p_faulttrace_snapshot_header {
-   uint64_t magic;
-   uint64_t program_va;
-   uint64_t shader_va;
-   uint64_t root_va;
-   uint32_t ioto_size;
-   uint32_t linked_size;
-   uint32_t main_size;
-   uint32_t root_size;
-   uint64_t descriptor_va[HK_MAX_SETS];
-   uint32_t descriptor_size[HK_MAX_SETS];
-   uint32_t descriptor_capture_size[HK_MAX_SETS];
-};
-
 #include <stdio.h>
 
 struct hk_buffer;
@@ -750,16 +733,6 @@ struct hk_cs {
    /* Active-context selector consumed by AGX3 VertexProgramVariant. */
    bool agx3_active_context_selector_valid;
    uint32_t agx3_raw_active_context_selector;
-
-   /* Render-state publications this G17P graphics stream has recorded.
-    * Every one of them overwrites the same context-0 state, so this -- not
-    * the draw count and not the bytes used -- is the depth that decides
-    * whether the stream faults. See hk_cmd_draw.c. */
-   unsigned g17p_state_publications;
-
-   /* Exact fragment launch inputs retained only for failure-only faulttrace.
-    * The allocation remains empty on the production path. */
-   struct util_dynarray g17p_faulttrace_snapshots;
 
    /* Whether the sampler heap is required. Although we always must maintain the
     * heap for correctness, it's often not necessary since we can push lots of
@@ -1473,7 +1446,6 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       };
 
       list_inithead(&cs->node);
-      util_dynarray_init(&cs->g17p_faulttrace_snapshots, NULL);
       hk_drm_attachment_set_init(&cs->compute_attachments);
       /* Only known meta destinations are collected so far. */
       cs->compute_attachments.complete = false;
@@ -1485,7 +1457,6 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
          if (!hk_graphics_cs_publishable(
                 dev->dev.chip, initialized,
                 cs->agx3_active_context_selector_valid)) {
-            util_dynarray_fini(&cs->g17p_faulttrace_snapshots);
             free(cs);
             return NULL;
          }
@@ -1548,7 +1519,6 @@ hk_cmd_buffer_dirty_all(struct hk_cmd_buffer *cmd)
 static inline void
 hk_cs_destroy(struct hk_cs *cs)
 {
-   util_dynarray_fini(&cs->g17p_faulttrace_snapshots);
    if (cs->type == HK_CS_VDM) {
       util_dynarray_fini(&cs->scissor);
       util_dynarray_fini(&cs->depth_bias);

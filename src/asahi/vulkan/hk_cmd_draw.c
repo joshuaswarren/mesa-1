@@ -6945,11 +6945,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (!hk_gfx_republishes_render_state(cmd))
       return;
 
-   /* Past this point the draw installs a fresh vertex-program template, a
-    * fresh HAL200 bind tail and a fresh draw-state selector, all into the
-    * stream's one render-state context. Count it for fault traces. */
-   cs->g17p_state_publications++;
-
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
    assert(cs->current + 0x1000 < cs->end && "already ensured space");
@@ -8783,7 +8778,6 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
       struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
 
-      cs->g17p_state_publications++;
       uint8_t *out = cs->current;
 
       if (linked_vs->b.uses_base_param) {
