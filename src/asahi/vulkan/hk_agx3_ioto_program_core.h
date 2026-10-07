@@ -90,6 +90,7 @@ struct hk_agx3_g17p_graphics_program_desc {
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
    bool preloaded_root;
+   bool patchable;
    struct agx_ioto_constant_program constant_program;
    const struct agx3_cprog_inputs *cprog_inputs;
 };

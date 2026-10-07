@@ -2512,6 +2512,218 @@ hk_g17p_graphics_setup_get(
    return candidate;
 }
 
+/* A G17P graphics stage program of one linked executable for one uniform
+ * layout. It is composed once with every range loaded from its own patchable
+ * base; a draw copies it and writes its range addresses into the bases. */
+#define HK_G17P_GFX_LOADER_MAX_RELOCATIONS 16
+
+struct hk_g17p_gfx_loader {
+   struct hk_g17p_gfx_loader *next;
+   const struct hk_shader *s;
+   struct agx_ioto_g17p_imageblock imageblock;
+   uint16_t range_start[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   uint16_t range_size[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   uint8_t range_count;
+   uint8_t reloc_count;
+   uint16_t length;
+   struct {
+      uint16_t offset;
+      uint8_t dest_half;
+      uint8_t range;
+      uint32_t delta;
+   } relocs[HK_G17P_GFX_LOADER_MAX_RELOCATIONS];
+   uint8_t bytes[];
+};
+
+static inline bool
+hk_g17p_gfx_loader_matches(const struct hk_g17p_gfx_loader *l,
+                           const struct hk_shader *s,
+                           const struct agx_ioto_g17p_imageblock *imageblock,
+                           const struct agx3_ioto_uniform_range *ranges,
+                           size_t range_count)
+{
+   if (l->s != s || l->range_count != range_count ||
+       l->imageblock.tile_size_px != imageblock->tile_size_px ||
+       l->imageblock.sample_size_B != imageblock->sample_size_B ||
+       l->imageblock.nr_samples != imageblock->nr_samples)
+      return false;
+
+   for (unsigned i = 0; i < range_count; ++i) {
+      if (l->range_start[i] != ranges[i].start_halfs ||
+          l->range_size[i] != ranges[i].size_halfs)
+         return false;
+   }
+   return true;
+}
+
+static struct hk_g17p_gfx_loader *
+hk_g17p_gfx_loader_create(struct hk_device *dev, const struct hk_shader *s,
+                          const struct hk_agx3_g17p_graphics_program_desc *desc)
+{
+   struct hk_agx3_g17p_graphics_program_desc patchable = *desc;
+   /* Any aligned address inside the USC window: with absolute constant
+    * program branches the bytes do not depend on it. */
+   patchable.program_va = dev->dev.shader_base + 0x10000;
+   patchable.patchable = true;
+
+   struct agx3_g17p_graphics_program_template *t = malloc(sizeof(*t));
+   if (!t)
+      return NULL;
+
+   struct hk_g17p_gfx_loader *l = NULL;
+   if (!hk_agx3_g17p_graphics_program_template_generate(dev->dev.chip,
+                                                         &patchable, t) ||
+       t->relocation_count > HK_G17P_GFX_LOADER_MAX_RELOCATIONS ||
+       (desc->constant_program.code_size &&
+        !desc->constant_program.absolute_branch))
+      goto out;
+
+   l = calloc(1, sizeof(*l) + t->program.length);
+   if (!l)
+      goto out;
+
+   l->s = s;
+   l->imageblock = desc->imageblock;
+   l->range_count = desc->uniform_range_count;
+   l->reloc_count = t->relocation_count;
+   l->length = t->program.length;
+   memcpy(l->bytes, t->program.bytes, t->program.length);
+   for (unsigned i = 0; i < l->range_count; ++i) {
+      l->range_start[i] = desc->uniform_ranges[i].start_halfs;
+      l->range_size[i] = desc->uniform_ranges[i].size_halfs;
+   }
+
+   unsigned based = 0;
+   for (unsigned r = 0; r < t->relocation_count; ++r) {
+      const struct agx_ioto_load_relocation *rel = &t->relocations[r];
+      unsigned i = 0;
+      while (i < l->range_count &&
+             (rel->address < desc->uniform_ranges[i].address ||
+              rel->address - desc->uniform_ranges[i].address >=
+                 desc->uniform_ranges[i].size_halfs * 2u))
+         ++i;
+      if (i == l->range_count || rel->low_length != 8 ||
+          rel->high_length != 8 || rel->offset + 16u > l->length) {
+         free(l);
+         l = NULL;
+         goto out;
+      }
+      l->relocs[r].offset = rel->offset;
+      l->relocs[r].dest_half = rel->dest_half;
+      l->relocs[r].range = i;
+      l->relocs[r].delta = rel->address - desc->uniform_ranges[i].address;
+      based |= BITFIELD_BIT(i);
+   }
+   if (based != BITFIELD_MASK(l->range_count)) {
+      free(l);
+      l = NULL;
+   }
+
+out:
+   free(t);
+   return l;
+}
+
+static uint64_t
+hk_g17p_gfx_loader_emit(struct hk_cmd_buffer *cmd,
+                        const struct hk_g17p_gfx_loader *l,
+                        const struct agx3_ioto_uniform_range *ranges)
+{
+   struct hk_ioto_reservation r;
+   if (!hk_cmd_reserve_ioto_program(cmd, l->length, "G17P graphics loader",
+                                    &r))
+      return 0;
+
+   memcpy(r.map, l->bytes, l->length);
+   for (unsigned i = 0; i < l->reloc_count; ++i) {
+      const uint64_t address = ranges[l->relocs[i].range].address +
+                               l->relocs[i].delta;
+      agx_ioto_load_pack_ldimm_long(l->relocs[i].dest_half, (uint32_t)address,
+                                    r.map + l->relocs[i].offset);
+      agx_ioto_load_pack_ldimm_long(l->relocs[i].dest_half + 2,
+                                    (uint32_t)(address >> 32),
+                                    r.map + l->relocs[i].offset + 8);
+   }
+
+   return hk_cmd_publish_ioto_program(cmd, &r, l->length);
+}
+
+static bool
+hk_g17p_graphics_program_desc_init(
+   struct hk_cmd_buffer *cmd, struct hk_shader *s,
+   struct hk_linked_shader *linked, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, struct hk_agx3_g17p_graphics_program_desc *desc);
+
+/* The stage program of s for the current draw: the loader of its range
+ * layout, copied with the draw's range addresses. 0 if the layout has no
+ * loader (or on error, which is then set on the command buffer). */
+static uint64_t
+hk_g17p_publish_gfx_loader(struct hk_cmd_buffer *cmd, struct hk_shader *s,
+                           struct hk_linked_shader *linked,
+                           struct hk_g17p_graphics_ioto_cache_entry *cached,
+                           const struct agx3_ioto_uniform_range *ranges,
+                           size_t range_count)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const struct agx_tilebuffer_layout *tib = &cmd->state.gfx.render.tilebuffer;
+   const struct agx_ioto_g17p_imageblock imageblock = {
+      .sample_size_B = tib->sample_size_B,
+      .nr_samples = tib->nr_samples,
+      .tile_size_px = tib->tile_size,
+   };
+
+   const struct hk_g17p_gfx_loader *l = cached->loader;
+   if (!l || cached->loader_linked != linked ||
+       !hk_g17p_gfx_loader_matches(l, s, &imageblock, ranges, range_count)) {
+      l = NULL;
+      for (struct hk_g17p_gfx_loader *it =
+              p_atomic_read(&linked->g17p_gfx_loaders);
+           it; it = it->next) {
+         if (hk_g17p_gfx_loader_matches(it, s, &imageblock, ranges,
+                                        range_count)) {
+            l = it;
+            break;
+         }
+      }
+   }
+
+   if (!l) {
+      struct hk_agx3_g17p_graphics_program_desc desc;
+      if (!hk_g17p_graphics_program_desc_init(cmd, s, linked, ranges,
+                                              range_count, &desc))
+         return 0;
+
+      struct hk_g17p_gfx_loader *created =
+         hk_g17p_gfx_loader_create(dev, s, &desc);
+      if (!created)
+         return 0;
+
+      while (true) {
+         struct hk_g17p_gfx_loader *head =
+            p_atomic_read(&linked->g17p_gfx_loaders);
+         created->next = head;
+         if (p_atomic_cmpxchg_ptr(&linked->g17p_gfx_loaders, head, created) ==
+             head)
+            break;
+      }
+      l = created;
+   }
+
+   cached->loader = l;
+   cached->loader_linked = linked;
+
+   const uint64_t published = hk_g17p_gfx_loader_emit(cmd, l, ranges);
+   if (!published)
+      return 0;
+
+   /* The program names the linked executable, and promoted constants and the
+    * constant program live with the shader's code. */
+   hk_cmd_buffer_retain_bo(cmd, linked->b.bo);
+   if (s->b.info.rodata.size_16 != 0 || s->b.info.has_preamble)
+      hk_cmd_buffer_retain_bo(cmd, s->bo);
+   return published;
+}
+
 void
 hk_g17p_linked_graphics_cache_finish(struct hk_device *dev,
                                      struct hk_linked_shader *linked)
@@ -2524,6 +2736,14 @@ hk_g17p_linked_graphics_cache_finish(struct hk_device *dev,
       entry = next;
    }
    linked->g17p_graphics_templates = NULL;
+
+   struct hk_g17p_gfx_loader *loader = p_atomic_read(&linked->g17p_gfx_loaders);
+   while (loader) {
+      struct hk_g17p_gfx_loader *next = loader->next;
+      free(loader);
+      loader = next;
+   }
+   linked->g17p_gfx_loaders = NULL;
 
    hk_g17p_graphics_setup_destroy(
       dev, p_atomic_read(&linked->g17p_graphics_vertex_setup));
@@ -2881,6 +3101,63 @@ hk_usc_uniform_split(struct agx_usc_builder *b, unsigned start_halfs,
    }
 }
 
+static bool
+hk_g17p_graphics_program_desc_init(
+   struct hk_cmd_buffer *cmd, struct hk_shader *s,
+   struct hk_linked_shader *linked, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, struct hk_agx3_g17p_graphics_program_desc *desc)
+{
+   const bool fragment = s->info.stage == MESA_SHADER_FRAGMENT;
+   const uint32_t pass_type = linked->b.fragment_control.opaque[0] >> 29;
+   *desc = (struct hk_agx3_g17p_graphics_program_desc){
+      /* The container's entry point, not the allocation base: the shader
+       * loader reads the block-size dword at entry - 0x80. */
+      .shader_va = linked->b.bo->va->addr + linked->b.entry_offset,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = linked->b.size,
+      .scratch_size =
+         MAX2(linked->b.scratch_size, linked->b.agx3_spectpr_scratch_size),
+      .nr_gprs = linked->b.nr_gprs,
+      .compiler_d_valid = linked->b.g17p_compiler_d_valid,
+      .compiler_d = linked->b.g17p_compiler_d,
+      .fragment = fragment,
+      .writes_sample_mask =
+         fragment && (pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
+                      pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
+      .colour_classes = linked->b.g17p_colour_classes,
+      .imageblock = {
+         .sample_size_B = cmd->state.gfx.render.tilebuffer.sample_size_B,
+         .nr_samples = cmd->state.gfx.render.tilebuffer.nr_samples,
+         .tile_size_px = cmd->state.gfx.render.tilebuffer.tile_size,
+      },
+   };
+
+   if (s->b.info.has_preamble &&
+       (!s->bo || !s->bo->va || s->code_size != s->b.info.binary_size ||
+        !hk_agx3_g17p_constant_program_from_binary(
+           s->code_ptr, s->code_size, s->b.info.preamble_offset,
+           s->b.info.preamble_size, hk_shader_code_va(s),
+           s->b.info.binary_size, &desc->constant_program))) {
+      mesa_loge_once("G17P graphics constant-program extent refused");
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+   }
+
+   desc->constant_program.request_prelude =
+      s->b.info.agx3_preamble_uniform_inputs;
+   if (s->b.info.agx3_preamble_tps_inputs) {
+      if (!s->b.info.has_preamble ||
+          s->b.info.preamble_scratch_size <
+             s->b.info.agx3_preamble_inputs.storage_bytes) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return false;
+      }
+      desc->cprog_inputs = &s->b.info.agx3_preamble_inputs;
+   }
+   return true;
+}
+
 static uint64_t
 hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked,
@@ -2904,26 +3181,34 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
        * earlier compact publication in this recording with the same inputs
        * was already admitted. */
       struct hk_graphics_state *agfx = &cmd->state.gfx;
+      const bool spills = agx_tilebuffer_spills(&agfx->render.tilebuffer);
+      const struct hk_shader *hw_vs =
+         agfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(agfx) : NULL;
       const bool same_program = dev->dev.chip == AGX_CHIP_G17P &&
-                                cached->compact.valid &&
-                                cached->compact.source_shader == s &&
-                                cached->compact.linked == linked;
+                                cached->admit.s == s &&
+                                cached->admit.linked == linked;
       const bool vertex_admitted =
          same_program && s->info.stage == MESA_SHADER_VERTEX;
       const bool fragment_admitted =
          same_program && s->info.stage == MESA_SHADER_FRAGMENT &&
          agfx->render.g17p_rt0_layout_supported &&
-         cached->compact.spills ==
-            agx_tilebuffer_spills(&agfx->render.tilebuffer) &&
-         cached->compact.admit_topology == agfx->topology &&
-         cached->compact.admit_provoking == agfx->provoking &&
-         agfx->shaders[MESA_SHADER_VERTEX] &&
-         cached->compact.admit_hw_vs == hk_bound_hw_vs(agfx);
-      if (!vertex_admitted && !fragment_admitted &&
-          (dev->dev.chip != AGX_CHIP_G17P ||
-           !hk_g17p_basic_graphics_program_supported(cmd, s, linked))) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return 0;
+         cached->admit.spills == spills &&
+         cached->admit.topology == agfx->topology &&
+         cached->admit.provoking == agfx->provoking && hw_vs &&
+         cached->admit.hw_vs == hw_vs;
+      if (!vertex_admitted && !fragment_admitted) {
+         if (dev->dev.chip != AGX_CHIP_G17P ||
+             !hk_g17p_basic_graphics_program_supported(cmd, s, linked)) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return 0;
+         }
+         cached->admit.s = s;
+         cached->admit.linked = linked;
+         cached->admit.spills = spills;
+         cached->admit.topology = agfx->topology;
+         cached->admit.provoking = agfx->provoking;
+         cached->admit.hw_vs = hw_vs;
       }
 
       const bool diagnostics = dev->dev.debug & AGX_DBG_FAULTTRACE;
@@ -2974,6 +3259,37 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
           cached->sample_size_B == tib->sample_size_B &&
           cached->nr_samples == tib->nr_samples) {
          return cached->program;
+      }
+
+      if (!diagnostics) {
+         struct agx3_ioto_uniform_range
+            loader_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+         size_t loader_range_count = 0;
+         if (hk_g17p_graphics_uniform_ranges(cmd, s, linked, loader_ranges,
+                                             &loader_range_count, NULL)) {
+            const uint64_t published = hk_g17p_publish_gfx_loader(
+               cmd, s, linked, cached, loader_ranges, loader_range_count);
+            if (published) {
+               cached->program = published;
+               cached->source_shader = s;
+               cached->linked_shader_va = linked_shader_va;
+               cached->rodata_va = rodata_va;
+               cached->root = cmd->state.gfx.root;
+               cached->draw_params = cmd->state.gfx.draw_params;
+               cached->draw_id_ptr = cmd->state.gfx.draw_id_ptr;
+               cached->root_dependent = root_dependent;
+               cached->dma_set_base = dma_set_base;
+               cached->tile_size_px = tib->tile_size;
+               cached->sample_size_B = tib->sample_size_B;
+               cached->nr_samples = tib->nr_samples;
+               cached->key_size = 0;
+               cached->fast_valid = fast_cacheable;
+               cached->valid = true;
+               return published;
+            }
+            if (vk_command_buffer_has_error(&cmd->vk))
+               return 0;
+         }
       }
 
       /* An indexed-indirect record publishes the
@@ -3183,54 +3499,10 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          }
       }
 
-      struct hk_agx3_g17p_graphics_program_desc desc = {
-         /* The container's entry point, not the allocation base: the
-       * shader loader reads the block-size dword at entry - 0x80. */
-         .shader_va = linked_shader_va,
-         .uniform_ranges = ranges,
-         .uniform_range_count = range_count,
-         .shader_binary_size = linked->b.size,
-         .scratch_size =
-            MAX2(linked->b.scratch_size,
-                 linked->b.agx3_spectpr_scratch_size),
-         .nr_gprs = linked->b.nr_gprs,
-         .compiler_d_valid = linked->b.g17p_compiler_d_valid,
-         .compiler_d = linked->b.g17p_compiler_d,
-         .fragment = fragment,
-         .writes_sample_mask = fragment &&
-            ((linked->b.fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_PUNCH_THROUGH ||
-             (linked->b.fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
-         .colour_classes = linked->b.g17p_colour_classes,
-         .imageblock = {
-            .sample_size_B = cmd->state.gfx.render.tilebuffer.sample_size_B,
-            .nr_samples = cmd->state.gfx.render.tilebuffer.nr_samples,
-            .tile_size_px = cmd->state.gfx.render.tilebuffer.tile_size,
-         },
-      };
-
-      if (s->b.info.has_preamble &&
-          (!s->bo || !s->bo->va ||
-           s->code_size != s->b.info.binary_size ||
-           !hk_agx3_g17p_constant_program_from_binary(
-              s->code_ptr, s->code_size, s->b.info.preamble_offset,
-              s->b.info.preamble_size, hk_shader_code_va(s), s->b.info.binary_size,
-              &desc.constant_program))) {
-         mesa_loge_once("G17P graphics constant-program extent refused");
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      struct hk_agx3_g17p_graphics_program_desc desc;
+      if (!hk_g17p_graphics_program_desc_init(cmd, s, linked, ranges,
+                                              range_count, &desc))
          return 0;
-      }
-
-      desc.constant_program.request_prelude =
-         s->b.info.agx3_preamble_uniform_inputs;
-      if (s->b.info.agx3_preamble_tps_inputs) {
-         if (!s->b.info.has_preamble ||
-             s->b.info.preamble_scratch_size <
-                s->b.info.agx3_preamble_inputs.storage_bytes) {
-            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-            return 0;
-         }
-         desc.cprog_inputs = &s->b.info.agx3_preamble_inputs;
-      }
 
       size_t program_capacity;
       if (!hk_agx3_g17p_graphics_program_desc_bound(

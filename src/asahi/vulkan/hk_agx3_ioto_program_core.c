@@ -295,6 +295,7 @@ hk_agx3_g17p_shared_graphics_desc(
       .colour_classes = desc->colour_classes,
       .imageblock = desc->imageblock,
       .preloaded_root = desc->preloaded_root,
+      .patchable = desc->patchable,
       .constant_program = desc->constant_program,
       .cprog_inputs = desc->cprog_inputs,
    };

@@ -528,7 +528,23 @@ struct hk_g17p_prepared_fragment_key {
    bool blend_constant;
 };
 
+struct hk_g17p_gfx_loader;
+
 struct hk_g17p_graphics_ioto_cache_entry {
+   /* The loader of the last draw (hk_g17p_publish_gfx_loader()). */
+   const struct hk_g17p_gfx_loader *loader;
+   const struct hk_linked_shader *loader_linked;
+
+   /* Inputs of the last admitted program (hk_upload_usc_words_internal()). */
+   struct {
+      const struct hk_shader *s;
+      const struct hk_linked_shader *linked;
+      const struct hk_shader *hw_vs;
+      bool spills;
+      uint8_t topology;
+      uint8_t provoking;
+   } admit;
+
    uint8_t key[HK_G17P_GRAPHICS_IOTO_KEY_MAX];
    uint64_t program;
    const void *source_shader;

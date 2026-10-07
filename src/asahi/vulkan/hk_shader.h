@@ -467,6 +467,10 @@ struct hk_linked_shader {
     * programs relocate only their absolute uniform addresses. */
    void *g17p_graphics_templates;
 
+   /* G17P stage programs of this executable, one per uniform-range layout,
+    * patched with each draw's range addresses (struct hk_g17p_gfx_loader). */
+   void *g17p_gfx_loaders;
+
    /* Directly owned immutable CPU setup templates for the compact-root path.
     * Vertex has one structural identity. Fragment entries are indexed by the
     * finite imageblock/blend/spill domain, never by draw-varying addresses. */
