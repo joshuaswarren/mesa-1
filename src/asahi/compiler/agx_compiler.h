@@ -1206,6 +1206,7 @@ bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
  * therefore starts its outputs here, and nowhere else. */
 #define AGX3_UVS_POSITION_ENTRIES 4u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
+bool agx3_fuse_vertex_output_alu(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 /* Number of 16-bit registers RA keeps reserved at the bottom of the register
  * file for the whole shader.

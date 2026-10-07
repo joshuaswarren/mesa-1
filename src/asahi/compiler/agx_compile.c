@@ -7863,6 +7863,95 @@ agx3_sink_vertex_outputs(agx_context *ctx)
    return true;
 }
 
+static bool
+agx3_vertex_alu_operand(agx_index x, bool allow_uniform)
+{
+   if (x.size != AGX_SIZE_32 || agx_channels(x) != 1 || x.abs || x.neg ||
+       x.memory)
+      return false;
+   /* The staged FFMA names its uniform with an 8-bit half index. */
+   return x.type == AGX_INDEX_NORMAL ||
+          (allow_uniform && x.type == AGX_INDEX_UNIFORM && x.value < 256);
+}
+
+/* Write a vertex output's FMUL or FFMA straight into the staging file and
+ * store it from there, as native vertex programs do (agx3_stage_vertex_alu:
+ * a staged FMUL, a uniform*register+register FFMA and an all-register FFMA),
+ * instead of computing it into a GPR and copying that into the staging file.
+ * Each fusion removes one COPY. The ALU moves down to the store, where its
+ * register sources are still available: SSA sources dominate their use.
+ *
+ * Only a producer whose sole use is the store is fused, and only operands the
+ * native forms take: scalar 32-bit registers without modifiers, and for FFMA
+ * a uniform first multiplicand (the multiplicands commute). Run after
+ * agx3_sink_vertex_outputs, which recognizes plain stores only. */
+bool
+agx3_fuse_vertex_output_alu(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_VERTEX || ctx->is_preamble)
+      return false;
+
+   agx_instr **defs = calloc(ctx->alloc, sizeof(*defs));
+   uint32_t *uses = calloc(ctx->alloc, sizeof(*uses));
+   if (!defs || !uses) {
+      free(defs);
+      free(uses);
+      return false;
+   }
+
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         defs[I->dest[d].value] = I;
+      agx_foreach_ssa_src(I, s)
+         uses[I->src[s].value]++;
+   }
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_ST_VARY || I->nr_srcs != 2)
+         continue;
+
+      const agx_index value = I->src[1];
+      if (value.type != AGX_INDEX_NORMAL || value.size != AGX_SIZE_32 ||
+          agx_channels(value) != 1 || value.abs || value.neg ||
+          value.memory || uses[value.value] != 1)
+         continue;
+
+      agx_instr *P = defs[value.value];
+      if (!P || (P->op != AGX_OPCODE_FMUL && P->op != AGX_OPCODE_FFMA) ||
+          P->nr_dests != 1 || P->saturate ||
+          P->dest[0].size != AGX_SIZE_32 || agx_channels(P->dest[0]) != 1)
+         continue;
+
+      const bool fma = P->op == AGX_OPCODE_FFMA;
+      agx_index a = P->src[0], b = P->src[1];
+      if (fma && b.type == AGX_INDEX_UNIFORM && a.type != AGX_INDEX_UNIFORM) {
+         agx_index t = a;
+         a = b;
+         b = t;
+      }
+      if (!agx3_vertex_alu_operand(a, fma) ||
+          !agx3_vertex_alu_operand(b, false) ||
+          (fma && !agx3_vertex_alu_operand(P->src[2], false)))
+         continue;
+
+      agx_builder bld = agx_init_builder(ctx, agx_before_instr(I));
+      if (fma)
+         agx_st_vary_fma_agx3(&bld, I->src[0], a, b, P->src[2]);
+      else
+         agx_st_vary_mul_agx3(&bld, I->src[0], a, b);
+
+      agx_remove_instruction(I);
+      agx_remove_instruction(P);
+      progress = true;
+   }
+
+   free(defs);
+   free(uses);
+   return progress;
+}
+
 /* Apple's G17P multi-RT fragments finish colour partitions in descending
  * order and make partition zero the final release.  This holds for both the
  * opaque two-RGBA8 witness (offsets 4, 0) and the mixed RGBA16F+R8 witnesses
@@ -8929,6 +9018,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_print_shader(ctx, stdout);
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
+   AGX_PASS(ctx, agx3_fuse_vertex_output_alu);
    AGX_PASS(ctx, agx3_order_g17p_mrt_tile_ops);
    AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);

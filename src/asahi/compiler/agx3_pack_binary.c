@@ -1215,8 +1215,7 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
    if (fused) {
       const bool fma = I->op == AGX_OPCODE_ST_VARY_FMA_AGX3;
       if ((I->op != AGX_OPCODE_ST_VARY_MUL_AGX3 && !fma) ||
-          I->nr_srcs != (fma ? 4 : 3) || register_index || uniform_index ||
-          !defer_writeout)
+          I->nr_srcs != (fma ? 4 : 3))
          return false;
       uint16_t src[3] = {0};
       bool live[3] = {0}, discard[3] = {0};
