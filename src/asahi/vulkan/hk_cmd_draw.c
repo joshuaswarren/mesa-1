@@ -2011,8 +2011,13 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
  * Suspending passes keep the forced store (a later command buffer reloads).
  * Firmware partial renders (TVB overflow) are unaffected: the G17 kernel
  * derives their ZLS word with both load and store forced
- * (g17_uapi.rs partial_depth_flags). Stencil keeps its forced store: the
- * existing TODO documents a CTS failure without it.
+ * (g17_uapi.rs partial_depth_flags). Stencil follows the same rule. The
+ * CTS failure in hk_pack_zls_control()'s TODO
+ * (renderpass ... d32_sfloat_s8_uint.input.dont_care.store.
+ * self_dep_clear_draw_use_input_aspect) is the store of a stream that does
+ * not end its pass: its self-dependency splits the pass, and the next stream
+ * reads stencil from memory as an input attachment. That stream keeps the
+ * forced word; only the stream that ends the pass gets this one.
  *
  * Untouched depth/stencil elision (G17P).
  *
@@ -2116,7 +2121,8 @@ hk_pack_zls_control_final(struct agx_zls_control_packed *packed,
    }
 
    if (s) {
-      zls.s_store = true;
+      zls.s_store = s->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
+                    s->resolveMode != VK_RESOLVE_MODE_NONE;
       zls.s_load = s->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || later_stream ||
                    incomplete_render_area;
    }
