@@ -2807,7 +2807,15 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
     * with neither the first-load marker nor an incoming scoreboard wait. The
     * coverage operation that produced the mask has already completed its
     * pixel transaction before the load consumes the architectural register. */
-   const uint16_t tile_wait = load && sample_op.reg ? 0 : wait_mask;
+   uint16_t tile_wait = load && sample_op.reg ? 0 : wait_mask;
+   /* No LLDCol witness carries an incoming wait. A load that must wait (its
+    * destination still pending in an inline-blend program, for one) retires
+    * that wait on its destination first; waiting early is always safe. */
+   if (load && tile_wait) {
+      if (!agx3_retire_result_wait(emission, enc, I, tile_wait))
+         return false;
+      tile_wait = 0;
+   }
    const bool ok =
       load ? agx3_tile_load(enc, value.value, (enum agx3_tile_width)width,
                             slot, I->mask, I->pixel_offset, sample_op,
