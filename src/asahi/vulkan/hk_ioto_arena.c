@@ -30,11 +30,26 @@ hk_ioto_arena_finish(struct hk_cmd_buffer *cmd)
  * addresses are still live in the recorded stream -- and stays owned by
  * large_bos.
  */
+/* With cached command memory, programs are cleaned per chunk rather than per
+ * program: everything below the cursor, which also covers reservations that
+ * were never published. */
+void
+hk_ioto_arena_clean(struct hk_cmd_buffer *cmd)
+{
+   struct hk_ioto_arena *arena = &cmd->ioto;
+
+   if (arena->map && arena->cursor &&
+       hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cmd)->dev))
+      util_flush_range_no_fence(arena->map, arena->cursor);
+}
+
 static bool
 hk_ioto_arena_grow(struct hk_cmd_buffer *cmd, size_t size, const char *label)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_ioto_arena *arena = &cmd->ioto;
+
+   hk_ioto_arena_clean(cmd);
 
    const size_t chunk =
       hk_ioto_arena_chunk_size(size, AGX_IOTO_PROGRAM_ALIGNMENT);
@@ -135,9 +150,9 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
     * composer's bound and compose something shorter. */
    arena->cursor = (uint32_t)offset + (uint32_t)length;
 
-   if (hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cmd)->dev))
-      util_flush_range_no_fence(reservation->map, length);
-   if (agx_bo_sync_for_device(arena->bo, offset, length)) {
+   /* Cached memory is cleaned with its chunk (hk_ioto_arena_clean()). */
+   if (!hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cmd)->dev) &&
+       agx_bo_sync_for_device(arena->bo, offset, length)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
       return 0;
    }

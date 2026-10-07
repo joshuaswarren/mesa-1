@@ -786,6 +786,7 @@ hk_cmd_buffer_publish_cached_uploads(struct hk_cmd_buffer *cmd)
    list_for_each_entry(struct hk_vdm_allocation, allocation,
                        &cmd->vdm_allocations, link)
       hk_cmd_pool_clean_vdm(allocation);
+   hk_ioto_arena_clean(cmd);
    util_post_flush_fence();
 }
 

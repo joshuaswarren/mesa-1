@@ -1294,6 +1294,10 @@ uint64_t hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
                                         reservation,
                                      size_t length);
 
+/* Clean the current chunk's programs from the CPU cache (cached command
+ * memory); hk_cmd_buffer_publish_cached_uploads() fences it. */
+void hk_ioto_arena_clean(struct hk_cmd_buffer *cmd);
+
 /* Release the arena's bookkeeping. The chunks themselves are in large_bos. */
 void hk_ioto_arena_finish(struct hk_cmd_buffer *cmd);
 
