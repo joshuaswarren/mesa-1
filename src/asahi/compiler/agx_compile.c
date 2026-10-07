@@ -4001,6 +4001,27 @@ agx_lower_agx3_half_iadd_constants(agx_context *ctx)
    return progress;
 }
 
+/* The immediate native descriptor index has four bits. Materialize larger
+ * indices as the existing zero-extended 64-bit indexed-fetch operand after
+ * copy propagation, so constants do not get folded back into that field. */
+static bool
+agx3_lower_large_fetch_indices(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_TEXTURE_LOAD || I->nr_srcs != 6 ||
+          I->src[2].type != AGX_INDEX_IMMEDIATE || I->src[2].value != 0 ||
+          I->src[3].type != AGX_INDEX_IMMEDIATE || I->src[3].value <= 15)
+         continue;
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      I->src[3] = agx_mov_imm(&b, 64, I->src[3].value);
+      progress = true;
+   }
+   return progress;
+}
+
 /* No grounded AGX3 form adds two 64-bit registers (address forms take one
  * 64-bit base). Split a plain 64-bit add into a low 32-bit add, a carry from
  * an unsigned compare and a high 32-bit add, then recombine the pair
@@ -8554,6 +8575,11 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_info *out, unsigned *offset_out)
 {
    const unsigned initial_binary_size = binary->size;
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       nir->info.stage == MESA_SHADER_VERTEX && !impl->function->is_preamble &&
+       exec_list_length(&impl->body) > 1)
+      NIR_PASS(_, nir, nir_move_output_stores_to_end);
+
    nir_index_blocks(impl);
    nir_index_ssa_defs(impl);
 
@@ -8655,6 +8681,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx_lower_agx3_cf_constants);
    AGX_PASS(ctx, agx_lower_agx3_half_iadd_constants);
    AGX_PASS(ctx, agx_lower_agx3_wide_iadd);
+   AGX_PASS(ctx, agx3_lower_large_fetch_indices);
 
    /* For correctness, lower uniform sources after copyprop (for correctness,
     * as copyprop creates uniform sources). To keep register pressure in

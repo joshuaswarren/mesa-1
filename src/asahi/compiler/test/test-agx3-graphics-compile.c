@@ -483,6 +483,31 @@ build_vs_g17p_point_size_only(void)
    return b.shader;
 }
 
+/* Fixed exports in earlier top-level blocks remain live across later
+ * control flow. Sparse components 1 and 7 share their old modulo-six slot. */
+static nir_shader *
+build_vs_g17p_sparse_reconverged_exports(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "G17P reconverged sparse UVS");
+   nir_def *id = nir_load_vertex_id(&b);
+   nir_def *v = nir_u2f32(&b, id);
+   nir_store_uvs_agx(&b, v, nir_imm_intN_t(&b, 1, 16));
+   nir_push_if(&b, nir_ine_imm(&b, id, 0));
+   nir_def *a = nir_fadd_imm(&b, v, 2.0f);
+   nir_push_else(&b, NULL);
+   nir_def *z = nir_fmul_imm(&b, v, 3.0f);
+   nir_pop_if(&b, NULL);
+   nir_def *result = nir_if_phi(&b, a, z);
+   const unsigned components[] = {0, 2, 3, 7, 8, 12, 19, 20};
+   for (unsigned i = 0; i < ARRAY_SIZE(components); ++i)
+      nir_store_uvs_agx(&b, nir_fadd_imm(&b, result, (float)i),
+                        nir_imm_intN_t(&b, components[i], 16));
+   b.shader->info.outputs_written = VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 static nir_shader *
 build_vs_g17p_single_instanced_varying(void)
 {
@@ -759,6 +784,48 @@ fs_finish(nir_builder *b)
 
    fs_lower(b->shader);
    return b->shader;
+}
+
+/* A tested memory-effect prefix must remain before the colour-only MRT
+ * tail. The tail's two stores start in API order and finish in partition order. */
+static bool
+test_g17p_reconverged_mrt(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P early-tests MRT prefix");
+   b.shader->info.fs.early_fragment_tests = true;
+   b.shader->info.writes_memory = true;
+   nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
+                       nir_imm_intN_t(&b, 0xff, 16));
+   nir_def *condition = nir_load_preamble(&b, 1, 32, .base = 4);
+   nir_def *address = nir_load_preamble(&b, 1, 64, .base = 16);
+   nir_push_if(&b, nir_ine_imm(&b, condition, 0));
+   nir_global_atomic(&b, 32, address, condition, .atomic_op = nir_atomic_op_iadd);
+   nir_store_global(&b, condition, nir_iadd_imm(&b, address, 4),
+                    .align_mul = 4, .write_mask = 1);
+   nir_pop_if(&b, NULL);
+   for (unsigned i = 0; i < 2; ++i)
+      nir_store_local_pixel_agx(
+         &b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f),
+         nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+         .base = 4 * i, .write_mask = 15, .format = PIPE_FORMAT_R8_UNORM,
+         .target = i);
+   b.shader->info.outputs_written =
+      BITFIELD64_BIT(FRAG_RESULT_DATA0) | BITFIELD64_BIT(FRAG_RESULT_DATA1);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   const struct agx_shader_key key_template = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B, .no_preamble = true,
+      .has_scratch = true, .fs.nr_samples = 1,
+   };
+   struct agx_shader_key key = key_template;
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &key, &part);
+   if (!ok)
+      fprintf(stderr, "early-tests MRT prefix: %s\n", agx_last_compile_refusal());
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
 }
 
 static unsigned
@@ -8265,6 +8332,8 @@ static const struct agx3_graphics_case cases[] = {
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
    {"vs-point-size-only", build_vs_g17p_point_size_only, true,
     .g17p_only = true, .reserved_preamble = 64},
+   {"vs-reconverged-sparse-uvs", build_vs_g17p_sparse_reconverged_exports, true,
+    .g17p_only = true},
    {"vs-g17p-div3-mul-high", build_vs_g17p_div3_mul_high, true,
     .expected_leading_sr = 0xdd, .g17p_only = true},
    {"vs-glmark2-ideas", build_vs_glmark2_ideas, true,
@@ -8762,6 +8831,14 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--reconverged-mrt-only"))
+      return test_g17p_reconverged_mrt() ? 0 : 1;
+   if (argc == 2 && !strcmp(argv[1], "--sparse-uvs-only")) {
+      const struct agx3_graphics_case c = {
+         "vs-reconverged-sparse-uvs", build_vs_g17p_sparse_reconverged_exports, true,
+      };
+      return run_case(&c, AGX_ISA_ENCODING_AGX3B) ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--vertex-texture-lod-only")) {
       const struct agx3_graphics_case c = {
          "vs-texture-register-lod", build_vs_texture_register_lod, true,
@@ -9189,6 +9266,7 @@ main(int argc, char **argv)
       }                                                                        \
    } while (0)
 
+   RUN(test_g17p_reconverged_mrt);
    RUN(test_g17p_eot_block_store);
    RUN(test_indexed_sampler_sets);
    RUN(test_g17p_layered_eot_block_store);

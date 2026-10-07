@@ -5749,21 +5749,16 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
       minimum_output == 0 || minimum_output == AGX3_UVS_POSITION_ENTRIES;
    const bool dense_wide = output_count >= 5 && grounded_base &&
       maximum_output + 1 - minimum_output == output_count;
-   const bool sparse_high = ctx->key->g17p_sparse_vertex_outputs &&
-      output_count > 0 && maximum_output >= 4;
-   /* A separate vertex variant may only export point size, after the
-    * reserved four-entry position group. Terminal-output validation below
-    * proves its lifetime before using the existing component staging. */
-   const bool point_size_only = output_count == 1 &&
-      minimum_output == AGX3_UVS_POSITION_ENTRIES &&
-      maximum_output == AGX3_UVS_POSITION_ENTRIES;
-   return stopped && (dense_wide || sparse_high || point_size_only)
-             ? output_count : 0;
+   /* Sparse terminal bundles prove their own component/slot mapping below.
+    * Nonterminal sparse exports still require the driver's existing key. */
+   const bool sparse_high = output_count > 0 && maximum_output >= 4;
+   return stopped && (dense_wide || sparse_high) ? output_count : 0;
 }
 
 /* The sources of a dense terminal store bundle cannot be overwritten before
  * their injected staging COPY reads retire. Each six-store batch must use all
- * six distinct scoreboard slots; preserve its real output order so grouped
+ * six distinct scoreboard slots, assigned by batch position rather than
+ * component index so sparse exports cannot collide; preserve output order so grouped
  * Vulkan varyings do not get silently renumbered. Original producers retire
  * on the first COPY and UVSWs retire the staging producers. */
 static bool
@@ -5771,7 +5766,6 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
                           uint8_t order[AGX3_MAX_VERTEX_OUTPUTS])
 {
    unsigned next = 0;
-   unsigned slot_mask = 0;
    bool stopped = false;
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
@@ -5780,13 +5774,7 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
          if (next >= count || I->src[0].type != AGX_INDEX_IMMEDIATE)
             return false;
          const unsigned component = I->src[0].value;
-         const unsigned slot = component % 6;
-         if (slot_mask & BITFIELD_BIT(slot))
-            return false;
-         slot_mask |= BITFIELD_BIT(slot);
          order[next++] = component;
-         if ((next % 6) == 0)
-            slot_mask = 0;
       } else if (I->op == AGX_OPCODE_STOP) {
          if (next != count)
             return false;
@@ -9510,8 +9498,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * Each scalar is consumed immediately, before its slot/address
              * can be reused. A still-live general producer sharing the slot
              * must retire before the staging COPY reuses it. */
-            const uint8_t stage_slot =
-               (g17p_position_protocol || g17p_user_output_protocol)
+            const uint8_t stage_slot = g17p_terminal_outputs
+               ? g17p_outputs_staged % nslots + 1
+               : (g17p_position_protocol || g17p_user_output_protocol)
                   ? I->src[0].value % nslots + 1 : next_uvs_slot;
             const uint16_t staging_half =
                g17p_user_output_protocol
@@ -9562,10 +9551,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        position < g17p_outputs_staged; ++position) {
                      const unsigned component = g17p_output_order[position];
                      uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
+                     const unsigned token =
+                        (g17p_terminal_outputs ? position : component) % nslots;
                      if (!agx3_vary_uvsw(enc,
                                           agx3_g17p_output_staging_half(component),
-                                          component, component % nslots + 1, true,
-                                          1u << (component % nslots), bytes, &len) ||
+                                          component, token + 1, true,
+                                          1u << token, bytes, &len) ||
                          !agx3_append(emission, bytes, len))
                         AGX3_REFUSE(I);
                   }

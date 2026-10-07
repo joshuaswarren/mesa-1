@@ -34,7 +34,8 @@ agx_negate_src_index(agx_instr *I)
 
 /* A complete fragment may sample through structured control flow and finish
  * with an ordinary MRT epilog. Recognize only a reconverged, colour-only tail;
- * nothing from the prefix may enter a pixel transaction or have write effects.
+ * Prefix colour accesses stay closed. A leading force-early depth test may
+ * protect memory effects that remain entirely before the colour transaction.
  * Both ordering (SSA) and packing (physical registers) use this same proof.
  */
 agx_block *
@@ -61,7 +62,7 @@ agx_reconverged_mrt_tail(agx_context *ctx)
        agx_num_successors(tail) != 0)
       return NULL;
 
-   bool tile = false, stop = false;
+   bool tile = false, stop = false, early_wait = false, early_tested = false;
    agx_foreach_block(ctx, block) {
       /* A unique CFG exit means every normally terminating path reaches
        * the reconverged tail, even when the prefix contains a loop.
@@ -77,7 +78,37 @@ agx_reconverged_mrt_tail(agx_context *ctx)
             tile = true;
             break;
          case AGX_OPCODE_WAIT_PIX:
-            if (block != tail || I->writeout == 1)
+            if (I->writeout == 1) {
+               /* Force-early tests begin class 1 in the prefix and the
+                * following mask update retains it. Colour ordering does
+                * not move or otherwise alter that transaction. */
+               if (block != agx_start_block(ctx) || tile || early_wait ||
+                   !ctx->nir->info.fs.early_fragment_tests)
+                  return NULL;
+               early_wait = true;
+            } else if (block != tail) {
+               return NULL;
+            }
+            break;
+         case AGX_OPCODE_PUBLISH_TEXTURE_AGX3:
+            /* RA publishes the prefix's texture results into the staging
+             * file. This compiler-generated operation has no pixel class. */
+            if (tile)
+               return NULL;
+            break;
+         case AGX_OPCODE_SAMPLE_MASK_AGX3:
+            /* Demotion before colour acquisition only removes lanes; it
+             * does not enter or release a pixel transaction. */
+            if (tile || (early_wait && I->imm != 3))
+               return NULL;
+            early_tested |= early_wait && I->imm == 3;
+            early_wait = false;
+            break;
+         case AGX_OPCODE_ATOMIC:
+         case AGX_OPCODE_DEVICE_STORE:
+            /* Force-early testing already protects these API side effects.
+             * They remain in the prefix, before every colour transaction. */
+            if (block == tail || tile || !early_tested)
                return NULL;
             break;
          case AGX_OPCODE_STOP:
@@ -112,5 +143,5 @@ agx_reconverged_mrt_tail(agx_context *ctx)
          }
       }
    }
-   return tile && stop ? tail : NULL;
+   return tile && stop && !early_wait ? tail : NULL;
 }
