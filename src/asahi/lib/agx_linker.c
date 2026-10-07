@@ -350,10 +350,15 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    const bool container = agx3_uses_code_container(dev);
    const size_t alloc_size = container ? agx3_container_size(size) : size;
 
-   linked->bo = agx_bo_create(dev, alloc_size, 0, AGX_BO_EXEC | AGX_BO_LOW_VA,
-                              "Linked executable");
+   uint32_t code_offset = 0;
+   linked->bo = dev->code_alloc
+                   ? dev->code_alloc(dev, alloc_size, &code_offset)
+                   : agx_bo_create(dev, alloc_size, 0,
+                                   AGX_BO_EXEC | AGX_BO_LOW_VA,
+                                   "Linked executable");
    linked->size = size;
-   linked->entry_offset = container ? AGX3_CONTAINER_ENTRY : 0;
+   linked->entry_offset =
+      code_offset + (container ? AGX3_CONTAINER_ENTRY : 0);
    if (!linked->bo) {
       fprintf(stderr,
               "agx_fast_link: executable low-VA allocation of %zu bytes "
@@ -363,7 +368,11 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    uint8_t *container_map = agx_bo_map(linked->bo);
-   uint8_t *linked_map = container_map ? container_map + linked->entry_offset : NULL;
+   if (container_map)
+      container_map += code_offset;
+   uint8_t *linked_map =
+      container_map ? container_map + (linked->entry_offset - code_offset)
+                    : NULL;
    if (!linked_map) {
       fprintf(stderr,
               "agx_fast_link: executable BO mapping failed (size %zu, "
@@ -463,7 +472,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    linked->nr_gprs = nr_gprs;
    linked->g17p_colour_classes = colour_classes;
 
-   if (agx_bo_sync_for_device(linked->bo, 0, alloc_size)) {
+   if (agx_bo_sync_for_device(linked->bo, code_offset, alloc_size)) {
       agx_bo_unreference(dev, linked->bo);
       linked->bo = NULL;
       return false;

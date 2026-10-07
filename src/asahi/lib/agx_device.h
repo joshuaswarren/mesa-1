@@ -218,6 +218,11 @@ int agx_drm_bo_sync_for_device(struct agx_device *dev, struct agx_bo *bo,
 void agx_drm_bo_close(struct agx_device *dev, uint32_t handle);
 
 struct agx_device {
+   /* Optional allocator for linked executables: returns a referenced BO with
+    * the allocation at *offset. Without it, each program gets its own BO. */
+   struct agx_bo *(*code_alloc)(struct agx_device *dev, size_t size,
+                                uint32_t *offset);
+
    uint32_t debug;
 
    /* Precompiled libagx binary table */
