@@ -1453,13 +1453,11 @@ hk_cmd_buffer_pool(struct hk_cmd_buffer *cmd)
  * the epilog read unwritten uniforms. Prepared programs are keyed by
  * dynamic_graphics_state.generation, which covers every input here. */
 static inline bool
-hk_cmd_uses_blend_constant(const struct hk_cmd_buffer *cmd)
+hk_uses_blend_constant(const struct vk_color_blend_state *cb)
 {
    static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 3 ==
                     VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA,
                  "constant factors are contiguous");
-   const struct vk_color_blend_state *cb =
-      &cmd->vk.dynamic_graphics_state.cb;
 
    for (unsigned i = 0; i < cb->attachment_count; ++i) {
       const unsigned factors[] = {
@@ -1477,6 +1475,12 @@ hk_cmd_uses_blend_constant(const struct hk_cmd_buffer *cmd)
    }
 
    return false;
+}
+
+static inline bool
+hk_cmd_uses_blend_constant(const struct hk_cmd_buffer *cmd)
+{
+   return hk_uses_blend_constant(&cmd->vk.dynamic_graphics_state.cb);
 }
 
 /*

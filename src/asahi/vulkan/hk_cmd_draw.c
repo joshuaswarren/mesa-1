@@ -2689,6 +2689,40 @@ hk_pack_zls_control_final(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
+/* The tilebuffer layout for colour attachments of the given formats. G17P's
+ * bounded RT0 programs use non-array image operations, so it lays out a
+ * single layer unless the rendering is layered. */
+static struct agx_tilebuffer_layout
+hk_tilebuffer_layout(const struct hk_device *dev, const VkFormat *vk_formats,
+                     size_t stride, unsigned count, unsigned samples,
+                     bool layered, bool g17p_wide_ms_to_memory)
+{
+   enum pipe_format formats[HK_MAX_RTS] = {0};
+   for (unsigned i = 0; i < count; ++i) {
+      const VkFormat format =
+         *(const VkFormat *)((const uint8_t *)vk_formats + i * stride);
+      formats[i] = hk_format_to_pipe_format(format);
+      if (agx_native_graphics(&dev->dev)) {
+         formats[i] = hk_padded_image_format(formats[i]);
+         const enum pipe_format integer = hk_scaled_texture_format(formats[i]);
+         if (integer != PIPE_FORMAT_NONE)
+            formats[i] = integer;
+      }
+   }
+
+   /* Storage capacity and raster samples are independent limits. In
+    * particular 16x16 at 4x may occupy the full 32 KiB, while 32x32 at 4x
+    * exceeds the sample budget even for an eight-byte sample. */
+   const bool g17p = dev->dev.chip == AGX_CHIP_G17P;
+   const uint8_t max_sample_size_B =
+      !g17p                    ? 0
+      : g17p_wide_ms_to_memory ? AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE
+                               : AGX_G17P_MAX_BYTES_PER_SAMPLE;
+   return agx_build_tilebuffer_layout_with_limits(
+      formats, count, samples, layered, max_sample_size_B,
+      g17p ? 32768 : 0, g17p ? 2048 : 0);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
@@ -2774,29 +2808,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    render->cr.layers = layer_count;
 
-   /* Choose a tilebuffer layout given the framebuffer key */
-   enum pipe_format formats[HK_MAX_RTS] = {0};
-   for (unsigned i = 0; i < render->color_att_count; ++i) {
-      formats[i] = hk_format_to_pipe_format(render->color_att[i].vk_format);
-      if (agx_native_graphics(&dev->dev)) {
-         formats[i] = hk_padded_image_format(formats[i]);
-         const enum pipe_format integer =
-            hk_scaled_texture_format(formats[i]);
-         if (integer != PIPE_FORMAT_NONE)
-            formats[i] = integer;
-      }
-   }
-
-   /* G17P's bounded RT0 programs use non-array image operations. Other chips
-    * keep the existing always-layered layout.
-    */
-   const bool layered =
-      dev->dev.chip != AGX_CHIP_G17P ||
-      !hk_agx3_g17p_single_layer_rendering(render->view_mask, layer_count);
-   /* Storage capacity and raster samples are independent limits. In
-    * particular 16x16 at 4x may occupy the full32KiB, while 32x32 at 4x
-    * exceeds the sample budget even for an eight-byte sample. */
-   const bool native_tile_limits = dev->dev.chip == AGX_CHIP_G17P;
    /* A G17P multisample tilebuffer wider than eight bytes per sample only
     * keeps a tile's whole sample where colour-writing geometry covered that
     * tile; see AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE. A load-op clear
@@ -2818,15 +2829,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                                    is_attachment_stored(att);
       }
    }
-   const uint8_t max_sample_size_B =
-      dev->dev.chip != AGX_CHIP_G17P ? 0
-      : g17p_wide_ms_to_memory
-           ? AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE
-           : AGX_G17P_MAX_BYTES_PER_SAMPLE;
-   render->tilebuffer = agx_build_tilebuffer_layout_with_limits(
-      formats, render->color_att_count, render->tilebuffer.nr_samples, layered,
-      max_sample_size_B,
-      native_tile_limits ? 32768 : 0, native_tile_limits ? 2048 : 0);
+   render->tilebuffer = hk_tilebuffer_layout(
+      dev, &render->color_att[0].vk_format, sizeof(render->color_att[0]),
+      render->color_att_count, render->tilebuffer.nr_samples,
+      dev->dev.chip != AGX_CHIP_G17P ||
+         !hk_agx3_g17p_single_layer_rendering(render->view_mask, layer_count),
+      g17p_wide_ms_to_memory);
 
    if (dev->dev.chip == AGX_CHIP_G17P)
       render->g17p_rt0_layout_supported =
@@ -2834,18 +2842,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        !render->g17p_rt0_layout_supported) {
-      char names[256] = "";
-      for (unsigned i = 0, len = 0; i < render->color_att_count; ++i) {
-         len += snprintf(names + len, sizeof(names) - MIN2(len, sizeof(names)),
-                         "%s%s", i ? "," : "",
-                         util_format_short_name(formats[i]));
-         len = MIN2(len, sizeof(names));
-      }
       mesa_loge_once("G17P tilebuffer layout refused: attachments=%u "
-                     "samples=%u sample_size=%u tile_size=%u formats=%s",
+                     "samples=%u sample_size=%u tile_size=%u",
                      render->color_att_count, render->tilebuffer.nr_samples,
                      render->tilebuffer.sample_size_B,
-                     render->tilebuffer.tile_size, names);
+                     render->tilebuffer.tile_size);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -7437,31 +7438,73 @@ hk_g17p_relocated_blend_constant_base(const struct hk_shader *fs,
    return true;
 }
 
+/* Everything outside a fragment shader that its fast-link key depends on. */
+struct hk_fs_link_inputs {
+   const struct vk_dynamic_graphics_state *dyn;
+   const struct agx_tilebuffer_layout *tib;
+   const VkFormat *color_formats;
+   unsigned color_formats_stride;
+   unsigned color_att_count;
+   unsigned cull_distance_size;
+   bool statistics;
+   bool depth_attachment;
+   bool stencil_attachment;
+   bool occlusion;
+};
+
+static bool
+hk_g17p_read_only_early_reject_in(const struct hk_device *dev,
+                                  const struct hk_shader *fs,
+                                  const struct hk_fs_link_inputs *in,
+                                  unsigned samples, bool prolog_discards)
+{
+   const struct vk_dynamic_graphics_state *dyn = in->dyn;
+
+   /* Moving a test ahead of a discard is unobservable only when neither the
+    * test nor the skipped fragment has a side effect. The all-live prolog
+    * also must not inherit an API-mask or cull-distance kill. */
+   return dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
+          !fs->b.info.early_fragment_tests && !fs->info.fs.writes_memory &&
+          !fs->info.fs.epilog_key.write_z && !fs->info.fs.epilog_key.write_s &&
+          samples == 1 && in->depth_attachment && dyn->ds.depth.test_enable &&
+          !dyn->ds.depth.write_enable &&
+          dyn->ds.depth.compare_op != VK_COMPARE_OP_ALWAYS &&
+          !dyn->ds.depth.bounds_test.enable &&
+          !(dyn->ds.stencil.test_enable && in->stencil_attachment) &&
+          !in->occlusion && !in->statistics && !prolog_discards;
+}
+
+static struct hk_fs_link_inputs
+hk_cmd_fs_link_inputs(struct hk_cmd_buffer *cmd, const struct hk_shader *hw_vs)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct hk_rendering_state *render = &gfx->render;
+   return (struct hk_fs_link_inputs){
+      .dyn = &cmd->vk.dynamic_graphics_state,
+      .tib = &render->tilebuffer,
+      .color_formats = &render->color_att[0].vk_format,
+      .color_formats_stride = sizeof(render->color_att[0]),
+      .color_att_count = render->color_att_count,
+      .cull_distance_size = hw_vs->info.cull_distance_array_size,
+      .statistics = hk_stat_enabled(hk_pipeline_stat_addr(
+         cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)),
+      .depth_attachment = render->depth_att.vk_format != VK_FORMAT_UNDEFINED,
+      .stencil_attachment =
+         render->stencil_att.vk_format != VK_FORMAT_UNDEFINED,
+      .occlusion = gfx->occlusion.mode != AGX_VISIBILITY_MODE_NONE,
+   };
+}
+
 static bool
 hk_g17p_read_only_early_reject(struct hk_cmd_buffer *cmd,
                                const struct hk_shader *fs, unsigned samples,
                                bool prolog_discards, bool statistics)
 {
-   const struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct hk_rendering_state *render = &gfx->render;
-   const struct vk_dynamic_graphics_state *dyn =
-      &cmd->vk.dynamic_graphics_state;
-
-   /* Keep this first recovery deliberately narrow.  Moving a test ahead of a
-    * discard is unobservable only when neither the test nor the skipped
-    * fragment has a side effect.  The all-live prolog also must not inherit an
-    * API-mask or cull-distance kill: that would recreate the pre-loop coverage
-    * transition this path exists to avoid. */
-   return dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
-          !fs->b.info.early_fragment_tests && !fs->info.fs.writes_memory &&
-          !fs->info.fs.epilog_key.write_z && !fs->info.fs.epilog_key.write_s &&
-          samples == 1 && render->depth_att.vk_format != VK_FORMAT_UNDEFINED &&
-          dyn->ds.depth.test_enable && !dyn->ds.depth.write_enable &&
-          dyn->ds.depth.compare_op != VK_COMPARE_OP_ALWAYS &&
-          !dyn->ds.depth.bounds_test.enable && !hk_stencil_test_enabled(cmd) &&
-          gfx->occlusion.mode == AGX_VISIBILITY_MODE_NONE && !statistics &&
-          !prolog_discards;
+   struct hk_fs_link_inputs in =
+      hk_cmd_fs_link_inputs(cmd, hk_bound_hw_vs(&cmd->state.gfx));
+   in.statistics = statistics;
+   return hk_g17p_read_only_early_reject_in(hk_cmd_buffer_device(cmd), fs,
+                                            &in, samples, prolog_discards);
 }
 
 void
@@ -7562,14 +7605,11 @@ hk_fill_fast_link_key_vs(struct hk_cmd_buffer *cmd, struct hk_shader *sw_vs,
 }
 
 static bool
-hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
-                         struct hk_shader *hw_vs,
-                         struct hk_fast_link_key_fs *key, bool report_errors)
+hk_fs_link_key_build(const struct hk_device *dev, struct hk_shader *fs,
+                     const struct hk_fs_link_inputs *in,
+                     struct hk_fast_link_key_fs *key, bool report_errors)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct hk_rendering_state *render = &gfx->render;
-   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   const struct vk_dynamic_graphics_state *dyn = in->dyn;
    unsigned samples = MAX2(dyn->ms.rasterization_samples, 1);
    unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
    unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
@@ -7617,9 +7657,8 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
       samples_shaded = dyn->ms.rasterization_samples;
 
    *key = (struct hk_fast_link_key_fs){
-      .prolog.statistics = hk_stat_enabled(hk_pipeline_stat_addr(
-         cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)),
-      .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
+      .prolog.statistics = in->statistics,
+      .prolog.cull_distance_size = in->cull_distance_size,
       .prolog.api_sample_mask =
          has_sample_mask && !nontrivial_force_early && !defer_api_sample_mask
             ? api_sample_mask
@@ -7650,15 +7689,15 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
       .defer_api_sample_mask = defer_api_sample_mask,
       .api_sample_mask = api_sample_mask,
    };
-   if (hk_g17p_read_only_early_reject(
-          cmd, fs, samples, prolog_discards, key->prolog.statistics)) {
+   if (hk_g17p_read_only_early_reject_in(dev, fs, in, samples,
+                                         prolog_discards)) {
       key->prolog.run_zs_tests = true;
       key->epilog.link.already_ran_zs = true;
    }
    agx_fs_epilog_apply_device_policy(dev->dev.chip, &key->epilog);
 
    key->epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
-                               agx_tilebuffer_spills(&render->tilebuffer);
+                               agx_tilebuffer_spills(in->tib);
    if (key->epilog.native_spills) {
       uint16_t base;
       if (!hk_g17p_relocated_blend_constant_base(fs, &base) ||
@@ -7669,7 +7708,7 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
    }
 
    if (!key->epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P &&
-       hk_cmd_uses_blend_constant(cmd) &&
+       hk_uses_blend_constant(&dyn->cb) &&
        (fs->info.agx3_combined_sampler_valid ||
         fs->info.agx3_indexed_sampler_valid) &&
        !hk_g17p_relocated_blend_constant_base(
@@ -7683,13 +7722,14 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
    }
 
    key->epilog.link.already_ran_zs |= nontrivial_force_early;
-   key->epilog.max_sample_size_B = render->tilebuffer.max_sample_size_B;
-   key->epilog.max_bytes_per_tile = render->tilebuffer.max_bytes_per_tile;
-   key->epilog.max_samples_per_tile = render->tilebuffer.max_samples_per_tile;
+   key->epilog.max_sample_size_B = in->tib->max_sample_size_B;
+   key->epilog.max_bytes_per_tile = in->tib->max_bytes_per_tile;
+   key->epilog.max_samples_per_tile = in->tib->max_samples_per_tile;
 
-   for (uint32_t i = 0; i < render->color_att_count; i++) {
-      key->epilog.rt_formats[i] =
-         hk_format_to_pipe_format(render->color_att[i].vk_format);
+   for (uint32_t i = 0; i < in->color_att_count; i++) {
+      const VkFormat format = *(const VkFormat *)(
+         (const uint8_t *)in->color_formats + i * in->color_formats_stride);
+      key->epilog.rt_formats[i] = hk_format_to_pipe_format(format);
       if (agx_native_graphics(&dev->dev)) {
          const enum pipe_format logical = key->epilog.rt_formats[i];
          key->epilog.rt_formats[i] = hk_padded_image_format(logical);
@@ -7751,6 +7791,18 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
 
    return true;
 }
+
+static bool
+hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
+                         struct hk_shader *hw_vs,
+                         struct hk_fast_link_key_fs *key, bool report_errors)
+{
+   const struct hk_fs_link_inputs in = hk_cmd_fs_link_inputs(cmd, hw_vs);
+   return hk_fs_link_key_build(hk_cmd_buffer_device(cmd), fs, &in, key,
+                               report_errors);
+}
+
+
 
 static void
 hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
@@ -8521,242 +8573,11 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           gfx->fast_link_fs.key.prolog.statistics ||
        !gfx->fast_link_fs.valid) {
 
-      unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
-      unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
-      bool has_sample_mask = api_sample_mask != tib_sample_mask;
-      bool defer_api_sample_mask =
-         dev->dev.chip == AGX_CHIP_G17P && has_sample_mask &&
-         !nontrivial_force_early;
-
-      if (hw_vs->info.cull_distance_array_size) {
-         perf_debug(cmd, "Emulating cull distance (size %u)",
-                    hw_vs->info.cull_distance_array_size);
-      }
-
-      if (has_sample_mask) {
-         perf_debug(cmd, "Emulating sample mask");
-      }
-
-      /* A fixed-count shader whose sample exports exceeded the register file
-       * was canonicalized to one sample. Keep that guard; dynamic sample-rate
-       * shaders instead select a native variant in hk_bound_fs().
-       */
-      if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
-          dyn->ms.rasterization_samples > 1) {
-         if (!prepare_only)
-            mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
-                      "count; refusing a %u-sample draw that requests it",
-                      dyn->ms.rasterization_samples);
+      struct hk_fast_link_key_fs key;
+      if (!hk_fill_fast_link_key_fs(cmd, fs, hw_vs, &key, !prepare_only)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      /* A fragment unrolled per sample shades exactly its pipeline's count. */
-      if (dev->dev.chip == AGX_CHIP_G17P &&
-          fs->info.fs.epilog_key.sample_shading &&
-          fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
-         if (!prepare_only)
-            mesa_loge("G17P: fragment unrolled for %u samples cannot run a "
-                      "%u-sample draw",
-                      fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      /* A G17P fragment's coverage updates are compiled for the sample count
-       * of its pipeline; a dynamic count other than that cannot reuse them.
-       */
-      if (dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
-          fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
-         if (!prepare_only)
-            mesa_loge("G17P: fragment coverage updates compiled for %u samples "
-                      "cannot run a %u-sample draw",
-                      fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      /* G17P shades every sample inside the fragment rather than looping. */
-      unsigned samples_shaded = 0;
-      if (fs->info.fs.epilog_key.sample_shading &&
-          dev->dev.chip != AGX_CHIP_G17P)
-         samples_shaded = dyn->ms.rasterization_samples;
-
-      struct hk_fast_link_key_fs key = {
-         .prolog.statistics = hk_stat_enabled(hk_pipeline_stat_addr(
-            cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)),
-
-         .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
-         .prolog.api_sample_mask =
-            has_sample_mask && !nontrivial_force_early &&
-                  !defer_api_sample_mask
-               ? api_sample_mask
-               : 0xff,
-         .prolog.nr_samples = dev->dev.chip == AGX_CHIP_G17P
-                                 ? MAX2(dyn->ms.rasterization_samples, 1)
-                                 : 0,
-         .nr_samples_shaded = samples_shaded,
-      };
-
-      bool prolog_discards =
-         (has_sample_mask && !defer_api_sample_mask) ||
-         key.prolog.cull_distance_size;
-
-      bool needs_prolog = key.prolog.statistics || prolog_discards;
-
-      if (needs_prolog) {
-         /* With late main shader tests, the prolog runs tests if neither the
-          * main shader nor epilog will.
-          *
-          * With (nontrivial) early main shader tests, the prolog does not
-          * run tests, the tests will run at the start of the main shader.
-          * This ensures tests are after API sample mask and cull distance
-          * discards.
-          */
-         key.prolog.run_zs_tests = !nontrivial_force_early &&
-                                   !fs->b.info.writes_sample_mask &&
-                                   !epilog_discards && prolog_discards;
-
-         if (key.prolog.cull_distance_size) {
-            key.prolog.cf_base = fs->b.info.varyings.fs.nr_cf;
-         }
-      }
-
-      key.epilog = (struct agx_fs_epilog_key){
-         .link = fs->info.fs.epilog_key,
-         .colour_unit_range = fs->info.fs.g17p_colour_unit_range,
-         .nr_samples = MAX2(dyn->ms.rasterization_samples, 1),
-         .blend.alpha_to_coverage = dyn->ms.alpha_to_coverage_enable,
-         .blend.alpha_to_one = dyn->ms.alpha_to_one_enable,
-         .blend.logicop_enable = dyn->cb.logic_op_enable,
-         .blend.logicop_func = vk_logic_op_to_pipe(dyn->cb.logic_op),
-         .defer_api_sample_mask = defer_api_sample_mask,
-         .api_sample_mask = api_sample_mask,
-      };
-      if (hk_g17p_read_only_early_reject(
-             cmd, fs, MAX2(dyn->ms.rasterization_samples, 1),
-             prolog_discards, key.prolog.statistics)) {
-         key.prolog.run_zs_tests = true;
-         key.epilog.link.already_ran_zs = true;
-      }
-      agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
-
-      key.epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
-         agx_tilebuffer_spills(&render->tilebuffer);
-      if (key.epilog.native_spills) {
-         uint16_t base;
-         if (!hk_g17p_relocated_blend_constant_base(fs, &base) ||
-             ALIGN_POT(base, 4) > 512 - 12) {
-            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-            cs->current = out;
-            return;
-         }
-         key.epilog.emrt_heap_base = ALIGN_POT(base, 4);
-         key.epilog.blend_constant_base = key.epilog.emrt_heap_base + 4;
-      }
-
-      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && hk_cmd_uses_blend_constant(cmd) &&
-          (fs->info.agx3_combined_sampler_valid ||
-           fs->info.agx3_indexed_sampler_valid) &&
-          !hk_g17p_relocated_blend_constant_base(
-             fs, &key.epilog.blend_constant_base)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
          cs->current = out;
          return;
-      }
-
-      for (unsigned rt = 0; rt < ARRAY_SIZE(dyn->cal.color_map); ++rt) {
-         int map = dyn->cal.color_map[rt];
-         key.epilog.remap[rt] = map == MESA_VK_ATTACHMENT_UNUSED ? -1 : map;
-      }
-
-      if (dyn->ms.alpha_to_one_enable || dyn->ms.alpha_to_coverage_enable ||
-          dyn->cb.logic_op_enable) {
-
-         perf_debug(
-            cmd, "Epilog with%s%s%s",
-            dyn->ms.alpha_to_one_enable ? " alpha-to-one" : "",
-            dyn->ms.alpha_to_coverage_enable ? " alpha-to-coverage" : "",
-            dyn->cb.logic_op_enable ? " logic-op" : "");
-      }
-
-      key.epilog.link.already_ran_zs |= nontrivial_force_early;
-
-      struct hk_rendering_state *render = &cmd->state.gfx.render;
-      key.epilog.max_sample_size_B = render->tilebuffer.max_sample_size_B;
-      key.epilog.max_bytes_per_tile = render->tilebuffer.max_bytes_per_tile;
-      key.epilog.max_samples_per_tile = render->tilebuffer.max_samples_per_tile;
-      for (uint32_t i = 0; i < render->color_att_count; i++) {
-         key.epilog.rt_formats[i] =
-            hk_format_to_pipe_format(render->color_att[i].vk_format);
-         if (agx_native_graphics(&dev->dev)) {
-            const enum pipe_format logical = key.epilog.rt_formats[i];
-            key.epilog.rt_formats[i] = hk_padded_image_format(logical);
-            const enum pipe_format integer =
-               hk_scaled_texture_format(key.epilog.rt_formats[i]);
-            if (integer != PIPE_FORMAT_NONE) {
-               key.epilog.rt_formats[i] = integer;
-               key.epilog.scaled_formats[i] = logical;
-            } else if (key.epilog.rt_formats[i] != logical) {
-               key.epilog.blend_formats[i] = logical;
-            }
-         }
-
-         const struct vk_color_blend_attachment_state *cb =
-            &dyn->cb.attachments[i];
-
-         bool write_enable = dyn->cb.color_write_enables & BITFIELD_BIT(i);
-         unsigned write_mask = write_enable ? cb->write_mask : 0;
-
-         /* A zero hardware mask deletes the tile store while raster coverage
-          * still makes a HAL200 tile nonempty. Materialize the unchanged tile
-          * value with the already-grounded blend load/store path instead.
-          * nir_lower_blend always blends, so use a default blend state when
-          * blending is disabled at an API level.
-          */
-         if ((dev->dev.chip == AGX_CHIP_G16G ||
-              dev->dev.chip == AGX_CHIP_G17P) && !write_enable) {
-            /* The epilog reloads and stores the tile value itself, which
-             * unlike a ZERO/ONE blend also covers pure-integer formats. */
-            key.epilog.preserve_rt |= BITFIELD_BIT(i);
-            key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
-               .colormask = BITFIELD_MASK(4),
-               .mode = agx_pack_blend_standard(
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO),
-            };
-         } else if (!dyn->cb.attachments[i].blend_enable) {
-            key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
-               .colormask = write_mask,
-               .mode = agx_pack_blend_standard(
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO),
-            };
-         } else if (cb->color_blend_op >= VK_BLEND_OP_ZERO_EXT) {
-            key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
-               .colormask = write_mask,
-               .advanced_blend = 1,
-               .mode = agx_pack_blend_advanced(
-                  vk_advanced_blend_op_to_pipe(cb->color_blend_op),
-                  vk_blend_overlap_to_pipe(cb->blend_overlap),
-                  cb->src_premultiplied, cb->dst_premultiplied,
-                  cb->clamp_results),
-            };
-
-            assert(cb->clamp_results == false);
-         } else {
-            key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
-               .colormask = write_mask,
-               .mode = agx_pack_blend_standard(
-                  vk_blend_op_to_pipe(cb->color_blend_op),
-                  vk_blend_factor_to_pipe(cb->src_color_blend_factor),
-                  vk_blend_factor_to_pipe(cb->dst_color_blend_factor),
-                  vk_blend_op_to_pipe(cb->alpha_blend_op),
-                  vk_blend_factor_to_pipe(cb->src_alpha_blend_factor),
-                  vk_blend_factor_to_pipe(cb->dst_alpha_blend_factor)),
-            };
-         }
       }
 
       if (!hk_update_fast_linked(cmd, fs, &key)) {
