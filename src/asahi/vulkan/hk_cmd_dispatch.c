@@ -2469,6 +2469,39 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           * halves0..7, with ordinary buffer arguments beginning at half8. */
          pointers[0] = set_address + offset;
          pointers[1] = dev->rodata.bo->va->addr;
+
+         /* Unlike the indexed ABI, direct txf publishes the descriptor-set
+          * texture word itself.  G17P ignores the low five pointer bits, so
+          * snapshot an unaligned record just as the combined-sampler paths do.
+          * The shader selector admits such a snapshot only when sampled-image
+          * update-after-bind is disabled; an aligned live set pointer is safe
+          * with either feature state. */
+         if (pointers[0] & (HK_G17P_TEXTURE_STATE_ALIGN - 1)) {
+            struct hk_descriptor_set *set = descriptors->sets[0];
+            const void *set_map = set ? set->mapped_ptr : NULL;
+            uint32_t mapped_size = set ? set->size : 0;
+            if (!set && descriptors->push[0]) {
+               set_map = descriptors->push[0]->data;
+               mapped_size = sizeof(descriptors->push[0]->data);
+            }
+
+            if (dev->vk.enabled_features
+                   .descriptorBindingSampledImageUpdateAfterBind ||
+                !set_map || offset > mapped_size) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+
+            pointers[0] = hk_g17p_texture_state_pointer(
+               cmd, pointers[0], (const uint8_t *)set_map + offset,
+               mapped_size - offset);
+            if (!pointers[0]) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
+               return;
+            }
+         }
       }
       if (s->info.agx3_storage_image_valid && hk_g17p_launch_trace_enabled()) {
          fprintf(stderr,

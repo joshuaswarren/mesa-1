@@ -49,7 +49,10 @@ which is aligned by construction. The explicit selector is needed because the
 direct txf lowering accepts a strict subset of the indexed lowering's shapes;
 there is no GLSL shader that naturally makes only the indexed pass decline.
 With the selector, `HK_G17P_LAUNCH_TRACE=1` reports `txf=1 idx_samp=0`, and the
-probe covers the set-relative pointer in `hk_cmd_dispatch.c`.
+probe covers the set-relative pointer in `hk_cmd_dispatch.c`. Unaligned direct
+txf state is copied only when sampled-image update-after-bind is disabled. If
+that feature is enabled, hk keeps an aligned live pointer or declines this ABI
+so later descriptor updates remain visible.
 
 A failing run costs a firmware queue slot until reboot. Never loop the probe
 against a driver that is known to fail. The probe is deliberately not

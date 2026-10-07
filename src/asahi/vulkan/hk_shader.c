@@ -2842,7 +2842,11 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                   candidate = nir_shader_clone(NULL, nir);
                   struct agx_g17p_txf_binding binding;
                   if (candidate &&
-                      agx_nir_lower_g17p_txf(candidate, &binding)) {
+                      agx_nir_lower_g17p_txf(candidate, &binding) &&
+                      (!(binding.texture_offset_B &
+                         (HK_G17P_TEXTURE_STATE_ALIGN - 1)) ||
+                       !dev->vk.enabled_features
+                           .descriptorBindingSampledImageUpdateAfterBind)) {
                      ralloc_free(nir);
                      nir = candidate;
                      shader->info.agx3_txf_texture_valid = true;

@@ -1578,9 +1578,11 @@ uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
  * 32-byte-aligned command-buffer copy of the descriptor record (texture word
  * plus the software fields after it, which descriptor crawls through the
  * same pointer may read), or 0 on allocation failure.  The ABIs using this
- * are not selected when sampled-image update-after-bind is enabled, and they
- * already snapshot the descriptor's sampler index at record time, so the copy
- * holds what the set holds when the commands execute.
+ * that need a copy are not selected when sampled-image update-after-bind is
+ * enabled.  The direct txf ABI may still publish an already aligned live set
+ * pointer in that case.  The combined-sampler ABIs also snapshot the
+ * descriptor's sampler index at record time, so their copies hold what the set
+ * holds when the commands execute.
  */
 #define HK_G17P_TEXTURE_STATE_ALIGN 32
 
