@@ -895,8 +895,46 @@ zink_end_batch(struct zink_context *ctx)
       ctx->swapchain = NULL;
    }
 
-   if (screen->device_lost)
+   if (screen->device_lost) {
+      /* This state will never be submitted, so it never completes and
+       * get_batch_state() could not reuse it: every later flush would make
+       * a new state with its own command pools and object references, and
+       * memory would grow by one state per flush for the life of the
+       * context (a GL client that kept drawing after one failed submit
+       * grew by ~190 KiB of RSS and four GPU buffers per frame on hk).
+       * Nothing of it reached the GPU, so retire it now:
+       * unlink it from the in-flight list, reset it and make it free.
+       * States submitted before the loss are left alone.
+       */
+      struct zink_batch_state **link = &ctx->batch_states, *prev = NULL;
+      while (*link && *link != bs) {
+         prev = *link;
+         link = &(*link)->next;
+      }
+      if (*link) {
+         *link = bs->next;
+         if (ctx->last_batch_state == bs)
+            ctx->last_batch_state = prev;
+         ctx->batch_states_count--;
+         bs->next = NULL;
+         /* What submit_queue() would release or publish for this state. */
+         set_foreach(&bs->dmabuf_exports, entry) {
+            struct pipe_resource *pres = (void*)entry->key;
+            pipe_resource_reference(&pres, NULL);
+         }
+         _mesa_set_clear(&bs->dmabuf_exports, NULL);
+         util_dynarray_foreach(&bs->fences, struct zink_tc_fence*, mfence)
+            (*mfence)->deferred_ctx = NULL;
+         p_atomic_set(&bs->usage.unflushed, false);
+         mtx_lock(&bs->usage.mtx);
+         cnd_broadcast(&bs->usage.flush);
+         mtx_unlock(&bs->usage.mtx);
+         bs->fence.completed = true;
+         zink_reset_batch_state(ctx, bs);
+         zink_batch_state_append(&ctx->free_batch_states, &ctx->last_free_batch_state, bs);
+      }
       return;
+   }
 
    if (ctx->tc) {
       set_foreach(&bs->active_queries, entry)
