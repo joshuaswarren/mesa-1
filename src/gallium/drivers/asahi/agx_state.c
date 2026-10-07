@@ -231,6 +231,15 @@ agx_set_shader_buffers(struct pipe_context *pctx, mesa_shader_stage shader,
    ctx->stage[shader].ssbo_writable_mask |= writable_bitmask << start;
 }
 
+static bool
+agx_front_face_ccw(const struct agx_context *ctx)
+{
+   bool ccw = ctx->rast->base.front_ccw;
+   if (ctx->in_tess && !ctx->gs)
+      ccw ^= !ctx->stage[MESA_SHADER_TESS_EVAL].shader->tess.ccw;
+   return ccw;
+}
+
 static void
 agx_set_blend_color(struct pipe_context *pctx,
                     const struct pipe_blend_color *state)
@@ -5968,7 +5977,7 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
 
    uint32_t cull = UINT32_C(0x00000480);
    if (!agx_ppp_hal200_cull_mode_pack(dev->chip, rast->base.cull_face,
-                                      rast->base.front_ccw, cull, &cull) ||
+                                      agx_front_face_ccw(ctx), cull, &cull) ||
        !agx_ppp_hal200_cull_provoking_pack(
           dev->chip, rast->base.flatshade_first ? 0 : 2, cull, &cull) ||
        !agx_ppp_hal200_depth_clip_pack(dev->chip, rast->base.depth_clip_near,
@@ -6307,13 +6316,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
 
    if (dirty.cull) {
       agx_ppp_push_merged(&ppp, CULL, cfg, ctx->rast->cull) {
-         cfg.front_face_ccw = ctx->rast->base.front_ccw;
-
-         if (ctx->in_tess && !ctx->gs) {
-            /* Yes, OpenGL is backwards. Deal with it. */
-            cfg.front_face_ccw ^=
-               !ctx->stage[MESA_SHADER_TESS_EVAL].shader->tess.ccw;
-         }
+         cfg.front_face_ccw = agx_front_face_ccw(ctx);
       }
    }
 
