@@ -34,7 +34,6 @@
 #include "hk_entrypoints.h"
 #include "hk_image.h"
 #include "hk_image_view.h"
-#include "hk_pass_profile.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "hk_g17p_ppp_indices.h"
 #include "hk_g17p_full_frame_scissor.h"
@@ -2885,9 +2884,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
               render->tilebuffer.nr_samples,
               render->view_mask ? " multiview" : "",
               incomplete_render_area ? " incomplete" : "");
-
-   if (unlikely(dev->pass_profile))
-      hk_pass_profile_describe(render, pRenderingInfo, incomplete_render_area);
 
    struct hk_g17p_bg_eot_cache_entry *bg_eot_cache =
       hk_g17p_bg_eot_cache_get(cmd, pRenderingInfo,

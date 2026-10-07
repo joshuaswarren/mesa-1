@@ -3997,11 +3997,6 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    if (dev->dev.chip == AGX_CHIP_G17P) {
       hk_dispatch_precomp_g17p(cmd, grid, barrier, idx, data, data_size);
-      hk_prof_dispatch(cmd,
-                       (barrier & AGX_POSTGFX)  ? cmd->current_cs.post_gfx
-                       : (barrier & AGX_PREGFX) ? cmd->current_cs.pre_gfx
-                                                : cmd->current_cs.cs,
-                       idx);
       return;
    }
 

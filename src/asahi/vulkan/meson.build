@@ -102,7 +102,6 @@ hk_files = files(
   'hk_query_pool.h',
   'hk_drm_render_core.c',
   'hk_drm_render_core.h',
-  'hk_pass_profile.c',
   'hk_queue.c',
   'hk_queue.h',
   'hk_sampler.c',

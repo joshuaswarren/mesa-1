@@ -1810,7 +1810,6 @@ hk_dispatch_prepared_precomp_g17p(
       cs->weak_barrier_end = cs->current;
    }
    cs->stats.cmds++;
-   hk_prof_dispatch(cmd, cs, idx);
    return true;
 }
 
@@ -2096,7 +2095,6 @@ hk_dispatch_prepared_g17p_native(
    if (!hk_dispatch_prepared_g17p_native_impl(cmd, cs, s, prepared, grid,
                                               local_size))
       return false;
-   hk_prof_dispatch(cmd, cs, HK_PROF_STAGE + s->info.stage);
    return true;
 }
 
