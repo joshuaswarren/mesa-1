@@ -412,11 +412,17 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
     *
     * Feedback loops are problematic with compression. The GL driver bans them.
     * Interestingly, the relevant CTS tests pass on G13G and G14C, but not on
-    * G13D. For now, conservatively ban compression with feedback loops.
+    * G13D. Keep that restriction except for depth images already admitted by
+    * the G17P policy. Rejecting those here contradicts the depth policy and
+    * makes the host-copy performance query report a plain device layout;
+    * Zink then retains HOST_TRANSFER and never compresses its depth images.
     */
-   if (usage &
-       (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_STORAGE_BIT |
-        VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT)) {
+   const bool depth_feedback = dev->chip == AGX_CHIP_G17P && allow_agx3 &&
+                               hk_g17p_compression_depth_format(format);
+   if ((usage & (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT |
+                 VK_IMAGE_USAGE_STORAGE_BIT)) ||
+       ((usage & VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) &&
+        !depth_feedback)) {
 
       perf_debug_dev(
          dev, "No compression: incompatible usage -%s%s%s",
