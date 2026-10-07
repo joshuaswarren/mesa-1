@@ -60,27 +60,31 @@ load_root(nir_builder *b, unsigned num_components, unsigned bit_size,
    return load_speculatable(b, num_components, bit_size, addr, align);
 }
 
+/* Constant data (nir_opt_large_constants, compute only) lives in a BO per
+ * shader; the compute root table carries its address.
+ */
 static bool
 lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
                     const struct lower_descriptors_ctx *ctx)
 {
    assert(load->intrinsic == nir_intrinsic_load_constant);
-   UNREACHABLE("todo: stick an address in the root descriptor or something");
-
-   uint32_t base = nir_intrinsic_base(load);
-   uint32_t range = nir_intrinsic_range(load);
+   assert(b->shader->info.stage == MESA_SHADER_COMPUTE);
 
    b->cursor = nir_before_instr(&load->instr);
 
-   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, base);
-   nir_def *data = nir_load_ubo(
-      b, load->def.num_components, load->def.bit_size, nir_imm_int(b, 0),
-      offset, .align_mul = nir_intrinsic_align_mul(load),
-      .align_offset = nir_intrinsic_align_offset(load), .range_base = base,
-      .range = range);
+   nir_def *base = load_root(
+      b, 1, 64, nir_imm_int(b, hk_root_descriptor_offset(cs.const_data_addr)),
+      8);
+   nir_def *offset =
+      nir_iadd_imm(b, load->src[0].ssa, nir_intrinsic_base(load));
+   nir_def *data = nir_load_global_constant(
+      b, load->def.num_components, load->def.bit_size,
+      nir_iadd(b, base, nir_u2u64(b, offset)),
+      .align_mul = nir_intrinsic_align_mul(load),
+      .align_offset = nir_intrinsic_align_offset(load),
+      .access = ACCESS_CAN_SPECULATE);
 
    nir_def_rewrite_uses(&load->def, data);
-
    return true;
 }
 

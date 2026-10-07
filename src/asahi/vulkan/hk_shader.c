@@ -838,7 +838,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
 
-   // NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   /* Large constant arrays become load_constant from the shader's data
+    * section (address in the compute root table) instead of falling to
+    * per-invocation scratch in agx_compile. Compute only: the graphics
+    * stages have no address for it yet.
+    */
+   if (nir->info.stage == MESA_SHADER_COMPUTE)
+      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
 
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
@@ -959,6 +965,13 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       memcpy(agx_bo_map(shader->bo), shader->b.binary, size);
       shader->preamble_addr =
          shader->bo->va->addr + shader->b.info.preamble_offset;
+   }
+
+   if (shader->data_size) {
+      shader->data_bo =
+         agx_bo_create(&dev->dev, shader->data_size, 0, 0, "Shader data");
+      memcpy(agx_bo_map(shader->data_bo), shader->data_ptr, shader->data_size);
+      shader->data_addr = shader->data_bo->va->addr;
    }
 
    if (!shader->linked.ht) {
@@ -1266,6 +1279,7 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
    agx_bo_unreference(&dev->dev, s->bo);
+   agx_bo_unreference(&dev->dev, s->data_bo);
 
    simple_mtx_destroy(&s->linked.lock);
 
