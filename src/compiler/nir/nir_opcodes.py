@@ -1535,9 +1535,10 @@ opcode("ulea_agx", 0, tuint64, [0, 0, 0], [tuint64, tuint32, tuint32], False,
 
 # Bounds check instruction.
 #
-# Sources: <data, end offset, bounds>
+# Sources: <data, unsigned end offset, unsigned byte bound>.
+# Data is an arbitrary bit pattern; only the address comparison is unsigned.
 opcode("bounds_agx", 0, tint, [0, 0, 0],
-       [tint, tint, tint], False,
+       [tint, tuint, tuint], False,
        "", "src1 <= src2 ? src0 : 0")
 
 binop_convert("interleave", tuint32, tuint16, "", """

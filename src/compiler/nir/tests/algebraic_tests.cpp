@@ -23,6 +23,7 @@
  */
 
 #include "nir_test.h"
+#include "nir_constant_expressions.h"
 
 namespace {
 
@@ -119,6 +120,50 @@ protected:
       nir_opt_mqsad(b->shader);
    }
 };
+
+TEST_F(nir_opt_algebraic_test, bounds_agx_unsigned_end_and_bound)
+{
+   for (unsigned bits : {8u, 16u, 32u, 64u}) {
+      uint64_t mask = UINT64_MAX >> (64 - bits);
+      uint64_t sign = UINT64_C(1) << (bits - 1);
+      const uint64_t edge[] = {0, 1, 63, 64, 65, sign - 1, sign,
+                              sign + 1, mask - 1, mask};
+      const uint64_t data[] = {0, sign, mask, UINT64_C(0x7fc12345) & mask};
+      for (uint64_t value : data) {
+         for (uint64_t end : edge) {
+            for (uint64_t bound : edge) {
+               nir_const_value v[] = {
+                  nir_const_value_for_uint(value, bits),
+                  nir_const_value_for_uint(end, bits),
+                  nir_const_value_for_uint(bound, bits),
+               };
+               nir_const_value *src[] = {&v[0], &v[1], &v[2]};
+               nir_const_value out = {};
+               uint16_t poison = 0;
+               nir_eval_const_opcode(nir_op_bounds_agx, &out, &poison,
+                                     1, bits, src, 0);
+               EXPECT_EQ(poison, 0u);
+               EXPECT_EQ(nir_const_value_as_uint(out, bits),
+                         end <= bound ? value : 0)
+                  << "bits=" << bits << " end=" << end << " bound=" << bound;
+            }
+         }
+      }
+   }
+}
+
+TEST_F(nir_opt_algebraic_test, bounds_agx_constant_fold_matches_unsigned_backend)
+{
+   nir_def *checked = nir_bounds_agx(b, nir_imm_int(b, 0xdeadbeef),
+                                      nir_imm_int(b, UINT32_MAX),
+                                      nir_imm_int(b, 64));
+   nir_deref_instr *deref = nir_build_deref_var(b, res_var);
+   nir_intrinsic_instr *store =
+      nir_build_store_deref(b, &deref->def, checked, 1, (gl_access_qualifier)0);
+   ASSERT_TRUE(nir_opt_constant_folding(b->shader));
+   ASSERT_TRUE(nir_src_is_const(store->src[1]));
+   EXPECT_EQ(nir_src_as_uint(store->src[1]), 0u);
+}
 
 TEST_F(nir_opt_algebraic_test, umod_pow2_src2)
 {
