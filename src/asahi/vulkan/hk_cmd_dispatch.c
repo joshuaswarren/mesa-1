@@ -183,10 +183,10 @@ hk_g17p_compute_program_cache_key_equal(
           a->range_start_halfs == b->range_start_halfs &&
           a->range_size_halfs == b->range_size_halfs &&
           a->compiler_d_valid == b->compiler_d_valid && a->kind == b->kind &&
-          a->launch_sources.max_total_threads_per_threadgroup ==
-             b->launch_sources.max_total_threads_per_threadgroup &&
-          a->launch_sources.extended_texture_write_mask_qword_1 ==
-             b->launch_sources.extended_texture_write_mask_qword_1 &&
+          a->launch_sources.ti_spill_bytes ==
+             b->launch_sources.ti_spill_bytes &&
+          a->launch_sources.ti_largest_ipr_bytes ==
+             b->launch_sources.ti_largest_ipr_bytes &&
           a->launch_sources.ray_traversal_depth_nonzero ==
              b->launch_sources.ray_traversal_depth_nonzero;
 }

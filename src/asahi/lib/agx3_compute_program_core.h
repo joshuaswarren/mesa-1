@@ -21,12 +21,11 @@ extern "C" {
 
 /*
  * Apple derives the two launch-template fields from the same LoadShader
- * object whose instruction stream is addressed by program_va.  On HAL300,
- * ProgramVariantESLState sources ShaderInfo::max_total_threads_per_threadgroup
- * and the low word of ShaderInfo::extended_texture_write_mask_qword_1 from
- * AGC reply vtable entries +0x42 and +0x4e.  Keep the objects joined so a
- * frontend cannot accidentally launch one Ioto program with another
- * program's template or with an AGX2 shader-base-relative USC pointer.
+ * object whose instruction stream is addressed by program_va: the constant
+ * program's thread-invariant spill and IPR bytes (ShaderInfo fields 31 and
+ * 37). Keep the objects joined so a frontend cannot accidentally launch one
+ * Ioto program with another program's template or with an AGX2
+ * shader-base-relative USC pointer.
  */
 struct agx3_compute_program_desc {
    enum agx_chip chip;

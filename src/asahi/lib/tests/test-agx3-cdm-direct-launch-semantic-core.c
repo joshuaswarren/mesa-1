@@ -181,8 +181,8 @@ test_template_contract(void)
    CHECK(!agx3_cdm_direct_template_decode(&template_words, NULL));
 
    const struct agx3_cdm_direct_template_sources source_fields = {
-      .max_total_threads_per_threadgroup = 5,
-      .extended_texture_write_mask_qword_1 = 4,
+      .ti_spill_bytes = 5,
+      .ti_largest_ipr_bytes = 4,
       .ray_traversal_depth_nonzero = true,
    };
    CHECK(agx3_cdm_direct_template_build_from_sources(&source_fields,
@@ -208,9 +208,9 @@ test_template_contract(void)
       CHECK(agx3_cdm_direct_template_sources_compute(
          compute_sources[i].resource_info, compute_sources[i].ray_traversal,
          false, &sources));
-      CHECK(sources.max_total_threads_per_threadgroup ==
+      CHECK(sources.ti_spill_bytes ==
             compute_sources[i].field31);
-      CHECK(sources.extended_texture_write_mask_qword_1 == 0);
+      CHECK(sources.ti_largest_ipr_bytes == 0);
       CHECK(!sources.ray_traversal_depth_nonzero);
       CHECK(agx3_cdm_direct_template_build_from_sources(&sources,
                                                          &template_words));
@@ -222,7 +222,7 @@ test_template_contract(void)
       if (compute_sources[i].ray_traversal) {
          CHECK(agx3_cdm_direct_template_sources_compute(
             compute_sources[i].resource_info, true, true, &sources));
-         CHECK(sources.max_total_threads_per_threadgroup ==
+         CHECK(sources.ti_spill_bytes ==
                compute_sources[i].field31);
          CHECK(sources.ray_traversal_depth_nonzero);
       } else {
@@ -239,7 +239,7 @@ test_template_contract(void)
    };
    for (unsigned i = 0; i < ARRAY_SIZE(extended_mask_boundaries); ++i) {
       struct agx3_cdm_direct_template_sources sources = {
-         .extended_texture_write_mask_qword_1 =
+         .ti_largest_ipr_bytes =
             extended_mask_boundaries[i][0],
       };
       CHECK(agx3_cdm_direct_template_build_from_sources(&sources,
@@ -248,22 +248,13 @@ test_template_contract(void)
       CHECK(decoded.word0_bits_3_14 == extended_mask_boundaries[i][1]);
    }
 
-   /* HAL300 uses a 32-bit load from the ULong field. */
-   const struct agx3_cdm_direct_template_sources high_mask_word = {
-      .extended_texture_write_mask_qword_1 = UINT64_C(1) << 32,
-   };
-   CHECK(agx3_cdm_direct_template_build_from_sources(&high_mask_word,
-                                                       &template_words));
-   CHECK(agx3_cdm_direct_template_decode(&template_words, &decoded));
-   CHECK(decoded.word0_bits_3_14 == 0);
-
    const uint32_t max_threads_boundaries[][2] = {
       {0, 0}, {1, 1}, {4, 1}, {5, 2},
       {UINT32_C(0xffffc), 0x3ffff},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(max_threads_boundaries); ++i) {
       struct agx3_cdm_direct_template_sources sources = {
-         .max_total_threads_per_threadgroup = max_threads_boundaries[i][0],
+         .ti_spill_bytes = max_threads_boundaries[i][0],
       };
       CHECK(agx3_cdm_direct_template_build_from_sources(&sources,
                                                          &template_words));
@@ -272,10 +263,10 @@ test_template_contract(void)
    }
 
    const struct agx3_cdm_direct_template_sources invalid_sources[] = {
-      {.extended_texture_write_mask_qword_1 = UINT32_C(0x3ff9)},
-      {.extended_texture_write_mask_qword_1 = UINT32_MAX},
-      {.max_total_threads_per_threadgroup = UINT32_C(0xffffd)},
-      {.max_total_threads_per_threadgroup = UINT32_MAX},
+      {.ti_largest_ipr_bytes = UINT32_C(0x3ff9)},
+      {.ti_largest_ipr_bytes = UINT32_MAX},
+      {.ti_spill_bytes = UINT32_C(0xffffd)},
+      {.ti_spill_bytes = UINT32_MAX},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(invalid_sources); ++i) {
       memset(&template_words, 0xa5, sizeof(template_words));

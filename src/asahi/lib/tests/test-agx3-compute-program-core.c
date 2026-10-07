@@ -53,8 +53,8 @@ make_desc(enum agx_chip chip)
       .preshader.external_va = AGX_IOTO_PRESHADER_NO_VA,
       .launch_sources =
          {
-            .max_total_threads_per_threadgroup = 0x345,
-            .extended_texture_write_mask_qword_1 = 0x124,
+            .ti_spill_bytes = 0x345,
+            .ti_largest_ipr_bytes = 0x124,
             .ray_traversal_depth_nonzero = true,
          },
    };
@@ -498,7 +498,7 @@ test_g17p_direct_add3_program_join(void)
    CHECK(memcmp(mapped, composed, composed_written) == 0);
 
    struct agx3_g17p_direct_add3_program_desc invalid_desc = desc;
-   invalid_desc.launch_sources.max_total_threads_per_threadgroup = 1;
+   invalid_desc.launch_sources.ti_spill_bytes = 1;
    uint8_t composed_before[sizeof(composed)];
    memcpy(composed_before, composed, sizeof(composed));
    composed_written = 47;
@@ -848,7 +848,7 @@ test_fail_closed(void)
    desc.program_va |= 1;
    CHECK(prepare_fails_unchanged(&desc, 96));
    desc.program_va &= ~UINT64_C(63);
-   desc.launch_sources.extended_texture_write_mask_qword_1 = UINT32_MAX;
+   desc.launch_sources.ti_largest_ipr_bytes = UINT32_MAX;
    CHECK(prepare_fails_unchanged(&desc, 96));
    desc = make_desc(AGX_CHIP_G17P);
    CHECK(prepare_fails_unchanged(&desc, 1));
