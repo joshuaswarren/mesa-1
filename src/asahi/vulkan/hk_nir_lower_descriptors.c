@@ -60,27 +60,32 @@ load_root(nir_builder *b, unsigned num_components, unsigned bit_size,
    return load_speculatable(b, num_components, bit_size, addr, align);
 }
 
+/* Large constant arrays (nir_opt_large_constants, compute only) live in the
+ * shader's data BO; the root table carries its address for the bound shader.
+ * The load may be speculated past the branch that guards its index, so the
+ * offset is clamped into the variable's range: an unguarded index past the
+ * BO would read unmapped memory.
+ */
 static bool
 lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
                     const struct lower_descriptors_ctx *ctx)
 {
    assert(load->intrinsic == nir_intrinsic_load_constant);
-   UNREACHABLE("todo: stick an address in the root descriptor or something");
-
-   uint32_t base = nir_intrinsic_base(load);
-   uint32_t range = nir_intrinsic_range(load);
+   assert(b->shader->info.stage == MESA_SHADER_COMPUTE);
 
    b->cursor = nir_before_instr(&load->instr);
 
-   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, base);
-   nir_def *data = nir_load_ubo(
-      b, load->def.num_components, load->def.bit_size, nir_imm_int(b, 0),
-      offset, .align_mul = nir_intrinsic_align_mul(load),
-      .align_offset = nir_intrinsic_align_offset(load), .range_base = base,
-      .range = range);
-
-   nir_def_rewrite_uses(&load->def, data);
-
+   uint32_t base = nir_intrinsic_base(load);
+   uint32_t bytes = load->def.num_components * load->def.bit_size / 8;
+   uint32_t last = MAX2(nir_intrinsic_range(load), bytes) - bytes;
+   nir_def *offset = nir_iadd_imm(
+      b, nir_umin(b, load->src[0].ssa, nir_imm_int(b, last)), base);
+   nir_def *data = load_root(b, 1, 64,
+                             nir_imm_int(b, hk_root_descriptor_offset(cs.const_data)), 8);
+   nir_def *val = load_speculatable(b, load->def.num_components, load->def.bit_size,
+                                    nir_iadd(b, data, nir_u2u64(b, offset)),
+                                    nir_intrinsic_align(load));
+   nir_def_replace(&load->def, val);
    return true;
 }
 

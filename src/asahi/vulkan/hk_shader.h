@@ -147,6 +147,9 @@ struct hk_shader {
    /* BO for any uploaded shader part */
    struct agx_bo *bo;
 
+   /* BO holding nir->constant_data (large constant arrays), compute only */
+   struct agx_bo *data_bo;
+
    /* Cache of fast linked variants */
    struct {
       simple_mtx_t lock;
