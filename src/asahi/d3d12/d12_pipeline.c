@@ -3040,7 +3040,7 @@ d12_dump_native_stage(nir_shader *nir, const struct agx_shader_part *part,
               i->local_size, i->texture_state_count, i->sampler_state_count,
               i->uses_txf ? "true" : "false",
               i->uses_sampler_heap ? "true" : "false",
-              i->agx3_uniform_dma_valid ? "true" : "false",
+              i->agx3_uniform_dma_count ? "true" : "false",
               i->rodata.offset, i->rodata.base_uniform, i->rodata.size_16,
               i->agx3_uniform_halfs_valid ? "true" : "false");
       bool first = true;

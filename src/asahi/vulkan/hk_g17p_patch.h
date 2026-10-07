@@ -30,7 +30,9 @@
  * every LDIMM 8 bytes) fits any addresses.
  */
 
-#define HK_G17P_PATCH_MAX_RANGES  8
+/* HK_AGX3_G17P_GRAPHICS_MAX_RANGES: a graphics stage with all its launch
+ * copies (hk_g17p_graphics_uniform_ranges()). */
+#define HK_G17P_PATCH_MAX_RANGES  19
 #define HK_G17P_PATCH_MAX_RELOCS  32
 #define HK_G17P_PATCH_CLUSTER_GAP ((uint64_t)INT16_MAX + 64)
 

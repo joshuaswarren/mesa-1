@@ -7154,7 +7154,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
        !pso->code_bo || !pso->code_va || !u->root ||
        !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
        info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
-       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_count ||
        info->imageblock_stride || info->texture_state_count ||
        info->uses_sampler_heap ||
        (native_txf ? (!info->uses_txf || info->sampler_state_count != 1)
@@ -7678,7 +7678,7 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        linked->scratch_size ||
        info->has_preamble || info->nr_preamble_gprs ||
        info->preamble_scratch_size || info->rodata.size_16 ||
-       info->agx3_uniform_dma_valid || info->texture_state_count ||
+       info->agx3_uniform_dma_count || info->texture_state_count ||
        (sampler_array ? info->sampler_state_count < 1 ||
                           info->sampler_state_count > 17
                       : info->sampler_state_count != (native_fetch ? 1u : 0u)) ||

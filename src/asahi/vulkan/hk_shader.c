@@ -445,6 +445,7 @@ struct hk_fs_sample_source {
    struct vk_pipeline_robustness_state robustness;
    enum hk_feature_key features;
    uint32_t set_layout_count;
+   uint8_t static_set_mask;
 
    /* Variants usable through hk_fs_variant(), published with p_atomic_set
     * once complete. */
@@ -2633,13 +2634,43 @@ hk_g17p_compile_fs_cprog(nir_shader **nir, struct agx_shader_key *key,
    return false;
 }
 
+/* The descriptor sets whose buffer descriptors a draw's launch may copy
+ * from when it is recorded (AGX3_UNIFORM_DMA_BUFFER): sets no binding of
+ * which may be updated after it is bound or while a command buffer using it
+ * is pending. Push descriptor sets are recorded too. */
+static uint8_t
+hk_static_set_mask(uint32_t set_layout_count,
+                   struct vk_descriptor_set_layout *const *set_layouts)
+{
+   const VkDescriptorBindingFlags late =
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+      VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+   uint8_t mask = 0;
+   for (unsigned s = 0; s < MIN2(set_layout_count, 8); ++s) {
+      if (!set_layouts || !set_layouts[s] ||
+          (set_layouts[s]->flags &
+           VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT))
+         continue;
+
+      const struct hk_descriptor_set_layout *layout =
+         vk_to_hk_descriptor_set_layout(set_layouts[s]);
+      bool fixed = true;
+      for (unsigned b = 0; b < layout->binding_count; ++b)
+         fixed &= !(layout->binding[b].flags & late);
+      if (fixed)
+         mask |= BITFIELD_BIT(s);
+   }
+   return mask;
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
                const struct vk_pipeline_robustness_state *rs,
                const union hk_key *key, enum hk_feature_key features,
                struct hk_shader *shader, mesa_shader_stage sw_stage, bool hw,
-               nir_xfb_info *xfb_info, unsigned set_count)
+               nir_xfb_info *xfb_info, unsigned set_count,
+               uint8_t static_set_mask)
 {
    unsigned nr_vbos = 0;
    bool kill_psiz = false;
@@ -3080,25 +3111,24 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    backend_key.g17p_native_uniforms =
       dev->dev.chip == AGX_CHIP_G17P && !backend_key.no_preamble;
 
-   /* Uniform DMA: the root table and every descriptor set pointer are
-    * driver-resolvable (hk_g17p_graphics_uniform_ranges publishes the span).
-    * The hardware vertex shader uses it too when its worst-case launch range
-    * count leaves room for the extra span. hk_g17p_graphics_uniform_ranges()
-    * can emit for a VS: attribute bases + clamps (2), draw parameters (1,
-    * decided by the linked prolog, so assume present), draw ID (1), indexed
-    * sampler heap (1), root (1) and promoted constants (1): 7 of the 7-range
-    * budget only when both the draw ID and the indexed heap are used. */
-   const bool vs_dma_fits =
-      sw_stage == MESA_SHADER_VERTEX && hw &&
-      nir->info.stage == MESA_SHADER_VERTEX &&
-      !(BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID) &&
-        shader->info.agx3_indexed_sampler_valid);
-   if (dev->dev.chip == AGX_CHIP_G17P && backend_key.no_preamble &&
-       ((sw_stage == MESA_SHADER_FRAGMENT &&
-         nir->info.stage == MESA_SHADER_FRAGMENT) || vs_dma_fits)) {
+   /* Uniform DMA: the root table, every descriptor set pointer, the dynamic
+    * buffers and the buffers of static sets are driver-resolvable
+    * (hk_g17p_graphics_uniform_ranges publishes the spans). A hardware vertex
+    * program copies into the uniforms its constant program leaves free; a
+    * fragment program copies only when it forms none. */
+   const bool vs_dma = sw_stage == MESA_SHADER_VERTEX && hw &&
+                       nir->info.stage == MESA_SHADER_VERTEX;
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       ((backend_key.no_preamble && sw_stage == MESA_SHADER_FRAGMENT &&
+         nir->info.stage == MESA_SHADER_FRAGMENT) || vs_dma)) {
       backend_key.g17p_uniform_dma = true;
       backend_key.g17p_dma_root = root;
       backend_key.g17p_dma_set_mask = BITFIELD_MASK(MIN2(set_count, 8));
+      backend_key.g17p_dma_static_set_mask =
+         static_set_mask & backend_key.g17p_dma_set_mask;
+      backend_key.g17p_dma_buffers_B =
+         hk_root_descriptor_offset(dynamic_buffers);
+      backend_key.g17p_dma_buffer_count = HK_MAX_DYNAMIC_BUFFERS;
    }
 
    /* For now, sample shading is always dynamic. Indicate that. */
@@ -3405,6 +3435,8 @@ hk_fs_sample_source_init(struct hk_api_shader *obj, const nir_shader *nir,
    src->robustness = *info->robustness;
    src->features = features;
    src->set_layout_count = info->set_layout_count;
+   src->static_set_mask =
+      hk_static_set_mask(info->set_layout_count, info->set_layouts);
    obj->sample_source = src;
    return VK_SUCCESS;
 }
@@ -3438,7 +3470,8 @@ hk_compile_fs_sample_variant(struct hk_device *dev,
    VkResult result = hk_compile_nir(dev, pAllocator, nir, src->flags,
                                     &src->robustness, &key, src->features,
                                     &obj->variants[i], MESA_SHADER_FRAGMENT,
-                                    true, NULL, src->set_layout_count);
+                                    true, NULL, src->set_layout_count,
+                                    src->static_set_mask);
    if (result == VK_SUCCESS)
       p_atomic_set(&src->ready_mask, src->ready_mask | BITFIELD_BIT(i));
    return result;
@@ -3612,7 +3645,9 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             result =
                hk_compile_nir(dev, pAllocator, variant_nir, info->flags,
                               info->robustness, NULL, features, variants[v].out,
-                              sw_stage, true, NULL, info->set_layout_count);
+                              sw_stage, true, NULL, info->set_layout_count,
+                              hk_static_set_mask(info->set_layout_count,
+                                                 info->set_layouts));
 
             if (result != VK_SUCCESS) {
                hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
@@ -3766,7 +3801,9 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
          result =
             hk_compile_nir(dev, pAllocator, clone, info->flags,
                            info->robustness, key, features, shader, sw_stage,
-                           hw, nir->xfb_info, info->set_layout_count);
+                           hw, nir->xfb_info, info->set_layout_count,
+                           hk_static_set_mask(info->set_layout_count,
+                                              info->set_layouts));
          if (result != VK_SUCCESS) {
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
             if (!last)
@@ -3811,7 +3848,9 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       /* hk_compile_nir takes ownership of nir */
       result = hk_compile_nir(dev, pAllocator, nir, info->flags,
                               info->robustness, key, features, shader, sw_stage,
-                              true, NULL, info->set_layout_count);
+                              true, NULL, info->set_layout_count,
+                              hk_static_set_mask(info->set_layout_count,
+                                                 info->set_layouts));
       if (result != VK_SUCCESS) {
          hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
          return result;
@@ -4187,6 +4226,7 @@ hk_fs_sample_source_deserialize(struct hk_api_shader *obj,
    blob_copy_bytes(blob, &src->robustness, sizeof(src->robustness));
    src->features = blob_read_uint32(blob);
    src->set_layout_count = blob_read_uint32(blob);
+   src->static_set_mask = blob_read_uint8(blob);
    src->nir_size = blob_read_uint32(blob);
    const void *nir = blob_read_bytes(blob, src->nir_size);
    src->nir = blob->overrun ? NULL : malloc(src->nir_size);
@@ -4589,6 +4629,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       blob_write_bytes(blob, &src->robustness, sizeof(src->robustness));
       blob_write_uint32(blob, src->features);
       blob_write_uint32(blob, src->set_layout_count);
+      blob_write_uint8(blob, src->static_set_mask);
       blob_write_uint32(blob, src->nir_size);
       blob_write_bytes(blob, src->nir, src->nir_size);
    }

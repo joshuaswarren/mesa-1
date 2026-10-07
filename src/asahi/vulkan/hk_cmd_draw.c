@@ -4148,14 +4148,15 @@ hk_g17p_mono_layout_mismatch(const struct agx_shader_part *a,
     * of the main's rodata at the same base or stays below it. */
    if (m->info.push_count > a->info.push_count)
       return "push_count";
-   if (m->info.agx3_uniform_dma_valid) {
-      HK_MONO_FIELD(agx3_uniform_dma_valid)
-      HK_MONO_FIELD(agx3_uniform_dma_pointer)
-      HK_MONO_FIELD(agx3_uniform_dma_dest)
-      HK_MONO_FIELD(agx3_uniform_dma_halfs)
-      HK_MONO_FIELD(agx3_uniform_dma_offset_B)
-   } else if (a->info.agx3_uniform_dma_valid &&
-              m->info.push_count > a->info.agx3_uniform_dma_dest) {
+   if (m->info.agx3_uniform_dma_count) {
+      HK_MONO_FIELD(agx3_uniform_dma_count)
+      for (unsigned i = 0; i < m->info.agx3_uniform_dma_count; ++i) {
+         if (!agx3_uniform_dma_span_equal(&a->info.agx3_uniform_dma[i],
+                                          &m->info.agx3_uniform_dma[i]))
+            return "agx3_uniform_dma";
+      }
+   } else if (a->info.agx3_uniform_dma_count &&
+              m->info.push_count > a->info.agx3_uniform_dma[0].dest) {
       return "push_count over dma";
    }
    if (m->info.rodata.size_16 == 0) {

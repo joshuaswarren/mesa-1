@@ -81,6 +81,44 @@ struct agx_rodata {
    uint16_t size_16;
 };
 
+#define AGX3_UNIFORM_DMA_MAX_SPANS 6
+
+enum agx3_uniform_dma_source {
+   /* Memory at the 64-bit pointer held in uniform halves [pointer,
+    * pointer + 4): the root table or one descriptor set. */
+   AGX3_UNIFORM_DMA_POINTER,
+
+   /* The buffer whose descriptor -- a 64-bit address and a 32-bit size -- is
+    * stored at byte descriptor_B through that pointer: a dynamic buffer in the
+    * root table or a buffer in a descriptor set the driver knows when it
+    * records the launch (agx_shader_key::g17p_dma_buffers_B and
+    * g17p_dma_static_set_mask). The driver copies the dwords below the
+    * buffer's size rounded up to 4 bytes from the buffer and every later dword
+    * from the zero page, so the compiler drops the per-component bounds checks
+    * of the loads the span replaces: they differ only within that rounding,
+    * which the robust buffer access size alignments (at least 4) allow.
+    */
+   AGX3_UNIFORM_DMA_BUFFER,
+};
+
+struct agx3_uniform_dma_span {
+   uint8_t source; /* enum agx3_uniform_dma_source */
+   uint16_t pointer;
+   uint16_t descriptor_B; /* AGX3_UNIFORM_DMA_BUFFER only */
+   uint16_t dest;         /* first uniform half written */
+   uint16_t halfs;        /* even */
+   uint32_t offset_B;     /* dword-aligned, within the pointed-to memory */
+};
+
+static inline bool
+agx3_uniform_dma_span_equal(const struct agx3_uniform_dma_span *a,
+                            const struct agx3_uniform_dma_span *b)
+{
+   return a->source == b->source && a->pointer == b->pointer &&
+          a->descriptor_B == b->descriptor_B && a->dest == b->dest &&
+          a->halfs == b->halfs && a->offset_B == b->offset_B;
+}
+
 struct agx_shader_info {
    mesa_shader_stage stage;
    uint32_t binary_size;
@@ -96,17 +134,12 @@ struct agx_shader_info {
    uint64_t agx3_uniform_halfs[AGX3_CPROG_INPUT_WORDS];
    bool agx3_uniform_halfs_valid;
 
-   /* G17P uniform DMA (v51a, AGX_G17P_UNIFORM_DMA): constant-index loads
-    * through one 64-bit pointer uniform were replaced by uniform reads of
-    * [agx3_uniform_dma_dest, +agx3_uniform_dma_halfs). The driver publishes
-    * that block as one Ioto uniform range whose source is the pointer's
-    * value plus agx3_uniform_dma_offset_B, read at launch like the loads. */
-   bool agx3_uniform_dma_valid;
-   uint16_t agx3_uniform_dma_pointer;
-   uint16_t agx3_uniform_dma_dest;
-   uint16_t agx3_uniform_dma_halfs;
-   uint32_t agx3_uniform_dma_offset_B;
-   uint16_t agx3_uniform_dma_loads;
+   /* G17P uniform DMA: constant-index loads of data whose address the driver
+    * knows when it records the launch were replaced by uniform reads. The
+    * driver publishes each span as one Ioto uniform range, copied in by the
+    * launch program as the loads would have read it. */
+   uint8_t agx3_uniform_dma_count;
+   struct agx3_uniform_dma_span agx3_uniform_dma[AGX3_UNIFORM_DMA_MAX_SPANS];
 
    /* Local memory allocation in bytes */
    uint16_t local_size;
@@ -436,14 +469,20 @@ struct agx_shader_key {
     * compiling threads read. */
    bool g17p_native_uniforms;
 
-   /* G17P uniform DMA (v51a): hoist constant-index loads through the 64-bit
-    * pointer uniform at g17p_dma_root (the root table) or at
-    * g17p_dma_root + 4 * (1 + s) for each set s in g17p_dma_set_mask into
-    * one driver-published uniform range. Zero mask and !g17p_uniform_dma
-    * leave code unchanged. */
+   /* G17P uniform DMA: copy constant-index loads into driver-published
+    * uniform ranges (agx_shader_info::agx3_uniform_dma) when they read
+    * through the 64-bit pointer uniform at g17p_dma_root (the root table) or
+    * at g17p_dma_root + 4 * (1 + s) for each set s in g17p_dma_set_mask, or
+    * through a buffer descriptor the driver can read when it records the
+    * launch: one of the g17p_dma_buffer_count 16-byte descriptors stored in
+    * the root table from byte g17p_dma_buffers_B on, or any in a set in
+    * g17p_dma_static_set_mask. !g17p_uniform_dma leaves code unchanged. */
    bool g17p_uniform_dma;
    uint16_t g17p_dma_root;
    uint8_t g17p_dma_set_mask;
+   uint8_t g17p_dma_static_set_mask;
+   uint8_t g17p_dma_buffer_count;
+   uint16_t g17p_dma_buffers_B;
 
    /* Set if this is a non-monolithic shader that must be linked with additional
     * shader parts before the program can be used. This suppresses omission of

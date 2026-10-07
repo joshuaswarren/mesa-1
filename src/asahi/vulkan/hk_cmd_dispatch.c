@@ -575,7 +575,7 @@ hk_g17p_internal_graphics_uniform_ranges(
 {
    /* Uniform DMA is only enabled for hardware graphics stages;
     * this internal path cannot publish its span, so fail closed. */
-   if (s->b.info.agx3_uniform_dma_valid)
+   if (s->b.info.agx3_uniform_dma_count)
       return false;
 
    if (s->info.stage != MESA_SHADER_VERTEX)
@@ -693,7 +693,7 @@ hk_g17p_compute_uniform_ranges(
     * whose preamble performs no memory access whatsoever.
     */
    /* Uniform DMA is never enabled for compute (see hk_shader.c). */
-   if (s->b.info.agx3_uniform_dma_valid)
+   if (s->b.info.agx3_uniform_dma_count)
       return false;
 
    const struct agx_rodata *rodata_probe = &s->b.info.rodata;

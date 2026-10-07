@@ -6799,10 +6799,32 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
 
 static bool agx_g17p_discard_word(nir_shader *nir);
 
+/* Drop a constant program left without instructions. */
+static void
+agx_remove_empty_preamble(nir_shader *nir)
+{
+   nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
+   if (!entrypoint->preamble)
+      return;
+
+   nir_foreach_block(block, entrypoint->preamble->impl) {
+      if (!exec_list_is_empty(&block->instr_list))
+         return;
+   }
+   exec_node_remove(&entrypoint->preamble->node);
+   entrypoint->preamble = NULL;
+}
+
+static bool agx3_nir_lower_uniform_dma(nir_shader *nir,
+                                       const struct agx_shader_key *key,
+                                       struct agx_shader_info *info);
+
 static void
 agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
                  bool byte_indices, bool discard_word,
-                 uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count)
+                 uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count,
+                 const struct agx_shader_key *dma_key,
+                 struct agx_shader_info *dma_info)
 {
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
@@ -6981,6 +7003,16 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       NIR_PASS(_, nir, agx_nir_opt_preamble, sizes, byte_indices);
 
       *preamble_size = sizes[0];
+
+      /* Copy what the launch can copy into the uniforms the constant
+       * program leaves free, which then computes on the copies instead of
+       * loading. Copying first would take uniforms the constant program's
+       * results need. */
+      if (dma_key && dma_key->g17p_uniform_dma &&
+          agx3_nir_lower_uniform_dma(nir, dma_key, dma_info)) {
+         NIR_PASS(_, nir, nir_opt_dce);
+         agx_remove_empty_preamble(nir);
+      }
 
       if (ts_count && state_promotion)
          *ts_count = sizes[1];
@@ -8684,7 +8716,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * Do not run copy propagation here: it could undo source legalization. */
    if (((key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          ctx->stage == MESA_SHADER_VERTEX) ||
-        (key->g17p_uniform_dma && out->agx3_uniform_dma_valid)) &&
+        (key->g17p_uniform_dma && out->agx3_uniform_dma_count)) &&
        !(agx_compiler_debug & AGX_DBG_NOOPT))
       AGX_PASS(ctx, agx_opt_cse);
 
@@ -9442,31 +9474,41 @@ has_unlowered_printf_address(const nir_shader *nir)
 }
 
 /*
- * AGX_G17P_UNIFORM_DMA (v51a, keyed by agx_shader_key::g17p_uniform_dma).
+ * G17P uniform DMA (keyed by agx_shader_key::g17p_uniform_dma).
  *
- * G17P forms no preamble (hk sets no_preamble), so every constant-index
- * descriptor or push-constant read -- load_constant_agx(load_preamble(ptr),
- * k) -- stays a per-invocation device load (lddev): 1 per pixel in the light
- * FS, 36 static in the Minecraft terrain FS. Apple's G17P shaders instead
- * receive such data through uniform DMA in the launch (Ioto) program: its
- * light FS reads the push constants as uniforms u4..7 and runs an empty
- * constant program.
+ * Apple's G17P programs receive the constants whose address is known when
+ * the launch is recorded -- push data, root and descriptor-set words, bound
+ * buffer contents -- by DMA in the launch (Ioto) program, and their constant
+ * program computes on those copies (ShaderInfo dma_list and
+ * cprog_uniform_inputs). A G17P constant program runs once per batch, so a
+ * device load left in it is paid per batch, while a copied range is not.
  *
- * Do the same without a constant program: pick the pointer uniform (root
- * table or one descriptor set) with the most hoistable loads, cover them
- * with one dword-aligned span of at most AGX3_UNIFORM_DMA_MAX_HALFS, place
- * the span after every reserved uniform, and turn each covered load into a
- * uniform read. The driver publishes the span as ONE extra Ioto uniform range
- * sourced from the pointer's value plus the span offset, read at launch time
- * exactly like the loads it replaces (so descriptor updates after bind stay
- * visible). Only raw 16/32-bit formats with a constant, non-negative element
- * index qualify; everything else is left alone.
+ * Copy two kinds of constant-index loads:
+ *
+ *  - loads through a buffer descriptor the driver can read when it records
+ *    the launch (a dynamic buffer in the root table, or a buffer in a static
+ *    descriptor set). The driver zero-fills what lies past the buffer's end,
+ *    so the per-component bounds checks of such loads are dropped, and the
+ *    descriptor is usually left unused;
+ *
+ *  - loads through the root table or one descriptor set pointer: push data
+ *    and descriptors still in use.
+ *
+ * Each source gets the window of at most AGX3_UNIFORM_DMA_MAX_HALFS covering
+ * most of its loads; up to AGX3_UNIFORM_DMA_MAX_SPANS windows are placed in the
+ * uniforms left after every reserved one and every constant-program result,
+ * and each covered load becomes a uniform read. With a constant program, this
+ * runs once it is formed: it then computes on the copies, and keeps the loads
+ * for which no uniforms are left. Only raw 8/16/32-bit formats with a
+ * constant, non-negative element index qualify.
  */
 #define AGX3_UNIFORM_DMA_MAX_HALFS 128u
 
 struct agx3_uniform_dma_candidate {
    nir_intrinsic_instr *load;
+   uint8_t source;
    uint16_t pointer;
+   uint16_t descriptor_B;
    uint32_t offset_B;
    uint32_t size_B;
 };
@@ -9475,145 +9517,567 @@ static int
 agx3_uniform_dma_compare(const void *a_, const void *b_)
 {
    const struct agx3_uniform_dma_candidate *a = a_, *b = b_;
+   if (a->source != b->source)
+      return a->source < b->source ? -1 : 1;
    if (a->pointer != b->pointer)
       return a->pointer < b->pointer ? -1 : 1;
+   if (a->descriptor_B != b->descriptor_B)
+      return a->descriptor_B < b->descriptor_B ? -1 : 1;
    if (a->offset_B != b->offset_B)
       return a->offset_B < b->offset_B ? -1 : 1;
    return a->size_B < b->size_B ? -1 : a->size_B > b->size_B;
 }
 
 static bool
-agx3_uniform_dma_pointer_allowed(const struct agx_shader_key *key,
-                                 unsigned base)
+agx3_uniform_dma_same_source(const struct agx3_uniform_dma_candidate *a,
+                             const struct agx3_uniform_dma_candidate *b)
+{
+   return a->source == b->source && a->pointer == b->pointer &&
+          a->descriptor_B == b->descriptor_B;
+}
+
+/* The descriptor set whose pointer uniform is at `base`, -1 for the root
+ * table, or -2 for any other uniform. */
+static int
+agx3_uniform_dma_pointer_set(const struct agx_shader_key *key, unsigned base)
 {
    const unsigned root = key->g17p_dma_root;
    if (base == root)
-      return true;
-   if (base < root + 4 || (base - root - 4) % 4 != 0)
+      return -1;
+   if (base < root + 4 || (base - root - 4) % 4 != 0 ||
+       (base - root - 4) / 4 >= 8)
+      return -2;
+   return (base - root - 4) / 4;
+}
+
+/* The pointer uniform `ptr` loads, if it is the root table or a set in
+ * set_mask, else -1. */
+static int
+agx3_uniform_dma_pointer(const struct agx_shader_key *key, nir_def *ptr,
+                         uint8_t set_mask)
+{
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic_or_null(ptr);
+   if (!intr || intr->intrinsic != nir_intrinsic_load_preamble ||
+       intr->def.bit_size != 64 || intr->def.num_components != 1)
+      return -1;
+
+   const unsigned base = nir_intrinsic_base(intr);
+   const int set = agx3_uniform_dma_pointer_set(key, base);
+   if (set == -2 || (set >= 0 && !(set_mask & BITFIELD_BIT(set))))
+      return -1;
+   return base;
+}
+
+/* Byte offset of a constant-index raw load_constant_agx, or -1. */
+static int64_t
+agx3_uniform_dma_offset(nir_intrinsic_instr *intr, unsigned *size_B)
+{
+   if (!nir_src_is_const(intr->src[1]))
+      return -1;
+
+   const unsigned field = nir_intrinsic_base(intr);
+   if (field & (AGX_NIR_MEMORY_INDEX_BYTES | AGX_NIR_MEMORY_PACKED_COUNT_MASK))
+      return -1;
+
+   unsigned format_shift;
+   const enum pipe_format format = nir_intrinsic_format(intr);
+   if (format == PIPE_FORMAT_R32_UINT && intr->def.bit_size == 32)
+      format_shift = 2;
+   else if (format == PIPE_FORMAT_R16_UINT && intr->def.bit_size == 16)
+      format_shift = 1;
+   else if (format == PIPE_FORMAT_R8_UINT && intr->def.bit_size == 8)
+      format_shift = 0;
+   else
+      return -1;
+
+   const int64_t index = nir_intrinsic_sign_extend(intr)
+                            ? nir_src_as_int(intr->src[1])
+                            : (int64_t)nir_src_as_uint(intr->src[1]);
+   if (index < 0 || index > (1 << 20) || field > 3)
+      return -1;
+
+   const uint64_t offset_B = (uint64_t)index << (format_shift + field);
+   if (offset_B > (UINT32_C(1) << 24))
+      return -1;
+
+   *size_B = intr->def.num_components << format_shift;
+   return offset_B;
+}
+
+/* Fill in a candidate whose address is a buffer descriptor's: the 64-bit
+ * pack of two adjacent words of one constant-offset load through the root
+ * table (a dynamic buffer descriptor) or a static set. */
+static bool
+agx3_uniform_dma_buffer(const struct agx_shader_key *key, nir_def *ptr,
+                        struct agx3_uniform_dma_candidate *c)
+{
+   nir_alu_instr *pack = nir_def_as_alu_or_null(ptr);
+   if (!pack || pack->op != nir_op_pack_64_2x32_split ||
+       pack->src[0].src.ssa != pack->src[1].src.ssa ||
+       pack->src[1].swizzle[0] != pack->src[0].swizzle[0] + 1)
       return false;
-   const unsigned set = (base - root - 4) / 4;
-   return set < 8 && (key->g17p_dma_set_mask & BITFIELD_BIT(set));
+
+   nir_intrinsic_instr *desc = nir_src_as_intrinsic(pack->src[0].src);
+   if (!desc || desc->intrinsic != nir_intrinsic_load_constant_agx ||
+       desc->def.bit_size != 32)
+      return false;
+
+   const int pointer =
+      agx3_uniform_dma_pointer(key, desc->src[0].ssa,
+                               key->g17p_dma_static_set_mask);
+   if (pointer < 0)
+      return false;
+
+   unsigned size_B;
+   const int64_t offset_B = agx3_uniform_dma_offset(desc, &size_B);
+   if (offset_B < 0)
+      return false;
+
+   /* A 16-byte buffer descriptor (address, then size): one of the root
+    * table's, or a set's, where buffer descriptors are 16-byte aligned. */
+   const int64_t descriptor_B = offset_B + 4 * pack->src[0].swizzle[0];
+   const int64_t table_B = pointer == key->g17p_dma_root
+                              ? descriptor_B - key->g17p_dma_buffers_B
+                              : descriptor_B;
+   if (table_B < 0 || table_B % 16 != 0 || descriptor_B > UINT16_MAX ||
+       (pointer == key->g17p_dma_root &&
+        table_B / 16 >= key->g17p_dma_buffer_count))
+      return false;
+
+   c->source = AGX3_UNIFORM_DMA_BUFFER;
+   c->pointer = pointer;
+   c->descriptor_B = descriptor_B;
+   return true;
+}
+
+static void
+agx3_uniform_dma_collect(nir_shader *nir, const struct agx_shader_key *key,
+                         enum agx3_uniform_dma_source source,
+                         struct util_dynarray *cands)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_load_constant_agx)
+               continue;
+
+            unsigned size_B;
+            const int64_t offset_B = agx3_uniform_dma_offset(intr, &size_B);
+            if (offset_B < 0)
+               continue;
+
+            struct agx3_uniform_dma_candidate c = {
+               .load = intr,
+               .source = AGX3_UNIFORM_DMA_POINTER,
+               .offset_B = offset_B,
+               .size_B = size_B,
+            };
+
+            if (source == AGX3_UNIFORM_DMA_POINTER) {
+               const int pointer = agx3_uniform_dma_pointer(
+                  key, intr->src[0].ssa, key->g17p_dma_set_mask);
+               if (pointer < 0)
+                  continue;
+               c.pointer = pointer;
+            } else if (!agx3_uniform_dma_buffer(key, intr->src[0].ssa, &c)) {
+               continue;
+            }
+            util_dynarray_append(cands, c);
+         }
+      }
+   }
+}
+
+struct agx3_uniform_dma_window {
+   unsigned first, last, count;
+   uint32_t start, end;
+};
+
+/* The window of at most AGX3_UNIFORM_DMA_MAX_HALFS covering the most of the
+ * sorted candidates [first, end) of one source not yet taken. */
+static struct agx3_uniform_dma_window
+agx3_uniform_dma_best_window(const struct agx3_uniform_dma_candidate *c,
+                             const bool *taken, unsigned first, unsigned end)
+{
+   struct agx3_uniform_dma_window best = {0};
+   for (unsigned i = first; i < end; ++i) {
+      if (taken[i])
+         continue;
+
+      struct agx3_uniform_dma_window w = {
+         .first = i,
+         .start = c[i].offset_B & ~3u,
+         .end = c[i].offset_B & ~3u,
+      };
+      for (unsigned j = i; j < end; ++j) {
+         if (taken[j])
+            continue;
+         const uint32_t e = ALIGN_POT(c[j].offset_B + c[j].size_B, 4);
+         const uint32_t new_end = MAX2(w.end, e);
+         if ((new_end - w.start) / 2 > AGX3_UNIFORM_DMA_MAX_HALFS)
+            break;
+         w.end = new_end;
+         w.last = j;
+         w.count++;
+      }
+      if (w.count > best.count ||
+          (w.count == best.count && w.end - w.start < best.end - best.start))
+         best = w;
+   }
+   return best;
+}
+
+/* Whether `size` is the size word of c's buffer descriptor: loaded through
+ * the same pointer, 8 bytes after the address. */
+static bool
+agx3_uniform_dma_is_size(const struct agx3_uniform_dma_candidate *c,
+                         nir_scalar size)
+{
+   size = nir_scalar_resolved(size.def, size.comp);
+   nir_intrinsic_instr *load = nir_def_as_intrinsic_or_null(size.def);
+   if (!load || load->intrinsic != nir_intrinsic_load_constant_agx ||
+       load->def.bit_size != 32)
+      return false;
+
+   nir_intrinsic_instr *ptr = nir_src_as_intrinsic(load->src[0]);
+   unsigned load_size_B;
+   const int64_t offset_B = agx3_uniform_dma_offset(load, &load_size_B);
+   return ptr && ptr->intrinsic == nir_intrinsic_load_preamble &&
+          nir_intrinsic_base(ptr) == c->pointer && offset_B >= 0 &&
+          offset_B + 4 * size.comp == c->descriptor_B + 8;
+}
+
+/* A buffer load's per-component bounds checks against its own descriptor's
+ * size are exactly what the span's zero fill gives (see
+ * AGX3_UNIFORM_DMA_BUFFER): drop those of the loads in `copied` (load ->
+ * candidate). Other checks stay. */
+static void
+agx3_uniform_dma_drop_bounds(nir_shader *nir, struct hash_table *copied)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            if (alu->op != nir_op_bounds_agx ||
+                !nir_src_is_const(alu->src[1].src))
+               continue;
+
+            nir_scalar data = nir_scalar_resolved(alu->src[0].src.ssa,
+                                                  alu->src[0].swizzle[0]);
+            nir_intrinsic_instr *load = nir_def_as_intrinsic_or_null(data.def);
+            struct hash_entry *entry =
+               load ? _mesa_hash_table_search(copied, load) : NULL;
+            if (!entry)
+               continue;
+
+            const struct agx3_uniform_dma_candidate *c = entry->data;
+            const unsigned comp_B = load->def.bit_size / 8;
+            if (nir_alu_src_as_uint(alu->src[1]) !=
+                   c->offset_B + (data.comp + 1) * comp_B ||
+                !agx3_uniform_dma_is_size(
+                   c, nir_get_scalar(alu->src[2].src.ssa,
+                                     alu->src[2].swizzle[0])))
+               continue;
+
+            nir_builder b = nir_builder_at(nir_before_instr(instr));
+            nir_def_replace(&alu->def, nir_channel(&b, &load->def, data.comp));
+         }
+      }
+   }
+}
+
+/* Place the best windows of `cands` while spans remain, most loads first. */
+static void
+agx3_uniform_dma_take(nir_shader *nir, const struct agx_shader_key *key,
+                      struct agx_shader_info *info,
+                      struct util_dynarray *cands, unsigned limit,
+                      unsigned *dest, int *set_pointer)
+{
+   const unsigned n =
+      util_dynarray_num_elements(cands, struct agx3_uniform_dma_candidate);
+   struct agx3_uniform_dma_candidate *c = util_dynarray_begin(cands);
+   if (!n)
+      return;
+   qsort(c, n, sizeof(*c), agx3_uniform_dma_compare);
+
+   /* Sources as [first, end) runs of the sorted candidates. */
+   struct {
+      unsigned first, end;
+   } groups[32];
+   unsigned group_count = 0;
+   for (unsigned g = 0; g < n && group_count < ARRAY_SIZE(groups);) {
+      unsigned end = g;
+      while (end < n && agx3_uniform_dma_same_source(&c[end], &c[g]))
+         ++end;
+      groups[group_count].first = g;
+      groups[group_count++].end = end;
+      g = end;
+   }
+
+   bool *taken = calloc(n, sizeof(bool));
+   while (info->agx3_uniform_dma_count < AGX3_UNIFORM_DMA_MAX_SPANS) {
+      /* The driver keys a published launch on at most one descriptor set
+       * pointer value. */
+      struct agx3_uniform_dma_window w = {0};
+      for (unsigned g = 0; g < group_count; ++g) {
+         const struct agx3_uniform_dma_candidate *head = &c[groups[g].first];
+         if (head->source == AGX3_UNIFORM_DMA_POINTER &&
+             head->pointer != key->g17p_dma_root && *set_pointer >= 0 &&
+             head->pointer != *set_pointer)
+            continue;
+
+         struct agx3_uniform_dma_window best = agx3_uniform_dma_best_window(
+            c, taken, groups[g].first, groups[g].end);
+         if (best.count > w.count)
+            w = best;
+      }
+
+      const unsigned halfs = (w.end - w.start) / 2;
+      if (!w.count || *dest + halfs > limit)
+         break;
+
+      const struct agx3_uniform_dma_candidate *head = &c[w.first];
+      if (head->source == AGX3_UNIFORM_DMA_POINTER &&
+          head->pointer != key->g17p_dma_root)
+         *set_pointer = head->pointer;
+
+      if (head->source == AGX3_UNIFORM_DMA_BUFFER) {
+         struct hash_table *copied = _mesa_pointer_hash_table_create(NULL);
+         for (unsigned k = w.first; k <= w.last; ++k) {
+            if (!taken[k])
+               _mesa_hash_table_insert(copied, c[k].load, &c[k]);
+         }
+         agx3_uniform_dma_drop_bounds(nir, copied);
+         _mesa_hash_table_destroy(copied, NULL);
+      }
+
+      for (unsigned k = w.first; k <= w.last; ++k) {
+         if (taken[k])
+            continue;
+         taken[k] = true;
+
+         nir_intrinsic_instr *load = c[k].load;
+         nir_builder b = nir_builder_at(nir_before_instr(&load->instr));
+         const unsigned offset_B = *dest * 2 + c[k].offset_B - w.start;
+         nir_def *value;
+         if (load->def.bit_size == 8) {
+            /* Bytes come out of their copied dwords. */
+            nir_def *bytes[NIR_MAX_VEC_COMPONENTS];
+            for (unsigned i = 0; i < load->def.num_components; ++i) {
+               const unsigned byte_B = offset_B + i;
+               nir_def *dword = nir_load_preamble(&b, 1, 32,
+                                                  .base = (byte_B & ~3u) / 2);
+               bytes[i] = nir_u2u8(&b, nir_ushr_imm(&b, dword,
+                                                    8 * (byte_B & 3)));
+            }
+            value = nir_vec(&b, bytes, load->def.num_components);
+         } else {
+            value = nir_load_preamble(&b, load->def.num_components,
+                                      load->def.bit_size,
+                                      .base = offset_B / 2);
+         }
+         nir_def_replace(&load->def, value);
+      }
+
+      info->agx3_uniform_dma[info->agx3_uniform_dma_count++] =
+         (struct agx3_uniform_dma_span){
+            .source = head->source,
+            .pointer = head->pointer,
+            .descriptor_B = head->descriptor_B,
+            .dest = *dest,
+            .halfs = halfs,
+            .offset_B = w.start,
+         };
+      *dest += ALIGN_POT(halfs, 4);
+   }
+   free(taken);
+}
+
+/* A constant-program result that only copies a uniform the launch already
+ * holds is read straight from that uniform, and is no longer stored when
+ * nothing else reads it. */
+static void
+agx3_uniform_dma_forward_copies(nir_shader *nir)
+{
+   if (!nir_shader_get_entrypoint(nir)->preamble)
+      return;
+   nir_function_impl *preamble = nir_shader_get_preamble(nir);
+
+   /* For each result half: the uniform half it copies, or -1. */
+   int16_t source[512];
+   memset(source, 0xff, sizeof(source));
+   bool any = false;
+   nir_foreach_block(block, preamble) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+         if (store->intrinsic != nir_intrinsic_store_preamble ||
+             nir_intrinsic_preamble_class(store) != nir_preamble_class_general)
+            continue;
+
+         /* Each component a uniform half (pair) through movs and vecs. */
+         nir_def *value = store->src[0].ssa;
+         const unsigned comp_halfs = value->bit_size / 16;
+         const unsigned base = nir_intrinsic_base(store);
+         if (!comp_halfs || base + comp_halfs * value->num_components >
+                               ARRAY_SIZE(source))
+            continue;
+
+         int16_t halves[64];
+         bool copy = comp_halfs * value->num_components <= ARRAY_SIZE(halves);
+         for (unsigned c = 0; c < value->num_components && copy; ++c) {
+            nir_scalar scalar = nir_scalar_resolved(value, c);
+            nir_intrinsic_instr *load =
+               nir_def_as_intrinsic_or_null(scalar.def);
+            copy = load && load->intrinsic == nir_intrinsic_load_preamble &&
+                   nir_intrinsic_preamble_class(load) ==
+                      nir_preamble_class_general &&
+                   load->def.bit_size == value->bit_size;
+            for (unsigned h = 0; copy && h < comp_halfs; ++h) {
+               halves[c * comp_halfs + h] =
+                  nir_intrinsic_base(load) + scalar.comp * comp_halfs + h;
+            }
+         }
+         if (!copy)
+            continue;
+         for (unsigned h = 0; h < comp_halfs * value->num_components; ++h)
+            source[base + h] = halves[h];
+         any = true;
+      }
+   }
+   if (!any)
+      return;
+
+   /* Forward main-program reads of whole copies; any other read of a copied
+    * half keeps its store. */
+   bool keep[512] = {false};
+   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         unsigned base, size;
+         if (intr->intrinsic == nir_intrinsic_load_preamble &&
+             nir_intrinsic_preamble_class(intr) == nir_preamble_class_general) {
+            base = nir_intrinsic_base(intr);
+            size = MAX2(intr->def.bit_size, 16) / 16 * intr->def.num_components;
+         } else if (intr->intrinsic == nir_intrinsic_bindless_image_agx ||
+                    intr->intrinsic == nir_intrinsic_bindless_sampler_agx) {
+            base = nir_intrinsic_desc_set(intr);
+            size = 4;
+            intr = NULL;
+         } else {
+            continue;
+         }
+         if (base + size > ARRAY_SIZE(source))
+            continue;
+
+         bool whole = intr != NULL && source[base] >= 0;
+         for (unsigned h = 1; h < size; ++h)
+            whole &= source[base + h] == source[base] + h;
+
+         if (whole)
+            nir_intrinsic_set_base(intr, source[base]);
+         else
+            memset(keep + base, true, size);
+      }
+   }
+
+   nir_foreach_block(block, preamble) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+         if (store->intrinsic != nir_intrinsic_store_preamble ||
+             nir_intrinsic_preamble_class(store) != nir_preamble_class_general)
+            continue;
+
+         const unsigned base = nir_intrinsic_base(store);
+         const unsigned size = MAX2(store->src[0].ssa->bit_size, 16) / 16 *
+                               store->src[0].ssa->num_components;
+         if (base + size > ARRAY_SIZE(source) || source[base] < 0)
+            continue;
+
+         bool kept = false;
+         for (unsigned h = 0; h < size; ++h)
+            kept |= keep[base + h];
+         if (!kept)
+            nir_instr_remove(instr);
+      }
+   }
+}
+
+/* Uniform halves to leave for the main program's promoted constants
+ * (agx_opt_promote_constants), which are placed after the spans: about one
+ * per distinct constant too wide to be an immediate. */
+static unsigned
+agx3_uniform_dma_constant_reserve(nir_shader *nir)
+{
+   struct set *values = _mesa_pointer_set_create(NULL);
+   unsigned halves = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_load_const)
+            continue;
+         nir_load_const_instr *load = nir_instr_as_load_const(instr);
+         if (load->def.bit_size < 16)
+            continue;
+         for (unsigned c = 0; c < load->def.num_components; ++c) {
+            const uint64_t value = nir_const_value_as_uint(load->value[c],
+                                                           load->def.bit_size);
+            /* Keyed by value and size; an estimate tolerates aliasing. */
+            const void *key =
+               (const void *)(uintptr_t)((value << 7) | load->def.bit_size);
+            if (value <= 0xff || _mesa_set_search(values, key))
+               continue;
+            _mesa_set_add(values, key);
+            halves += load->def.bit_size / 16;
+         }
+      }
+   }
+   _mesa_set_destroy(values, NULL);
+   return MIN2(halves, 128);
 }
 
 static bool
 agx3_nir_lower_uniform_dma(nir_shader *nir, const struct agx_shader_key *key,
                            struct agx_shader_info *info)
 {
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   unsigned dest = ALIGN_POT(info->push_count, 4);
+   int set_pointer = -1;
+   info->agx3_uniform_dma_count = 0;
+
+   /* Spans end where the constant program's storage does, before the main
+    * program's promoted constants. */
+   const unsigned limit =
+      MIN2(480, AGX_NUM_UNIFORMS - agx3_uniform_dma_constant_reserve(nir));
+
+   /* Buffers first: copying one also retires its descriptor's loads. */
    struct util_dynarray cands = UTIL_DYNARRAY_INIT;
+   agx3_uniform_dma_collect(nir, key, AGX3_UNIFORM_DMA_BUFFER, &cands);
+   agx3_uniform_dma_take(nir, key, info, &cands, limit, &dest, &set_pointer);
 
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
-            continue;
-         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (intr->intrinsic != nir_intrinsic_load_constant_agx)
-            continue;
+   if (info->agx3_uniform_dma_count)
+      nir_opt_dce(nir);
 
-         nir_intrinsic_instr *ptr = nir_src_as_intrinsic(intr->src[0]);
-         if (!ptr || ptr->intrinsic != nir_intrinsic_load_preamble ||
-             ptr->def.bit_size != 64 || ptr->def.num_components != 1 ||
-             !agx3_uniform_dma_pointer_allowed(key, nir_intrinsic_base(ptr)))
-            continue;
-
-         if (!nir_src_is_const(intr->src[1]))
-            continue;
-
-         const unsigned field = nir_intrinsic_base(intr);
-         if (field & (AGX_NIR_MEMORY_INDEX_BYTES |
-                      AGX_NIR_MEMORY_PACKED_COUNT_MASK))
-            continue;
-
-         unsigned format_shift;
-         const enum pipe_format format = nir_intrinsic_format(intr);
-         if (format == PIPE_FORMAT_R32_UINT && intr->def.bit_size == 32)
-            format_shift = 2;
-         else if (format == PIPE_FORMAT_R16_UINT && intr->def.bit_size == 16)
-            format_shift = 1;
-         else
-            continue;
-
-         const int64_t index = nir_intrinsic_sign_extend(intr)
-                                  ? nir_src_as_int(intr->src[1])
-                                  : (int64_t)nir_src_as_uint(intr->src[1]);
-         if (index < 0 || index > (1 << 20) || field > 3)
-            continue;
-
-         const uint64_t offset_B = (uint64_t)index << (format_shift + field);
-         if (offset_B > (UINT32_C(1) << 24))
-            continue;
-
-         struct agx3_uniform_dma_candidate c = {
-            .load = intr,
-            .pointer = nir_intrinsic_base(ptr),
-            .offset_B = (uint32_t)offset_B,
-            .size_B = intr->def.num_components << format_shift,
-         };
-         util_dynarray_append(&cands, c);
-      }
-   }
-
-   const unsigned n = util_dynarray_num_elements(
-      &cands, struct agx3_uniform_dma_candidate);
-   if (n == 0) {
-      util_dynarray_fini(&cands);
-      return false;
-   }
-
-   struct agx3_uniform_dma_candidate *c =
-      util_dynarray_begin(&cands);
-   qsort(c, n, sizeof(*c), agx3_uniform_dma_compare);
-
-   /* Best window: most loads within one pointer and one span. */
-   unsigned best_first = 0, best_count = 0;
-   uint32_t best_start = 0, best_end = 0;
-   for (unsigned i = 0; i < n; ++i) {
-      const uint32_t start = c[i].offset_B & ~3u;
-      uint32_t end = start;
-      unsigned count = 0;
-      for (unsigned j = i; j < n && c[j].pointer == c[i].pointer; ++j) {
-         const uint32_t e = ALIGN_POT(c[j].offset_B + c[j].size_B, 4);
-         const uint32_t new_end = MAX2(end, e);
-         if ((new_end - start) / 2 > AGX3_UNIFORM_DMA_MAX_HALFS)
-            break;
-         end = new_end;
-         count = j - i + 1;
-      }
-      if (count > best_count ||
-          (count == best_count && end - start < best_end - best_start)) {
-         best_first = i;
-         best_count = count;
-         best_start = start;
-         best_end = end;
-      }
-   }
-
-   const unsigned dest = ALIGN_POT(info->push_count, 4);
-   const unsigned halfs = (best_end - best_start) / 2;
-   if (!best_count || dest + halfs > 512) {
-      util_dynarray_fini(&cands);
-      return false;
-   }
-
-   for (unsigned k = best_first; k < best_first + best_count; ++k) {
-      nir_intrinsic_instr *load = c[k].load;
-      nir_builder b = nir_builder_at(nir_before_instr(&load->instr));
-      const unsigned half = dest + (c[k].offset_B - best_start) / 2;
-      nir_def *value = nir_load_preamble(&b, load->def.num_components,
-                                         load->def.bit_size, .base = half);
-      nir_def_replace(&load->def, value);
-   }
-
-   info->agx3_uniform_dma_valid = true;
-   info->agx3_uniform_dma_pointer = c[best_first].pointer;
-   info->agx3_uniform_dma_dest = dest;
-   info->agx3_uniform_dma_halfs = halfs;
-   info->agx3_uniform_dma_offset_B = best_start;
-   info->agx3_uniform_dma_loads = best_count;
-   info->push_count = dest + halfs;
-
+   util_dynarray_clear(&cands);
+   agx3_uniform_dma_collect(nir, key, AGX3_UNIFORM_DMA_POINTER, &cands);
+   agx3_uniform_dma_take(nir, key, info, &cands, limit, &dest, &set_pointer);
    util_dynarray_fini(&cands);
-   nir_progress(true, impl, nir_metadata_control_flow);
+
+   if (!info->agx3_uniform_dma_count)
+      return false;
+
+   info->push_count = dest;
+   agx3_uniform_dma_forward_copies(nir);
+   nir_foreach_function_impl(impl, nir)
+      nir_progress(true, impl, nir_metadata_control_flow);
    return true;
 }
 
@@ -10088,7 +10552,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       (form_preamble && key->promote_textures) ? &info->texture_state_count
                                               : NULL,
       (form_preamble && key->promote_textures) ? &info->sampler_state_count
-                                              : NULL);
+                                              : NULL,
+      form_preamble ? key : NULL, info);
 
    if (is_g17p && source_imul64)
       NIR_PASS(_, nir, agx_nir_lower_imul64);

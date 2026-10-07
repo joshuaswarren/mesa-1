@@ -1731,19 +1731,24 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
    (2 /* attribute bases and clamps */ + 1 /* draw parameters */ +             \
     1 /* draw ID */ + 1 /* indexed sampler heap */ + 1 /* root */ +            \
     1 /* promoted constants */)
-/* v51b uniform DMA adds one VS range; hk_shader.c enables it only when the
- * draw ID and the indexed heap are not both used, keeping VS <= 7. */
+/* Each uniform DMA span publishes at most two ranges: its buffer part and a
+ * zero-page tail (hk_g17p_graphics_uniform_ranges()). */
+#define HK_G17P_DMA_RANGES (2 * AGX3_UNIFORM_DMA_MAX_SPANS)
 
 #define HK_G17P_FRAGMENT_RANGES                                                \
    (1 /* blend constants */ + 1 /* combined sampler heap */ +                  \
     1 /* indexed sampler heap */ + 1 /* root */ + 1 /* promoted constants */ + \
-    1 /* native spill table */ + 1 /* v51a uniform DMA span */)
+    1 /* native spill table */)
 
-static_assert(HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_VERTEX_RANGES &&
-                 HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_FRAGMENT_RANGES,
+static_assert(HK_AGX3_G17P_GRAPHICS_MAX_RANGES >=
+                    HK_G17P_VERTEX_RANGES + HK_G17P_DMA_RANGES &&
+                 HK_AGX3_G17P_GRAPHICS_MAX_RANGES >=
+                    HK_G17P_FRAGMENT_RANGES + HK_G17P_DMA_RANGES,
               "the graphics range budget must cover every range "
               "hk_g17p_graphics_uniform_ranges() can emit, or a legal "
               "program is refused and ranges[] is written past its end");
+static_assert(HK_G17P_PATCH_MAX_RANGES >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES,
+              "every graphics range layout needs a patchable loader");
 
 /*
  * Record how many uniform ranges the collector had already committed when it
@@ -1778,21 +1783,65 @@ uint64_t
 hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
                      const struct hk_shader *s)
 {
-   if (!s || !s->b.info.agx3_uniform_dma_valid)
+   if (!s)
       return 0;
 
    const unsigned root_uniform = s->info.agx3_root_uniform;
-   const unsigned pointer = s->b.info.agx3_uniform_dma_pointer;
-   if (pointer == root_uniform || pointer < root_uniform + 4 ||
-       (pointer - root_uniform - 4) % 4 != 0 ||
-       (pointer - root_uniform - 4) / 4 >= HK_MAX_SETS)
-      return 0;
+   for (unsigned i = 0; i < s->b.info.agx3_uniform_dma_count; ++i) {
+      const struct agx3_uniform_dma_span *span =
+         &s->b.info.agx3_uniform_dma[i];
+      const unsigned pointer = span->pointer;
+      if (span->source != AGX3_UNIFORM_DMA_POINTER ||
+          pointer == root_uniform || pointer < root_uniform + 4 ||
+          (pointer - root_uniform - 4) % 4 != 0 ||
+          (pointer - root_uniform - 4) / 4 >= HK_MAX_SETS)
+         continue;
 
-   const uint64_t base =
-      cmd->state.gfx.descriptors.root.sets[(pointer - root_uniform - 4) / 4];
-   /* Distinguish "set pointer, currently unbound" (zero page) from "no set
-    * span" so that binding a set later still invalidates. */
-   return base ? base : AGX_ZERO_PAGE_ADDRESS;
+      /* The compiler copies through at most one set pointer. */
+      const uint64_t base =
+         cmd->state.gfx.descriptors.root.sets[(pointer - root_uniform - 4) / 4];
+      /* Distinguish "set pointer, currently unbound" (zero page) from "no set
+       * span" so that binding a set later still invalidates. */
+      return base ? base : AGX_ZERO_PAGE_ADDRESS;
+   }
+   return 0;
+}
+
+/* The buffer descriptor an AGX3_UNIFORM_DMA_BUFFER span names, as the root
+ * this draw publishes (set < 0) or the descriptor set bound or pushed at
+ * `set` holds it. The shader was compiled for a static layout of that set
+ * (agx_shader_key::g17p_dma_static_set_mask), so its contents cannot change
+ * before the launch runs. An unbound set reads as a null buffer. */
+static bool
+hk_g17p_dma_buffer(const struct hk_cmd_buffer *cmd, int set,
+                   unsigned descriptor_B, struct hk_buffer_address *buffer)
+{
+   const struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+   const void *table;
+   size_t table_B;
+   if (set < 0) {
+      const unsigned buffers_B = hk_root_descriptor_offset(dynamic_buffers);
+      if (descriptor_B < buffers_B ||
+          descriptor_B + sizeof(*buffer) >
+             buffers_B + sizeof(desc->root.dynamic_buffers))
+         return false;
+      table = &desc->root;
+      table_B = sizeof(desc->root);
+   } else if (desc->push_active & BITFIELD_BIT(set)) {
+      table = desc->push[set]->data;
+      table_B = sizeof(desc->push[set]->data);
+   } else if (desc->sets[set]) {
+      table = desc->sets[set]->mapped_ptr;
+      table_B = desc->sets[set]->size;
+   } else {
+      *buffer = (struct hk_buffer_address){0};
+      return true;
+   }
+
+   if (descriptor_B + sizeof(*buffer) > table_B)
+      return false;
+   memcpy(buffer, (const uint8_t *)table + descriptor_B, sizeof(*buffer));
+   return true;
 }
 
 /* sources, when not NULL, receives each range's enum hk_g17p_range_source. */
@@ -2076,42 +2125,87 @@ hk_g17p_graphics_uniform_ranges(
       return hk_g17p_graphics_ranges_refused(range_count, count);
    }
 
-   /* AGX_G17P_UNIFORM_DMA (v51a): the compiler replaced constant-index loads
-    * through one pointer uniform (root table or descriptor set) with reads
-    * of one uniform span. Publish that span from the pointer's current value;
-    * the Ioto program reads it at launch, as the loads did. */
-   if (s->b.info.agx3_uniform_dma_valid) {
-      const unsigned pointer = s->b.info.agx3_uniform_dma_pointer;
-      uint64_t base = 0;
-      if (pointer == root_uniform) {
+   /* Uniform DMA: the compiler replaced constant-index loads with reads of
+    * uniform spans (agx_shader_info::agx3_uniform_dma). Publish each from the
+    * address this draw gives it; the launch reads the memory when it runs,
+    * as the loads did. */
+   for (unsigned i = 0; i < s->b.info.agx3_uniform_dma_count; ++i) {
+      const struct agx3_uniform_dma_span *span =
+         &s->b.info.agx3_uniform_dma[i];
+      const unsigned pointer = span->pointer;
+      const int set = pointer == root_uniform ? -1
+                      : pointer >= root_uniform + 4 &&
+                            (pointer - root_uniform - 4) % 4 == 0 &&
+                            (pointer - root_uniform - 4) / 4 < HK_MAX_SETS
+                         ? (int)(pointer - root_uniform - 4) / 4
+                         : -2;
+      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || set == -2 ||
+          (span->dest & 1) || (span->halfs & 1) || (span->offset_B & 3))
+         return hk_g17p_graphics_ranges_refused(range_count, count);
+
+      if (span->source == AGX3_UNIFORM_DMA_BUFFER) {
+         struct hk_buffer_address buffer;
+         if (!hk_g17p_dma_buffer(cmd, set, span->descriptor_B, &buffer))
+            return hk_g17p_graphics_ranges_refused(range_count, count);
+
+         /* Dwords below the size rounded up to 4 bytes come from the buffer,
+          * later ones from the zero page (AGX3_UNIFORM_DMA_BUFFER). A buffer
+          * holding none of the span, such as a null one, is all zero page.
+          * Both addresses come from the root's or a static set's contents,
+          * not from an address a published launcher could be patched to. */
+         const uint64_t size_B = ALIGN_POT((uint64_t)buffer.size, 4);
+         const unsigned buffer_halfs =
+            size_B > span->offset_B
+               ? MIN2(span->halfs, (size_B - span->offset_B) / 2)
+               : 0;
+         if (buffer_halfs) {
+            const uint64_t address = buffer.base_addr + span->offset_B;
+            if (address & 3)
+               return hk_g17p_graphics_ranges_refused(range_count, count);
+            sources[count] = HK_G17P_RANGE_SOURCE_UPLOADED;
+            ranges[count++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = span->dest,
+               .size_halfs = buffer_halfs,
+               .address = address,
+            };
+         }
+         if (buffer_halfs < span->halfs) {
+            if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
+               return hk_g17p_graphics_ranges_refused(range_count, count);
+            sources[count] = HK_G17P_RANGE_SOURCE_CONSTANT;
+            ranges[count++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = span->dest + buffer_halfs,
+               .size_halfs = span->halfs - buffer_halfs,
+               .address = AGX_ZERO_PAGE_ADDRESS,
+            };
+         }
+         continue;
+      }
+
+      uint64_t base;
+      if (set < 0) {
          base = root_ptr;
          if (!base)
             return hk_g17p_graphics_ranges_refused(range_count, count);
-      } else if (pointer >= root_uniform + 4 &&
-                 (pointer - root_uniform - 4) % 4 == 0 &&
-                 (pointer - root_uniform - 4) / 4 < HK_MAX_SETS) {
-         base = cmd->state.gfx.descriptors.root.sets[
-            (pointer - root_uniform - 4) / 4];
       } else {
-         return hk_g17p_graphics_ranges_refused(range_count, count);
+         base = cmd->state.gfx.descriptors.root.sets[set];
       }
       /* A set the draw never binds is only read on statically dead paths
        * (reading it is invalid usage); give the launch a mapped zero page
        * instead of a fault. */
-      const uint64_t address = base ? base + s->b.info.agx3_uniform_dma_offset_B
-                                    : AGX_ZERO_PAGE_ADDRESS;
-      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || (address & 3) ||
-          (s->b.info.agx3_uniform_dma_dest & 1) ||
-          (s->b.info.agx3_uniform_dma_halfs & 1))
+      const uint64_t address =
+         base ? base + span->offset_B : AGX_ZERO_PAGE_ADDRESS;
+      if (address & 3)
          return hk_g17p_graphics_ranges_refused(range_count, count);
+
       /* A root-relative span follows the root, a set-pointer span the set's
        * address (hk_g17p_dma_set_base(), which every reuse of a published
        * launcher still compares). */
-      sources[count] = pointer == root_uniform ? HK_G17P_RANGE_SOURCE_ROOT
-                                               : HK_G17P_RANGE_SOURCE_SET;
+      sources[count] = set < 0 ? HK_G17P_RANGE_SOURCE_ROOT
+                               : HK_G17P_RANGE_SOURCE_SET;
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = s->b.info.agx3_uniform_dma_dest,
-         .size_halfs = s->b.info.agx3_uniform_dma_halfs,
+         .start_halfs = span->dest,
+         .size_halfs = span->halfs,
          .address = address,
       };
    }
@@ -2312,11 +2406,20 @@ hk_g17p_launch_record(struct hk_cmd_buffer *cmd, struct hk_g17p_launch *launch,
       case HK_G17P_RANGE_SOURCE_DRAW_PARAMS:
       case HK_G17P_RANGE_SOURCE_DRAW_ID:
          break;
-      case HK_G17P_RANGE_SOURCE_SET:
-         set = (s->b.info.agx3_uniform_dma_pointer -
-                s->info.agx3_root_uniform - 4) / 4;
-         offset = s->b.info.agx3_uniform_dma_offset_B;
+      case HK_G17P_RANGE_SOURCE_SET: {
+         /* The set-pointer span the range was collected from: the one
+          * copied to its first uniform. */
+         const struct agx3_uniform_dma_span *span = NULL;
+         for (unsigned j = 0; j < s->b.info.agx3_uniform_dma_count; ++j) {
+            if (s->b.info.agx3_uniform_dma[j].dest == ranges[i].start_halfs)
+               span = &s->b.info.agx3_uniform_dma[j];
+         }
+         if (!span || span->source != AGX3_UNIFORM_DMA_POINTER)
+            return;
+         set = (span->pointer - s->info.agx3_root_uniform - 4) / 4;
+         offset = span->offset_B;
          break;
+      }
       default:
          return;
       }

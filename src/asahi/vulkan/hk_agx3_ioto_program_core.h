@@ -59,7 +59,7 @@ struct hk_agx3_g17p_graphics_program_desc {
  * program can publish. Aliases the composer's capacity so the driver and
  * agx3_g17p_graphics_program_bound() can never disagree about it.
  *
- * The worst case is a vertex program, which can request all seven:
+ * The worst case is a vertex program, which can request all nineteen:
  *
  *   1. vertex attribute bases              nr_attribs != 0
  *   2. vertex attribute clamps             nr_attribs != 0
@@ -68,14 +68,15 @@ struct hk_agx3_g17p_graphics_program_desc {
  *   5. texture/sampler heap pointers       agx3_indexed_sampler_valid
  *   6. root descriptor                     shader/prolog root || set_count
  *   7. promoted constants                  rodata.size_16 != 0
+ *   8-19. uniform DMA spans, two each      agx3_uniform_dma_count
  *
  * The combined-sampler range is not in that list: it is fragment-only, and
- * a fragment program's own worst case is five. hk_cmd_buffer.c static-asserts
+ * a fragment program's own worst case is seventeen. hk_cmd_buffer.c static-asserts
  * this derivation against the collector.
  */
-/* Honeykrisp has a fixed seven-range collector and a matching cache key.
+/* Honeykrisp has a fixed nineteen-range collector and a matching cache key.
  * Gallium needs a larger budget in the shared program composer. */
-#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 7u
+#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 19u
 
 struct hk_agx3_g17p_graphics_program {
    uint8_t bytes[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
