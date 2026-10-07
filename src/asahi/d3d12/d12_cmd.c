@@ -14818,6 +14818,10 @@ d12_list_EndQuery(ID3D12GraphicsCommandList6 *iface,
          .handle = heap->timestamp_handle,
          .offset = index * heap->stride,
       };
+      d12_segment_track_write_range(seg,
+                                    seg->type == D12_SEG_CDM
+                                       ? D12_WRITE_COMPUTE : D12_WRITE_FRAGMENT,
+                                    result, sizeof(uint64_t));
       /* A following resolve or timestamp must be a separate command, so its
        * reads/writes cannot race this retirement write. */
       d12_list_close_cdm(list);
