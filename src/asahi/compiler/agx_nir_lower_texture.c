@@ -25,6 +25,8 @@ struct agx_texture_lower_options {
    bool buffer_metadata;
    /* Formatless image loads still need view-bounds robustness. */
    bool robust_formatless_images;
+   /* G17P texel fetches need explicit view-bounds checks (image robustness). */
+   bool robust_texel_fetch;
    /* Offset between a sparse resource's read/write mapping and its read-only
     * alias; see agx_device::sparse_ro_offset.  The residency map is indexed
     * from the primary mapping, so a descriptor that addresses the alias has
@@ -505,6 +507,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_tex_instr *tex = nir_instr_as_tex(instr);
    const struct agx_texture_lower_options *options = data;
    const bool gen9 = options && options->gen9;
+   const bool robust_texel_fetch = !options || options->robust_texel_fetch;
    b->cursor = nir_before_instr(instr);
 
    if (nir_tex_instr_is_query(tex) && tex->op != nir_texop_lod)
@@ -538,14 +541,16 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_def *g17p_txf_oob = NULL;
 
    /* G17P's raw integer fetch is memory-safe but does not return the Vulkan
-    * robustness value for every out-of-view coordinate. The older workaround
+    * robustness value for every out-of-view coordinate. Without image
+    * robustness an out-of-view fetch is undefined and a null descriptor
+    * swizzles every channel to zero, so only robust images need this. The older workaround
     * below relies on that value: it moves an invalid layer or level to an
     * out-of-range coordinate and keeps the level itself, which the G17P
     * indexed fetch cannot even take as an immediate. Predicate the whole
     * access explicitly, fetch texel (0,0) of level 0 for an invalid one so the
     * hardware access itself stays inside the view, and select the
     * robustImageAccess2 value after the fetch. */
-   if (gen9 && tex->op == nir_texop_txf &&
+   if (gen9 && robust_texel_fetch && tex->op == nir_texop_txf &&
        (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
         tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
        nir_tex_instr_src_index(tex, nir_tex_src_min_lod) < 0 &&
@@ -1584,14 +1589,18 @@ lower_lod_clamp(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 
 static bool
 lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
-              bool robust_formatless_images, uint64_t sparse_ro_offset,
-              bool sparse_buffer_residency)
+              bool robust_formatless_images, bool robust_texel_fetch,
+              uint64_t sparse_ro_offset, bool sparse_buffer_residency)
 {
    bool progress = false;
    const bool gen9 = generation == 9;
    const struct agx_texture_lower_options options = {
-      gen9, buffer_metadata, robust_formatless_images, sparse_ro_offset,
-      sparse_buffer_residency,
+      .gen9 = gen9,
+      .buffer_metadata = buffer_metadata,
+      .robust_formatless_images = robust_formatless_images,
+      .robust_texel_fetch = robust_texel_fetch,
+      .sparse_ro_offset = sparse_ro_offset,
+      .sparse_buffer_residency = sparse_buffer_residency,
    };
 
    nir_tex_src_type_constraints tex_constraints = {
@@ -1674,7 +1683,7 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
 bool
 agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
 {
-   return lower_texture(s, generation, false, false, 0, false);
+   return lower_texture(s, generation, false, false, true, 0, false);
 }
 
 bool
@@ -1683,8 +1692,10 @@ agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation,
                                            uint64_t sparse_ro_offset,
                                            bool sparse_buffer_residency)
 {
+   /* hk's image robustness covers both formatless loads and texel fetches. */
    return lower_texture(s, generation, true, robust_formatless_images,
-                        sparse_ro_offset, sparse_buffer_residency);
+                        robust_formatless_images, sparse_ro_offset,
+                        sparse_buffer_residency);
 }
 
 bool
