@@ -4472,6 +4472,19 @@ agx3_g18_msaa4_tile_shader(const agx_context *ctx)
 
 /* Bind the witnessed tile subset: the 1x whole-pixel form and the 2x/4x
  * register-sourced sample mask. Explicit pixel coordinates stay closed. */
+/* Native454/513/567 cover register-sample reloads at each of these tuple
+ * widths. Keep format and alignment checks shared by encoding and ordering. */
+static unsigned
+agx3_g18_msaa_tile_stride(const agx_instr *I)
+{
+   if (I->format == AGX_FORMAT_I32)
+      return I->mask == 1 ? 4 : I->mask == 15 ? 16 : 0;
+   if (I->mask != 15)
+      return 0;
+   return I->format == AGX_FORMAT_U8NORM ? 4
+          : I->format == AGX_FORMAT_F16 ? 8 : 0;
+}
+
 static bool
 agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint8_t slot, uint16_t wait_mask,
@@ -4500,13 +4513,12 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    /* msaa163: at four samples the 0xFF immediate would be encoded as the 1x
     * whole-pixel immediate and write sample 0 only; refuse it rather than
     * resolve a quarter of the colour. Stores take the witnessed AGX3c/AGX3d
-    * register form. Native454/513 ground raw RGBA32/scalar32 reloads at
-    * sixteen-/four-byte partitions with the same register-sample operand. */
+    * register form. Native454/513/567 ground raw32 and packed reloads with
+    * the same register-sample operand and their corresponding tuple sizes. */
    if (g18_msaa4) {
-      const unsigned stride = I->mask == 1 ? 4 : I->mask == 15 ? 16 : 0;
+      const unsigned stride = agx3_g18_msaa_tile_stride(I);
       if (!sample_op.reg ||
-          (load && (I->format != AGX_FORMAT_I32 || !stride ||
-                    (I->pixel_offset % stride))))
+          (load && (!stride || (I->pixel_offset % stride))))
          return false;
       sample_op.g17_register = true;
    }
@@ -4545,7 +4557,8 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
       load ? agx3_tile_load(enc, value.value, (enum agx3_tile_width)width,
                             slot, I->mask, I->pixel_offset, sample_op,
                             tile_wait, sample_op.reg ? false : first_load,
-                            sample_op.reg ? false : last_load, bytes, &length)
+                            sample_op.reg ? (g18_msaa4 && last_load) : last_load,
+                            bytes, &length)
            : agx3_tile_store_f13(enc, value.value,
                                  (enum agx3_tile_width)width, I->mask,
                                  I->pixel_offset, sample_op, tile_wait,
@@ -9037,13 +9050,12 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
             return agx3_g17p_mrt_refused(__LINE__);
          if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
             continue;
-         if (g18 && !(g18_ms ? (I->format == AGX_FORMAT_I32 &&
-                               (I->mask == 1 || I->mask == 15))
+         if (g18 && !(g18_ms ? agx3_g18_msaa_tile_stride(I)
                             : ((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
                                (I->format == AGX_FORMAT_I32 && I->mask == 1))))
             return agx3_g17p_mrt_refused(__LINE__);
          if (g18_ms) {
-            const unsigned stride = I->mask == 1 ? 4 : 16;
+            const unsigned stride = agx3_g18_msaa_tile_stride(I);
             if ((p.ms_tile_stride && p.ms_tile_stride != stride) ||
                 (I->pixel_offset % stride))
                return agx3_g17p_mrt_refused(__LINE__);
@@ -13264,7 +13276,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                     (!agx3_pixel_wait(enc, acquire_classes, 0,
                                       bytes, &len) ||
                      !agx3_append(emission, bytes, len))) ||
-                   !agx3_emit_tile(emission, enc, I, slot, wait, false, false,
+                   !agx3_emit_tile(emission, enc, I, slot, wait, false,
+                                   /* Native567's single-target register read
+                                    * terminates its load group in each sample
+                                    * body, including a statically unrolled one. */
+                                   load && agx3_g18_msaa4_tile_shader(ctx) &&
+                                      g17p_mrt.count == 1,
                                    g17p_mrt.raw32_store,
                                    /* Native per-sample exports use halves
                                     * 0..31 even for one/two targets. */

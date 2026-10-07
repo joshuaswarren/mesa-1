@@ -1021,10 +1021,6 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
        * broadcast the pixel-shaded colour to the live coverage mask without a
        * sample loop. Preserve any sample-shading request already set above. */
       if (key->sample_loop_mrt) {
-         unsigned targets = 0;
-         for (unsigned rt = 0; rt < ARRAY_SIZE(key->rt_formats); ++rt)
-            targets += key->rt_formats[rt] != PIPE_FORMAT_NONE;
-
          bool reads_tile = false;
          nir_foreach_block(block, b->impl) {
             nir_foreach_instr(instr, block) {
@@ -1034,7 +1030,10 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
                   reads_tile = true;
             }
          }
-         b->shader->info.fs.uses_sample_shading |= targets > 1 && reads_tile;
+         /* A single unwritten attachment also needs its own previous value
+          * at every sample. Broadcasting one loaded value would overwrite
+          * the other samples even though the API shader writes no colour. */
+         b->shader->info.fs.uses_sample_shading |= reads_tile;
       }
       NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
    } else if (b->shader->info.fs.uses_discard) {

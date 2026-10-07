@@ -1039,6 +1039,26 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
    const bool packed =
       agx_gallium_pack_native_texture(descriptor_generation, out, &cfg);
 
+   if (packed && agx_device(rsrc->base.screen)->chip == AGX_CHIP_G18G &&
+       getenv("ASAHI_G18_RESOURCE_TRACE")) {
+      fprintf(stderr,
+              "G18_TEXTURE_TRACE format=%s resource_format=%s target=%u "
+              "view_target=%u samples=%u storage_samples=%u bind=%#x "
+              "tiling=%u width=%u height=%u dimension=%u address=%#" PRIx64
+              " size=%" PRIu64 " layer_stride=%" PRIu64 " desc=",
+              util_format_short_name(format),
+              util_format_short_name(rsrc->base.format), rsrc->base.target,
+              state->target, rsrc->base.nr_samples, rsrc->base.nr_storage_samples,
+              rsrc->base.bind, rsrc->layout.tiling, cfg.width, cfg.height,
+              cfg.dimension, (uint64_t)cfg.address, (uint64_t)rsrc->layout.size_B,
+              (uint64_t)rsrc->layout.layer_stride_B);
+      const uint8_t *bytes = (const uint8_t *)out->opaque;
+      for (unsigned i = 0;
+           i < agx_gallium_texture_descriptor_size(descriptor_generation); ++i)
+         fprintf(stderr, "%02x", bytes[i]);
+      fputc('\n', stderr);
+   }
+
    /* An array texture's packed descriptor, to diff against the captured
     * Apple one byte for byte. A mipmapped array samples layer zero for every
     * layer, and every field examined so far matches the witness, so print
@@ -1377,6 +1397,14 @@ agx_set_framebuffer_state(struct pipe_context *pctx,
       return;
 
    util_copy_framebuffer_state(&ctx->framebuffer, state);
+
+   /* The frontend still reads and resolves the window's multisample colour
+    * attachment. G18's direct EOT resolve only writes the single-sample
+    * target, losing that source. Preserve the samples and let the frontend's
+    * normal blit perform the resolve, as for explicit framebuffer blits.
+    */
+   if (agx_device(pctx->screen)->chip == AGX_CHIP_G18G)
+      pipe_resource_reference(&ctx->framebuffer.resolve, NULL);
 
    for (unsigned i = 0; i < state->nr_cbufs; ++i) {
       agx_legalize_compression(ctx,
@@ -2523,6 +2551,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
 
+      /* The zero-key precompile uses the same single-sample specialization
+       * as the explicit one-sample draw variant. */
+      const unsigned keyed_samples = key->nr_samples ? key->nr_samples : 1;
       /* G17P has no recovered samples-log2 special register, and the variant
        * key already carries the raster sample count, so fold it into the
        * shader as hk_shader.c does. gl_SampleMaskIn, gl_SampleID and
@@ -2539,10 +2570,16 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
        * Do this before the epilog split, so the link key records the collapse
        * and its tile stores use the ordinary whole-pixel protocol. */
       if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G18G) &&
-          key->nr_samples == 1 &&
+          keyed_samples == 1 &&
           nir->info.fs.uses_sample_shading) {
          NIR_PASS(_, nir, agx_nir_lower_g17p_1x_sample_shading);
       }
+
+      /* Keep helper invocation intact until one-sample specialization has
+       * removed per-sample execution. Lowering it in the serialized shader
+       * would leave a multisample coverage test after that collapse. */
+      if (dev->chip == AGX_CHIP_G18G && so->info.uses_sample_shading)
+         NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, true);
 
       /* AGX3 has no equivalent of the AGX2 machine code agx_fast_link()
        * splices around a linked fragment program to run it once per sample.
@@ -2557,10 +2594,6 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
        * needs. G18 colour shaders instead expand both linked parts with the
        * same per-sample export layout below.
        */
-      /* See the sample-count key in agx_update_fs(). A draw always keys
-       * the count; the zero key is the link-time variant that only checks
-       * the shader encodes, compiled here as single-sampled. */
-      const unsigned keyed_samples = key->nr_samples ? key->nr_samples : 1;
       if (agx_chip_m5_paths(dev->chip) &&
           (keyed_samples == 1 || keyed_samples == 2 || keyed_samples == 4) &&
           agx_nir_needs_sample_count(nir))
@@ -2607,7 +2640,17 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       }
 
       if (unrolled_samples) {
-         NIR_PASS(_, nir, agx_nir_lower_monolithic_msaa, key->nr_samples);
+         if (dev->chip == AGX_CHIP_G18G) {
+            /* Keep memory side effects and coverage predicates in each
+             * statically specialized body. The AGX2 loop otherwise depends
+             * on optimizer unrolling and can reach unsupported loop forms. */
+            NIR_PASS(_, nir, agx_nir_lower_sample_mask);
+            NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
+            NIR_PASS(_, nir, agx_nir_unroll_g17p_samples,
+                     key->nr_samples, 0);
+         } else {
+            NIR_PASS(_, nir, agx_nir_lower_monolithic_msaa, key->nr_samples);
+         }
 
          /* Nothing is left for the linker to wrap. */
          nir->info.fs.uses_sample_shading = false;
@@ -3091,7 +3134,10 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, true);
+      /* G18 sample-shading variants must specialize first. Their original
+       * uses_sample_shading flag already keys the raster sample count. */
+      if (dev->chip != AGX_CHIP_G18G || !nir->info.fs.uses_sample_shading)
+         NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, true);
       so->info.needs_sample_count = agx_nir_needs_sample_count(nir);
    }
 
@@ -7086,6 +7132,23 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       if (surf->texture == NULL)
          continue;
 
+      if (dev->chip == AGX_CHIP_G18G && getenv("ASAHI_G18_RESOURCE_TRACE")) {
+         const struct agx_resource *rsrc = agx_resource(surf->texture);
+         fprintf(stderr,
+                 "G18_ATTACHMENT_TRACE rt=%u store=%u partial=%u "
+                 "resolve=%u multisample_store=%u format=%s resource_format=%s "
+                 "target=%u samples=%u storage_samples=%u bind=%#x tiling=%u "
+                 "width=%u height=%u tib_samples=%u tib_offset=%u "
+                 "clear=%#x load=%#x\n",
+                 rt, store, partial_render, batch->key.resolve != NULL,
+                 key.multisample_store, util_format_short_name(surf->format),
+                 util_format_short_name(rsrc->base.format), rsrc->base.target,
+                 rsrc->base.nr_samples, rsrc->base.nr_storage_samples,
+                 rsrc->base.bind, rsrc->layout.tiling, rsrc->base.width0,
+                 rsrc->base.height0, batch->tilebuffer_layout.nr_samples,
+                 batch->tilebuffer_layout._offset_B[rt], batch->clear, batch->load);
+      }
+
       if (store) {
          /* TODO: Suppress stores to discarded render targets */
          key.op[rt] = AGX_EOT_STORE;
@@ -8363,6 +8426,41 @@ agx_g17g_viewport_scissor_records(struct agx_batch *batch,
  * Colour sample shading expands both shader parts over distinct exports;
  * the linked prolog applies the API mask before the masked colour stores. */
 static bool
+agx_g18_msaa_memory_shader(struct agx_context *ctx, struct agx_batch *batch)
+{
+   const struct agx_device *dev = agx_device(ctx->base.screen);
+   const struct agx_compiled_shader *fs = ctx->fs;
+   const unsigned samples = batch->tilebuffer_layout.nr_samples;
+
+   /* The no-colour per-sample main is statically expanded before compilation.
+    * Native564/567 place covered-sample memory writes before late depth, and
+    * the epilog preserves each unwritten colour sample independently. Colour
+    * exports, stencil and external sample loops are different contracts.
+    * write_z with writes_sample_mask is the main's own DEPTHF feedback;
+    * agx_update_fs clears that duplicate epilog export before linking. */
+   const bool admitted = agx_g18_msaa4(dev) && (samples == 2 || samples == 4) &&
+          fs && fs->so && fs->so->info.writes_memory &&
+          fs->so->info.uses_sample_shading && !fs->so->info.uses_fbfetch &&
+          !fs->b.info.early_fragment_tests &&
+          !fs->epilog_key.sample_shading && !fs->epilog_key.loc_written &&
+          (!fs->epilog_key.write_z || fs->b.info.writes_sample_mask) &&
+          !fs->epilog_key.write_s;
+   if (!admitted && fs && fs->so && fs->so->info.writes_memory &&
+       (dev->debug & AGX_DBG_FAULTTRACE)) {
+      fprintf(stderr,
+              "G18_MSAA_MEMORY_PROFILE samples=%u enabled=%u sample=%u "
+              "fbfetch=%u early=%u epilog_sample=%u colours=%#x "
+              "write_z=%u write_s=%u write_mask=%u reads_tib=%u\n",
+              samples, agx_g18_msaa4(dev), fs->so->info.uses_sample_shading,
+              fs->so->info.uses_fbfetch, fs->b.info.early_fragment_tests,
+              fs->epilog_key.sample_shading, fs->epilog_key.loc_written,
+              fs->epilog_key.write_z, fs->epilog_key.write_s,
+              fs->b.info.writes_sample_mask, fs->b.info.reads_tib);
+   }
+   return admitted;
+}
+
+static bool
 agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
                             unsigned fragment_pass)
 {
@@ -8376,6 +8474,7 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
       !no_color && fs && fs->so && fs->so->info.uses_sample_shading &&
       fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
       !fs->epilog_key.write_s && !fs->so->info.writes_memory;
+   const bool unrolled_memory = agx_g18_msaa_memory_shader(ctx, batch);
    /* Masked-off resident MRTs are preserved by the epilog's tile loads,
     * making the linked program translucent even when the API main reads no
     * TIB. Native454 grounds this per-sample read/modify/write transaction;
@@ -8392,18 +8491,22 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
            batch->reduced_prim == MESA_PRIM_LINES) &&
           (fragment_pass == AGX_PASS_TYPE_OPAQUE ||
            fragment_pass == AGX_PASS_TYPE_PUNCH_THROUGH ||
+           (unrolled_memory &&
+            (fragment_pass == AGX_PASS_TYPE_TRANSLUCENT ||
+             fragment_pass == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)) ||
            resident_mrt_preserve) &&
           ctx->rast->base.multisample &&
-          (unrolled_colour ||
+          (unrolled_colour || unrolled_memory ||
            (ctx->sample_mask & BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) ==
               BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) &&
           !ctx->blend->key.alpha_to_coverage &&
           fs && fs->so && !fs->so->info.uses_fbfetch &&
-          !fs->so->info.writes_memory &&
-          (!fs->so->info.uses_sample_shading || unrolled_depth || unrolled_colour) &&
+          (!fs->so->info.writes_memory || unrolled_memory) &&
+          (!fs->so->info.uses_sample_shading || unrolled_depth ||
+           unrolled_colour || unrolled_memory) &&
           (!fs->epilog_key.sample_shading || unrolled_colour) &&
           !fs->epilog_key.write_s &&
-          (!fs->b.info.writes_sample_mask || unrolled_depth) &&
+          (!fs->b.info.writes_sample_mask || unrolled_depth || unrolled_memory) &&
           !fs->b.info.reads_tib;
    if (!admitted && (dev->debug & AGX_DBG_FAULTTRACE)) {
       fprintf(stderr,
@@ -8411,7 +8514,7 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
               "pass=%u opaque=%u punch=%u raster_ms=%u mask=%#x "
               "a2c=%u fs=%u so=%u fbfetch=%u memory=%u sample=%u "
               "epilog_sample=%u write_s=%u write_mask=%u reads_tib=%u "
-              "unrolled_depth=%u unrolled_colour=%u\n",
+              "unrolled_depth=%u unrolled_colour=%u unrolled_memory=%u\n",
               agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout),
               no_color ? batch->key.zsbuf.texture != NULL
                        : agx_g18_msaa_color_surfaces(batch),
@@ -8425,7 +8528,7 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
               fs && fs->epilog_key.sample_shading,
               fs && fs->epilog_key.write_s,
               fs && fs->b.info.writes_sample_mask, fs && fs->b.info.reads_tib,
-              unrolled_depth, unrolled_colour);
+              unrolled_depth, unrolled_colour, unrolled_memory);
    }
    return admitted;
 }
@@ -8656,13 +8759,15 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       }
       const bool g18_late_memory =
          dev->chip == AGX_CHIP_G18G &&
-         batch->tilebuffer_layout.nr_samples == 1 &&
+         (batch->tilebuffer_layout.nr_samples == 1 ||
+          agx_g18_msaa_memory_shader(ctx, batch)) &&
          !ctx->fs->b.info.early_fragment_tests &&
          !(ctx->zs->base.depth_enabled &&
            ctx->zs->base.depth_func == PIPE_FUNC_NEVER);
       /* The main acquires the pixel transaction before helper-predicated
-       * writes and supplies late depth feedback. Explicit early tests,
-       * depth-NEVER emulation and per-sample side effects remain separate. */
+       * writes and supplies late depth feedback. Explicit early tests and
+       * depth-NEVER emulation remain separate. The statically expanded MS
+       * memory shader keeps that ordering in each unrolled body. */
       M5_DRAW_OUTSIDE(ctx->fs->so && ctx->fs->so->info.writes_memory &&
                          !g18_late_memory,
                       "fragment writes memory");

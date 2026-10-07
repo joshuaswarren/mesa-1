@@ -424,11 +424,11 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
       return false;
    if (!strcmp(mnemonic, "lddev"))
       fields[87] = fields[75] ? 2 : 0;
-   /* Native454's register-sample RGBA32 tile reloads use the G18 long
-    * LLDCol form with f79=2. All sample, slot and payload fields retain
-    * their G17G meaning; immediate-sample forms stay on the existing path. */
+   /* Native454/567's register-sample RGBA32, RGBA16Float and BGRA8 reloads
+    * use the G18 long LLDCol form with f79=2 at every payload width.
+    * Sample, slot and payload fields retain their G17G meaning. */
    if (!strcmp(mnemonic, "lldcol") && fields[51] == 2 &&
-       fields[10] == 2 && fields[26] == 15)
+       fields[10] <= 2 && fields[26] == 15)
       fields[79] = 2;
    if (!strcmp(mnemonic, "ldcfr")) {
       /* Native G18 no-perspective interpolate_at_offset keeps the raw

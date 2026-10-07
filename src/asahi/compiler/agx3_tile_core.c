@@ -161,18 +161,20 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    if (enc == AGX_ISA_ENCODING_AGX3D)
       return false;
 
-   /* Native454's RGBA32Float and native513's R32Sint/R32Uint G17G/G18G
-    * MS reloads use this register sample operand at dense sixteen-byte
-    * and four-byte tile partitions respectively. The G18 long-form field
-    * is supplied by the transcode rule. */
+   /* Native454/513 ground raw32 reloads; native567 additionally grounds
+    * packed BGRA8 and RGBA16Float register-sample reloads. Their full
+    * tuples occupy four, eight or sixteen bytes according to the width.
+    * The G18 long-form field is supplied by the transcode rule. */
    bool scalar_ms = sample.g17_register && sample.reg &&
                     enc == AGX_ISA_ENCODING_AGX3C &&
                     width == AGX3_TILE_W32 && chan_mask == 1 &&
                     !(tile_off % 4);
    if (sample.g17_register &&
        (enc != AGX_ISA_ENCODING_AGX3C || !sample.reg ||
-        width != AGX3_TILE_W32 ||
-        (!scalar_ms && (chan_mask != 15 || (tile_off % 16)))))
+        (width != AGX3_TILE_W8 && width != AGX3_TILE_W16 &&
+         width != AGX3_TILE_W32) ||
+        (!scalar_ms &&
+         (chan_mask != 15 || (tile_off % (4u << width))))))
       return false;
 
    /* Full-component loads, plus the G17P scalar, pair, and RGB565 forms.

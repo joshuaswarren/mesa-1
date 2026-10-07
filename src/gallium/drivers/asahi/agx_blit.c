@@ -773,15 +773,15 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    agx_legalize_compression(ctx, agx_resource(info->src.resource),
                             info->src.format);
 
-   /* msaa163 P4 (AGX_G18_MSAA4, default off): G18G folds the same resolves
-    * into the source batch's end of tile, where Apple's G18 4x render
-    * resolves too (MSAA notes s2.6); agx_build_g17g_bg_eot admits only the
-    * witnessed four-sample tile and drops anything else. */
+   /* The current G18 fused EOT resolve replaces the multisample store. GL
+    * requires the source samples to survive a resolve, including subsequent
+    * texture fetches and resolves. Store them first and use the render blitter
+    * to fetch and average every sample until EOT can preserve both outputs. */
    const bool g18_msaa4 =
       agx_device(ctx->base.screen)->chip == AGX_CHIP_G18G &&
       agx_g18_msaa4_enabled();
    const bool fold_resolves =
-      agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P || g18_msaa4;
+      agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P;
 
    if (fold_resolves &&
        agx_g17p_direct_resolve_blit_shape(info, true) &&

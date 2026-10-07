@@ -3089,6 +3089,16 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
    case nir_intrinsic_sample_mask_agx: {
       assert(stage == MESA_SHADER_FRAGMENT);
+      /* TARGET selects the samples whose coverage or Z/S tests may change.
+       * An empty target has no effect, including after per-sample lowering.
+       * Do not send this identity through the legacy SAMPLE_MASK encoder. */
+      if (b->shader->key->dev.emit_agx3d &&
+          (b->shader->key->fs.nr_samples == 2 ||
+           b->shader->key->fs.nr_samples == 4) &&
+          nir_src_is_const(instr->src[0]) &&
+          nir_src_as_uint(instr->src[0]) == 0)
+         return NULL;
+
       b->shader->out->writes_sample_mask = true;
 
       /* We need to wait_pix before running Z/S tests, but we don't need to
@@ -3107,13 +3117,28 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
            !(nir_src_as_uint(instr->src[0]) &
              nir_src_as_uint(instr->src[1]))));
 
-      /* Native G18 constant sample-mask writes at 2x/4x stage SR39 in the
+       const unsigned g18_samples = b->shader->key->fs.nr_samples;
+       if (b->shader->key->dev.emit_agx3d &&
+           (g18_samples == 2 || g18_samples == 4) && no_tests) {
+          /* Native570's G18 multisample discard stages only the affected
+           * sample bits: 0xff for whole-pixel discard, or a shifting
+           * one-bit low half and zero high half in a memory sample loop.
+           * This kills coverage without running depth/stencil tests.
+           * Preserve zero for untargeted lanes and leave any later testing
+           * update responsible for its own class-1 transaction. */
+          agx_index affected = agx_and(b, agx_src_index(&instr->src[0]),
+                                      agx_immediate(0xff));
+          return agx_sample_mask_agx3(
+             b, agx_immediate(1),
+             agx_g18_sample_mask_word(b, affected, agx_immediate(0), true), 0);
+       }
+
+       /* Native G18 constant sample-mask writes at 2x/4x stage SR39 in the
        * low half and keep<<8 in the high half, then update under class1.
        * Its fields are bytes, unlike G17P's nibble-based coverage word.
        * Only the witnessed all-target, nonzero constant late update is
-       * handled here; early tests, partial targets and dynamic masks retain
-       * their separate admission requirements. */
-      const unsigned g18_samples = b->shader->key->fs.nr_samples;
+        * handled here; early tests and testing updates with partial targets
+        * or dynamic masks retain their separate admission requirements. */
       if (b->shader->key->dev.emit_agx3d &&
           (g18_samples == 2 || g18_samples == 4) &&
           !b->shader->key->fs.inside_sample_loop &&
@@ -8445,9 +8470,9 @@ agx3_sink_vertex_outputs(agx_context *ctx)
 static bool
 agx3_order_g18_msaa_tile_ops(agx_context *ctx)
 {
-   /* Native454/513: RGBA32 and scalar32 MS tile accesses use sixteen- and
-    * four-byte partitions respectively. Retain complete sample groups;
-    * only move stores within their block, after every group definition. */
+   /* Native454/513/567: raw32, packed BGRA8 and RGBA16Float tile accesses
+    * use their actual tuple size. Retain complete sample groups; only
+    * move stores within their block, after every group definition. */
    BITSET_DECLARE(offsets, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    unsigned stores = 0, loads = 0;
    unsigned tile_stride = 0;
@@ -8456,8 +8481,12 @@ agx3_order_g18_msaa_tile_ops(agx_context *ctx)
    agx_foreach_instr_global(ctx, I) {
       if (I->op != AGX_OPCODE_ST_TILE && I->op != AGX_OPCODE_LD_TILE)
          continue;
-      const unsigned stride = I->mask == 1 ? 4 : I->mask == 15 ? 16 : 0;
-      if (I->format != AGX_FORMAT_I32 || !stride ||
+      const unsigned stride = I->format == AGX_FORMAT_I32
+                                 ? (I->mask == 1 ? 4 : I->mask == 15 ? 16 : 0)
+                                 : I->mask != 15 ? 0
+                                 : I->format == AGX_FORMAT_U8NORM ? 4
+                                 : I->format == AGX_FORMAT_F16 ? 8 : 0;
+      if (!stride ||
           (tile_stride && tile_stride != stride) ||
           I->explicit_coords || (I->pixel_offset % stride) ||
           I->pixel_offset >= AGX_G17P_MAX_BYTES_PER_SAMPLE)
