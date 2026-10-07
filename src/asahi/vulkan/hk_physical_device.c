@@ -12,6 +12,7 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/disk_cache.h"
+#include "util/hex.h"
 #include "util/mesa-blake3.h"
 #include "git_sha1.h"
 #include "hk_buffer.h"
@@ -1545,8 +1546,20 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[BLAKE3_HEX_LEN];
-   _mesa_blake3_format(timestamp, instance->driver_build_sha);
+   /* The driver id names the single-file cache directory: keep it to the
+    * 20-byte build-id (40 hex digits), not the zero-padded 32-byte buffer.
+    * Steam points each game's Mesa cache at its shadercache directory in
+    * single-file mode, records it as bucket "L7:<driver id>" cut to 64
+    * characters, and prunes each mesa_shader_cache_sf/<driver id> directory
+    * that matches no current bucket. A 64-digit id never matches its own cut
+    * bucket, so whenever the bucket set changes Steam deletes the live cache
+    * as old (seen in Steam's shader_log.txt on Neo) and the next launch
+    * compiles everything again.
+    */
+   const unsigned id_bytes = 20;
+   static_assert(sizeof(instance->driver_build_sha) >= 20);
+   char timestamp[2 * 20 + 1];
+   mesa_bytes_to_hex(timestamp, instance->driver_build_sha, id_bytes);
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags ^
       (env_hash * UINT64_C(0xff51afd7ed558ccd)));
