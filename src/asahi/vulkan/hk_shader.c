@@ -96,6 +96,13 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
+/* Prototype: large constant arrays as compute-shader constant data */
+static bool
+hk_large_constants(void)
+{
+   return debug_get_bool_option("HK_LARGE_CONSTANTS", false);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -105,7 +112,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)(getenv("AGX_DECODE_Q4") != NULL) << 33) |
          ((uint64_t)(getenv("AGX_HWMAT_VEC2_OFF") != NULL) << 34) |
          ((uint64_t)(getenv("AGX_LOCAL_FOLD_OFF") != NULL) << 35) |
-         ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36);
+         ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36) |
+         ((uint64_t)hk_large_constants() << 40);
 }
 
 const nir_shader_compiler_options *
@@ -838,8 +846,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * table instead of per-invocation scratch copies (compute only for now;
     * graphics stages have no root field for it). Prototype, opt-in.
     */
-   if (nir->info.stage == MESA_SHADER_COMPUTE &&
-       debug_get_bool_option("HK_LARGE_CONSTANTS", false))
+   if (nir->info.stage == MESA_SHADER_COMPUTE && hk_large_constants())
       NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
 
    /* Turn cache flushes into image coherency bits while we still have derefs */
