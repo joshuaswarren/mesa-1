@@ -7,6 +7,7 @@
 
 #include "agx_device.h"
 #include <inttypes.h>
+#include <stdlib.h>
 #include "clc/asahi_clc.h"
 #include "drm-uapi/asahi_drm.h"
 #include "util/bitscan.h"
@@ -952,13 +953,18 @@ agx_gather_device_key(struct agx_device *dev)
    bool g13x_coh = (dev->params.gpu_generation == 13 &&
                     dev->params.num_clusters_total > 1) ||
                    dev->params.num_dies > 1;
+   /* AGX_FOLD_SUBFORMAT=0|1 overrides the measured per-device default, so
+    * one driver build can A/B the fold on any chip. */
+   const char *fold_env = getenv("AGX_FOLD_SUBFORMAT");
+   bool fold = fold_env ? fold_env[0] != '0'
+                        : dev->params.gpu_generation == 13 &&
+                             dev->params.num_clusters_total == 1 &&
+                             dev->params.num_dies == 1;
 
    return (struct agx_device_key){
       .needs_g13x_coherency = u_tristate_make(g13x_coh),
       .soft_fault = agx_has_soft_fault(dev),
       .g13 = dev->params.gpu_generation == 13,
-      .fold_subformat_address = dev->params.gpu_generation == 13 &&
-                                dev->params.num_clusters_total == 1 &&
-                                dev->params.num_dies == 1,
+      .fold_subformat_address = fold,
    };
 }
