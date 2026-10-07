@@ -679,6 +679,9 @@ typedef struct {
    /* An intrinsic or ALU op this backend does not implement reached
     * instruction selection; the compile is refused right after emission. */
    bool unsupported_instruction;
+   /* Register allocation found no legal placement for a constrained value
+    * (agx_register_allocate.c); the compile is refused after agx_ra(). */
+   bool ra_failed;
 } agx_context;
 
 static inline void

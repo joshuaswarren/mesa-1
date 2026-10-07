@@ -9040,6 +9040,12 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Record provenance before RA can create stack instructions. */
    const bool imports_only_before_ra = agx3_cprog_spill_provenance(ctx);
    AGX_PASS(ctx, agx_ra);
+   if (ctx->ra_failed) {
+      agx_set_refusal(ctx, "register allocation found no legal placement",
+                      __LINE__);
+      ralloc_free(ctx);
+      return false;
+   }
 
    /* Apple's G17P compiler publishes a 16-byte scratch footprint for compute,
     * vertex and fragment shaders that consume a device atomic's return.

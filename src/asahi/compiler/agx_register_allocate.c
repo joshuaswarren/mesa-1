@@ -699,16 +699,14 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
       }
 
       if (!found) {
-         /* Not a refusal path.  The result feeds straight into
-          * BITSET_SET_COUNT() and reg_to_ssa[], so continuing with a bad base
-          * is an out-of-bounds write rather than a poor register choice: a
-          * build where NDEBUG removes assertions would corrupt memory
-          * silently.  Fail the same way in every build instead. */
-         fprintf(stderr,
-                 "agx: no constrained region for count=%u minimum=%u limit=%u "
-                 "bound=%u\n",
-                 count, minimum, limit, rctx->bound[RA_GPR]);
-         abort();
+         /* No legal placement exists. Never write through an unset base --
+          * it feeds BITSET_SET_COUNT() and reg_to_ssa[] -- and never emit the
+          * illegal placement either: record the failure, let the ordinary
+          * eviction below place the value anywhere so allocation finishes
+          * consistently, and let agx_compile_function_nir() refuse the
+          * shader through its normal error path. */
+         rctx->shader->ra_failed = true;
+         goto unconstrained;
       }
       nr_blocked = 0;
       for (unsigned reg = base; reg < base + span;) {
@@ -733,6 +731,7 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
       set_ssa_to_reg(rctx, dest.value, base);
    }
 
+unconstrained:
    while (nr_blocked > 0) {
       /* Grab the largest var. TODO: Consider not writing O(N^2) code. */
       uint32_t ssa = ~0, nr = 0, chosen_idx = ~0;
