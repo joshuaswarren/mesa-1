@@ -63,11 +63,11 @@ div_rn(nir_builder *b, nir_def *a, nir_def *d)
 }
 
 /*
- * 1/x, bit for bit div_rn(1, x). For x in [2^-126, 2^126) the refinement on
- * x itself is the normalized one scaled by a power of two, which
- * tests/div_window.py checks over every input. The other exponents have fixed
- * results: zero and denormals give +-inf, exactly 2^126 gives +-2^-126, the
- * rest of [2^126, inf] gives +-0 and NaN gives the canonical NaN.
+ * 1/x, bit for bit div_rn(1, x): one Newton step on the hardware rcp, which
+ * flushes denormal inputs to +-inf and results below 2^-126 to +-0. Where the
+ * step is NaN (x zero, denormal, infinite or NaN), the hardware rcp already
+ * holds the answer, and NaN becomes the canonical NaN. tests/div_window.py
+ * checks every input.
  */
 static nir_def *
 rcp_rn(nir_builder *b, nir_def *x)
@@ -75,20 +75,8 @@ rcp_rn(nir_builder *b, nir_def *x)
    nir_def *u = nir_frcp(b, x);
    nir_def *q = nir_ffma(b, nir_ffma(b, nir_fneg(b, x), u,
                                      nir_imm_float(b, 1.0)), u, u);
-
-   nir_def *ex = nir_ubfe_imm(b, x, 23, 8);
-   nir_def *mag = nir_iand_imm(b, x, 0x7fffffff);
-   nir_def *special =
-      nir_bcsel(b, nir_ieq_imm(b, mag, 0x7e800000), nir_imm_int(b, 0x00800000),
-                nir_imm_int(b, 0));
-   special = nir_bcsel(b, nir_ieq_imm(b, ex, 0), nir_imm_int(b, 0x7f800000),
-                       special);
-   special = nir_ior(b, special, nir_iand_imm(b, x, 0x80000000));
-   special = nir_bcsel(b, nir_ugt_imm(b, mag, 0x7f800000),
-                       nir_imm_int(b, 0x7fc00000), special);
-
-   nir_def *inside = nir_ult(b, nir_iadd_imm(b, ex, -1), nir_imm_int(b, 252));
-   return nir_bcsel(b, inside, q, special);
+   q = nir_bcsel(b, nir_fisnan(b, q), u, q);
+   return nir_bcsel(b, nir_fisnan(b, q), nir_imm_int(b, 0x7fc00000), q);
 }
 
 static bool
