@@ -2644,6 +2644,22 @@ hk_static_set_mask(uint32_t set_layout_count,
    return mask;
 }
 
+/* Bindless (descriptor-heap) samples leave num_textures at zero, yet their
+ * descriptor reads are exactly the per-draw work a constant program hoists. */
+static bool
+hk_nir_has_tex(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
@@ -3071,7 +3087,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       .no_preamble = dev->dev.chip == AGX_CHIP_G17P &&
          !(nir->info.stage == MESA_SHADER_FRAGMENT &&
            (nir->info.num_ubos || nir->info.num_ssbos ||
-            nir->info.num_textures || nir->info.num_images)),
+            nir->info.num_textures || nir->info.num_images ||
+            hk_nir_has_tex(nir))),
    };
 
    /* The native constant-program lowering applies exactly when G17P lets
