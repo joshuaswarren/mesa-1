@@ -9898,9 +9898,29 @@ agx3_uniform_dma_take(nir_shader *nir, const struct agx_shader_key *key,
    free(taken);
 }
 
+/* Whether a sample names `def` as its texture or sampler handle. */
+static bool
+agx3_is_sample_handle(nir_def *def)
+{
+   nir_foreach_use(use, def) {
+      nir_instr *parent = nir_src_parent_instr(use);
+      if (parent->type != nir_instr_type_tex)
+         continue;
+      const nir_tex_src *src = (const nir_tex_src *)use;
+      if (src->src_type == nir_tex_src_texture_handle ||
+          src->src_type == nir_tex_src_sampler_handle ||
+          src->src_type == nir_tex_src_texture_offset ||
+          src->src_type == nir_tex_src_sampler_offset)
+         return true;
+   }
+   return false;
+}
+
 /* A constant-program result that only copies a uniform the launch already
  * holds is read straight from that uniform, and is no longer stored when
- * nothing else reads it. */
+ * nothing else reads it. A sample handle stays a result when the copy is
+ * above the halves a sample reads directly, so it can be placed there
+ * (agx_nir_place_preamble_handles_low). */
 static void
 agx3_uniform_dma_forward_copies(nir_shader *nir)
 {
@@ -9981,6 +10001,8 @@ agx3_uniform_dma_forward_copies(nir_shader *nir)
          bool whole = intr != NULL && source[base] >= 0;
          for (unsigned h = 1; h < size; ++h)
             whole &= source[base + h] == source[base] + h;
+         whole &= !(intr && source[base] + size > AGX3_SMP_HANDLE_MAX_HALF &&
+                    agx3_is_sample_handle(&intr->def));
 
          if (whole)
             nir_intrinsic_set_base(intr, source[base]);
@@ -10576,9 +10598,13 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       NIR_PASS(_, nir, agx_nir_coalesce_preamble_half_exports,
                key->reserved_preamble, info->push_count);
       NIR_PASS(_, nir, nir_opt_dce);
+      /* The launch's copies, if any, sit above every export. */
       unsigned push_count = info->push_count;
       NIR_PASS(_, nir, agx_nir_place_preamble_handles_low,
-               key->reserved_preamble, &push_count);
+               key->reserved_preamble,
+               info->agx3_uniform_dma_count ? info->agx3_uniform_dma[0].dest
+                                            : push_count,
+               &push_count);
       info->push_count = push_count;
    }
 

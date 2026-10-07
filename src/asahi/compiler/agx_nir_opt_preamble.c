@@ -687,11 +687,6 @@ agx_nir_coalesce_preamble_half_exports(nir_shader *nir, unsigned reserved,
    return true;
 }
 
-/* Highest uniform half a G17P sample can name directly as its texture or
- * sampler handle (agx_instr_accepts_uniform): handles above it are copied to
- * registers before every sample.
- */
-#define AGX3_SMP_HANDLE_MAX_HALF 252
 
 static unsigned
 if_depth(const nir_instr *instr)
@@ -754,16 +749,21 @@ find_slot(struct preamble_slot *slots, unsigned n, unsigned half)
  * and sampler handles of a shader with many exports can land above the range
  * a sample reads directly, and each sample then copies its handles into
  * registers first. Move every export that is used as a handle to the bottom of
- * the general range, keeping the others in order behind them. Updates the
- * allocated size when alignment grows the layout.
+ * the general range [reserved, exports_end), keeping the others in order
+ * behind them. Uniforms from exports_end to the allocated size, if any, are
+ * copied in by the launch and stay where they are. Updates the allocated size
+ * when alignment grows the layout.
  */
 bool
 agx_nir_place_preamble_handles_low(nir_shader *nir, unsigned reserved,
+                                   unsigned exports_end,
                                    unsigned *allocated_inout)
 {
    const unsigned allocated = *allocated_inout;
-   if (!nir_shader_get_entrypoint(nir)->preamble || allocated > 512)
+   if (!nir_shader_get_entrypoint(nir)->preamble || allocated > 512 ||
+       exports_end > allocated)
       return false;
+   const unsigned limit = exports_end < allocated ? exports_end : 512;
 
    struct preamble_slot slots[512];
    unsigned n = 0;
@@ -787,7 +787,7 @@ agx_nir_place_preamble_handles_low(nir_shader *nir, unsigned reserved,
           * padding (agx3_pack_binary), so it keeps its pair to itself. */
          const unsigned slot_align = MAX2(align, 2);
          const unsigned slot_size = ALIGN_POT(size, 2);
-         if (base < reserved || base + size > allocated)
+         if (base < reserved || base + size > exports_end)
             return false;
 
          const int s = find_slot(slots, n, base);
@@ -828,7 +828,7 @@ agx_nir_place_preamble_handles_low(nir_shader *nir, unsigned reserved,
             } else {
                continue;
             }
-            if (base < reserved)
+            if (base < reserved || base >= exports_end)
                continue;
             const int s = find_slot(slots, n, base);
             if (s < 0 || base + size > slots[s].base + slots[s].size)
@@ -865,9 +865,9 @@ agx_nir_place_preamble_handles_low(nir_shader *nir, unsigned reserved,
          next += slots[i].pad_size;
       }
    }
-   /* Alignment can grow the layout by a few halves; stay in the hardware's
-    * uniform file. */
-   if (next > 512)
+   /* Alignment can grow the layout by a few halves; stay below the launch's
+    * copies and in the hardware's uniform file. */
+   if (next > limit)
       return false;
    *allocated_inout = MAX2(allocated, next);
 
@@ -883,14 +883,14 @@ agx_nir_place_preamble_handles_low(nir_shader *nir, unsigned reserved,
                nir_intrinsic_preamble_class(intr) == nir_preamble_class_general;
             if (general) {
                const unsigned base = nir_intrinsic_base(intr);
-               if (base < reserved)
+               if (base < reserved || base >= exports_end)
                   continue;
                const struct preamble_slot *s = &slots[find_slot(slots, n, base)];
                nir_intrinsic_set_base(intr, s->new_base + (base - s->base));
             } else if (intr->intrinsic == nir_intrinsic_bindless_image_agx ||
                        intr->intrinsic == nir_intrinsic_bindless_sampler_agx) {
                const unsigned base = nir_intrinsic_desc_set(intr);
-               if (base < reserved)
+               if (base < reserved || base >= exports_end)
                   continue;
                nir_intrinsic_set_desc_set(intr,
                   slots[find_slot(slots, n, base)].new_base);

@@ -1300,7 +1300,14 @@ bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
 bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
 bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
                                           unsigned allocated);
+/* Highest uniform half a G17P sample can name directly as its texture or
+ * sampler handle (agx_instr_accepts_uniform): handles above it are copied to
+ * registers before every sample.
+ */
+#define AGX3_SMP_HANDLE_MAX_HALF 252
+
 bool agx_nir_place_preamble_handles_low(nir_shader *s, unsigned reserved,
+                                         unsigned exports_end,
                                          unsigned *allocated);
 agx_block *agx_reconverged_mrt_tail(agx_context *ctx);
 bool agx_nir_lower_load_mask(nir_shader *shader);
