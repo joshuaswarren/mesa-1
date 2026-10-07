@@ -38,6 +38,7 @@
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
 #include "agx_abi.h"
+#include "agx_nir.h"
 #include "agx_nir_texture.h"
 #include "agx_usc.h"
 #include "agx_vdm_state_update_core.h"
