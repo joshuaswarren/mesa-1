@@ -7802,6 +7802,73 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
                                report_errors);
 }
 
+void
+hk_prelink_pipeline_fragment(struct hk_device *dev,
+                             struct hk_api_shader *vs_api,
+                             struct hk_api_shader *fs_api,
+                             const struct vk_graphics_pipeline_state *state)
+{
+   static const enum mesa_vk_dynamic_graphics_state key_states[] = {
+      MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES,
+      MESA_VK_DYNAMIC_MS_SAMPLE_MASK,
+      MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE,
+      MESA_VK_DYNAMIC_MS_ALPHA_TO_ONE_ENABLE,
+      MESA_VK_DYNAMIC_CB_LOGIC_OP_ENABLE,
+      MESA_VK_DYNAMIC_CB_LOGIC_OP,
+      MESA_VK_DYNAMIC_CB_ATTACHMENT_COUNT,
+      MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES,
+      MESA_VK_DYNAMIC_CB_BLEND_ENABLES,
+      MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS,
+      MESA_VK_DYNAMIC_CB_WRITE_MASKS,
+   };
+
+   if (!state->rp || !state->ms || !state->cb)
+      return;
+   for (unsigned i = 0; i < ARRAY_SIZE(key_states); ++i) {
+      if (BITSET_TEST(state->dynamic, key_states[i]))
+         return;
+   }
+
+   struct vk_dynamic_graphics_state dyn;
+   struct vk_vertex_input_state vi;
+   struct vk_sample_locations_state sl;
+   vk_dynamic_graphics_state_init(&dyn);
+   dyn.vi = &vi;
+   dyn.ms.sample_locations = &sl;
+   vk_dynamic_graphics_state_fill(&dyn, state);
+
+   for (unsigned i = 0; i < dyn.cb.attachment_count; ++i) {
+      if (dyn.cb.attachments[i].color_blend_op >= VK_BLEND_OP_ZERO_EXT &&
+          BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_BLEND_ADVANCED))
+         return;
+   }
+
+   const unsigned samples = MAX2(dyn.ms.rasterization_samples, 1);
+   struct hk_shader *fs = hk_fs_variant(fs_api, samples);
+   if (fs->b.info.writes_sample_mask)
+      return;
+
+   const uint32_t view_mask = state->mv ? state->mv->view_mask : 0;
+   struct agx_tilebuffer_layout tib = hk_tilebuffer_layout(
+      dev, state->rp->color_attachment_formats, sizeof(VkFormat),
+      state->rp->color_attachment_count, samples, view_mask != 0,
+      samples > 1 && view_mask != 0);
+   if (!hk_agx3_g17p_rt0_tile_layout_supported(&tib))
+      return;
+
+   const struct hk_fs_link_inputs in = {
+      .dyn = &dyn,
+      .tib = &tib,
+      .color_formats = state->rp->color_attachment_formats,
+      .color_formats_stride = sizeof(VkFormat),
+      .color_att_count = state->rp->color_attachment_count,
+      .cull_distance_size =
+         vs_api->variants[HK_VS_VARIANT_HW].info.cull_distance_array_size,
+   };
+   struct hk_fast_link_key_fs key;
+   if (hk_fs_link_key_build(dev, fs, &in, &key, false))
+      hk_get_fast_linked(dev, fs, &key);
+}
 
 
 static void

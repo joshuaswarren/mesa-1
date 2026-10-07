@@ -402,6 +402,13 @@ hk_any_variant(struct hk_api_shader *obj)
    return &obj->variants[0];
 }
 
+/* Link a complete pipeline's fragment shader for the state the pipeline
+ * fixes, so its first draw finds the linked program. */
+void hk_prelink_pipeline_fragment(struct hk_device *dev,
+                                  struct hk_api_shader *vs,
+                                  struct hk_api_shader *fs,
+                                  const struct vk_graphics_pipeline_state *state);
+
 static inline struct hk_shader *
 hk_fs_variant(struct hk_api_shader *obj, unsigned samples)
 {

@@ -4039,6 +4039,17 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       }
    }
 
+   /* G17P links a fragment shader with its epilog into one program, a full
+    * compile. Do it for the state a complete pipeline fixes now, rather than
+    * at the first draw on the recording thread. */
+   if (dev->dev.chip == AGX_CHIP_G17P && state && shader_count == 2 &&
+       infos[0].stage == MESA_SHADER_VERTEX &&
+       infos[1].stage == MESA_SHADER_FRAGMENT) {
+      hk_prelink_pipeline_fragment(
+         dev, container_of(shaders_out[0], struct hk_api_shader, vk),
+         container_of(shaders_out[1], struct hk_api_shader, vk), state);
+   }
+
    return VK_SUCCESS;
 }
 
