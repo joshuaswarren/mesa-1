@@ -790,7 +790,7 @@ agx3_is_async(const agx_instr *I)
           I->op == AGX_OPCODE_GET_COVERAGE_1X_AGX3 ||
           I->op == AGX_OPCODE_TEXTURE_LOAD || I->op == AGX_OPCODE_IMAGE_LOAD ||
           I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_LD_TILE ||
-          I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3 ||
+          agx_is_texture_publication(I) ||
           I->op == AGX_OPCODE_SCS_LOAD_AGX3 ||
           I->op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 ||
           I->op == AGX_OPCODE_LOAD_CPROG_AGX3 ||
@@ -8732,7 +8732,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned resource_capacity = 0, resource_use_capacity = 0;
    agx_foreach_instr_global(ctx, resource_scan) {
       resource_capacity += resource_scan->agx3_tex_coord_start ||
-         resource_scan->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3;
+         agx_is_texture_publication(resource_scan);
       resource_use_capacity += resource_scan->agx3_tex_coords_staged ||
          agx_texture_resource(resource_scan);
    }
@@ -8784,7 +8784,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
-         e->latches_srcs = I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3;
+         e->latches_srcs = agx_is_texture_publication(I);
          /* Release ordering includes reads whose results are used after the
           * fence. Register dependencies alone do not order those reads. */
          e->drain = I->op == AGX_OPCODE_SCOPED_BARRIER_AGX3 &&
@@ -8893,15 +8893,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             };
             active_coord_resource = UINT32_MAX;
          }
-         if (I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3) {
+         if (agx_is_texture_publication(I)) {
+            const bool scalar = I->op == AGX_OPCODE_PUBLISH_TEXTURE_SCALAR_AGX3;
             if (!I->imm || I->imm > resource_capacity ||
-                publication_values[I->imm] || I->nr_srcs != 2)
+                publication_values[I->imm] || I->nr_srcs != (scalar ? 3 : 2))
                goto fail;
             const unsigned value = resource_count++;
             publication_values[I->imm] = value + 1;
             resources[value] = (struct agx3_resource_value){
                .producer = k - 1,
-               .halves = agx_is_null(I->src[1]) ? 4 : 6,
+               .halves = agx_is_null(I->src[scalar ? 2 : 1]) ? 4 : 6,
                .alignment = 4, .fixed_base = UINT16_MAX,
             };
          }
@@ -9315,15 +9316,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3) {
-            if (enc != AGX_ISA_ENCODING_AGX3B || !slot || I->nr_srcs != 2 ||
+         if (agx_is_texture_publication(I)) {
+            const bool scalar = I->op == AGX_OPCODE_PUBLISH_TEXTURE_SCALAR_AGX3;
+            if (enc != AGX_ISA_ENCODING_AGX3B || !slot ||
+                I->nr_srcs != (scalar ? 3 : 2) ||
                 !I->imm || I->imm > resource_capacity ||
-                !publication_values[I->imm] || !agx3_tex_plain_reg(I->src[0]) ||
-                I->src[0].size != AGX_SIZE_32 || agx_channels(I->src[0]) != 2 ||
-                (!agx_is_null(I->src[1]) &&
-                 (!agx3_tex_plain_reg(I->src[1]) ||
-                  I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 1)))
+                !publication_values[I->imm])
                AGX3_REFUSE(I);
+            for (unsigned c = 0; c < I->nr_srcs; ++c) {
+               const bool optional = c == (scalar ? 2 : 1);
+               if (optional && agx_is_null(I->src[c]))
+                  continue;
+               if (!agx3_tex_plain_reg(I->src[c]) ||
+                   I->src[c].size != AGX_SIZE_32 ||
+                   agx_channels(I->src[c]) != ((!scalar && c == 0) ? 2 : 1))
+                  AGX3_REFUSE(I);
+            }
             const unsigned value = publication_values[I->imm] - 1;
             const uint16_t base = resource_bases[value];
             const uint16_t span = resources[value].halves;
@@ -9340,11 +9348,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             outstanding |= (uint16_t)(1u << (slot - 1));
             agx3_staging_forget(&staging_banks, retire);
             for (unsigned c = 0; c < span / 2; ++c) {
-               const agx_index src = I->src[c < 2 ? 0 : 1];
-               const uint16_t reg = src.value + (c == 1 ? 2 : 0);
+               const agx_index src = I->src[scalar ? c : (c < 2 ? 0 : 1)];
+               const uint16_t reg = src.value + (!scalar && c == 1 ? 2 : 0);
                uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+               /* Scalar coordinates/reference may alias one physical GPR.
+                * The IR publication reads all sources together; its discard
+                * annotation must land on the last native read of that GPR.
+                */
+               bool last = true;
+               for (unsigned later = c + 1; later < span / 2; ++later) {
+                  const agx_index next_src =
+                     I->src[scalar ? later : (later < 2 ? 0 : 1)];
+                  const uint16_t next_reg =
+                     next_src.value + (!scalar && later == 1 ? 2 : 0);
+                  last &= next_reg != reg;
+               }
                if (!agx3_tex_stage_copy_hints(enc, base + 2 * c, reg, slot, 0,
-                                             src.cache, src.discard,
+                                             src.cache, src.discard && last,
                                              bytes, &len) ||
                    !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);

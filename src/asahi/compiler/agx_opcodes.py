@@ -294,6 +294,11 @@ op("texture_sample",
 op("publish_texture_agx3", None, dests = 0, srcs = 2, imms = [IMM],
    can_eliminate = False, can_reorder = False)
 
+# Pre-RA publication has independent scalar x/y/reference inputs. A native
+# coordinate COPY does not require the GPR inputs to form a contiguous vector.
+op("publish_texture_scalar_agx3", None, dests = 0, srcs = 3, imms = [IMM],
+   can_eliminate = False, can_reorder = False)
+
 # Immutable constant-program input. IMM names the logical uniform half in
 # the frozen loader interface, not a GPR or an already assigned TPS offset.
 op("load_cprog_agx3", None, srcs = 0, imms = [IMM])

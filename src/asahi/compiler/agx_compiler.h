@@ -483,6 +483,19 @@ agx_texture_resource(const agx_instr *I)
 }
 
 static inline bool
+agx_is_texture_publication(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3 ||
+          I->op == AGX_OPCODE_PUBLISH_TEXTURE_SCALAR_AGX3;
+}
+
+static inline uint32_t
+agx_publication_resource(const agx_instr *I)
+{
+   return agx_is_texture_publication(I) ? I->imm : 0;
+}
+
+static inline bool
 agx_is_vertex_store(const agx_instr *I)
 {
    return I->op == AGX_OPCODE_ST_VARY ||
@@ -1146,6 +1159,7 @@ void agx_lower_pseudo(agx_context *ctx);
 void agx_lower_spill(agx_context *ctx);
 void agx3_split_vector_stack_access(agx_context *ctx);
 bool agx3_lower_texture_publications(agx_context *ctx);
+bool agx3_lower_scalar_texture_publications(agx_context *ctx);
 void agx_lower_uniform_sources(agx_context *ctx);
 void agx_opt_cse(agx_context *ctx);
 void agx_opt_compact_constants(agx_context *ctx);

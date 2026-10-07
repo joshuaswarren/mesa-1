@@ -2210,6 +2210,16 @@ agx_ra(agx_context *ctx)
             BITSET_SET(low_gpr, split_source[I->src[0].value] - 1);
       }
 
+      /* Explicit scalar publications are the coordinate GPR consumers now.
+       * Their native COPY source still has the same seven-bit domain, even
+       * though the following sample no longer exposes a GPR operand to RA.
+       */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          agx_is_texture_publication(I)) {
+         agx_foreach_ssa_src(I, s)
+            BITSET_SET(texture_gpr, I->src[s].value);
+      }
+
       /* G17P publishes sampled coordinates through COPY, whose source field
        * has seven bits and no high-bit extension. CEM has the same source
        * domain. Keep every SSA vector that reaches either path below half

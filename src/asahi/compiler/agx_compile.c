@@ -8884,6 +8884,14 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
+   /* Expose independent coordinate inputs before register allocation. Resource
+    * values have no GPR destination; remove any now-unused coordinate collect.
+    */
+   if (agx3_lower_scalar_texture_publications(ctx)) {
+      agx_validate(ctx, "scalar texture publications");
+      AGX_PASS(ctx, agx_dce, true);
+   }
+
    if (!agx3_tile_store_payloads_fit(ctx)) {
       agx_set_refusal(ctx, "tile-store payload bank overflow", __LINE__);
       ralloc_free(ctx);
