@@ -852,7 +852,8 @@ check_device_rmw_compute(enum agx_isa_encoding encoding)
 }
 
 static bool
-check_device_atomic_compute(enum agx_isa_encoding encoding)
+check_device_atomic_stage(enum agx_isa_encoding encoding,
+                          mesa_shader_stage stage)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
    static const struct {
@@ -867,7 +868,7 @@ check_device_atomic_compute(enum agx_isa_encoding encoding)
 
    for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
       nir_builder b = nir_builder_init_simple_shader(
-         MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 device atomic family");
+         stage, &agx_nir_options, "AGX3 device atomic family");
       b.shader->info.workgroup_size[0] = 1;
       b.shader->info.workgroup_size[1] = 1;
       b.shader->info.workgroup_size[2] = 1;
@@ -919,13 +920,22 @@ check_device_atomic_compute(enum agx_isa_encoding encoding)
                    part.info.binary_size - sizeof(end),
                 end, sizeof(end)) == 0;
 
+      /* Returning atomics reload from TPS, including CDM programs that
+       * retain their API tessellation-control/geometry stage labels. */
+      const unsigned required_scratch = align(part.info.scratch_size, 4) + 16;
+      const bool scratch_valid = encoding != AGX_ISA_ENCODING_AGX3B ||
+         part.info.agx3_spectpr_scratch_size >= required_scratch;
+      if (!scratch_valid)
+         fprintf(stderr, "AGX3 returned atomic %s stage %u reserved %u TPS bytes, need %u\n",
+                 cases[i].name, stage,
+                 part.info.agx3_spectpr_scratch_size, required_scratch);
       if (!valid)
          fprintf(stderr, "AGX3 device atomic %s metadata/binary mismatch\n",
                  cases[i].name);
 
       free(part.binary);
       ralloc_free(b.shader);
-      if (!valid)
+      if (!valid || !scratch_valid)
          return false;
    }
 
@@ -2420,7 +2430,7 @@ main(int argc, char **argv)
 
    if (argc == 2 && strcmp(argv[1], "--device-atomics-only") == 0) {
       for (unsigned i = 0; i < ARRAY_SIZE(encodings); ++i) {
-         if (!check_device_atomic_compute(encodings[i]))
+         if (!check_device_atomic_stage(encodings[i], MESA_SHADER_COMPUTE))
             return 1;
       }
       return 0;
@@ -2522,7 +2532,11 @@ main(int argc, char **argv)
          return 1;
       if (!check_device_rmw_compute(encodings[i]))
          return 1;
-      if (!check_device_atomic_compute(encodings[i]))
+      if (!check_device_atomic_stage(encodings[i], MESA_SHADER_COMPUTE))
+         return 1;
+      if (encodings[i] == AGX_ISA_ENCODING_AGX3B &&
+          (!check_device_atomic_stage(encodings[i], MESA_SHADER_TESS_CTRL) ||
+           !check_device_atomic_stage(encodings[i], MESA_SHADER_GEOMETRY)))
          return 1;
       if (!check_shared_atomic_compute(encodings[i]))
          return 1;

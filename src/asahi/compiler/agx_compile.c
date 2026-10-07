@@ -8902,10 +8902,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * TPS half 0 without spills, and at half 130 after a kernel's spills end
     * at half 130. Keep this fixed ABI reservation distinct from
     * allocator-created spill size. */
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       (ctx->stage == MESA_SHADER_COMPUTE ||
-        ctx->stage == MESA_SHADER_VERTEX ||
-        ctx->stage == MESA_SHADER_FRAGMENT)) {
+   /* Software geometry and tessellation-control shaders keep their API
+    * stage labels while running through CDM. Their returned atomics consume
+    * the same thread-private word and require the same reservation. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       agx_foreach_instr_global(ctx, I) {
          if (I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
              !agx_is_null(I->dest[0])) {
