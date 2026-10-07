@@ -34,7 +34,9 @@
  * C -> fmadd32, in agx_compile.c); A/B are passed at their own width. Verified
  * operand forms: fmadd32 with fp32 or fp16 A/B (the fp16 A/B, fp32 C form is
  * what Apple's own mul_mm emits), fmadd16 with fp16 A/B. fp32 A/B with an fp16
- * accumulator is not advertised and not lowered.
+ * accumulator is not advertised and not lowered. bf16 A/B (fp32 C) have no
+ * hardware form: fragments stay 16-bit bf16 patterns and widen exactly to
+ * fp32 at the MulAdd, which then runs the fp32 A/B form.
  *
  * On by default; AGX_SIMDMAT=0 disables it. The hardware tile needs ALL 32
  * lanes of a subgroup, so this path is only correct when every subgroup of
@@ -56,6 +58,73 @@ static unsigned
 simdmat_len(struct glsl_cmat_description desc)
 {
    return (desc.rows * desc.cols) / SIMDMAT_SUBGROUP;
+}
+
+/* Base-type conversion of cooperative-matrix elements. bf16 values are 16-bit
+ * patterns with no NIR float type; SPV_KHR_bfloat16 converts through fp32. */
+nir_def *
+agx_cmat_convert(nir_builder *b, nir_def *src, enum glsl_base_type from,
+                 enum glsl_base_type to)
+{
+   if (from == to)
+      return src;
+   if (from == GLSL_TYPE_BFLOAT16)
+      return agx_cmat_convert(b, nir_bf2f(b, src), GLSL_TYPE_FLOAT, to);
+   if (to == GLSL_TYPE_BFLOAT16)
+      return nir_f2bf(b, agx_cmat_convert(b, src, from, GLSL_TYPE_FLOAT));
+
+   nir_op op = nir_type_conversion_op(nir_get_nir_type_for_glsl_base_type(from),
+                                      nir_get_nir_type_for_glsl_base_type(to),
+                                      nir_rounding_mode_undef);
+   return nir_build_alu1(b, op, src);
+}
+
+/* Element-wise op on elements of type t; y is NULL for a unary op. bf16
+ * elements compute in fp32 and round back to bf16. */
+nir_def *
+agx_cmat_alu(nir_builder *b, nir_op op, enum glsl_base_type t, nir_def *x,
+             nir_def *y)
+{
+   bool bf16 = t == GLSL_TYPE_BFLOAT16;
+   if (bf16) {
+      x = nir_bf2f(b, x);
+      y = y ? nir_bf2f(b, y) : NULL;
+   }
+   nir_def *r = y ? nir_build_alu2(b, op, x, y) : nir_build_alu1(b, op, x);
+   return bf16 ? nir_f2bf(b, r) : r;
+}
+
+/* bf16 <-> fp32 conversions in integer ALU. bf2f is exact; f2bf rounds to
+ * nearest even (Vulkan allows any rounding; RNE matches what bf16 storage
+ * kernels already compute), and a NaN keeps its sign and top payload bits
+ * with the quiet bit set. */
+static bool
+lower_bf16_conversion(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
+{
+   if (alu->op != nir_op_bf2f && alu->op != nir_op_f2bf)
+      return false;
+
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+   nir_def *r;
+   if (alu->op == nir_op_bf2f) {
+      r = nir_ishl_imm(b, nir_u2u32(b, x), 16);
+   } else {
+      nir_def *hi = nir_ushr_imm(b, x, 16);
+      nir_def *rne = nir_ushr_imm(
+         b, nir_iadd(b, nir_iadd_imm(b, x, 0x7fff), nir_iand_imm(b, hi, 1)), 16);
+      nir_def *nan = nir_ugt_imm(b, nir_iand_imm(b, x, 0x7fffffff), 0x7f800000);
+      r = nir_u2u16(b, nir_bcsel(b, nan, nir_ior_imm(b, hi, 0x40), rne));
+   }
+   nir_def_replace(&alu->def, r);
+   return true;
+}
+
+bool
+agx_nir_lower_bf16_conversions(nir_shader *shader)
+{
+   return nir_shader_alu_pass(shader, lower_bf16_conversion,
+                              nir_metadata_control_flow, NULL);
 }
 
 static const struct glsl_type *
@@ -309,6 +378,8 @@ lower_muladd(nir_builder *b, nir_intrinsic_instr *intr)
     * (f32acc shape: fp16 A/B, fp32 C/D). */
    struct glsl_cmat_description da = src_desc(intr->src[1]); /* A */
    struct glsl_cmat_description dc = src_desc(intr->src[3]); /* C / accumulator */
+   /* Every advertised shape has one A/B type; B is widened like A below. */
+   assert(da.element_type == src_desc(intr->src[2]).element_type);
    unsigned nblk = da.rows / 8;
    unsigned acc_bits = glsl_base_type_bit_size(dc.element_type);
    unsigned in_bits = glsl_base_type_bit_size(da.element_type);
@@ -316,6 +387,12 @@ lower_muladd(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def *a = load_src(b, intr->src[1]);
    nir_def *bb = load_src(b, intr->src[2]);
    nir_def *c = load_src(b, intr->src[3]);
+
+   if (da.element_type == GLSL_TYPE_BFLOAT16) {
+      a = nir_bf2f(b, a);
+      bb = nir_bf2f(b, bb);
+      in_bits = 32;
+   }
 
    /* The HW op accumulates in the C type and takes A/B at their own width
     * (fp16 A/B with fp32 C is the mixed-precision form Apple's own mul_mm
@@ -380,7 +457,9 @@ lower_binary_op(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def *c = load_src(b, intr->src[2]);
    unsigned save = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
-   store_src(b, intr->src[0], nir_build_alu2(b, nir_intrinsic_alu_op(intr), a, c));
+   store_src(b, intr->src[0],
+             agx_cmat_alu(b, nir_intrinsic_alu_op(intr),
+                          src_desc(intr->src[1]).element_type, a, c));
    b->fp_math_ctrl = save;
    nir_instr_remove(&intr->instr);
    return true;
@@ -392,7 +471,9 @@ lower_unary_op(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def *a = load_src(b, intr->src[1]);
    unsigned save = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
-   store_src(b, intr->src[0], nir_build_alu1(b, nir_intrinsic_alu_op(intr), a));
+   store_src(b, intr->src[0],
+             agx_cmat_alu(b, nir_intrinsic_alu_op(intr),
+                          src_desc(intr->src[1]).element_type, a, NULL));
    b->fp_math_ctrl = save;
    nir_instr_remove(&intr->instr);
    return true;
@@ -405,7 +486,9 @@ lower_scalar_op(nir_builder *b, nir_intrinsic_instr *intr)
    unsigned save = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
    store_src(b, intr->src[0],
-             nir_build_alu2(b, nir_intrinsic_alu_op(intr), a, intr->src[2].ssa));
+             agx_cmat_alu(b, nir_intrinsic_alu_op(intr),
+                          src_desc(intr->src[1]).element_type, a,
+                          intr->src[2].ssa));
    b->fp_math_ctrl = save;
    nir_instr_remove(&intr->instr);
    return true;
@@ -455,17 +538,10 @@ lower_convert(nir_builder *b, nir_intrinsic_instr *intr)
           "HWMAT: cmat use-change/transpose not implemented");
 
    nir_def *src = load_src(b, intr->src[1]);
-   nir_def *ret = src;
-   if (dd.element_type != sd.element_type) {
-      nir_op op = nir_type_conversion_op(
-         nir_get_nir_type_for_glsl_base_type(sd.element_type),
-         nir_get_nir_type_for_glsl_base_type(dd.element_type),
-         nir_rounding_mode_undef);
-      unsigned save = b->fp_math_ctrl;
-      b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
-      ret = nir_build_alu1(b, op, src);
-      b->fp_math_ctrl = save;
-   }
+   unsigned save = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
+   nir_def *ret = agx_cmat_convert(b, src, sd.element_type, dd.element_type);
+   b->fp_math_ctrl = save;
    store_src(b, intr->src[0], ret);
    nir_instr_remove(&intr->instr);
    return true;

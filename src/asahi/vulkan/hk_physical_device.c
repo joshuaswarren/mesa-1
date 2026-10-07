@@ -124,6 +124,7 @@ hk_get_device_extensions(const struct agx_device *dev,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_atomic_int64 = false,
+      .KHR_shader_bfloat16 = true,
       .KHR_shader_clock = false,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
@@ -256,6 +257,12 @@ hk_get_device_features(
        * hk_cooperative_matrix_enabled) */
       .cooperativeMatrix = hk_cooperative_matrix_enabled(dev),
       .cooperativeMatrixRobustBufferAccess = false,
+
+      /* VK_KHR_shader_bfloat16: conversions, and bf16 A/B cooperative
+       * matrices widened to fp32 (agx_nir_lower_simdmat.c) */
+      .shaderBFloat16Type = true,
+      .shaderBFloat16DotProduct = false,
+      .shaderBFloat16CooperativeMatrix = hk_cooperative_matrix_enabled(dev),
 
       /* Vulkan 1.0 */
       .robustBufferAccess = true,
@@ -1554,12 +1561,14 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
        * takes fp16 or fp32 A/B and accumulates in fp32 (fmadd32) or fp16
        * (fmadd16); 16x16x16 is a 2x2x2 tiling of 8x8x8 ops in
        * agx_nir_lower_simdmat.c. Every shape here is GPU-verified exact.
+       * bf16 A/B widen exactly to fp32 and run the fp32 A/B form.
        */
       static const struct {
          VkComponentTypeKHR ab, c;
       } types[] = {
          {VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
          {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+         {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
          {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
       };
       for (unsigned n = 8; n <= 16; n *= 2) {

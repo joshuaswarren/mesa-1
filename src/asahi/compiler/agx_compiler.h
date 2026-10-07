@@ -1098,6 +1098,11 @@ bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader);
 bool agx_nir_lower_simdmat(nir_shader *shader, unsigned subgroup_size);
 bool agx_nir_lower_cmat(nir_shader *shader);
+nir_def *agx_cmat_convert(struct nir_builder *b, nir_def *src,
+                          enum glsl_base_type from, enum glsl_base_type to);
+nir_def *agx_cmat_alu(struct nir_builder *b, nir_op op, enum glsl_base_type t,
+                      nir_def *x, nir_def *y);
+bool agx_nir_lower_bf16_conversions(nir_shader *shader);
 bool agx_nir_lower_frag_sidefx(nir_shader *s);
 
 struct agx_cycle_estimate {
