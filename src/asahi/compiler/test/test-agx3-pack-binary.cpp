@@ -9083,15 +9083,14 @@ TEST_F(AGX3PackBinary, SixVertexOutputsDrainUnrelatedSlotsBeforeInjectedCopy)
    EXPECT_EQ(memcmp(&*(at + len), wait_bytes, wait_len), 0);
 }
 
-TEST_F(AGX3PackBinary, SixVertexOutputsRefuseUnqualifiedGraphs)
+TEST_F(AGX3PackBinary, SparseTerminalOutputsRetainIndicesAndRefuseInvalidGraphs)
 {
    for (unsigned mode = 0; mode < 7; ++mode) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_VERTEX;
       for (unsigned component = 0; component < 6; ++component) {
-         /* A hole at index zero is not a base the UVS layout can produce: a
-          * positionless program starts at AGX3_UVS_POSITION_ENTRIES, not at
-          * one. */
+         /* Terminal sparse layouts retain holes without remapping their
+          * component addresses. Duplicate writes remain invalid. */
          if (mode == 0 && component == 0)
             continue;
          unsigned index = mode == 1 && component == 0 ? 1 : component;
@@ -9109,7 +9108,27 @@ TEST_F(AGX3PackBinary, SixVertexOutputsRefuseUnqualifiedGraphs)
                           agx_uniform(0, AGX_SIZE_64), agx_immediate(0),
                           AGX_FORMAT_I32, 1, 2, false);
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+      if (mode == 0 || mode == 2) {
+         const auto code = pack(b);
+         ASSERT_FALSE(code.empty()) << "mode=" << mode;
+         /* Match each expected component's native UVSW, allowing the
+          * independently checked terminal batch tokens. */
+         for (unsigned component = mode == 0 ? 1 : 0; component < 6; ++component) {
+            const unsigned index = mode == 2 && component == 5 ? 6 : component;
+            bool found = false;
+            for (unsigned slot = 1; slot <= 6; ++slot) {
+               uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
+               ASSERT_TRUE(agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B, index * 2,
+                                          index, slot, true, 1u << (slot - 1),
+                                          bytes, &len));
+               found |= std::search(code.begin(), code.end(), bytes, bytes + len)
+                           != code.end();
+            }
+            EXPECT_TRUE(found) << "mode=" << mode << " component=" << index;
+         }
+      } else {
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+      }
    }
 }
 
@@ -9146,14 +9165,14 @@ TEST_F(AGX3PackBinary, PositionlessVertexOutputsStageFromTheUvsPositionGroup)
    }
    EXPECT_EQ(writes, 5u);
 
-   /* A run based anywhere else is not a layout the driver emits. */
+   /* A terminal sparse run retains its component addresses as well. */
    agx_builder *ungrounded = builder(AGX_ISA_ENCODING_AGX3B);
    ungrounded->shader->stage = MESA_SHADER_VERTEX;
    for (unsigned index = 5; index < 10; ++index)
       agx_st_vary(ungrounded, agx_immediate(index),
                   agx_register(0, AGX_SIZE_32));
    agx_stop(ungrounded);
-   EXPECT_TRUE(pack(ungrounded, false).empty());
+   EXPECT_FALSE(pack(ungrounded).empty());
 }
 
 TEST_F(AGX3PackBinary, ProjectiveReciprocalMatchesNativeOperandForm)
@@ -10405,9 +10424,9 @@ TEST_F(AGX3PackBinary, SparseTerminalVertexOutputUsesComponentStaging)
 
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
-   ASSERT_TRUE(agx3_stage_copy_source(enc, 8, 0, false, 5, 0, bytes, &len));
+   ASSERT_TRUE(agx3_stage_copy_source(enc, 8, 0, false, 1, 0, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_vary_uvsw(enc, 8, 4, 5, true, 1u << 4, bytes, &len));
+   ASSERT_TRUE(agx3_vary_uvsw(enc, 8, 4, 1, true, 1u << 0, bytes, &len));
    append(want, bytes, len);
    want.insert(want.end(), {0x0e, 0, 0, 0});
 
@@ -10760,15 +10779,15 @@ TEST_F(AGX3PackBinary, ReorderedWideVertexOutputsMatchNativeStagingProtocol)
       uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
       const uint16_t wait = position && (position % 6) == 0 ? 0x3f : 0;
       ASSERT_TRUE(agx3_stage_copy_source(enc, component * 2, 4, false,
-                                        component % 6 + 1, wait, bytes, &len));
+                                        position % 6 + 1, wait, bytes, &len));
       append(want, bytes, len);
       if (((position + 1) % 6) == 0 || position + 1 == ARRAY_SIZE(order)) {
          const unsigned first = position - (position % 6);
          for (unsigned i = first; i <= position; ++i) {
             const unsigned output = order[i];
             ASSERT_TRUE(agx3_vary_uvsw(enc, output * 2, output,
-                                      output % 6 + 1, true,
-                                      1u << (output % 6), bytes, &len));
+                                      i % 6 + 1, true,
+                                      1u << (i % 6), bytes, &len));
             append(want, bytes, len);
          }
       }
