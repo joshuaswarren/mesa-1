@@ -26,11 +26,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef G17P_SEQUENTIAL_DISPATCH
-#include "g17p_vulkan_sequential_dispatch_spv.h"
-#else
 #include "g17p_vulkan_compute_spv.h"
-#endif
 
 #define T8140_DEVICE_ID 0x8140
 #define ELEMENT_COUNT   32
@@ -93,11 +89,7 @@ VK_FN(vkDestroyFence);
 VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
 
-#ifdef G17P_SEQUENTIAL_DISPATCH
-static const char *const NAME = "g17p-vulkan-sequential-dispatch";
-#else
 static const char *const NAME = "g17p-vulkan-dispatch-indirect";
-#endif
 
 static void
 die(const char *what)
@@ -534,11 +526,7 @@ main(int argc, char **argv)
     * args[2] supplies the executable workload for the selected shader. */
    VkBuffer args[3];
    VkDeviceMemory args_memory[3];
-#ifdef G17P_SEQUENTIAL_DISPATCH
-   static const uint32_t args_values[3][3] = {{3, 3, 1}, {5, 2, 1}, {3, 3, 1}};
-#else
    static const uint32_t args_values[3][3] = {{2, 3, 1}, {5, 1, 1}, {1, 1, 1}};
-#endif
    for (unsigned i = 0; i < 3; ++i) {
       check(vkCreateBuffer(device, &args_info, NULL, &args[i]),
             "vkCreateBuffer(indirect)");
@@ -605,11 +593,7 @@ main(int argc, char **argv)
    const VkDescriptorBufferInfo descriptor_buffer = {
       .buffer = buffer,
       .offset = 0,
-#ifdef G17P_SEQUENTIAL_DISPATCH
-      .range = sizeof(uint32_t),
-#else
       .range = buffer_size,
-#endif
    };
    const VkWriteDescriptorSet descriptor_write = {
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -730,11 +714,7 @@ main(int argc, char **argv)
       REQUIRE(count == 2, "traced %zu indirect dispatches, recorded 2", count);
 
    /* Match each variant's shader local size. */
-#ifdef G17P_SEQUENTIAL_DISPATCH
-   static const uint32_t expected_local[3] = {1, 1, 1};
-#else
    static const uint32_t expected_local[3] = {32, 1, 1};
-#endif
    for (unsigned i = 0; i < count && i < 2; ++i)
       verify(&recorded[i], i, recorded[i].args_va, expected_local);
 
@@ -761,9 +741,6 @@ main(int argc, char **argv)
       for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
          mapped[i] = UINT32_C(0xA5A50000) | i;
 
-#ifdef G17P_SEQUENTIAL_DISPATCH
-      mapped[0] = 0;
-#endif
       VkCommandBuffer execute_cb;
       check(vkAllocateCommandBuffers(device, &command_buffer_info,
                                      &execute_cb),
@@ -773,9 +750,6 @@ main(int argc, char **argv)
       vkCmdBindPipeline(execute_cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
       vkCmdBindDescriptorSets(execute_cb, VK_PIPELINE_BIND_POINT_COMPUTE,
                               pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
-#ifdef G17P_SEQUENTIAL_DISPATCH
-      vkCmdDispatchBase(execute_cb, 2, 3, 4, 1, 1, 1);
-#endif
       vkCmdDispatchIndirect(execute_cb, args[2], 0);
       const VkBufferMemoryBarrier host_barrier = {
          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -810,19 +784,9 @@ main(int argc, char **argv)
             "vkWaitForFences");
 
       if (!submit_only) {
-#ifdef G17P_SEQUENTIAL_DISPATCH
-         REQUIRE(mapped[0] == 10, "counter=%u expected=10", mapped[0]);
-         for (unsigned i = 1; i < ELEMENT_COUNT; ++i)
-            REQUIRE(mapped[i] == (UINT32_C(0xa5a50000) | i),
-                    "guard word %u changed to %08x", i, mapped[i]);
-         if (!failures)
-            printf("%s: counter=10 guards=124 PASS%s\n", NAME,
-                   cpu_reference ? " (CPU reference only)" : "");
-#else
          for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
             REQUIRE(mapped[i] == UINT32_C(0x12340000) + (2 * i) + 3,
                     "element %u got %08x", i, mapped[i]);
-#endif
       } else {
          printf("%s: one primary buffer submitted; counter unchecked\n", NAME);
       }

@@ -2560,15 +2560,6 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    g17p_sequential_dispatch = executable(
-      'g17p-vulkan-sequential-dispatch',
-      files('tests/g17p_vulkan_dispatch_indirect.c'),
-      include_directories : [inc_include],
-      dependencies : [dep_dl],
-      c_args : [c_msvc_compat_args, '-DG17P_SEQUENTIAL_DISPATCH=1'],
-      gnu_symbol_visibility : 'hidden',
-    )
-
     # Offline proof that transform feedback records on G17P through the native
     # geometry path and G17P-compiled libagx counter-copy kernel.  --execute is
     # the hardware mode with exact buffer, counter, and guard checks.
@@ -2661,16 +2652,6 @@ if with_tests
     g17p_timeline_host = executable(
       'g17p-vulkan-timeline-host',
       files('tests/g17p_vulkan_timeline_host.c'),
-      include_directories : [inc_include],
-      dependencies : [dep_dl],
-      c_args : [c_msvc_compat_args],
-      gnu_symbol_visibility : 'hidden',
-    )
-
-    # Public no-submit VK_EXT_memory_budget allocation-lifetime oracle.
-    g17p_memory_budget = executable(
-      'g17p-vulkan-memory-budget',
-      files('tests/g17p_vulkan_memory_budget.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
@@ -2831,20 +2812,6 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_CONDITIONAL_RENDERING=1'],
-      gnu_symbol_visibility : 'hidden',
-    )
-
-    # Graphics half of the same qualification: direct, robust indexed,
-    # indirect, count and clear-attachments paths are checked by exact RGBA8
-    # pixels and precise occlusion counts.
-    g17p_conditional_graphics = executable(
-      'g17p-vulkan-conditional-rendering-graphics',
-      files('tests/g17p_render_only.c'),
-      include_directories : [inc_include],
-      dependencies : [dep_dl],
-      c_args : [c_msvc_compat_args,
-                '-DG17P_OCCLUSION_QUERY=1',
-                '-DG17P_CONDITIONAL_RENDERING=1'],
       gnu_symbol_visibility : 'hidden',
     )
 

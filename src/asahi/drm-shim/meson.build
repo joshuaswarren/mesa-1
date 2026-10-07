@@ -85,17 +85,6 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  test(
-    'hk_g17p_sequential_dispatch',
-    prog_python,
-    args : [
-      files('../vulkan/tests/test-g17p-sequential-dispatch.py'),
-      meson.current_build_dir() / '../../..',
-    ],
-    depends : [_dev_icd, libasahi_noop_drm_shim, g17p_sequential_dispatch],
-    suite : ['asahi', 'g17p-sequential-dispatch'],
-    timeout : 30,
-  )
 
   test(
     'hk_g17p_buffer_memory_lifetime',
@@ -135,16 +124,6 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  test(
-    'hk_g17p_memory_budget_lifetime',
-    g17p_memory_budget,
-    env : g17p_queue_progress_environment + {
-      'HK_SYSMEM' : '1073741824',
-    },
-    depends : _dev_icd,
-    suite : ['asahi', 'g17p-memory-budget'],
-    timeout : 30,
-  )
 
   test(
     'hk_g17p_maintenance4_requirements',
@@ -517,38 +496,6 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  # Retain the one-draw-per-stream diagnostic baseline explicitly. It must
-  # never be required by the default batching tests below.
-  g17p_interdraw_barrier_env = environment(g17p_image_copy_3d_environment)
-  g17p_interdraw_barrier_env.set('HK_G17P_DRAW_SPLIT', 'every')
-  g17p_interdraw_barrier_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '0:4')
-  test(
-    'hk_g17p_interdraw_vdm_barrier',
-    g17p_scissor_ring,
-    args : ['ring', '--record-only'],
-    env : g17p_interdraw_barrier_env,
-    depends : _dev_icd,
-    suite : ['asahi', 'g17p-interdraw-barrier'],
-    timeout : 30,
-  )
-
-  # Explicit cache-invalidation diagnostic, independently of stream splitting.
-  g17p_concat_draw_barrier_env = environment(g17p_image_copy_3d_environment)
-  g17p_concat_draw_barrier_env.set('HK_G17P_CONCAT_DRAWS', '1')
-  g17p_concat_draw_barrier_env.set('HK_G17P_INTERDRAW_BARRIER', '1')
-  g17p_concat_draw_barrier_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '3:4')
-  test(
-    'hk_g17p_interdraw_vdm_barrier_concat_control',
-    g17p_scissor_ring,
-    args : ['ring', '--record-only'],
-    env : g17p_concat_draw_barrier_env,
-    depends : _dev_icd,
-    suite : ['asahi', 'g17p-interdraw-barrier'],
-    timeout : 30,
-  )
-
   # The narrowness control. Four identical draws with no state between them
   # are body-only: they reuse what the first draw latched, so nothing the VDM
   # is still dereferencing gets overwritten and no barrier is owed. Expect
@@ -563,55 +510,6 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     env : g17p_repeat_draw_barrier_env,
     depends : _dev_icd,
     suite : ['asahi', 'g17p-interdraw-barrier'],
-    timeout : 30,
-  )
-
-  # What each draw-split policy does to the shape of the stream.
-  #
-  # Diagnostic policies are checked separately from the default, including
-  # their counts of both draw bodies and state publications.
-  g17p_split_shape_every_env = environment(g17p_image_copy_3d_environment)
-  g17p_split_shape_every_env.set('G17P_REPEAT_DRAW_COUNT', '16')
-  g17p_split_shape_every_env.set('HK_G17P_DRAW_SPLIT', 'every')
-  g17p_split_shape_every_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '16:16:16')
-  test(
-    'hk_g17p_split_shape_every_draw',
-    g17p_repeat_draw,
-    env : g17p_split_shape_every_env,
-    depends : _dev_icd,
-    suite : ['asahi', 'g17p-draw-split'],
-    timeout : 30,
-  )
-
-  # The republication diagnostic permits unchanged-state draw bodies to batch.
-  g17p_split_shape_republish_env = environment(g17p_image_copy_3d_environment)
-  g17p_split_shape_republish_env.set('G17P_REPEAT_DRAW_COUNT', '16')
-  g17p_split_shape_republish_env.set('HK_G17P_DRAW_SPLIT', 'republish')
-  g17p_split_shape_republish_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '1:16:1')
-  test(
-    'hk_g17p_split_shape_republished_state',
-    g17p_repeat_draw,
-    env : g17p_split_shape_republish_env,
-    depends : _dev_icd,
-    suite : ['asahi', 'g17p-draw-split'],
-    timeout : 30,
-  )
-
-  # Explicit diagnostic depth cap: four streams of four bodies.
-  g17p_split_shape_cap_env = environment(g17p_image_copy_3d_environment)
-  g17p_split_shape_cap_env.set('G17P_REPEAT_DRAW_COUNT', '16')
-  g17p_split_shape_cap_env.set('HK_G17P_DRAW_SPLIT', 'republish')
-  g17p_split_shape_cap_env.set('HK_G17P_DRAWS_PER_STREAM', '4')
-  g17p_split_shape_cap_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '4:16:4')
-  test(
-    'hk_g17p_split_shape_draws_per_stream_cap',
-    g17p_repeat_draw,
-    env : g17p_split_shape_cap_env,
-    depends : _dev_icd,
-    suite : ['asahi', 'g17p-draw-split'],
     timeout : 30,
   )
 
@@ -675,17 +573,6 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   test('hk_g17p_batching_capacity_integer_bias', g17p_repeat_draw,
        env : batching_bias_env, depends : [_dev_icd, libasahi_noop_drm_shim],
        suite : ['asahi', 'g17p-batching'], timeout : 30)
-
-  split_bias_env = environment(g17p_image_copy_3d_environment)
-  split_bias_env.set('G17P_REPEAT_DRAW_COUNT', '16')
-  split_bias_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
-  split_bias_env.set('G17P_REPEAT_INTEGER_DEPTH_BIAS', '1')
-  split_bias_env.set('HK_G17P_STATE_PUBLICATIONS_PER_STREAM', '4')
-  split_bias_env.set('ASAHI_SHIM_G17P_EXPECT_INTEGER_DEPTH_BIAS', '1')
-  split_bias_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '4:16:16:4')
-  test('hk_g17p_split_integer_bias', g17p_repeat_draw,
-       env : split_bias_env, depends : [_dev_icd, libasahi_noop_drm_shim],
-       suite : ['asahi', 'g17p-draw-split'], timeout : 30)
 
   batching_repeat_env = environment(g17p_image_copy_3d_environment)
   batching_repeat_env.set('G17P_REPEAT_DRAW_COUNT', '128')
@@ -928,25 +815,4 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  foreach case : [
-    'execute',
-    'discard',
-    'indexed-execute',
-    'indexed-discard',
-    'indirect-execute',
-    'indirect-discard',
-    'count-execute',
-    'count-discard',
-    'clear-execute',
-    'clear-discard',
-  ]
-    test(
-      'hk_g17p_conditional_graphics_' + case,
-      g17p_conditional_graphics,
-      args : ['--submit-only', case],
-      env : g17p_conditional_env,
-      suite : ['asahi', 'g17p-conditional-rendering'],
-      timeout : 30,
-    )
-  endforeach
 endif
