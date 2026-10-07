@@ -3586,23 +3586,29 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       /* Fold constant offset srcs for IO. */
       NIR_PASS(_, nir, nir_opt_constant_folding);
 
+      /* Only compile the software variant if we might use this shader with
+       * geometry/tessellation. We need to compile the hardware variant
+       * unconditionally to handle the VS -> null FS case, which does not
+       * require setting the FRAGMENT bit.
+       */
+      const bool sw_variant =
+         next_stage & (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                       VK_SHADER_STAGE_GEOMETRY_BIT);
+      const enum hk_vs_variant last_variant =
+         sw_variant ? HK_VS_VARIANT_SW : HK_VS_VARIANT_HW;
+
       for (enum hk_vs_variant v = 0; v < HK_VS_VARIANTS; ++v) {
-         /* Only compile the software variant if we might use this shader with
-          * geometry/tessellation. We need to compile the hardware variant
-          * unconditionally to handle the VS -> null FS case, which does not
-          * require setting the FRAGMENT bit.
-          */
-         if (v == HK_VS_VARIANT_SW &&
-             !(next_stage & (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                             VK_SHADER_STAGE_GEOMETRY_BIT)))
+         if (v == HK_VS_VARIANT_SW && !sw_variant)
             continue;
 
          struct hk_shader *shader = &obj->variants[v];
          bool hw = v == HK_VS_VARIANT_HW;
-         bool last = (v + 1) == HK_VS_VARIANTS;
+         bool last = v == last_variant;
 
          /* Each variant gets its own NIR. To save an extra clone, we use the
-          * original NIR for the last stage.
+          * original NIR for the last variant compiled. (Using it only for the
+          * software variant leaked the original whenever that variant was not
+          * needed, the common vertex -> fragment case.)
           */
          nir_shader *clone = last ? nir : nir_shader_clone(NULL, nir);
 
