@@ -2689,7 +2689,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       }
       clear_count = selected;
    }
-   cs->cr.process_empty_tiles = resolved_clear;
+   /* Resolves of loaded samples write the destination even without geometry. */
+   const bool process_empty_tiles = resolved_clear ||
+      (render->g17p_direct_color_resolve &&
+       pRenderingInfo->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD);
+   cs->cr.process_empty_tiles = process_empty_tiles;
    if (clear_count > 0 &&
        (incomplete_render_area || clear_spills || clear_wide_multisample)) {
       const VkClearRect clear_rect = {
@@ -2708,7 +2712,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
        * effect. This is the case exactly when there is an attachment we are
        * fast clearing and then storing.
        */
-      cs->cr.process_empty_tiles = resolved_clear;
+      cs->cr.process_empty_tiles = process_empty_tiles;
    }
 }
 
