@@ -187,15 +187,16 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
-   /* Large constant arrays become shader constant data read through the root
-    * table. This must run before agx_preprocess_nir, whose
-    * nir_lower_vars_to_scratch would otherwise give every invocation a scratch
-    * copy of the whole array (compute only: graphics stages have no root field
-    * for it). nir_opt_large_constants cannot see through copy_deref.
+   /* Constant arrays that nir_lower_vars_to_scratch (in agx_preprocess_nir,
+    * same 256 B threshold) would give every invocation a scratch copy of
+    * become shader constant data read through the root table instead.
+    * Smaller indirectly indexed arrays keep their if-else lowering. Compute
+    * only: graphics stages have no root field for it.
+    * nir_opt_large_constants cannot see through copy_deref.
     */
    if (nir->info.stage == MESA_SHADER_COMPUTE && hk_large_constants()) {
       NIR_PASS(_, nir, nir_lower_var_copies);
-      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 256);
    }
 
    /* Optimize but allow copies because we haven't lowered them yet */
