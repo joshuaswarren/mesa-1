@@ -29,6 +29,20 @@ libasahi_noop_drm_shim = shared_library(
 )
 
 if with_tests and with_asahi_vk and host_machine.system() == 'linux'
+  test(
+    'hk_g17p_depth_feedback_query',
+    g17p_depth_feedback_query,
+    args : ['compressed'],
+    env : {
+      'ASAHI_SHIM_CHIP' : 'g17p',
+      'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+      'VK_DRIVER_FILES' : _dev_icd.full_path(),
+      'MESA_SHADER_CACHE_DISABLE' : 'true',
+    },
+    depends : [_dev_icd, libasahi_noop_drm_shim, libvulkan_asahi],
+    suite : ['asahi'],
+  )
+
   foreach sparse_case : [['g17p', 'no-sparse'], ['g13g', 'sparse']]
     test(
       'hk_sparse_format_properties_' + sparse_case[0],

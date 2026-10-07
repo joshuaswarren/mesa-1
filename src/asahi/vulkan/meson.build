@@ -195,6 +195,13 @@ if with_tests
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
     )
+    g17p_depth_feedback_query = executable(
+      'g17p-depth-feedback-query',
+      files('tests/g17p_depth_feedback_query.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+    )
   endif
 
   test(
