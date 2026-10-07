@@ -257,6 +257,10 @@ struct hk_descriptor_state {
    uint64_t generation;
    struct hk_root_descriptor_table root;
 
+   /* One past the highest root.dynamic_buffers entry any bind wrote. Later
+    * entries are unread by every bound layout and stay out of uploads. */
+   uint8_t dynamic_buffer_end;
+
    uint32_t set_sizes[HK_MAX_SETS];
    struct hk_descriptor_set *sets[HK_MAX_SETS];
    uint32_t sets_dirty;

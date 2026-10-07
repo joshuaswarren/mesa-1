@@ -1067,6 +1067,7 @@ hk_bind_descriptor_sets(struct hk_cmd_buffer *cmd,
    }
    assert(dyn_buffer_start <= HK_MAX_DYNAMIC_BUFFERS);
    assert(next_dyn_offset <= info->dynamicOffsetCount);
+   desc->dynamic_buffer_end = MAX2(desc->dynamic_buffer_end, dyn_buffer_start);
 
    /* Preserve all descriptor bookkeeping even if the root's immutable bytes
     * can be reused.  Other paths keep the prior unconditional invalidation.
@@ -1264,13 +1265,23 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    root->root_desc_addr = root_ptr.gpu;
    root->printf_buffer_address = dev->dev.printf_buffer_address;
 
-   memcpy(root_ptr.cpu, root, sizeof(*root));
+   /* Dynamic buffers past the highest one ever bound are read by no bound
+    * layout: copy the table around them. */
+   const size_t head_B = hk_root_descriptor_offset(dynamic_buffers) +
+                         desc->dynamic_buffer_end * sizeof(root->dynamic_buffers[0]);
+   const size_t tail_B = hk_root_descriptor_offset(set_dynamic_buffer_start);
+   memcpy(root_ptr.cpu, root, head_B);
+   memcpy((uint8_t *)root_ptr.cpu + tail_B, (const uint8_t *)root + tail_B,
+          sizeof(*root) - tail_B);
 
    /* Cached G17P roots need explicit CPU-to-GPU publication. Clean just this
     * table now; vkEndCommandBuffer completes all recorded root cleans with a
     * single fence before submission can consume them. */
-   if (dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops())
-      util_flush_range_no_fence(root_ptr.cpu, sizeof(*root));
+   if (dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops()) {
+      util_flush_range_no_fence(root_ptr.cpu, head_B);
+      util_flush_range_no_fence((uint8_t *)root_ptr.cpu + tail_B,
+                                sizeof(*root) - tail_B);
+   }
 
    return root_ptr.gpu;
 }
