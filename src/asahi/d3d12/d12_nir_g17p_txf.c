@@ -263,3 +263,20 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
    NIR_PASS(_, nir, nir_opt_dce);
    return true;
 }
+
+bool
+d12_nir_lower_g17p_graphics_resources(
+   nir_shader *nir, uint32_t generation,
+   struct d12_nir_g17p_fragment_sample *out)
+{
+   if (!nir || !out || generation != 9 ||
+       (nir->info.stage != MESA_SHADER_VERTEX &&
+        nir->info.stage != MESA_SHADER_FRAGMENT))
+      return false;
+   if (!agx_nir_lower_g17p_native32_samplers(nir, D12_UNIFORM_TEXTURES))
+      return false;
+   *out = (struct d12_nir_g17p_fragment_sample){
+      .indexed_fetch = true, .indexed_samplers = true,
+   };
+   return true;
+}

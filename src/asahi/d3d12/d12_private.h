@@ -315,7 +315,8 @@ struct d12_stage_outputs {
     * publishes the texture descriptor and the static sampler as the two
     * pointers in uniform halves 0..7. */
    bool g17p_fragment_sample;
-   bool g17p_fragment_fetch; /* native32 array and the device sampler0 */
+   bool g17p_fragment_fetch; /* native32 texture array */
+   bool g17p_indexed_samplers;
    uint8_t g17p_sample_slot;           /* API sampler s<N> */
    uint32_t g17p_texture_offset_B;     /* byte offset in the root texture table */
    uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
@@ -1317,6 +1318,7 @@ struct d12_gfx_stage {
    struct {
       bool valid;
       bool indexed_fetch; /* publish the complete readonly texture array */
+      bool indexed_samplers; /* mixed samples/fetches with the sampler file */
       uint8_t sampler_slot;
       uint32_t texture_offset_B;
    } g17p_sample;

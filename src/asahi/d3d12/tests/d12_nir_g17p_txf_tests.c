@@ -124,6 +124,46 @@ int main(void)
       ralloc_free(v.shader);
    }
 
+   /* A vertex can mix a buffer Load with an explicit-level sample. Reuse
+    * the same native texture array while retaining sampler entry one. */
+   {
+      nir_builder b = builder();
+      b.shader->info.stage = MESA_SHADER_VERTEX;
+      nir_tex_instr *fetch = make_fetch(&b, nir_imm_int(&b, 0));
+      nir_tex_instr *sample = nir_tex_instr_create(b.shader, 4);
+      sample->op = nir_texop_txl;
+      sample->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      sample->dest_type = nir_type_float32;
+      sample->coord_components = 2;
+      sample->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1,
+         nir_imm_vec2(&b, 0.25f, 0.75f));
+      sample->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle,
+         nir_bindless_image_agx(&b, nir_imm_int(&b, 32),
+                                .desc_set = D12_UNIFORM_TEXTURES));
+      sample->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle,
+         nir_imm_intN_t(&b, 1, 16));
+      sample->src[3] = nir_tex_src_for_ssa(nir_tex_src_lod,
+         nir_imm_floatN_t(&b, 0.0f, 16));
+      nir_def_init(&sample->instr, &sample->def, 4, 32);
+      nir_builder_instr_insert(&b, &sample->instr);
+      nir_store_global(&b, &sample->def, nir_load_root_agx(&b),
+                       .align_mul = 16, .write_mask = 15);
+      struct d12_nir_g17p_fragment_sample binding = {0};
+      CHECK(d12_nir_lower_g17p_graphics_resources(b.shader, 9, &binding));
+      CHECK(binding.indexed_fetch && binding.indexed_samplers);
+      CHECK(nir_tex_instr_src_index(fetch, nir_tex_src_texture_handle) < 0);
+      CHECK(nir_tex_instr_src_index(sample, nir_tex_src_texture_handle) < 0);
+      int sampler = nir_tex_instr_src_index(sample, nir_tex_src_sampler_handle);
+      CHECK(sampler >= 0 && nir_src_bit_size(sample->src[sampler].src) == 64);
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      CHECK(sample->texture_index == 1);
+      sampler = nir_tex_instr_src_index(sample, nir_tex_src_sampler_handle);
+      CHECK(sampler >= 0);
+      CHECK(nir_src_as_uint(sample->src[sampler].src) == 1);
+      nir_validate_shader(b.shader, "mixed native32 fetch/sample");
+      ralloc_free(b.shader);
+   }
+
    /* Constant byte offsets become exactly one zero-extended native index. */
    const uint32_t offsets[] = {0,32,96,8192,UINT32_MAX & ~31u};
    for (unsigned i=0; i<sizeof(offsets)/sizeof(offsets[0]); i++) {

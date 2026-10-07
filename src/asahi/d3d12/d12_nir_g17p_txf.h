@@ -24,10 +24,15 @@ bool d12_nir_shift_g17p_txf_root(nir_shader *nir);
  * after agx_nir_lower_texture, which is what gave the sampler its +1 handle.
  * Fails closed on every other shape and leaves the shader unchanged. */
 struct d12_nir_g17p_fragment_sample {
-   bool indexed_fetch; /* native32 array plus the device texel-fetch sampler */
+   bool indexed_fetch; /* complete native32 texture array */
+   bool indexed_samplers; /* complete sampler file, including sampler0 */
    uint32_t texture_offset_B;
    uint8_t sampler_slot;
 };
 bool d12_nir_lower_g17p_fragment_sample(
    nir_shader *nir, uint32_t generation,
    struct d12_nir_g17p_fragment_sample *out);
+
+/* Mixed readonly samples/fetches use the shared native indexed sampler pass. */
+bool d12_nir_lower_g17p_graphics_resources(nir_shader *nir, uint32_t generation,
+                                         struct d12_nir_g17p_fragment_sample *out);

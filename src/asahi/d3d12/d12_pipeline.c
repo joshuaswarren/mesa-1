@@ -1247,6 +1247,7 @@ d12_reduction_gather(nir_builder *b, const nir_tex_instr *tex,
    gather->op = nir_texop_tg4;
    gather->component = component;
    gather->sampler_dim = tex->sampler_dim;
+   gather->coord_components = tex->coord_components;
    gather->is_array = tex->is_array;
    gather->dest_type = tex->dest_type;
    gather->texture_index = tex->texture_index;
@@ -2812,9 +2813,12 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
          NIR_PASS(_, nir, nir_opt_dce);
          struct d12_nir_g17p_fragment_sample binding;
          if (d12_nir_lower_g17p_fragment_sample(nir, descriptor_generation,
-                                                &binding)) {
+                                                &binding) ||
+             d12_nir_lower_g17p_graphics_resources(nir, descriptor_generation,
+                                                  &binding)) {
             o->g17p_fragment_sample = true;
             o->g17p_fragment_fetch = binding.indexed_fetch;
+            o->g17p_indexed_samplers = binding.indexed_samplers;
             o->g17p_sample_slot = binding.sampler_slot;
             o->g17p_texture_offset_B = binding.texture_offset_B;
          }
@@ -2882,10 +2886,15 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
       struct agx_varyings_vs linked = {0};
       agx_assign_uvs(&linked, &o->uvs, 0, 0);
       NIR_PASS(_, nir, d12_dxil_lower_uvs_index, linked.slots);
-      if (descriptor_generation == 9 && d12_nir_lower_g17p_txf(nir, 9)) {
+      struct d12_nir_g17p_fragment_sample binding = {0};
+      const bool native_resources = descriptor_generation == 9 &&
+         (d12_nir_lower_g17p_txf(nir, 9) ||
+          d12_nir_lower_g17p_graphics_resources(nir, 9, &binding));
+      if (native_resources) {
          NIR_PASS(_, nir, d12_nir_shift_g17p_txf_root);
          o->g17p_fragment_sample = true;
          o->g17p_fragment_fetch = true;
+         o->g17p_indexed_samplers = binding.indexed_samplers;
       }
 
    }
@@ -2948,9 +2957,11 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
    /* The native two-pointer sample consumes no USC sampler state: the
     * sampler is a pointer the Ioto program loads, not a state-file entry. */
    out->info.sampler_state_count =
-      o->g17p_fragment_sample
-         ? (o->g17p_fragment_fetch ? 1 : 0)
-         : MAX2(out->info.sampler_state_count, runtime_samplers);
+      o->g17p_indexed_samplers
+         ? MAX2(runtime_samplers, map ? map->sampler_count + 1 : 1)
+         : o->g17p_fragment_sample
+            ? (o->g17p_fragment_fetch ? 1 : 0)
+            : MAX2(out->info.sampler_state_count, runtime_samplers);
    d12_report_scratch("shader", &out->info);
 
    if (d12_debug()->dump_shaders && out->binary) {
@@ -5266,6 +5277,7 @@ d12_pipeline_state_create_graphics(
    pso->vs.g17p_root_only = vs_entry->out.root_only;
    pso->vs.g17p_sample.valid = vs_entry->out.g17p_fragment_sample;
    pso->vs.g17p_sample.indexed_fetch = vs_entry->out.g17p_fragment_fetch;
+   pso->vs.g17p_sample.indexed_samplers = vs_entry->out.g17p_indexed_samplers;
    pso->vs.reads_root = vs_entry->out.reads_root;
    pso->vs.g17p_writes_memory = vs_entry->out.writes_memory;
    const uint8_t cull_distance_size = vs_entry->out.cull_distance_size;
@@ -5339,6 +5351,7 @@ d12_pipeline_state_create_graphics(
    pso->fs.g17p_root_only = fs_entry->out.root_only;
    pso->fs.g17p_sample.valid = fs_entry->out.g17p_fragment_sample;
    pso->fs.g17p_sample.indexed_fetch = fs_entry->out.g17p_fragment_fetch;
+   pso->fs.g17p_sample.indexed_samplers = fs_entry->out.g17p_indexed_samplers;
    pso->fs.g17p_sample.sampler_slot = fs_entry->out.g17p_sample_slot;
    pso->fs.g17p_sample.texture_offset_B = fs_entry->out.g17p_texture_offset_B;
    pso->fs.reads_root = fs_entry->out.reads_root;

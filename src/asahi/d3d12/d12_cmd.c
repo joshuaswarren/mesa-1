@@ -6718,11 +6718,11 @@ d12_list_upload_custom_borders(struct d12_cmd_list *list,
  * one USC record for the complete file matches the proven Gallium path and
  * avoids overlapping state records with unrelated backing addresses. */
 static bool
-d12_list_push_samplers(struct d12_cmd_list *list,
-                       struct agx_usc_builder *b,
-                       const struct agx_shader_info *info,
-                       bool compute_bindings,
-                       D3D12_SHADER_VISIBILITY visibility)
+d12_list_upload_sampler_file(struct d12_cmd_list *list,
+                              const struct agx_shader_info *info,
+                              bool compute_bindings,
+                              D3D12_SHADER_VISIBILITY visibility,
+                              uint64_t *out_gpu, unsigned *out_count)
 {
    bool validate = d12_debug()->validate_bindings;
    unsigned count = info->uses_txf ? MAX2(info->sampler_state_count, 1)
@@ -6733,6 +6733,8 @@ d12_list_push_samplers(struct d12_cmd_list *list,
                 (unsigned)visibility, compute_bindings, count,
                 info->uses_txf);
 
+   *out_gpu = 0;
+   *out_count = count;
    if (!count)
       return true;
    if (count > 17) {
@@ -6808,10 +6810,28 @@ d12_list_push_samplers(struct d12_cmd_list *list,
       }
    }
 
-   agx_usc_pack(b, SAMPLER, cfg) {
-      cfg.start = 0;
-      cfg.count = count;
-      cfg.buffer = gpu;
+   *out_gpu = gpu;
+   return true;
+}
+
+static bool
+d12_list_push_samplers(struct d12_cmd_list *list,
+                       struct agx_usc_builder *b,
+                       const struct agx_shader_info *info,
+                       bool compute_bindings,
+                       D3D12_SHADER_VISIBILITY visibility)
+{
+   uint64_t gpu;
+   unsigned count;
+   if (!d12_list_upload_sampler_file(list, info, compute_bindings, visibility,
+                                     &gpu, &count))
+      return false;
+   if (count) {
+      agx_usc_pack(b, SAMPLER, cfg) {
+         cfg.start = 0;
+         cfg.count = count;
+         cfg.buffer = gpu;
+      }
    }
    return true;
 }
@@ -7646,6 +7666,7 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    const bool native_sample = st->g17p_sample.valid &&
       (fragment || st->g17p_sample.indexed_fetch);
    const bool native_fetch = native_sample && st->g17p_sample.indexed_fetch;
+   const bool sampler_array = native_fetch && st->g17p_sample.indexed_samplers;
    if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
        !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
        linked->bo->va->addr > UINT64_MAX - linked->entry_offset ||
@@ -7658,13 +7679,15 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        info->has_preamble || info->nr_preamble_gprs ||
        info->preamble_scratch_size || info->rodata.size_16 ||
        info->agx3_uniform_dma_valid || info->texture_state_count ||
-       info->sampler_state_count != (native_fetch ? 1u : 0u) ||
+       (sampler_array ? info->sampler_state_count < 1 ||
+                          info->sampler_state_count > 17
+                      : info->sampler_state_count != (native_fetch ? 1u : 0u)) ||
        info->uses_sampler_heap || (linked->uses_txf && !native_fetch) ||
        !root_gpu || !tib || tib->nr_samples != 1)
       goto fail;
 
    failure = "uniform-ownership";
-   struct agx3_ioto_uniform_range ranges[5];
+   struct agx3_ioto_uniform_range ranges[6];
    size_t count = 0;
    if (native_fetch) {
       /* Reuse compute's native32 array and sampler0 publication. Validate
@@ -7692,7 +7715,21 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
              sizeof(table));
       if (table != cache->texture_table || (table & 31))
          goto fail;
-      const uint64_t pointers[2] = {table, sampler_bo->va->addr};
+      uint64_t sampler_table = sampler_bo->va->addr;
+      if (sampler_array) {
+         unsigned sampler_count;
+         if (!d12_list_upload_sampler_file(
+                list, info, false,
+                fragment ? D3D12_SHADER_VISIBILITY_PIXEL
+                         : D3D12_SHADER_VISIBILITY_VERTEX,
+                &sampler_table, &sampler_count) || !sampler_table ||
+             sampler_count != info->sampler_state_count)
+            goto fail;
+         if (agx_bo_sync_for_device(list->stream_bo,
+               sampler_table - list->stream_bo->va->addr, sampler_count * 32u))
+            goto fail;
+      }
+      const uint64_t pointers[2] = {table, sampler_table};
       const uint64_t pointers_va =
          d12_list_upload(list, pointers, sizeof(pointers), 8);
       if (!pointers_va || agx_bo_sync_for_device(list->stream_bo,
@@ -7780,11 +7817,25 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    };
    /* Vertex buffer loads also inspect descriptor words through the original
     * native32 table pointer. Keep that descriptor ABI alongside indexed TXF. */
-   if (!fragment && native_fetch) {
+   if ((!fragment || sampler_array) && native_fetch) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = D12_UNIFORM_TEXTURES,
          .size_halfs = D12_UNIFORM_TEXTURE_REGS, .address = textures_gpu,
       };
+   }
+   if (sampler_array) {
+      uint64_t borders = 0;
+      if (!d12_list_upload_custom_borders(
+             list, info, false,
+             fragment ? D3D12_SHADER_VISIBILITY_PIXEL
+                      : D3D12_SHADER_VISIBILITY_VERTEX, &borders))
+         goto fail;
+      if (borders) {
+         ranges[count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = D12_UNIFORM_CUSTOM_BORDERS,
+            .size_halfs = D12_UNIFORM_CUSTOM_BORDER_REGS, .address = borders,
+         };
+      }
    }
    /* Mesh rasterization consumes its own parameter block. Do not load an
     * unused DRAW range from the application's indirect argument buffer. */
