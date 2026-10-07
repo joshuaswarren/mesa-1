@@ -2151,8 +2151,10 @@ hk_g17p_graphics_uniform_ranges(
          /* Dwords below the size rounded up to 4 bytes come from the buffer,
           * later ones from the zero page (AGX3_UNIFORM_DMA_BUFFER). A buffer
           * holding none of the span, such as a null one, is all zero page.
-          * Both addresses come from the root's or a static set's contents,
-          * not from an address a published launcher could be patched to. */
+          * Both addresses come from the root's or a static set's contents.
+          * A launch replays the buffer address of a span the buffer covers
+          * (hk_g17p_launch_replay()); a split or zero-page span depends on
+          * the buffer's size, so it is collected again for every draw. */
          const uint64_t size_B = ALIGN_POT((uint64_t)buffer.size, 4);
          const unsigned buffer_halfs =
             size_B > span->offset_B
@@ -2162,7 +2164,9 @@ hk_g17p_graphics_uniform_ranges(
             const uint64_t address = buffer.base_addr + span->offset_B;
             if (address & 3)
                return hk_g17p_graphics_ranges_refused(range_count, count);
-            sources[count] = HK_G17P_RANGE_SOURCE_UPLOADED;
+            sources[count] = buffer_halfs == span->halfs
+                                ? HK_G17P_RANGE_SOURCE_BUFFER
+                                : HK_G17P_RANGE_SOURCE_UPLOADED;
             ranges[count++] = (struct agx3_ioto_uniform_range){
                .start_halfs = span->dest,
                .size_halfs = buffer_halfs,
@@ -2172,7 +2176,7 @@ hk_g17p_graphics_uniform_ranges(
          if (buffer_halfs < span->halfs) {
             if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
                return hk_g17p_graphics_ranges_refused(range_count, count);
-            sources[count] = HK_G17P_RANGE_SOURCE_CONSTANT;
+            sources[count] = HK_G17P_RANGE_SOURCE_UPLOADED;
             ranges[count++] = (struct agx3_ioto_uniform_range){
                .start_halfs = span->dest + buffer_halfs,
                .size_halfs = span->halfs - buffer_halfs,
@@ -2396,6 +2400,7 @@ hk_g17p_launch_record(struct hk_cmd_buffer *cmd, struct hk_g17p_launch *launch,
    for (unsigned i = 0; i < count; ++i) {
       uint64_t offset = 0;
       uint8_t set = 0;
+      uint16_t descriptor_B = 0;
       switch (sources[i]) {
       case HK_G17P_RANGE_SOURCE_CONSTANT:
          offset = ranges[i].address;
@@ -2420,11 +2425,30 @@ hk_g17p_launch_record(struct hk_cmd_buffer *cmd, struct hk_g17p_launch *launch,
          offset = span->offset_B;
          break;
       }
+      case HK_G17P_RANGE_SOURCE_BUFFER: {
+         /* The buffer span the range was collected from, as above. */
+         const struct agx3_uniform_dma_span *span = NULL;
+         for (unsigned j = 0; j < s->b.info.agx3_uniform_dma_count; ++j) {
+            if (s->b.info.agx3_uniform_dma[j].dest == ranges[i].start_halfs)
+               span = &s->b.info.agx3_uniform_dma[j];
+         }
+         if (!span || span->source != AGX3_UNIFORM_DMA_BUFFER ||
+             span->halfs != ranges[i].size_halfs ||
+             span->descriptor_B > UINT16_MAX)
+            return;
+         set = span->pointer == s->info.agx3_root_uniform
+                  ? HK_G17P_LAUNCH_ROOT_SET
+                  : (span->pointer - s->info.agx3_root_uniform - 4) / 4;
+         descriptor_B = span->descriptor_B;
+         offset = span->offset_B;
+         break;
+      }
       default:
          return;
       }
       launch->source[i] = sources[i];
       launch->set[i] = set;
+      launch->descriptor_B[i] = descriptor_B;
       launch->offset[i] = offset;
       launch->start_halfs[i] = ranges[i].start_halfs;
       launch->size_halfs[i] = ranges[i].size_halfs;
@@ -2500,6 +2524,22 @@ hk_g17p_launch_replay(struct hk_cmd_buffer *cmd,
           * zero page. */
          const uint64_t base = gfx->descriptors.root.sets[launch->set[i]];
          address = base ? base + launch->offset[i] : AGX_ZERO_PAGE_ADDRESS;
+         if (address & 3)
+            return 0;
+         break;
+      }
+      case HK_G17P_RANGE_SOURCE_BUFFER: {
+         /* As hk_g17p_graphics_uniform_ranges(), for a buffer that still
+          * covers the whole span; otherwise the span splits differently. */
+         struct hk_buffer_address buffer;
+         if (!hk_g17p_dma_buffer(cmd,
+                                 launch->set[i] == HK_G17P_LAUNCH_ROOT_SET
+                                    ? -1 : launch->set[i],
+                                 launch->descriptor_B[i], &buffer) ||
+             ALIGN_POT((uint64_t)buffer.size, 4) <
+                launch->offset[i] + 2 * launch->size_halfs[i])
+            return 0;
+         address = buffer.base_addr + launch->offset[i];
          if (address & 3)
             return 0;
          break;

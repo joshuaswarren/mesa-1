@@ -409,8 +409,13 @@ enum hk_g17p_range_source {
    /* A bound descriptor set's address plus a fixed offset, or the zero page
     * when the set is not bound (uniform DMA spans). */
    HK_G17P_RANGE_SOURCE_SET = 4,
+   /* A whole uniform DMA buffer span: the buffer whose descriptor the root
+    * (dynamic buffers) or a static descriptor set holds at a fixed byte, plus
+    * a fixed offset, while that buffer covers the span. */
+   HK_G17P_RANGE_SOURCE_BUFFER = 5,
    /* Uploaded while collecting the ranges (combined-sampler pointers,
-    * spilled render-target descriptors): not re-derivable. */
+    * spilled render-target descriptors), or a buffer span the buffer does
+    * not wholly cover: not re-derivable. */
    HK_G17P_RANGE_SOURCE_UPLOADED,
 };
 
@@ -423,6 +428,7 @@ struct hk_g17p_gfx_loader;
  * admission inputs derives its ranges from it. Every BO the loader names was
  * retained when it was recorded. */
 #define HK_G17P_LAUNCH_SLOTS 8
+#define HK_G17P_LAUNCH_ROOT_SET 0xff
 
 struct hk_g17p_launch {
    const struct hk_shader *s;
@@ -438,10 +444,14 @@ struct hk_g17p_launch {
    uint8_t count;
    bool valid;
    uint8_t source[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   /* Descriptor set of a SET or BUFFER range; HK_G17P_LAUNCH_ROOT_SET for a
+    * BUFFER range whose descriptor is in the root. */
    uint8_t set[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
    uint16_t start_halfs[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
    uint16_t size_halfs[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
-   /* Root/set offset, or the address of a constant range. */
+   /* Byte of a BUFFER range's descriptor in its root or set. */
+   uint16_t descriptor_B[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   /* Root/set/buffer offset, or the address of a constant range. */
    uint64_t offset[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
 };
 
