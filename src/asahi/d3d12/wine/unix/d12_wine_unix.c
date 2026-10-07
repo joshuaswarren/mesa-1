@@ -12,8 +12,10 @@
 
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <link.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -26,6 +28,10 @@
 #include <unistd.h>
 
 #include "../d12_wine_unixlib.h"
+
+/* Use the headers of the Wine build loading this unixlib. Its server ABI is
+ * private and versioned; never substitute headers from another Wine build. */
+#include <wine/server.h>
 
 /* drm.h subset: version query and syncobj waits (public Linux UAPI). */
 struct drm_version {
@@ -61,7 +67,6 @@ struct drm_syncobj_timeline_wait {
 #define DRM_IOCTL_SYNCOBJ_WAIT          _IOWR('d', 0xC3, struct drm_syncobj_wait)
 #define DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT _IOWR('d', 0xCA, struct drm_syncobj_timeline_wait)
 
-typedef uint32_t NTSTATUS;
 #define STATUS_SUCCESS 0
 
 static int
@@ -234,7 +239,63 @@ static NTSTATUS
 call_clock(void *args)
 {
    struct d12_wine_clock_args *a = args;
-   a->monotonic_ns = monotonic_ns();
+   a->monotonic_ns = a->monotonic_ns == D12_WINE_CLOCK_ABI_QUERY
+      ? D12_WINE_CLOCK_ABI_VERSION : monotonic_ns();
+   return STATUS_SUCCESS;
+}
+
+static int
+find_ntdll(struct dl_phdr_info *info, size_t size, void *data)
+{
+   (void)size;
+   const char *name = strrchr(info->dlpi_name, '/');
+   name = name ? name + 1 : info->dlpi_name;
+   if (strcmp(name, "ntdll.so"))
+      return 0;
+   void **handle = data;
+   *handle = dlopen(info->dlpi_name, RTLD_NOW | RTLD_NOLOAD);
+   return *handle != NULL;
+}
+
+static NTSTATUS
+call_resource_fd(void *args)
+{
+   struct d12_wine_resource_fd_args *a = args;
+   /* Wine loads ntdll locally. Resolve its existing Unix API from that
+    * loaded object, never from a second copy or a guessed installation path. */
+   void *ntdll = NULL;
+   dl_iterate_phdr(find_ntdll, &ntdll);
+   unsigned int (*server_call)(void *) = ntdll ? dlsym(ntdll, "wine_server_call") : NULL;
+   NTSTATUS (*handle_to_fd)(HANDLE, unsigned int, int *, unsigned int *) =
+      ntdll ? dlsym(ntdll, "wine_server_handle_to_fd") : NULL;
+   NTSTATUS (*nt_close)(HANDLE) = ntdll ? dlsym(ntdll, "NtClose") : NULL;
+   if (ntdll)
+      dlclose(ntdll);
+   a->fd = -1;
+   a->err = ENOSYS;
+   if (!server_call || !handle_to_fd || !nt_close)
+      return STATUS_SUCCESS;
+
+   /* The shared NT handle wraps a resource. Open the resource itself before
+    * asking ntdll for its host fd, just as Wine's D3DKMT bridge does. */
+   HANDLE resource = NULL;
+   unsigned int status;
+   SERVER_START_REQ(d3dkmt_object_open) {
+      req->type = D3DKMT_RESOURCE;
+      req->handle = (uint32_t)a->handle;
+      status = server_call(req);
+      if (!status)
+         resource = wine_server_ptr_handle(reply->handle);
+   } SERVER_END_REQ;
+   if (status) {
+      a->err = EINVAL;
+      return STATUS_SUCCESS;
+   }
+   status = handle_to_fd(resource, GENERIC_ALL, &a->fd, NULL);
+   nt_close(resource);
+   a->err = status ? EINVAL : 0;
+   if (!status)
+      fcntl(a->fd, F_SETFD, FD_CLOEXEC);
    return STATUS_SUCCESS;
 }
 
@@ -270,6 +331,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] = {
    [D12_WINE_CALL_CLOCK] = call_clock,
    [D12_WINE_CALL_DUPFD_CLOEXEC] = call_dupfd_cloexec,
    [D12_WINE_CALL_DMABUF_SIZE] = call_dmabuf_size,
+   [D12_WINE_CALL_RESOURCE_FD] = call_resource_fd,
 };
 
 _Static_assert(sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==

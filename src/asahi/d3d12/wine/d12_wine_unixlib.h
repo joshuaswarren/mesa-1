@@ -23,6 +23,7 @@ enum d12_wine_call {
    D12_WINE_CALL_CLOCK,
    D12_WINE_CALL_DUPFD_CLOEXEC,
    D12_WINE_CALL_DMABUF_SIZE,
+   D12_WINE_CALL_RESOURCE_FD,
    D12_WINE_CALL_COUNT
 };
 
@@ -102,6 +103,15 @@ struct d12_wine_dmabuf_size_args {
    int32_t fd;
    int32_t err;
    int64_t size;
+};
+
+#define D12_WINE_CLOCK_ABI_QUERY INT64_MIN
+#define D12_WINE_CLOCK_ABI_VERSION (-INT64_C(0x12120003))
+/* The size-preserving CLOCK handshake detects a mismatched old call table. */
+struct d12_wine_resource_fd_args {
+   uint64_t handle;
+   int32_t fd;
+   int32_t err;
 };
 
 #endif

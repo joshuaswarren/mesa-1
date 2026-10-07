@@ -21,6 +21,7 @@ toolchain=${LLVM_MINGW_ROOT:-/opt/aurora-llvm-mingw-20260922/llvm-mingw-20260922
 native=${NATIVE_BUILD:-$out/native-tools}
 cross=$out/cross-arm64ec
 wine_dir=$src/src/asahi/d3d12/wine
+wine_include=${WINE_UNIX_INCLUDE:?Set WINE_UNIX_INCLUDE to the matching Wine source include directory}
 
 for tool in "$toolchain/bin/arm64ec-w64-mingw32-clang" "$toolchain/bin/llvm-readobj" meson ninja cc python3; do
    if [[ $tool == */* ]]; then [[ -x $tool ]] || { echo "missing $tool" >&2; exit 2; }
@@ -70,7 +71,8 @@ ninja -C "$cross" -j"$jobs" src/asahi/d3d12/d3d12.dll
 # 3. unixlib ----------------------------------------------------------------
 echo "== unixlib"
 cc -O2 -fPIC -shared -fvisibility=hidden -Wall -Wextra \
-   -o "$out/d3d12.so" "$wine_dir/unix/d12_wine_unix.c"
+   -D__WINESRC__ -DWINE_UNIX_LIB -ffixed-x18 \
+   -I"$wine_include" -o "$out/d3d12.so" "$wine_dir/unix/d12_wine_unix.c" -ldl
 
 # 4. package ----------------------------------------------------------------
 cp "$cross/src/asahi/d3d12/d3d12.dll" "$out/d3d12.dll"
