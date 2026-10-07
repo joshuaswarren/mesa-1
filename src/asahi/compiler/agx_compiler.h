@@ -1300,6 +1300,8 @@ bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
 bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
 bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
                                           unsigned allocated);
+bool agx_nir_place_preamble_handles_low(nir_shader *s, unsigned reserved,
+                                         unsigned *allocated);
 agx_block *agx_reconverged_mrt_tail(agx_context *ctx);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);

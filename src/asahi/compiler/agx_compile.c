@@ -10111,6 +10111,10 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       NIR_PASS(_, nir, agx_nir_coalesce_preamble_half_exports,
                key->reserved_preamble, info->push_count);
       NIR_PASS(_, nir, nir_opt_dce);
+      unsigned push_count = info->push_count;
+      NIR_PASS(_, nir, agx_nir_place_preamble_handles_low,
+               key->reserved_preamble, &push_count);
+      info->push_count = push_count;
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
