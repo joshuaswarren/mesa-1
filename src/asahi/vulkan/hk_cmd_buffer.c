@@ -1045,7 +1045,9 @@ hk_bind_descriptor_sets(struct hk_cmd_buffer *cmd,
          if (set != NULL && set_layout->vk.dynamic_descriptor_count > 0) {
             for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count; j++) {
                struct hk_buffer_address addr = set->dynamic_buffers[j];
-               addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
+               /* A null buffer stays at the zero page. */
+               if (addr.size)
+                  addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
                const struct hk_buffer_address *old =
                   &desc->root.dynamic_buffers[dyn_buffer_start + j];
                root_changed |= old->base_addr != addr.base_addr ||
