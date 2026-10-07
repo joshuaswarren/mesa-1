@@ -4193,6 +4193,15 @@ zink_set_framebuffer_state(struct pipe_context *pctx,
    struct zink_context *ctx = zink_context(pctx);
    struct zink_screen *screen = zink_screen(pctx->screen);
    unsigned samples = state->nr_cbufs || state->zsbuf.texture ? 0 : state->samples;
+   if (ctx->in_rp && unlikely(debug_get_option_zink_rp_stats())) {
+      /* Count actual framebuffer replacements separately from rebinds. An
+       * equal framebuffer may still delimit threaded-context renderpass
+       * information, so equality alone does not justify eliding this split.
+       */
+      const bool same = util_framebuffer_state_equal(&ctx->fb_state, state);
+      zink_rp_stats_note(ctx, same ? "fb-rebind-identical" : "fb-rebind-different",
+                         ctx->rp_tc_info_updated ? "tc-info-pending" : "tc-info-current");
+   }
    unsigned w = ctx->fb_state.width;
    unsigned h = ctx->fb_state.height;
    unsigned layers = MAX2(framebuffer_get_num_layers(state), 1);
