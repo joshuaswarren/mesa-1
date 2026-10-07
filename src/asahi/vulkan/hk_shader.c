@@ -1760,6 +1760,20 @@ hk_lower_multiview_stage(mesa_shader_stage stage,
    }
 }
 
+static bool
+hk_g17p_force_direct_txf(UNUSED nir_builder *b, nir_tex_instr *tex,
+                         UNUSED void *data)
+{
+   if (tex->op != nir_texop_txf)
+      return false;
+
+   /* The direct ABI diagnostic is only for in-bounds hardware probes.  Skip
+    * the mandatory Vulkan out-of-bounds predicate so it does not retain the
+    * bindless handle that the deliberately narrow direct lowering replaces. */
+   tex->backend_flags |= AGX_TEXTURE_FLAG_NO_CLAMP;
+   return true;
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -2028,6 +2042,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    }
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
+      if (HK_PERF(dev, TXF)) {
+         NIR_PASS(_, nir, nir_shader_tex_pass, hk_g17p_force_direct_txf,
+                  nir_metadata_control_flow, NULL);
+      }
+
       /* hk_nir_lower_robust_image_access() leaves formatless loads to this
        * pass. */
       NIR_PASS(_, nir, agx_nir_lower_texture_with_buffer_metadata,

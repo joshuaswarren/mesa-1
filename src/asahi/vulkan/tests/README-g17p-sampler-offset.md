@@ -15,8 +15,10 @@ takes no set space, so the texture word moves to offset 0 while the shaders
 stay the same. The compute modes repeat the layout with a storage buffer and an
 unsigned sampled image read by `texelFetch`. They set `HK_PERFTEST=txf` before
 device creation, selecting the direct texture-state txf ABI instead of the
-indexed heap ABI that would otherwise win for this shader. Run one mode per
-process:
+indexed heap ABI that would otherwise win for this shader. The diagnostic marks
+the fetch in bounds before texture lowering so Vulkan's out-of-bounds predicate
+does not retain the bindless handle that makes the deliberately narrower direct
+ABI decline. Run one mode per process:
 
 ```sh
 cc -O2 -Wall -Wextra -Werror g17p_vulkan_sampler_offset.c -o sampler-offset -lvulkan
