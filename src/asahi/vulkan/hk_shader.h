@@ -346,8 +346,18 @@ struct hk_api_shader {
    /* Dynamic G17P sample-rate/coverage shaders have native 1x/2x/4x binaries. */
    bool g17p_sample_variants;
 
+   /* The one-sample binary compiles with the shader; the multisample ones
+    * compile from this source on first use (hk_fs_build_sample_variant). */
+   struct hk_fs_sample_source *sample_source;
+
    struct hk_shader variants[];
 };
+
+/* Make the `samples` variant of a dynamic-sample-count G17P fragment shader
+ * available to hk_fs_variant(). Thread-safe; a no-op for other shaders. */
+VkResult hk_fs_build_sample_variant(struct hk_device *dev,
+                                    struct hk_api_shader *obj,
+                                    unsigned samples);
 
 void hk_shader_binary_cache_finish(struct hk_device *dev);
 bool hk_shader_ensure_link_ht_locked(struct hk_shader *shader);

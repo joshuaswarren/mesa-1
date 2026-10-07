@@ -3642,6 +3642,16 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    if (sample_variant_dirty)
       gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
 
+   /* A multisample variant of a dynamic-sample-count fragment shader is
+    * built on its first draw. */
+   if (fs_obj->sample_source && IS_SHADER_DIRTY(FRAGMENT)) {
+      VkResult result = hk_fs_build_sample_variant(
+         hk_cmd_buffer_device(cmd), fs_obj,
+         cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
+      if (result != VK_SUCCESS)
+         vk_command_buffer_set_error(&cmd->vk, result);
+   }
+
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
    /* Geometry shading overrides the restart index, reemit on rebind */
@@ -6760,6 +6770,8 @@ hk_prelink_pipeline_fragment(struct hk_device *dev,
    }
 
    const unsigned samples = MAX2(dyn.ms.rasterization_samples, 1);
+   if (hk_fs_build_sample_variant(dev, fs_api, samples) != VK_SUCCESS)
+      return;
    struct hk_shader *fs = hk_fs_variant(fs_api, samples);
    if (fs->b.info.writes_sample_mask)
       return;
