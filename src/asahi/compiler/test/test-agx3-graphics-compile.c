@@ -4077,12 +4077,14 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "custom border indexed samples");
    nir_def *set = nir_load_descriptor_set_agx(&b, 24);
-   nir_def *ordinary_index = dynamic ? nir_load_global_constant(
-      &b, 1, 16, nir_iadd_imm(&b, set, 40), .align_mul = 2)
-      : nir_imm_intN_t(&b, 80, 16);
-   nir_def *clamp_index = dynamic ? nir_load_global_constant(
-      &b, 1, 16, nir_iadd_imm(&b, set, 42), .align_mul = 2)
-      : nir_imm_intN_t(&b, 84, 16);
+   nir_def *ordinary_index =
+      dynamic ? nir_load_global_constant(&b, 1, 16, nir_iadd_imm(&b, set, 40),
+                                         .align_mul = 2)
+              : nir_imm_intN_t(&b, 52, 16);
+   nir_def *clamp_index =
+      dynamic ? nir_load_global_constant(&b, 1, 16, nir_iadd_imm(&b, set, 42),
+                                         .align_mul = 2)
+              : nir_imm_intN_t(&b, 56, 16);
    nir_def *image = nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 24);
    nir_def *sampler = nir_bindless_sampler_agx(
       &b, nir_imm_int(&b, 32), ordinary_index, .desc_set = 24);
@@ -4130,11 +4132,8 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
          ok &= nir_src_bit_size(tex->src[si].src) == 64 &&
                nir_src_bit_size(tex->src[ti].src) == 64;
          nir_alu_instr *wide = nir_def_as_alu_or_null(tex->src[si].src.ssa);
-         nir_alu_instr *subtract = wide ? nir_def_as_alu_or_null(wide->src[0].src.ssa) : NULL;
-         nir_alu_instr *extend = subtract ? nir_def_as_alu_or_null(subtract->src[0].src.ssa) : NULL;
-         ok &= wide && wide->op == nir_op_u2u64 && subtract &&
-               subtract->op == nir_op_usub_sat && extend &&
-               extend->op == nir_op_u2u32 && extend->src[0].src.ssa == original[i];
+         ok &= wide && wide->op == nir_op_u2u64 &&
+               wide->src[0].src.ssa == original[i];
       }
       if (!dynamic) {
          NIR_PASS(_, b.shader, nir_opt_constant_folding);
@@ -4149,7 +4148,7 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
          /* This is the indexed two-sample/control-flow shape used by desktop
           * compositors. Keep the check through RA and binary scheduling: both
           * descriptor loads must retire before SMP consumes their register
-          * indices, including the saturating sampler-heap rebase above. */
+          * indices, including the raw sampler-heap index extension above. */
          struct agx_shader_key key = {
             .dev.encoding = AGX_ISA_ENCODING_AGX3B,
             .no_preamble = true,
@@ -4172,14 +4171,14 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
 }
 
 static bool
-test_indexed_sampler_rebase_boundaries(void)
+test_indexed_sampler_raw_index_boundaries(void)
 {
    static const uint16_t indices[] = {0, 1, 27, 28, 29, 43, 44, UINT16_MAX};
 
    for (unsigned i = 0; i < ARRAY_SIZE(indices); ++i) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_FRAGMENT, &agx_nir_options,
-         "G17P indexed sampler rebase boundary");
+         "G17P indexed sampler raw index boundary");
       nir_def *image =
          nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
       nir_def *sampler = nir_bindless_sampler_agx(
@@ -4196,7 +4195,7 @@ test_indexed_sampler_rebase_boundaries(void)
       const int ti = nir_tex_instr_src_index(
          tex, nir_tex_src_texture_offset);
       NIR_PASS(_, b.shader, nir_opt_constant_folding);
-      const uint32_t expected = indices[i] > 28 ? indices[i] - 28 : 0;
+      const uint32_t expected = indices[i];
       ok &= si >= 0 && ti >= 0 &&
             nir_src_is_const(tex->src[si].src) &&
             nir_src_as_uint(tex->src[si].src) == expected &&
@@ -4234,6 +4233,57 @@ indexed_sample(nir_builder *b, nir_def *set, uint32_t descriptor_offset_B,
    nir_def_init(&tex->instr, &tex->def, 4, 32);
    nir_builder_instr_insert(b, &tex->instr);
    return tex;
+}
+
+static bool
+test_native32_sampler_abi_widths(void)
+{
+   const unsigned widths[] = {16, 32, 64};
+   const uint64_t values[] = {0, 1, 16, 65535, UINT64_C(0x100000007)};
+   for (unsigned w = 0; w < ARRAY_SIZE(widths); ++w) {
+      for (unsigned v = 0; v < ARRAY_SIZE(values); ++v) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "raw native32 sampler ABI");
+         nir_def *image = nir_bindless_image_agx(
+            &b, nir_imm_int(&b, 96), .desc_set = 16);
+         /* ALU source models the dynamic index admitted by native32. The
+          * 64-bit case checks preservation of its existing u2u32 behavior. */
+         nir_def *sampler = nir_mov(&b, nir_imm_intN_t(&b, values[v], widths[w]));
+         nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+         tex->op = nir_texop_tex;
+         tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+         tex->dest_type = nir_type_float32;
+         tex->coord_components = 2;
+         tex->src[0] = nir_tex_src_for_ssa(
+            nir_tex_src_backend1, nir_imm_vec2(&b, 0.25f, 0.5f));
+         tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+         tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+         nir_def_init(&tex->instr, &tex->def, 4, 32);
+         nir_builder_instr_insert(&b, &tex->instr);
+         nir_export_agx(&b, nir_channel(&b, &tex->def, 0),
+                        .base = AGX_ABI_FOUT_COLOUR(0));
+         bool ok = agx_nir_lower_g17p_native32_samplers(b.shader, 16);
+         const bool lowered = ok;
+         NIR_PASS(_, b.shader, nir_opt_constant_folding);
+         NIR_PASS(_, b.shader, nir_opt_copy_prop);
+         NIR_PASS(_, b.shader, nir_opt_constant_folding);
+         const int ti = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+         const int si = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
+         uint64_t expected = values[v] & (widths[w] == 16 ? 0xffffu : 0xffffffffu);
+         ok &= ti < 0 && tex->texture_index == 3 && si >= 0 &&
+               nir_src_is_const(tex->src[si].src) &&
+               nir_src_as_uint(tex->src[si].src) == expected &&
+               nir_src_bit_size(tex->src[si].src) == 64;
+         if (!ok) {
+            fprintf(stderr, "native32 width=%u value=%llu lowered=%u ti=%d si=%d\n", widths[w], (unsigned long long)values[v], lowered, ti, si);
+            nir_print_shader(b.shader, stderr);
+         }
+         ralloc_free(b.shader);
+         if (!ok)
+            return false;
+      }
+   }
+   return true;
 }
 
 static bool
@@ -5435,7 +5485,7 @@ build_cs_sampled_storage(unsigned mode)
    nir_def *texture = nir_bindless_image_agx(
       &b, nir_imm_int(&b, 0), .desc_set = 0);
    nir_def *sampler = nir_bindless_sampler_agx(
-      &b, nir_imm_int(&b, 32), nir_imm_intN_t(&b, 28, 16), .desc_set = 0);
+      &b, nir_imm_int(&b, 32), nir_imm_intN_t(&b, 0, 16), .desc_set = 0);
    nir_tex_instr *sample = nir_tex_instr_create(b.shader, 4);
    sample->op = nir_texop_txl;
    sample->sampler_dim = GLSL_SAMPLER_DIM_2D;
@@ -6932,7 +6982,7 @@ build_vs_indexed_texture_sample(void)
    nir_def *offset = nir_imm_int(&b, 72);
    nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set = 3);
    nir_def *sampler = nir_bindless_sampler_agx(
-      &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 28, 16), .desc_set = 3);
+      &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 0, 16), .desc_set = 3);
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 4);
    tex->op = nir_texop_txl;
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
@@ -8971,7 +9021,7 @@ main(int argc, char **argv)
                 test_custom_border_samplers(true, false) &&
                 test_custom_border_samplers(true, 1) &&
                 test_custom_border_samplers(true, 2) &&
-                test_indexed_sampler_rebase_boundaries() &&
+                test_indexed_sampler_raw_index_boundaries() &&
                 test_indexed_sampler_sets() && test_indexed_fetch_sets();
       printf("custom border runtime branch, exact indices, mixed reads: %s\n",
              ok ? "PASS" : "FAIL");
@@ -8989,7 +9039,7 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-samplers-only")) {
       const bool ok = test_indexed_sampler_sets() &&
-                      test_indexed_sampler_rebase_boundaries() &&
+                      test_indexed_sampler_raw_index_boundaries() &&
                       test_indexed_array_and_3d_compile() &&
                       test_indexed_compute_sample() &&
                       test_indexed_storage_image_read() &&
@@ -9154,7 +9204,7 @@ main(int argc, char **argv)
    CHECK_NAMED("custom_border_samplers(custom,2)",
                test_custom_border_samplers(true, 2));
    CHECK_NAMED("indexed_sampler_rebase_boundaries",
-               test_indexed_sampler_rebase_boundaries());
+               test_indexed_sampler_raw_index_boundaries());
    CHECK_NAMED("indexed_array_and_3d_compile",
                test_indexed_array_and_3d_compile());
    CHECK_NAMED("g17p_quad_control_modes", test_g17p_quad_control_modes());
@@ -9343,6 +9393,7 @@ main(int argc, char **argv)
    RUN(test_g17p_reconverged_mrt);
    RUN(test_g17p_eot_block_store);
    RUN(test_indexed_sampler_sets);
+   RUN(test_native32_sampler_abi_widths);
    RUN(test_g17p_layered_eot_block_store);
    RUN(test_g17p_multisample_eot_block_store);
    RUN(test_g17p_background_reload_staging);

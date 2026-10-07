@@ -148,12 +148,14 @@ write_sampled_image_view_desc_g17p_single(struct hk_descriptor_set *set,
       assert(sampler->planes[0].hw->index < (1 << 12));
 
       struct hk_sampled_image_descriptor desc = {
-         .sw = {
-            .sampler = sampler->planes[0].hw->key,
-            .sampler_index = sampler->planes[0].hw->index + 28,
-            .clamp_0_sampler_index_or_negative = -1,
-            .lod_bias_fp16 = sampler->lod_bias_fp16,
-         },
+         .sw =
+            {
+               .sampler = sampler->planes[0].hw->key,
+               .sampler_index = hk_sampler_descriptor_index(
+                  set->layout, sampler->planes[0].hw->index),
+               .clamp_0_sampler_index_or_negative = -1,
+               .lod_bias_fp16 = sampler->lod_bias_fp16,
+            },
       };
       if (!hk_set_null_native_texture(9, &desc.tex))
          return false;
@@ -183,17 +185,20 @@ write_sampled_image_view_desc_g17p_single(struct hk_descriptor_set *set,
    const bool ia = descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
    struct hk_sampled_image_descriptor desc = {
       .tex = ia ? view->planes[0].ia : view->planes[0].sampled,
-      .sw = {
-         .sampler_index = sampler ? sampler->planes[0].hw->index + 28
-                                  : HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX,
-         .clamp_0_sampler_index_or_negative = -1,
-         .lod_bias_fp16 = sampler ? sampler->lod_bias_fp16 : 0,
-         .min_lod_fp16 = view->sampled_min_lod_fp16,
-         .min_lod_uint16 = view->sampled_min_lod_uint16,
-         .scaled_conversion = view->g17p_scaled_conversion,
-         .sampled_heap_index = ia ? view->planes[0].input_heap_index
-                                  : view->planes[0].sampled_heap_index,
-      },
+      .sw =
+         {
+            .sampler_index = sampler
+                                ? hk_sampler_descriptor_index(
+                                     set->layout, sampler->planes[0].hw->index)
+                                : hk_sampler_descriptor_index(set->layout, 0),
+            .clamp_0_sampler_index_or_negative = -1,
+            .lod_bias_fp16 = sampler ? sampler->lod_bias_fp16 : 0,
+            .min_lod_fp16 = view->sampled_min_lod_fp16,
+            .min_lod_uint16 = view->sampled_min_lod_uint16,
+            .scaled_conversion = view->g17p_scaled_conversion,
+            .sampled_heap_index = ia ? view->planes[0].input_heap_index
+                                     : view->planes[0].sampled_heap_index,
+         },
    };
    if (sampler)
       desc.sw.sampler = sampler->planes[0].hw->key;
@@ -220,14 +225,11 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    /* "Zero" initialize.  The null texture word is filled below, only for
     * the planes that are written out without an image view's word. */
    for (unsigned i = 0; i < 3; ++i) {
-      /* G17P's native sampler heap reserves entry zero for robust null
-       * sampling. The descriptor-set ABI stores application indices with the
-       * legacy +28 bias, so encode that same base for an explicit null
-       * descriptor. A zero clamp companion means "custom border present";
-       * -1 is the canonical no-border sentinel. */
+      /* G17P native entry zero is the reserved robust sampler. Other Gen9
+       * chips retain their biased software index. A zero clamp companion
+       * means custom border present; -1 is the no-border sentinel. */
       if (generation == 9) {
-         desc[i].sw.sampler_index =
-            HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+         desc[i].sw.sampler_index = hk_sampler_descriptor_index(set->layout, 0);
          desc[i].sw.clamp_0_sampler_index_or_negative = -1;
       }
    }
@@ -316,11 +318,10 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
          uint8_t sampler_plane = MIN2(plane, sampler->plane_count - 1);
          assert(sampler->planes[sampler_plane].hw->index < (1 << 12));
 
-         /* All bindless samplers are indexed from 28 in hardware, add here so
-          * we don't have to care in the shader.
-          */
-         desc[plane].sw.sampler_index =
-            sampler->planes[sampler_plane].hw->index + 28;
+         /* Publish the device's sampler-index ABI, including every replicated
+          * image plane. G17P consumes the native heap index directly. */
+         desc[plane].sw.sampler_index = hk_sampler_descriptor_index(
+            set->layout, sampler->planes[sampler_plane].hw->index);
          desc[plane].sw.sampler = sampler->planes[sampler_plane].hw->key;
          desc[plane].sw.lod_bias_fp16 = sampler->lod_bias_fp16;
          desc[plane].sw.clamp_0_sampler_index_or_negative = -1;
@@ -329,7 +330,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       if (sampler->has_border) {
          assert(sampler->plane_count == 2);
          desc[0].sw.clamp_0_sampler_index_or_negative =
-            (sampler->planes[1].hw->index + 28) |
+            hk_sampler_descriptor_index(set->layout,
+                                        sampler->planes[1].hw->index) |
             (sampler->border_is_int ? HK_BORDER_IS_INT_BIT : 0);
 
          assert(desc[0].sw.clamp_0_sampler_index_or_negative >= 0 &&

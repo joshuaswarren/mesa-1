@@ -191,6 +191,7 @@ hk_CreateDescriptorSetLayout(VkDevice device,
    layout->binding_count = num_bindings;
    layout->descriptor_generation =
       agx_chip_descriptor_generation(pdev->dev.chip);
+   layout->native_sampler_indices = pdev->dev.chip == AGX_CHIP_G17P;
 
    for (uint32_t j = 0; j < pCreateInfo->bindingCount; j++) {
       const VkDescriptorSetLayoutBinding *binding = &pCreateInfo->pBindings[j];

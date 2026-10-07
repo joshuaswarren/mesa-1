@@ -22,6 +22,7 @@ struct hk_descriptor_set_layout;
 /* Software tail following a generation-sized native texture descriptor. */
 struct hk_sampled_image_descriptor_sw {
    struct agx_sampler_packed sampler;
+   /* Raw native heap index on G17P; AGX2-biased index on other chips. */
    uint16_t sampler_index;
 
    /* Negative if there is no border colour, else the clamp=0 sampler index used

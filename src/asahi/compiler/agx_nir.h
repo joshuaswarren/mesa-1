@@ -120,11 +120,6 @@ agx_g17p_pack_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,
 /* Native texture/PBE pair, heap indices, address sideband, then padding. */
 #define AGX_G17P_EMRT_DESCRIPTOR_SIZE 96
 #define AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET 80
-/* Software sampler indices carry AGX2's reservation of the first 28 entries;
- * the native G17P heap is zero-based. Must match the runtime's
- * HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX. */
-#define AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX 28
-
 bool agx_nir_lower_g17p_indexed_samplers(struct nir_shader *s);
 /* Packed native32 array handles are byte offsets; sampler handles already
  * name their native entry, including the reserved texel-fetch sampler0. */

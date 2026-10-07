@@ -924,32 +924,16 @@ lower_indexed_samplers(nir_shader *shader, int native32_set)
                nir_def *address = nir_iadd(&b, set, nir_u2u64(&b, offset));
                texture_index = nir_load_global_constant(&b, 1, 32, address, .align_mul = 4);
             }
-            /* The software sampler index includes AGX2's reservation of 28.
-             * Native G17P heaps are zero-based, as the immediate path is.
-             *
-             * Rebase by saturating, not wrapping. The descriptor ABI writes a
-             * null sampler as the unbiased base itself and leaves an untouched
-             * descriptor at all-zero, so indices below the bias do reach here.
-             * hk_agx3_g17p_combined_sampler_pointers() resolves the identical
-             * heap on the immediate path as
-             *   index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX ? 0
-             *                                                    : index - base
-             * and native entry zero is the reserved robust sampler both
-             * encodings must land on. Wrapping instead sends 0 to 0xffffffe4,
-             * a register sampler descriptor far outside the heap.
-             *
-             * G17P has no saturating-subtract encoding; agx_compile_shader_nir
-             * sets lower_usub_sat for AGX3B, so this becomes the witnessed
-             * compare/subtract/select before isel. */
+            /* G17P Vulkan descriptors already name the native zero-based
+             * sampler heap. The packed native32 path also uses raw indices.
+             * Untouched/null descriptors select reserved entry zero. Preserve
+             * native32's explicitly admitted wider sampler sources here. */
             texture_index = nir_u2u64(&b, texture_index);
             nir_steal_tex_src(tex, nir_tex_src_texture_handle);
             nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, texture_index);
             if (!fetch) {
-               nir_def *sampler_index = native32_set >= 0
-                  ? nir_u2u32(&b, sampler) : nir_usub_sat(
-                  &b, nir_u2u32(&b, sampler),
-                  nir_imm_int(&b, AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX));
-               sampler_index = nir_u2u64(&b, sampler_index);
+               nir_def *sampler_index = nir_u2u64(
+                  &b, native32_set >= 0 ? nir_u2u32(&b, sampler) : sampler);
                nir_steal_tex_src(tex, nir_tex_src_sampler_handle);
                nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler_index);
             }
