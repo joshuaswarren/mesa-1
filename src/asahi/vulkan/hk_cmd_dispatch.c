@@ -47,10 +47,11 @@ static const uint8_t hk_g17p_native_write_control[32] = {
 #define HK_G17P_LOADER_MAX_RELOCATIONS 32u
 
 struct hk_g17p_loader_relocation {
-   uint16_t offset;
-   uint16_t dest_half;
-   uint8_t range;
+   /* agx_ioto_load_ldimm_long_dest() of the low and high halves */
+   uint64_t dest[2];
    uint32_t delta;
+   uint16_t offset;
+   uint8_t range;
 };
 
 /* The uniform loader of a G17P launch, composed once per program and uniform
@@ -300,7 +301,8 @@ hk_g17p_loader_create(struct hk_device *dev,
       }
       l->relocs[r] = (struct hk_g17p_loader_relocation){
          .offset = rels[r].offset,
-         .dest_half = rels[r].dest_half,
+         .dest = {agx_ioto_load_ldimm_long_dest(rels[r].dest_half),
+                  agx_ioto_load_ldimm_long_dest(rels[r].dest_half + 2)},
          .range = i,
          .delta = rels[r].address - desc->uniform_ranges[i].address,
       };
@@ -359,11 +361,13 @@ hk_g17p_loader_emit(struct hk_cmd_buffer *cmd, const struct hk_g17p_loader *l,
    for (unsigned i = 0; i < l->reloc_count; ++i) {
       const struct hk_g17p_loader_relocation *rel = &l->relocs[i];
       const uint64_t address = ranges[rel->range].address + rel->delta;
-      agx_ioto_load_pack_ldimm_long(rel->dest_half, (uint32_t)address,
-                                    r.map + rel->offset);
-      agx_ioto_load_pack_ldimm_long(rel->dest_half + 2,
-                                    (uint32_t)(address >> 32),
-                                    r.map + rel->offset + 8);
+      const uint64_t ldimm[2] = {
+         util_cpu_to_le64(rel->dest[0] |
+                          agx_ioto_load_ldimm_long_immediate(address)),
+         util_cpu_to_le64(rel->dest[1] |
+                          agx_ioto_load_ldimm_long_immediate(address >> 32)),
+      };
+      memcpy((uint8_t *)r.map + rel->offset, ldimm, sizeof(ldimm));
    }
 
    const uint64_t va = hk_cmd_publish_ioto_program(cmd, &r, l->length);

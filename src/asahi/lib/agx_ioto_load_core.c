@@ -161,27 +161,6 @@ agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
 }
 
 void
-agx_ioto_load_pack_ldimm_long(uint16_t dest_half, uint32_t immediate,
-                              uint8_t out[AGX_IOTO_LOAD_LDIMM_MAX_SIZE])
-{
-   const uint16_t w0 = UINT16_C(0x800c) |
-                       (uint16_t)(((dest_half >> 1) & 0xf) << 4) |
-                       (uint16_t)((immediate & 0x7f) << 8);
-   const uint16_t w1 = UINT16_C(0x0002) | (uint16_t)((dest_half & 1) << 2) |
-                       (uint16_t)(((dest_half >> 5) & 3) << 6) |
-                       (uint16_t)(((dest_half >> 7) & 1) << 3) |
-                       (uint16_t)(((immediate >> 25) & 0x7f) << 9);
-   const uint16_t w2 = (uint16_t)(((immediate >> 7) & 0xf) << 1) |
-                       (uint16_t)(((immediate >> 11) & 3) << 10);
-   const uint16_t w3 = (uint16_t)((immediate >> 13) & 0xf) |
-                       (uint16_t)(((immediate >> 17) & 0xff) << 4);
-   store_u16(&out[0], w0);
-   store_u16(&out[2], w1);
-   store_u16(&out[4], w2);
-   store_u16(&out[6], w3);
-}
-
-void
 agx_ioto_load_core_forget_bases(struct agx_ioto_load_core *core)
 {
    core->cache_count = 0;

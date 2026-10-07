@@ -2527,10 +2527,11 @@ struct hk_g17p_gfx_loader {
    uint8_t reloc_count;
    uint16_t length;
    struct {
-      uint16_t offset;
-      uint8_t dest_half;
-      uint8_t range;
+      /* agx_ioto_load_ldimm_long_dest() of the low and high halves */
+      uint64_t dest[2];
       uint32_t delta;
+      uint16_t offset;
+      uint8_t range;
    } relocs[HK_G17P_GFX_LOADER_MAX_RELOCATIONS];
    uint8_t bytes[];
 };
@@ -2609,7 +2610,9 @@ hk_g17p_gfx_loader_create(struct hk_device *dev, const struct hk_shader *s,
          goto out;
       }
       l->relocs[r].offset = rel->offset;
-      l->relocs[r].dest_half = rel->dest_half;
+      l->relocs[r].dest[0] = agx_ioto_load_ldimm_long_dest(rel->dest_half);
+      l->relocs[r].dest[1] =
+         agx_ioto_load_ldimm_long_dest(rel->dest_half + 2);
       l->relocs[r].range = i;
       l->relocs[r].delta = rel->address - desc->uniform_ranges[i].address;
       based |= BITFIELD_BIT(i);
@@ -2638,11 +2641,13 @@ hk_g17p_gfx_loader_emit(struct hk_cmd_buffer *cmd,
    for (unsigned i = 0; i < l->reloc_count; ++i) {
       const uint64_t address = ranges[l->relocs[i].range].address +
                                l->relocs[i].delta;
-      agx_ioto_load_pack_ldimm_long(l->relocs[i].dest_half, (uint32_t)address,
-                                    r.map + l->relocs[i].offset);
-      agx_ioto_load_pack_ldimm_long(l->relocs[i].dest_half + 2,
-                                    (uint32_t)(address >> 32),
-                                    r.map + l->relocs[i].offset + 8);
+      const uint64_t ldimm[2] = {
+         util_cpu_to_le64(l->relocs[i].dest[0] |
+                          agx_ioto_load_ldimm_long_immediate(address)),
+         util_cpu_to_le64(l->relocs[i].dest[1] |
+                          agx_ioto_load_ldimm_long_immediate(address >> 32)),
+      };
+      memcpy((uint8_t *)r.map + l->relocs[i].offset, ldimm, sizeof(ldimm));
    }
 
    return hk_cmd_publish_ioto_program(cmd, &r, l->length);
@@ -2709,12 +2714,20 @@ hk_g17p_publish_gfx_loader(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       l = created;
    }
 
-   cached->loader = l;
-   cached->loader_linked = linked;
+   /* The program is a function of the loader and the range addresses. */
+   if (cached->loader == l && cached->loader_linked == linked &&
+       cached->loader_program &&
+       !memcmp(cached->loader_ranges, ranges, range_count * sizeof(ranges[0])))
+      return cached->loader_program;
 
    const uint64_t published = hk_g17p_gfx_loader_emit(cmd, l, ranges);
    if (!published)
       return 0;
+
+   cached->loader = l;
+   cached->loader_linked = linked;
+   cached->loader_program = published;
+   memcpy(cached->loader_ranges, ranges, range_count * sizeof(ranges[0]));
 
    /* The program names the linked executable, and promoted constants and the
     * constant program live with the shader's code. */
@@ -3212,6 +3225,24 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       const bool diagnostics = dev->dev.debug & AGX_DBG_FAULTTRACE;
+      if (!diagnostics) {
+         struct agx3_ioto_uniform_range
+            loader_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+         size_t loader_range_count = 0;
+         if (hk_g17p_graphics_uniform_ranges(cmd, s, linked, loader_ranges,
+                                             &loader_range_count, NULL)) {
+            const uint64_t published = hk_g17p_publish_gfx_loader(
+               cmd, s, linked, cached, loader_ranges, loader_range_count);
+            if (published) {
+               /* The paths below must not reuse their own last program. */
+               cached->valid = false;
+               return published;
+            }
+            if (vk_command_buffer_has_error(&cmd->vk))
+               return 0;
+         }
+      }
+
       const bool fast_cacheable =
          !diagnostics && !s->info.agx3_combined_sampler_valid &&
          !(s->info.stage == MESA_SHADER_FRAGMENT &&
@@ -3259,37 +3290,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
           cached->sample_size_B == tib->sample_size_B &&
           cached->nr_samples == tib->nr_samples) {
          return cached->program;
-      }
-
-      if (!diagnostics) {
-         struct agx3_ioto_uniform_range
-            loader_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
-         size_t loader_range_count = 0;
-         if (hk_g17p_graphics_uniform_ranges(cmd, s, linked, loader_ranges,
-                                             &loader_range_count, NULL)) {
-            const uint64_t published = hk_g17p_publish_gfx_loader(
-               cmd, s, linked, cached, loader_ranges, loader_range_count);
-            if (published) {
-               cached->program = published;
-               cached->source_shader = s;
-               cached->linked_shader_va = linked_shader_va;
-               cached->rodata_va = rodata_va;
-               cached->root = cmd->state.gfx.root;
-               cached->draw_params = cmd->state.gfx.draw_params;
-               cached->draw_id_ptr = cmd->state.gfx.draw_id_ptr;
-               cached->root_dependent = root_dependent;
-               cached->dma_set_base = dma_set_base;
-               cached->tile_size_px = tib->tile_size;
-               cached->sample_size_B = tib->sample_size_B;
-               cached->nr_samples = tib->nr_samples;
-               cached->key_size = 0;
-               cached->fast_valid = fast_cacheable;
-               cached->valid = true;
-               return published;
-            }
-            if (vk_command_buffer_has_error(&cmd->vk))
-               return 0;
-         }
       }
 
       /* An indexed-indirect record publishes the

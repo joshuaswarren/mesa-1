@@ -276,9 +276,38 @@ bool agx_ioto_load_core_set_fixed_base(struct agx_ioto_load_core *core,
  * their own. Used to give each patchable uniform range its own base. */
 void agx_ioto_load_core_forget_bases(struct agx_ioto_load_core *core);
 
-/* The 8-byte LDIMM form, valid for any immediate. */
-void agx_ioto_load_pack_ldimm_long(uint16_t dest_half, uint32_t immediate,
-                                   uint8_t out[AGX_IOTO_LOAD_LDIMM_MAX_SIZE]);
+/* The 8-byte LDIMM form, valid for any immediate, as a little-endian
+ * 64-bit word: the destination fields, and the immediate fields that can be
+ * ORed into an encoding of the same destination with a zero immediate. */
+static inline uint64_t
+agx_ioto_load_ldimm_long_dest(uint16_t dest_half)
+{
+   return (uint64_t)(UINT16_C(0x800c) | (((dest_half >> 1) & 0xf) << 4)) |
+          (uint64_t)(UINT16_C(0x0002) | ((dest_half & 1) << 2) |
+                     (((dest_half >> 5) & 3) << 6) |
+                     (((dest_half >> 7) & 1) << 3)) << 16;
+}
+
+static inline uint64_t
+agx_ioto_load_ldimm_long_immediate(uint32_t immediate)
+{
+   return (uint64_t)((immediate & 0x7f) << 8) |
+          (uint64_t)(((immediate >> 25) & 0x7f) << 9) << 16 |
+          (uint64_t)((((immediate >> 7) & 0xf) << 1) |
+                     (((immediate >> 11) & 3) << 10)) << 32 |
+          (uint64_t)(((immediate >> 13) & 0xf) |
+                     (((immediate >> 17) & 0xff) << 4)) << 48;
+}
+
+static inline void
+agx_ioto_load_pack_ldimm_long(uint16_t dest_half, uint32_t immediate,
+                              uint8_t out[AGX_IOTO_LOAD_LDIMM_MAX_SIZE])
+{
+   const uint64_t word = agx_ioto_load_ldimm_long_dest(dest_half) |
+                         agx_ioto_load_ldimm_long_immediate(immediate);
+   for (unsigned i = 0; i < 8; ++i)
+      out[i] = (uint8_t)(word >> (8 * i));
+}
 
 bool agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
                               uint32_t immediate,

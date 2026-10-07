@@ -531,9 +531,13 @@ struct hk_g17p_prepared_fragment_key {
 struct hk_g17p_gfx_loader;
 
 struct hk_g17p_graphics_ioto_cache_entry {
-   /* The loader of the last draw (hk_g17p_publish_gfx_loader()). */
+   /* The loader of the last draw, the program published from it and the
+    * range addresses written into it (hk_g17p_publish_gfx_loader()). */
    const struct hk_g17p_gfx_loader *loader;
    const struct hk_linked_shader *loader_linked;
+   uint64_t loader_program;
+   struct agx3_ioto_uniform_range
+      loader_ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
 
    /* Inputs of the last admitted program (hk_upload_usc_words_internal()). */
    struct {
