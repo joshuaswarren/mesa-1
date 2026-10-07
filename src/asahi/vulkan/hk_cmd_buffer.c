@@ -2245,8 +2245,8 @@ hk_g17p_graphics_uniform_ranges(
       const struct agx_rodata *rodata = &s->b.info.rodata;
       if (!s->bo || !s->bo->va ||
           !hk_agx3_g17p_rodata_range(
-             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
-             rodata->offset, s->bo->size, &ranges[count]))
+             rodata->base_uniform, rodata->size_16, hk_shader_code_va(s),
+             rodata->offset, s->b.info.binary_size, &ranges[count]))
          return hk_g17p_graphics_ranges_refused(range_count, count);
       sources[count] = HK_G17P_RANGE_SOURCE_CONSTANT;
       count++;
@@ -2530,18 +2530,19 @@ hk_g17p_graphics_setup_build(
    setup->external_va = 0;
    setup->external_length = 0;
    if (external_valid) {
-      setup->external_bo = agx_bo_create(
-         &dev->dev, ALIGN_POT(external_written, 64), 0,
-         AGX_BO_EXEC | AGX_BO_LOW_VA, "G17P persistent graphics setup");
+      uint32_t offset;
+      setup->external_bo = hk_code_alloc(
+         dev, ALIGN_POT(external_written, 64), &offset);
       if (setup->external_bo) {
-         void *external_map = agx_bo_map(setup->external_bo);
-         if (external_map) {
+         uint8_t *external_map =
+            (uint8_t *)agx_bo_map(setup->external_bo) + offset;
+         {
             memcpy(external_map, external, external_written);
-            memset((uint8_t *)external_map + external_written, 0,
+            memset(external_map + external_written, 0,
                    ALIGN_POT(external_written, 64) - external_written);
-            if (!agx_bo_sync_for_device(
-                   setup->external_bo, 0, ALIGN_POT(external_written, 64))) {
-               setup->external_va = setup->external_bo->va->addr;
+            if (!agx_bo_sync_for_device(setup->external_bo, offset,
+                                        ALIGN_POT(external_written, 64))) {
+               setup->external_va = setup->external_bo->va->addr + offset;
                setup->external_length = external_written;
                if (!hk_agx3_g17p_graphics_external_launcher_template_generate(
                       dev->dev.chip, &desc, setup->external_va,
@@ -3048,7 +3049,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          linked->b.bo->va->addr + linked->b.entry_offset;
       const uint64_t rodata_va =
          s->b.info.rodata.size_16 && s->bo && s->bo->va
-            ? s->bo->va->addr
+            ? hk_shader_code_va(s)
             : 0;
       const struct agx_tilebuffer_layout *tib =
          &cmd->state.gfx.render.tilebuffer;
@@ -3344,7 +3345,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
            s->code_size != s->b.info.binary_size ||
            !hk_agx3_g17p_constant_program_from_binary(
               s->code_ptr, s->code_size, s->b.info.preamble_offset,
-              s->b.info.preamble_size, s->bo->va->addr, s->bo->size,
+              s->b.info.preamble_size, hk_shader_code_va(s), s->b.info.binary_size,
               &desc.constant_program))) {
          mesa_loge_once("G17P graphics constant-program extent refused");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

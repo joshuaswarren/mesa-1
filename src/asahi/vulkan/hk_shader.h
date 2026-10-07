@@ -191,7 +191,9 @@ struct hk_shader {
    uint32_t data_size;
 
    /* BO for any uploaded shader part */
+   /* Code heap chunk holding the binary, at bo_offset. */
    struct agx_bo *bo;
+   uint32_t bo_offset;
 
    /* Cache of fast linked variants */
    struct {
@@ -230,6 +232,12 @@ struct hk_shader {
    size_t g17p_mono_nir_size;
    struct agx_shader_key g17p_mono_key;
 };
+
+static inline uint64_t
+hk_shader_code_va(const struct hk_shader *s)
+{
+   return s->bo->va->addr + s->bo_offset;
+}
 
 enum hk_vs_variant {
    /* Hardware vertex shader, when next stage is fragment */

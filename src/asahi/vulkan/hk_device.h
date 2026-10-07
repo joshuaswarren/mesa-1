@@ -110,6 +110,14 @@ struct hk_sampler_heap {
    struct hash_table *ht;
 };
 
+/* Executable memory for shader binaries and launch setups, bump-allocated
+ * from chunks. A chunk lives while anything allocated from it does. */
+struct hk_code_heap {
+   simple_mtx_t lock;
+   struct agx_bo *chunk;
+   uint32_t offset;
+};
+
 struct hk_device {
    struct vk_device vk;
    struct agx_device dev;
@@ -149,6 +157,8 @@ struct hk_device {
    struct {
       void *templates[LIBAGX_NUM_PROGRAMS];
    } g17p_compute_program_cache;
+
+   struct hk_code_heap code_heap;
 
    /* v48: kernel-maintained copy of this VM's sticky status
     * (DRM_ASAHI_FEATURE_VM_STATUS_MIRROR). NULL: query per check instead. */
@@ -319,3 +329,9 @@ hk_device_alloc_scratch(struct hk_device *dev, mesa_shader_stage stage,
  * launch programs (hk_cmd_draw.c). */
 void hk_g17p_bg_eot_dev_cache_init(struct hk_device *dev);
 void hk_g17p_bg_eot_dev_cache_finish(struct hk_device *dev);
+
+/* Allocate size bytes of executable memory. Returns a reference to the chunk
+ * BO holding it, with the allocation at *offset; release it with
+ * agx_bo_unreference(). */
+struct agx_bo *hk_code_alloc(struct hk_device *dev, size_t size,
+                             uint32_t *offset);

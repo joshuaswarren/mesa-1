@@ -2084,35 +2084,19 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       size_t size = shader->b.info.binary_size;
       assert(size > 0);
 
-      shader->bo = agx_bo_create(&dev->dev, size, 0,
-                                 AGX_BO_EXEC | AGX_BO_LOW_VA, "Preamble");
-      if (!shader->bo) {
-         fprintf(stderr,
-                 "hk_upload_shader: executable preamble allocation failed "
-                 "(%zu bytes, stage %u)\n",
-                 size, (unsigned)shader->info.stage);
+      shader->bo = hk_code_alloc(dev, size, &shader->bo_offset);
+      if (!shader->bo)
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      }
 
-      void *map = agx_bo_map(shader->bo);
-      if (!map) {
-         fprintf(stderr,
-                 "hk_upload_shader: executable preamble mapping failed "
-                 "(%zu bytes, stage %u)\n",
-                 size, (unsigned)shader->info.stage);
-         agx_bo_unreference(&dev->dev, shader->bo);
-         shader->bo = NULL;
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      }
-
-      memcpy(map, shader->b.binary, size);
-      if (agx_bo_sync_for_device(shader->bo, 0, size)) {
+      memcpy((uint8_t *)agx_bo_map(shader->bo) + shader->bo_offset,
+             shader->b.binary, size);
+      if (agx_bo_sync_for_device(shader->bo, shader->bo_offset, size)) {
          agx_bo_unreference(&dev->dev, shader->bo);
          shader->bo = NULL;
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
       }
       shader->preamble_addr =
-         shader->bo->va->addr + shader->b.info.preamble_offset;
+         hk_shader_code_va(shader) + shader->b.info.preamble_offset;
    }
 
    if (!shader->linked.ht) {
@@ -4897,7 +4881,7 @@ hk_fast_link_part(struct hk_device *dev, bool fragment, struct hk_shader *main,
    struct agx_usc_builder b = agx_usc_builder(s->usc.data, sizeof(s->usc.data));
 
    if (main && main->b.info.rodata.size_16) {
-      agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
+      agx_usc_immediates(&b, &main->b.info.rodata, hk_shader_code_va(main));
    }
 
    if (s->b.uses_txf)

@@ -436,6 +436,48 @@ hk_init_vm_status_mirror(struct hk_device *dev)
    dev->vm_status_mirror.word = word;
 }
 
+#define HK_CODE_CHUNK_SIZE (1024 * 1024)
+#define HK_CODE_ALIGNMENT  256
+
+struct agx_bo *
+hk_code_alloc(struct hk_device *dev, size_t size, uint32_t *offset)
+{
+   struct hk_code_heap *heap = &dev->code_heap;
+   struct agx_bo *bo = NULL;
+
+   simple_mtx_lock(&heap->lock);
+   uint32_t at = ALIGN_POT(heap->offset, HK_CODE_ALIGNMENT);
+   if (!heap->chunk || size > heap->chunk->size ||
+       at > heap->chunk->size - size) {
+      struct agx_bo *chunk =
+         agx_bo_create(&dev->dev, MAX2(HK_CODE_CHUNK_SIZE, size), 0,
+                       AGX_BO_EXEC | AGX_BO_LOW_VA, "Shader code");
+      if (!chunk || !agx_bo_map(chunk)) {
+         agx_bo_unreference(&dev->dev, chunk);
+         goto out;
+      }
+      agx_bo_unreference(&dev->dev, heap->chunk);
+      heap->chunk = chunk;
+      at = 0;
+   }
+
+   heap->offset = at + size;
+   *offset = at;
+   bo = heap->chunk;
+   agx_bo_reference(bo);
+
+out:
+   simple_mtx_unlock(&heap->lock);
+   return bo;
+}
+
+static struct agx_bo *
+hk_code_alloc_linked(struct agx_device *adev, size_t size, uint32_t *offset)
+{
+   return hk_code_alloc(container_of(adev, struct hk_device, dev), size,
+                        offset);
+}
+
 /* Release before agx_close_device(), whose BO-cache eviction then frees the
  * object; the kernel's own reference keeps its copy of the pages valid. */
 static void
@@ -768,6 +810,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    vk_device_dispatch_table_from_entrypoints(
       &dev->cmd_dispatch, &vk_common_device_entrypoints, false);
 
+   simple_mtx_init(&dev->code_heap.lock, mtx_plain);
+   dev->dev.code_alloc = hk_code_alloc_linked;
+
    result = vk_device_init(&dev->vk, &pdev->vk, &dispatch_table, pCreateInfo,
                            pAllocator);
    if (result != VK_SUCCESS)
@@ -995,6 +1040,7 @@ fail_samplers:
    hk_destroy_sampler_heap(dev, &dev->samplers);
 fail_dev:
    hk_finish_vm_status_mirror(dev);
+   agx_bo_unreference(&dev->dev, dev->code_heap.chunk);
    agx_close_device(&dev->dev);
    /* agx_close_device owns the DRM fd after agx_open_device succeeds. */
    goto fail_init;
@@ -1072,6 +1118,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    hk_g17p_bg_eot_dev_cache_finish(dev);
    agx_bg_eot_cleanup(&dev->bg_eot);
    hk_finish_vm_status_mirror(dev);
+   agx_bo_unreference(&dev->dev, dev->code_heap.chunk);
+   simple_mtx_destroy(&dev->code_heap.lock);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
 }

@@ -784,8 +784,8 @@ hk_g17p_internal_graphics_uniform_ranges(
       const struct agx_rodata *rodata = &s->b.info.rodata;
       if (count >= HK_G17P_COMPUTE_MAX_RANGES || !s->bo || !s->bo->va ||
           !hk_agx3_g17p_rodata_range(
-             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
-             rodata->offset, s->bo->size, &ranges[count]))
+             rodata->base_uniform, rodata->size_16, hk_shader_code_va(s),
+             rodata->offset, s->b.info.binary_size, &ranges[count]))
          return false;
       count++;
    }
@@ -860,8 +860,8 @@ hk_g17p_compute_uniform_ranges(
    if (rodata->size_16 != 0) {
       if (!s->bo || !s->bo->va ||
           !hk_agx3_g17p_rodata_range(
-             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
-             rodata->offset, s->bo->size, &ranges[count]))
+             rodata->base_uniform, rodata->size_16, hk_shader_code_va(s),
+             rodata->offset, s->b.info.binary_size, &ranges[count]))
          return false;
       count++;
    }
