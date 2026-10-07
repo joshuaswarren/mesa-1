@@ -465,6 +465,19 @@ struct hk_g17p_graphics_ioto_cache_entry {
    } admit;
 };
 
+/* The inputs of a G17P VertexProgramVariant state update other than the
+ * pipeline address (hk_agx3_publish_vertex_state()). */
+struct hk_g17p_vdm_update_key {
+   const struct hk_shader *hw_vs;
+   uint32_t selector;
+   uint8_t draw_path;
+   uint8_t provoking;
+   bool rasterization_enabled;
+   bool primitive_id;
+   bool ordinary;
+   bool selector_valid;
+};
+
 struct hk_graphics_state {
    struct hk_rendering_state render;
    struct hk_descriptor_state descriptors;
@@ -519,9 +532,9 @@ struct hk_graphics_state {
 
    /* The last VertexProgramVariant state update this command buffer encoded,
     * keyed by every encoder input except the pipeline address; see
-    * hk_g17p_encode_vdm_state_update(). */
+    * hk_agx3_publish_vertex_state(). */
    struct {
-      struct agx_vdm_state_update_draw_info info;
+      struct hk_g17p_vdm_update_key key;
       struct agx_vdm_state_update encoded;
       bool valid;
    } g17p_vdm_update_memo;

@@ -6717,68 +6717,6 @@ hk_gfx_republishes_render_state(struct hk_cmd_buffer *cmd)
            gfx->linked[MESA_SHADER_VERTEX]->b.uses_base_param);
 }
 
-static bool
-hk_vdm_update_inputs_equal(const struct agx_vdm_state_update_draw_info *a,
-                           const struct agx_vdm_state_update_draw_info *b)
-{
-   const struct agx_vdm_state_update_template_info *x = &a->template_info;
-   const struct agx_vdm_state_update_template_info *y = &b->template_info;
-
-   return a->source_layout == b->source_layout &&
-          a->draw_path == b->draw_path &&
-          a->rasterization_enabled == b->rasterization_enabled &&
-          a->raw_provoking_selector == b->raw_provoking_selector &&
-          x->raw_state_load_count_12 == y->raw_state_load_count_12 &&
-          x->raw_state_load_count_18 == y->raw_state_load_count_18 &&
-          x->raw_vs_output_count_0 == y->raw_vs_output_count_0 &&
-          x->raw_vs_output_count_2 == y->raw_vs_output_count_2 &&
-          x->raw_vs_output_count_1_extra == y->raw_vs_output_count_1_extra &&
-          x->raw_vs_output_selector == y->raw_vs_output_selector &&
-          x->raw_vs_output_flag_6 == y->raw_vs_output_flag_6 &&
-          x->pre_hal300_flag_group_nonzero ==
-             y->pre_hal300_flag_group_nonzero &&
-          x->pre_hal300_flag_bit_4 == y->pre_hal300_flag_bit_4 &&
-          x->variant == y->variant &&
-          x->raw_active_context_selector == y->raw_active_context_selector;
-}
-
-/* hk_agx3_encode_vdm_state_update_draw(), reusing the previous encoding when
- * every input except the pipeline address is unchanged.  The pipeline
- * address occupies only the two-word pipeline pair at bytes 8..15
- * (agx_vdm_state_update_pack()), and that pair is packed by the same
- * function with the same template field, so the bytes and the refusal
- * condition are exactly the encoder's. */
-static bool
-hk_g17p_encode_vdm_state_update(struct hk_cmd_buffer *cmd, enum agx_chip chip,
-                                const struct agx_vdm_state_update_draw_info *info,
-                                struct agx_vdm_state_update *encoded)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-
-   if (gfx->g17p_vdm_update_memo.valid &&
-       hk_vdm_update_inputs_equal(&gfx->g17p_vdm_update_memo.info, info)) {
-      struct agx_vdm_state_vertex_pipeline_pair pair;
-      *encoded = gfx->g17p_vdm_update_memo.encoded;
-      if (!agx_vdm_state_vertex_pipeline_pair_pack(
-             chip, info->template_info.pipeline,
-             info->template_info.raw_state_load_count_18 << 3, &pair)) {
-         memset(encoded, 0, sizeof(*encoded));
-         return false;
-      }
-      static_assert(sizeof(pair.bytes) == 8, "pipeline pair is two words");
-      memcpy(&encoded->bytes[8], pair.bytes, sizeof(pair.bytes));
-      return true;
-   }
-
-   if (!hk_agx3_encode_vdm_state_update_draw(chip, info, encoded))
-      return false;
-
-   gfx->g17p_vdm_update_memo.info = *info;
-   gfx->g17p_vdm_update_memo.encoded = *encoded;
-   gfx->g17p_vdm_update_memo.valid = true;
-   return true;
-}
-
 /* The AGX3 VertexProgramVariant state update for pipeline_program and, on
  * G17P, the native HAL200 bind tail: the vertex-program publication of every
  * draw that republishes render state.  Shared by hk_flush_dynamic_state_slow()
@@ -6804,6 +6742,57 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const bool pipeline_va_valid =
       pipeline_program != 0 && pipeline_program < (UINT64_C(1) << 48) &&
       (pipeline_program & UINT64_C(0x3f)) == 0;
+   const enum agx_vdm_state_update_draw_path draw_path =
+      agx_is_indirect(draw.b)
+         ? (draw.indexed ? AGX_VDM_STATE_UPDATE_DRAW_INDIRECT_INDEXED
+                         : AGX_VDM_STATE_UPDATE_DRAW_INDIRECT_NONINDEXED)
+         : (draw.indexed ? AGX_VDM_STATE_UPDATE_DRAW_DIRECT_INDEXED
+                         : AGX_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED);
+   /* RenderPipeline+0x2f0 is populated from isRasterizationEnabled; the
+    * selected template carries 0x30 when this is false on pre-HAL300.
+    * Software XFB stores live in the raster variant's vertex program, so it
+    * must use the live vertex template even when Vulkan discards
+    * rasterization.  The independently packed HAL200 PPP discard bits still
+    * suppress fragments. */
+   const bool rasterization_enabled =
+      !hk_rast_discard(cmd) || hk_g17p_xfb_vertex_side_effects(cmd, hw_vs);
+
+   /* Every encoder input except the pipeline address, which occupies only
+    * the two-word pipeline pair at bytes 8..15 (agx_vdm_state_update_pack())
+    * and is packed by the same function with the same template field: a
+    * draw whose other inputs match the last encoding reuses it. */
+   const struct hk_g17p_vdm_update_key key = {
+      .hw_vs = hw_vs,
+      .draw_path = draw_path,
+      .rasterization_enabled = rasterization_enabled,
+      .provoking = gfx->provoking,
+      .primitive_id = gfx->generate_primitive_id,
+      .ordinary = ordinary_draw_path,
+      .selector_valid = cs->agx3_active_context_selector_valid,
+      .selector = cs->agx3_raw_active_context_selector,
+   };
+   struct agx_vdm_state_update encoded;
+   struct agx_vdm_state_vertex_pipeline_pair pair;
+   const struct hk_g17p_vdm_update_key *memo = &gfx->g17p_vdm_update_memo.key;
+   if (pipeline_va_valid && gfx->g17p_vdm_update_memo.valid &&
+       memo->hw_vs == key.hw_vs && memo->selector == key.selector &&
+       memo->draw_path == key.draw_path &&
+       memo->provoking == key.provoking &&
+       memo->rasterization_enabled == key.rasterization_enabled &&
+       memo->primitive_id == key.primitive_id &&
+       memo->ordinary == key.ordinary &&
+       memo->selector_valid == key.selector_valid &&
+       agx_vdm_state_vertex_pipeline_pair_pack(
+          dev->dev.chip, pipeline_program,
+          program->template_info.raw_state_load_count_18 << 3, &pair)) {
+      static_assert(sizeof(pair.bytes) == 8, "pipeline pair is two words");
+      encoded = gfx->g17p_vdm_update_memo.encoded;
+      memcpy(&encoded.bytes[8], pair.bytes, sizeof(pair.bytes));
+      memcpy(out, encoded.bytes, encoded.length);
+      out += encoded.length;
+      goto tail;
+   }
+
    const bool complete_program =
       pipeline_va_valid &&
       hk_agx3_vdm_live_source_layout(
@@ -6814,23 +6803,8 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .source_layout = complete_program
             ? AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT
             : AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_UNSPECIFIED,
-      .draw_path = agx_is_indirect(draw.b)
-         ? (draw.indexed
-               ? AGX_VDM_STATE_UPDATE_DRAW_INDIRECT_INDEXED
-               : AGX_VDM_STATE_UPDATE_DRAW_INDIRECT_NONINDEXED)
-         : (draw.indexed
-               ? AGX_VDM_STATE_UPDATE_DRAW_DIRECT_INDEXED
-               : AGX_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED),
-      /* RenderPipeline+0x2f0 is populated from
-       * isRasterizationEnabled; the selected template carries 0x30
-       * when this is false on pre-HAL300.  Software XFB stores live in
-       * the raster variant's vertex program, so it must use the live
-       * vertex template even when Vulkan discards rasterization.  The
-       * independently packed HAL200 PPP discard bits still suppress
-       * fragments. */
-      .rasterization_enabled =
-         !hk_rast_discard(cmd) ||
-         hk_g17p_xfb_vertex_side_effects(cmd, hw_vs),
+      .draw_path = draw_path,
+      .rasterization_enabled = rasterization_enabled,
       /* hk already stores the actual hardware provoking vertex 0..2.
        * Apple's setter maps its API mode to this same value before
        * selecting one of the six templates. */
@@ -6844,9 +6818,8 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    info.template_info.raw_active_context_selector =
       cs->agx3_raw_active_context_selector;
 
-   struct agx_vdm_state_update encoded;
-   if (!hk_g17p_encode_vdm_state_update(cmd, dev->dev.chip, &info,
-                                        &encoded)) {
+   if (!hk_agx3_encode_vdm_state_update_draw(dev->dev.chip, &info,
+                                             &encoded)) {
       const char *reason =
          !pipeline_va_valid ? "pipeline-va"
          : program->source_layout !=
@@ -6893,7 +6866,11 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    memcpy(out, encoded.bytes, encoded.length);
    out += encoded.length;
+   gfx->g17p_vdm_update_memo.key = key;
+   gfx->g17p_vdm_update_memo.encoded = encoded;
+   gfx->g17p_vdm_update_memo.valid = true;
 
+tail:
    if (dev->dev.chip == AGX_CHIP_G17P) {
       if (!hk_g17p_emit_native_bind_tail(cmd, cs, &out,
                                            tail_known_match)) {
