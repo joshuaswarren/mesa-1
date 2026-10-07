@@ -257,6 +257,8 @@ lower_muladd(nir_builder *b, struct hash_table *orig, nir_intrinsic_instr *intr)
 
    unsigned m = da.rows, k = da.cols, n = src_desc(orig, intr->src[2]).cols;
    struct glsl_cmat_description dc = src_desc(orig, intr->src[3]);
+   /* Every advertised shape has one A/B type; B converts like A below. */
+   assert(da.element_type == src_desc(orig, intr->src[2]).element_type);
 
    /* Only N x N x N, N in {8, 16}, is advertised; anything larger would
     * overflow the fixed SSA hoist arrays. Leave it unlowered so it fails
@@ -265,31 +267,23 @@ lower_muladd(nir_builder *b, struct hash_table *orig, nir_intrinsic_instr *intr)
        m * n > AGX_CMAT_MAX_ELEMS)
       return false;
 
-   unsigned acc_bits = glsl_base_type_bit_size(dc.element_type);
-   unsigned in_bits = glsl_base_type_bit_size(da.element_type);
-   nir_op conv = nir_op_mov;
-   if (in_bits != acc_bits) {
-      /* fp16 A/B with an fp32 accumulator: the HW form computes the products
-       * at accumulator width; mirror that. */
-      conv = nir_type_conversion_op(
-         nir_get_nir_type_for_glsl_base_type(da.element_type),
-         nir_get_nir_type_for_glsl_base_type(dc.element_type),
-         nir_rounding_mode_undef);
-   }
-
    /* Tangled op: uniform loop, gather each A/B element from its owner lane.
     * Hoisted before any D store so D aliasing an input stays correct. C is
     * local: only the owner's result of each element is consumed. */
    nir_def *a_cnt = active_count(b);
    nir_def *av[AGX_CMAT_MAX_ELEMS], *bv[AGX_CMAT_MAX_ELEMS];
    nir_def *owner = nir_imm_int(b, 0);
+   /* A/B narrower than the accumulator (fp16 or bf16 A/B, fp32 C): the HW
+    * form computes the products at accumulator width; mirror that. */
    for (unsigned e = 0; e < m * k; e++) {
-      av[e] = gather_elem(b, a, e, owner);
+      av[e] = agx_cmat_convert(b, gather_elem(b, a, e, owner), da.element_type,
+                               dc.element_type);
       owner = owner_next(b, owner, a_cnt);
    }
    owner = nir_imm_int(b, 0);
    for (unsigned e = 0; e < k * n; e++) {
-      bv[e] = gather_elem(b, mat_b, e, owner);
+      bv[e] = agx_cmat_convert(b, gather_elem(b, mat_b, e, owner),
+                               da.element_type, dc.element_type);
       owner = owner_next(b, owner, a_cnt);
    }
 
@@ -297,12 +291,7 @@ lower_muladd(nir_builder *b, struct hash_table *orig, nir_intrinsic_instr *intr)
       unsigned i = e / n, j = e % n;
       nir_def *acc = load_elem(b, c, e);
       for (unsigned kk = 0; kk < k; kk++) {
-         nir_def *x = av[i * k + kk], *y = bv[kk * n + j];
-         if (conv != nir_op_mov) {
-            x = nir_build_alu1(b, conv, x);
-            y = nir_build_alu1(b, conv, y);
-         }
-         acc = nir_ffma(b, x, y, acc);
+         acc = nir_ffma(b, av[i * k + kk], bv[kk * n + j], acc);
       }
       store_elem(b, d, e, acc);
    }
@@ -353,24 +342,18 @@ lower_alu_op(nir_builder *b, struct hash_table *orig,
    nir_deref_instr *dst = nir_src_as_deref(intr->src[0]);
    nir_deref_instr *a = nir_src_as_deref(intr->src[1]);
    nir_op op = nir_intrinsic_alu_op(intr);
-   unsigned elems = src_desc(orig, intr->src[0]).rows *
-                    src_desc(orig, intr->src[0]).cols;
+   struct glsl_cmat_description desc = src_desc(orig, intr->src[1]);
+   unsigned elems = desc.rows * desc.cols;
 
    unsigned save = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
-   if (kind == 0) {
-      for (unsigned e = 0; e < elems; e++)
-         store_elem(b, dst, e, nir_build_alu1(b, op, load_elem(b, a, e)));
-   } else if (kind == 1) {
-      for (unsigned e = 0; e < elems; e++)
-         store_elem(b, dst, e,
-                    nir_build_alu2(b, op, load_elem(b, a, e), intr->src[2].ssa));
-   } else {
-      nir_deref_instr *c = nir_src_as_deref(intr->src[2]);
-      for (unsigned e = 0; e < elems; e++)
-         store_elem(b, dst, e,
-                    nir_build_alu2(b, op, load_elem(b, a, e),
-                                   load_elem(b, c, e)));
+   nir_deref_instr *c = kind == 2 ? nir_src_as_deref(intr->src[2]) : NULL;
+   for (unsigned e = 0; e < elems; e++) {
+      nir_def *y = kind == 0 ? NULL
+                   : kind == 1 ? intr->src[2].ssa
+                               : load_elem(b, c, e);
+      store_elem(b, dst, e,
+                 agx_cmat_alu(b, op, desc.element_type, load_elem(b, a, e), y));
    }
    b->fp_math_ctrl = save;
 
@@ -448,14 +431,6 @@ lower_convert(nir_builder *b, struct hash_table *orig,
    if (dd.rows * dd.cols > AGX_CMAT_MAX_ELEMS)
       return false; /* unadvertised shape: fail loudly, not corrupt */
 
-   nir_op op = nir_op_mov;
-   if (dd.element_type != sd.element_type) {
-      op = nir_type_conversion_op(
-         nir_get_nir_type_for_glsl_base_type(sd.element_type),
-         nir_get_nir_type_for_glsl_base_type(dd.element_type),
-         nir_rounding_mode_undef);
-   }
-
    nir_def *a = active_count(b);
    nir_def *sv[AGX_CMAT_MAX_ELEMS];
    nir_def *owner = nir_imm_int(b, 0);
@@ -471,12 +446,9 @@ lower_convert(nir_builder *b, struct hash_table *orig,
 
    unsigned save = b->fp_math_ctrl;
    b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
-   for (unsigned e = 0; e < dd.rows * dd.cols; e++) {
-      if (op == nir_op_mov)
-         store_elem(b, dst, e, sv[e]);
-      else
-         store_elem(b, dst, e, nir_build_alu1(b, op, sv[e]));
-   }
+   for (unsigned e = 0; e < dd.rows * dd.cols; e++)
+      store_elem(b, dst, e,
+                 agx_cmat_convert(b, sv[e], sd.element_type, dd.element_type));
    b->fp_math_ctrl = save;
 
    nir_instr_remove(&intr->instr);

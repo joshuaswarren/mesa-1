@@ -11308,6 +11308,7 @@ agx_preprocess_nir(nir_shader *nir)
       else
          NIR_PASS(_, nir, agx_nir_lower_cmat);
    }
+   NIR_PASS(_, nir, agx_nir_lower_bf16_conversions);
 
    agx_preprocess_nir_internal(nir, false, false);
 }

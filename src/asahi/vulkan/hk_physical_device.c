@@ -203,6 +203,7 @@ hk_get_device_extensions(const struct agx_device *dev,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_atomic_int64 = false,
+      .KHR_shader_bfloat16 = true,
       .KHR_shader_clock = false,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
@@ -1970,9 +1971,12 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    supported_extensions.KHR_cooperative_matrix =
       native_coop_matrix || hk_cooperative_matrix_enabled(&pdev->dev);
 
+   /* bf16 conversions and bf16 cooperative matrices: the M5 native path and
+    * the G13 simd_matrix path both carry them. */
    supported_extensions.KHR_shader_bfloat16 =
-      native_coop_matrix &&
-      debug_get_bool_option("ASAHI_M5_BFLOAT16", true);
+      native_coop_matrix
+         ? debug_get_bool_option("ASAHI_M5_BFLOAT16", true)
+         : hk_cooperative_matrix_enabled(&pdev->dev);
 
    /* Hardware-qualified on M5 only. */
    supported_extensions.EXT_primitives_generated_query =
@@ -2456,12 +2460,14 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
        * takes fp16 or fp32 A/B and accumulates in fp32 (fmadd32) or fp16
        * (fmadd16); 16x16x16 is a 2x2x2 tiling of 8x8x8 ops in
        * agx_nir_lower_simdmat.c. Every shape here is GPU-verified exact.
+       * bf16 A/B widen exactly to fp32 and run the fp32 A/B form.
        */
       static const struct {
          VkComponentTypeKHR ab, c;
       } types[] = {
          {VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
          {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+         {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
          {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
       };
       for (unsigned n = 8; n <= 16; n *= 2) {
