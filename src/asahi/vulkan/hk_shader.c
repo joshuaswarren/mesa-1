@@ -4029,7 +4029,8 @@ enum hk_serialized_variant {
 
 static VkResult
 hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
-                      struct hk_shader *shader, bool absent)
+                      struct hk_shader *shader, bool absent,
+                      bool cache_candidate)
 {
    struct hk_shader_info info;
    blob_copy_bytes(blob, &info, sizeof(info));
@@ -4075,6 +4076,14 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    if (result != VK_SUCCESS)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   /* Cache templates may only own shareable CPU payloads. Decline before
+    * copying/uploading an executable or eagerly linking it, so the caller
+    * can deserialize once with the final object's allocation callbacks.
+    * VK_NOT_READY is private to this probe and is consumed by the wrapper. */
+   if (cache_candidate &&
+       (b_info.has_preamble || b_info.rodata.size_16 || !shader->linked.ht))
+      return VK_NOT_READY;
+
    shader->b.info = b_info;
    shader->info = info;
    shader->agx3_vdm_state_update = agx3_vdm_state_update;
@@ -4112,6 +4121,7 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
                                struct blob_reader *blob,
                                uint32_t binary_version,
                                const VkAllocationCallbacks *pAllocator,
+                               bool cache_candidate,
                                struct vk_shader **shader_out)
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
@@ -4143,7 +4153,8 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
       if (marker == HK_SERIALIZED_COMPILED ||
           marker == HK_SERIALIZED_ABSENT) {
          result = hk_deserialize_shader(dev, blob, shader,
-                                        marker == HK_SERIALIZED_ABSENT);
+                                        marker == HK_SERIALIZED_ABSENT,
+                                        cache_candidate);
       } else {
          result = vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       }
@@ -4271,7 +4282,24 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
                                          binary_version);
    if (entry)
       entry->refcount++;
+   bool cache_has_room = false;
+   if (!entry) {
+      for (unsigned i = 0; i < HK_SHADER_BINARY_CACHE_MAX; ++i) {
+         if (!dev->shader_binary_cache.entries[i]) {
+            cache_has_room = true;
+            break;
+         }
+      }
+   }
    simple_mtx_unlock(&dev->shader_binary_cache.lock);
+
+   /* Entries remain installed until device destruction. A full-cache miss
+    * cannot gain a slot, so decode directly with the caller's allocator.
+    * Existing hits still share their template; racing insertions below keep
+    * their locked recheck when a slot was available at this first lookup. */
+   if (!entry && !cache_has_room)
+      return hk_deserialize_api_shader_impl(
+         vk_dev, blob, binary_version, pAllocator, false, shader_out);
 
    VkResult result;
    if (entry) {
@@ -4281,7 +4309,15 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
       struct blob_reader template_blob = *blob;
       struct vk_shader *template_vk = NULL;
       result = hk_deserialize_api_shader_impl(
-         vk_dev, &template_blob, binary_version, NULL, &template_vk);
+         vk_dev, &template_blob, binary_version, NULL, true, &template_vk);
+
+      if (result == VK_NOT_READY) {
+         /* The probe released its partial CPU-only object. Re-read the
+          * original blob with the final allocator, including the explicit
+          * device callbacks used by pipeline-cache imports. */
+         return hk_deserialize_api_shader_impl(
+            vk_dev, blob, binary_version, pAllocator, false, shader_out);
+      }
 
       struct hk_api_shader *template_obj = result == VK_SUCCESS
          ? container_of(template_vk, struct hk_api_shader, vk)
@@ -4339,12 +4375,12 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
             if (template_obj)
                hk_api_shader_destroy(vk_dev, &template_obj->vk, NULL);
             result = hk_deserialize_api_shader_impl(
-               vk_dev, blob, binary_version, pAllocator, shader_out);
+               vk_dev, blob, binary_version, pAllocator, false, shader_out);
          }
       } else if (result == VK_SUCCESS) {
          hk_api_shader_destroy(vk_dev, template_vk, NULL);
          result = hk_deserialize_api_shader_impl(
-            vk_dev, blob, binary_version, pAllocator, shader_out);
+            vk_dev, blob, binary_version, pAllocator, false, shader_out);
       }
    }
 
