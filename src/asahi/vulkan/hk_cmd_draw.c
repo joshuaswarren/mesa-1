@@ -137,10 +137,10 @@ static void hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd);
 void
 hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
 {
-   /* Bind-time preparation is speculative. It runs from cmd_bind_shaders(),
-    * which vk_graphics_pipeline_cmd_bind() calls before the pipeline's static
-    * dynamic state is applied, and the application may still change dynamic
-    * state, descriptors or attachments before the draw. The draw re-derives
+   /* Bind-time preparation is speculative. A G17P pipeline bind applies its
+    * static state before preparing; shader objects and rendering changes may
+    * still see incomplete state, and the application can change dynamic state,
+    * descriptors or attachments before the draw. The draw re-derives
     * and validates everything it consumes, so a refusal seen here (e.g. a
     * sample-shaded fragment program against the not-yet-applied sample
     * count) must not fail the command buffer. */
@@ -243,9 +243,8 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        vk_command_buffer_has_error(&cmd->vk))
       return;
 
-   /* Pipeline binding prepares shaders before the pipeline's static state is
-    * applied. Rendering/subpass changes can likewise retain the previous
-    * rasterization state. Do not combine a known attachment layout with a
+   /* Shader-object binding and rendering/subpass changes can retain the
+    * previous rasterization state. Do not combine a known attachment layout with a
     * different sample count while preparing a speculative epilog: its spill
     * decision and rebuilt tilebuffer layout would describe different draws.
     * HK does not expose mixed-sample rendering. Unknown/attachmentless sample

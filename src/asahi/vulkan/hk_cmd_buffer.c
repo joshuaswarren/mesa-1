@@ -1023,7 +1023,40 @@ hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
          hk_cmd_bind_graphics_shader(cmd, stages[i], shader);
    }
 
-   if (cmd->current_cs.gfx)
+   if (cmd->current_cs.gfx) {
+      if (cmd->defer_graphics_prepare)
+         cmd->graphics_prepare_pending = true;
+      else
+         hk_cmd_prepare_bound_graphics(cmd);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdBindPipeline(VkCommandBuffer commandBuffer,
+                   VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS ||
+       hk_cmd_buffer_device(cmd)->dev.chip != AGX_CHIP_G17P) {
+      vk_common_CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+      return;
+   }
+
+   /* The common implementation binds shaders before applying the pipeline's
+    * static graphics state. Preparing in the shader callback can upload
+    * a bind tail for the previous state, discarded by a later state update
+    * or draw.
+    * Keep shader-object preparation unchanged and run this pipeline's exact
+    * same preparation after both parts of the bind have completed.
+    */
+   assert(!cmd->defer_graphics_prepare);
+   cmd->graphics_prepare_pending = false;
+   cmd->defer_graphics_prepare = true;
+   vk_common_CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+   cmd->defer_graphics_prepare = false;
+   const bool prepare = cmd->graphics_prepare_pending;
+   cmd->graphics_prepare_pending = false;
+   if (prepare)
       hk_cmd_prepare_bound_graphics(cmd);
 }
 

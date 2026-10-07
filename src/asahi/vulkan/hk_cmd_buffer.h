@@ -1251,6 +1251,10 @@ struct hk_cmd_buffer {
    /* Set by hk_reset_cmd_buffer, cleared by vkBeginCommandBuffer. */
    bool g17p_pristine;
 
+   /* Defer speculative preparation until a pipeline applies its static state. */
+   bool defer_graphics_prepare;
+   bool graphics_prepare_pending;
+
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
