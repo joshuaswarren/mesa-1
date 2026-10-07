@@ -9029,11 +9029,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2) {
       agx_pack_binary(ctx, binary);
    } else {
-      /* AGX3 (M3/M4/M5). Device open still refuses these parts
-       * (agx_chip_codegen_supported), so this runs only when a caller builds an
-       * AGX3 device key deliberately. agx3_pack_binary fails the shader -- never
-       * aborts -- on any ungrounded op and rolls the emitted shader prefix back
-       * before returning false. */
+      /* AGX3 has its own native encoder. Device admission is checked separately
+       * by agx_params_driver_supported(); G17P uses this path on hardware.
+       * If the encoder refuses an instruction, discard the emitted prefix and
+       * report compilation failure. */
       if (!agx3_pack_binary(ctx, binary)) {
          agx_set_refusal(ctx, "AGX3 binary packer refused an instruction "
                          "(AGX_MESA_DEBUG=shaders names it)", __LINE__);
