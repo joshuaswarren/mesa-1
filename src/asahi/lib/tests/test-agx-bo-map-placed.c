@@ -23,7 +23,11 @@ fake_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
    mmap_count++;
    last_mmap_length = length;
    bo->_map = fixed_addr ? fixed_addr : &default_mapping;
+   bo->_map_size = length ? length : bo->size;
 }
+
+static void *last_munmap;
+static size_t last_munmap_size;
 
 static void
 fake_bo_munmap(struct agx_device *dev, struct agx_bo *bo)
@@ -31,6 +35,8 @@ fake_bo_munmap(struct agx_device *dev, struct agx_bo *bo)
    assert(dev == bo->dev);
    assert(bo->_map != NULL);
    munmap_count++;
+   last_munmap = bo->_map;
+   last_munmap_size = bo->_map_size;
 }
 
 int
@@ -71,6 +77,27 @@ main(void)
    assert(agx_bo_map(&bo) == &placed_mapping);
    assert(agx_bo_map_placed(&bo, &placed_mapping, 4096) == &placed_mapping);
    assert(mmap_count == 1 && munmap_count == 1);
+
+   /* Owned maps need a backend that maps a BO more than once. */
+   size_t owned_size = 0;
+   assert(agx_bo_map_owned(&bo, NULL, 0, &owned_size) == NULL);
+   assert(mmap_count == 1);
+
+   /* An owned map is a new mapping that leaves the shared one alone, and
+    * unmapping it releases exactly that mapping. */
+   dev.ops.bo_mmap_independent = true;
+   uint8_t owned_mapping;
+   assert(agx_bo_map_owned(&bo, NULL, 0, &owned_size) == &default_mapping);
+   assert(owned_size == bo.size && mmap_count == 2);
+   assert(bo._map == &placed_mapping && "shared mapping untouched");
+   assert(agx_bo_map_owned(&bo, &owned_mapping, 4096, &owned_size) ==
+          &owned_mapping);
+   assert(last_mmap_length == 4096 && owned_size == 4096 &&
+          "owned placed map bounded by the caller");
+   agx_bo_unmap_owned(&bo, &owned_mapping, owned_size);
+   assert(munmap_count == 2 && last_munmap == &owned_mapping &&
+          last_munmap_size == 4096);
+   assert(bo._map == &placed_mapping && "shared mapping untouched");
 
    return 0;
 }

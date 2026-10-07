@@ -838,6 +838,7 @@ const agx_device_ops_t agx_device_drm_ops = {
    .bo_alloc = agx_bo_alloc,
    .bo_bind = agx_drm_bo_bind,
    .bo_mmap = agx_bo_mmap,
+   .bo_mmap_independent = true,
    .get_params = agx_get_params,
    .submit = agx_submit,
    .bo_bind_object = agx_bo_bind_object,

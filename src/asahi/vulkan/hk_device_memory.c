@@ -302,6 +302,11 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);
 
+   /* Freeing a mapped memory object unmaps it. The shared mapping goes with
+    * the BO; an owned one belongs to this object alone. */
+   if (mem->map_owned)
+      agx_bo_unmap_owned(mem->bo, mem->map, mem->map_size);
+
    agx_bo_unreference(&dev->dev, mem->bo);
 
    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
@@ -357,8 +362,21 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
 
    /* Bound a placed mapping by the memory object, not the BO: the BO cache
     * may have handed us one up to twice as large, and the application has
-    * reserved only mem->vk.size at this address. */
-   mem->map = agx_bo_map_placed(mem->bo, fixed_addr, mem->vk.size);
+    * reserved only mem->vk.size at this address.
+    *
+    * An exported allocation and its imports into this device are distinct
+    * memory objects over one agx_bo. Each maps, unmaps, frees and reserves
+    * independently, so each gets a mapping of its own rather than the BO's
+    * shared one, which unmapping any of them would otherwise tear down
+    * under the others. A BO only one memory object can reach keeps the
+    * cached mapping. */
+   if (mem->bo->flags & (AGX_BO_SHARED | AGX_BO_SHAREABLE)) {
+      mem->map = agx_bo_map_owned(mem->bo, fixed_addr, mem->vk.size,
+                                  &mem->map_size);
+      mem->map_owned = mem->map != NULL;
+   }
+   if (!mem->map_owned)
+      mem->map = agx_bo_map_placed(mem->bo, fixed_addr, mem->vk.size);
    if (mem->map == NULL) {
       *ppData = NULL;
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
@@ -380,6 +398,26 @@ hk_UnmapMemory2KHR(VkDevice device,
 
    if (mem == NULL)
       return VK_SUCCESS;
+
+   if (mem->map_owned) {
+      if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
+         VK_FROM_HANDLE(hk_device, dev, device);
+
+         /* Exactly this object's mapping, as below. */
+         void *err = mmap(mem->map, mem->map_size, PROT_NONE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+         if (err == MAP_FAILED) {
+            return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                             "Failed to map over original mapping");
+         }
+      } else {
+         agx_bo_unmap_owned(mem->bo, mem->map, mem->map_size);
+      }
+      mem->map = NULL;
+      mem->map_size = 0;
+      mem->map_owned = false;
+      return VK_SUCCESS;
+   }
 
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       VK_FROM_HANDLE(hk_device, dev, device);

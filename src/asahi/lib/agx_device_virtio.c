@@ -284,6 +284,7 @@ const agx_device_ops_t agx_virtio_device_ops = {
    .bo_alloc = agx_virtio_bo_alloc,
    .bo_bind = agx_virtio_bo_bind,
    .bo_mmap = agx_virtio_bo_mmap,
+   .bo_mmap_independent = true,
    .get_params = agx_virtio_get_params,
    .submit = agx_virtio_submit,
    .bo_bind_object = agx_virtio_bo_bind_object,

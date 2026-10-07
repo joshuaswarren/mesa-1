@@ -126,6 +126,10 @@ typedef struct {
                            uint32_t count);
    void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
                    size_t length);
+   /* bo_mmap/bo_munmap may map one BO any number of times: each bo_mmap of a
+    * copy of the agx_bo returns a new mapping and touches nothing but the
+    * copy's _map/_map_size (agx_bo_map_owned()). */
+   bool bo_mmap_independent;
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -459,6 +463,38 @@ static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
    return agx_bo_map_placed(bo, NULL, 0);
+}
+
+/*
+ * A CPU mapping of `bo` owned by the caller rather than shared through
+ * bo->_map: one VkDeviceMemory object's mapping of a BO that other memory
+ * objects alias (an exported allocation and its imports resolve to one
+ * agx_bo), which that object alone maps, unmaps or reserves. `length` bounds
+ * a placed mapping as for agx_bo_map_placed(); *size receives the mapped
+ * length. NULL when the backend cannot map a BO more than once.
+ */
+static inline void *
+agx_bo_map_owned(struct agx_bo *bo, void *fixed_addr, size_t length,
+                 size_t *size)
+{
+   if (!bo->dev->ops.bo_mmap_independent)
+      return NULL;
+
+   struct agx_bo copy = *bo;
+   copy._map = NULL;
+   copy._map_size = 0;
+   bo->dev->ops.bo_mmap(bo->dev, &copy, fixed_addr, fixed_addr ? length : 0);
+   *size = agx_bo_map_size(&copy);
+   return copy._map;
+}
+
+static inline void
+agx_bo_unmap_owned(struct agx_bo *bo, void *map, size_t size)
+{
+   struct agx_bo copy = *bo;
+   copy._map = map;
+   copy._map_size = size;
+   bo->dev->ops.bo_munmap(bo->dev, &copy);
 }
 
 static inline bool
