@@ -70,6 +70,24 @@ lower_test_root(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
 int main(void)
 {
+   /* Deadzone's first PSO blends two Texture.Load results from t0 and t1.
+    * This is the same array/index contract as compute, without an API sampler. */
+   {
+      nir_builder b = builder();
+      b.shader->info.stage = MESA_SHADER_FRAGMENT;
+      nir_tex_instr *a = make_fetch(&b, nir_imm_int(&b, 0));
+      nir_tex_instr *z = make_fetch(&b, nir_imm_int(&b, 32));
+      struct d12_nir_g17p_fragment_sample binding = {0};
+      CHECK(d12_nir_lower_g17p_fragment_sample(b.shader, 9, &binding));
+      CHECK(binding.indexed_fetch);
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      CHECK(a->texture_index == 0 && z->texture_index == 1);
+      CHECK(nir_tex_instr_src_index(a, nir_tex_src_texture_handle) < 0);
+      CHECK(nir_tex_instr_src_index(z, nir_tex_src_texture_handle) < 0);
+      nir_validate_shader(b.shader, "G17P fragment array fetches");
+      ralloc_free(b.shader);
+   }
+
    /* Constant byte offsets become exactly one zero-extended native index. */
    const uint32_t offsets[] = {0,32,96,8192,UINT32_MAX & ~31u};
    for (unsigned i=0; i<sizeof(offsets)/sizeof(offsets[0]); i++) {
@@ -115,7 +133,7 @@ int main(void)
       case 4:t->coord_components=3;break;
       case 5:nir_intrinsic_set_desc_set(handle,D12_UNIFORM_HEAP_TEXTURES);break;
       case 6:break; /* Unaligned input built above with intact SSA use lists. */
-      case 7:b.shader->info.stage=MESA_SHADER_FRAGMENT;break;
+      case 7:b.shader->info.stage=MESA_SHADER_GEOMETRY;break;
       }
       char *before=snapshot(b.shader);bool found=false;
       CHECK(!d12_nir_g17p_txf_supported(b.shader,&found));

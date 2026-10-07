@@ -2501,7 +2501,8 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
             goto fail;
          const uint64_t pointers[2] = {table_va, device->rodata_bo->va->addr};
          failure_stage = "reload-pointer-upload";
-         const uint64_t pointers_va = d12_list_upload(list, pointers, sizeof(pointers), 8);
+         const uint64_t pointers_va =
+         d12_list_upload(list, pointers, sizeof(pointers), 8);
          if (!pointers_va)
             goto fail;
          desc.texture_pointer_va = pointers_va;
@@ -7642,6 +7643,7 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    const struct agx_shader_info *info = &st->info;
    const struct agx_linked_shader *linked = &st->linked;
    const bool native_sample = fragment && st->g17p_sample.valid;
+   const bool native_fetch = native_sample && st->g17p_sample.indexed_fetch;
    if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
        !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
        linked->bo->va->addr > UINT64_MAX - linked->entry_offset ||
@@ -7654,14 +7656,52 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        info->has_preamble || info->nr_preamble_gprs ||
        info->preamble_scratch_size || info->rodata.size_16 ||
        info->agx3_uniform_dma_valid || info->texture_state_count ||
-       info->sampler_state_count || info->uses_sampler_heap || linked->uses_txf ||
+       info->sampler_state_count != (native_fetch ? 1u : 0u) ||
+       info->uses_sampler_heap || (linked->uses_txf && !native_fetch) ||
        !root_gpu || !tib || tib->nr_samples != 1)
       goto fail;
 
    failure = "uniform-ownership";
    struct agx3_ioto_uniform_range ranges[5];
    size_t count = 0;
-   if (native_sample) {
+   if (native_fetch) {
+      /* Reuse compute's native32 array and sampler0 publication. Validate
+       * the complete command-owned array before exposing its base pointer. */
+      const struct d12_binding_upload_cache *cache = NULL;
+      for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS; ++w) {
+         const struct d12_binding_upload_cache *e =
+            &list->binding_upload_cache[0][w];
+         if (e->valid && e->root == root_gpu && e->textures == textures_gpu)
+            cache = e;
+      }
+      struct agx_bo *sampler_bo = list->device->rodata_bo;
+      if (blend_constants_used || !cache || !cache->texture_table_size_B ||
+          (cache->texture_table_size_B & 31) ||
+          !sampler_bo || !sampler_bo->va || sampler_bo->size < 32 ||
+          !d12_list_stream_contains(list, textures_gpu, sizeof(uint64_t)) ||
+          !d12_list_stream_contains(list, cache->texture_table,
+                                    cache->texture_table_size_B))
+         goto fail;
+      const uint8_t *cpu = d12_list_stream_map(list);
+      uint64_t table = 0;
+      if (!cpu)
+         goto fail;
+      memcpy(&table, cpu + (textures_gpu - list->stream_bo->va->addr),
+             sizeof(table));
+      if (table != cache->texture_table || (table & 31))
+         goto fail;
+      const uint64_t pointers[2] = {table, sampler_bo->va->addr};
+      const uint64_t pointers_va =
+         d12_list_upload(list, pointers, sizeof(pointers), 8);
+      if (!pointers_va || agx_bo_sync_for_device(list->stream_bo,
+            table - list->stream_bo->va->addr, cache->texture_table_size_B))
+         goto fail;
+      d12_list_track_read_bo(list, sampler_bo);
+      d12_list_track_read_range(list, table, cache->texture_table_size_B);
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0, .size_halfs = 8, .address = pointers_va,
+      };
+   } else if (native_sample) {
       /* The bounded texture0/sampler0 fragment ABI (Honeykrisp's combined
        * sampler): uniform halves 0..3 point at the one 32-byte texture
        * descriptor, 4..7 at the one 32-byte HAL200 sampler word, and the

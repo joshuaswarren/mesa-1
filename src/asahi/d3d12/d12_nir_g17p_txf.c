@@ -10,7 +10,8 @@
 bool
 d12_nir_g17p_txf_supported(nir_shader *nir, bool *has_txf)
 {
-   if (!nir || !has_txf || nir->info.stage != MESA_SHADER_COMPUTE)
+   if (!nir || !has_txf || (nir->info.stage != MESA_SHADER_COMPUTE &&
+                            nir->info.stage != MESA_SHADER_FRAGMENT))
       return false;
    bool found = false;
    nir_foreach_function_impl(impl, nir) {
@@ -158,6 +159,14 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
        nir->info.stage != MESA_SHADER_FRAGMENT)
       return false;
 
+   /* Both stages consume the same native32 texture array and sampler0.
+    * Unlike filtered samples, texel fetches need no API sampler and may
+    * address several entries in that array. Reuse the compute lowering. */
+   if (d12_nir_lower_g17p_txf(nir, generation)) {
+      *out = (struct d12_nir_g17p_fragment_sample){.indexed_fetch = true};
+      return true;
+   }
+
    nir_tex_instr *sample = NULL;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
@@ -237,6 +246,7 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
       }
    }
 
+   out->indexed_fetch = false;
    out->texture_offset_B = (uint32_t)nir_src_as_uint(handle->src[0]);
    out->sampler_slot = (uint8_t)(native_sampler - 1);
    nir_steal_tex_src(sample, nir_tex_src_texture_handle);

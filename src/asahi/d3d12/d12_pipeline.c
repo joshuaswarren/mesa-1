@@ -2814,6 +2814,7 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
          if (d12_nir_lower_g17p_fragment_sample(nir, descriptor_generation,
                                                 &binding)) {
             o->g17p_fragment_sample = true;
+            o->g17p_fragment_fetch = binding.indexed_fetch;
             o->g17p_sample_slot = binding.sampler_slot;
             o->g17p_texture_offset_B = binding.texture_offset_B;
          }
@@ -2940,7 +2941,7 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
     * sampler is a pointer the Ioto program loads, not a state-file entry. */
    out->info.sampler_state_count =
       o->g17p_fragment_sample
-         ? 0
+         ? (o->g17p_fragment_fetch ? 1 : 0)
          : MAX2(out->info.sampler_state_count, runtime_samplers);
    d12_report_scratch("shader", &out->info);
 
@@ -5327,6 +5328,7 @@ d12_pipeline_state_create_graphics(
       fs_entry->out.flat_transport;
    pso->fs.g17p_root_only = fs_entry->out.root_only;
    pso->fs.g17p_sample.valid = fs_entry->out.g17p_fragment_sample;
+   pso->fs.g17p_sample.indexed_fetch = fs_entry->out.g17p_fragment_fetch;
    pso->fs.g17p_sample.sampler_slot = fs_entry->out.g17p_sample_slot;
    pso->fs.g17p_sample.texture_offset_B = fs_entry->out.g17p_texture_offset_B;
    pso->fs.reads_root = fs_entry->out.reads_root;
