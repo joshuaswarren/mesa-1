@@ -108,6 +108,10 @@ struct hk_root_descriptor_table {
       struct {
          uint64_t group_count_addr;
          uint32_t base_group[3];
+         uint32_t _pad;
+
+         /* Address of the bound shader's large-constant data, else 0 */
+         uint64_t const_data;
       } cs;
    };
 

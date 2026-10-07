@@ -39,6 +39,10 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
                            struct hk_api_shader *shader)
 {
    cmd->state.cs.shader = shader;
+
+   struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+   desc->root.cs.const_data = shader ? hk_only_variant(shader)->data_addr : 0;
+   desc->root_dirty = true;
 }
 
 void
