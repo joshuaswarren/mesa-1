@@ -10,14 +10,14 @@ extern "C" {
 }
 
 #include <gtest/gtest.h>
+#include <map>
 
 /*
  * Behavioral pins for the float-control keying in agx_nir_lower_math.c.
  *
- * The default path (no execution modes declared) must emit exactly the
- * sequences the pinned MLX decode digests were measured against, so the
- * first tests pin its op histogram: any accidental change to the default
- * emission shows up here before it can move a digest on hardware.
+ * Division and reciprocal do not key on float controls. Their bits are pinned
+ * on hardware by tests/precise_math.py, ulp_bound.py and div_window.py; here
+ * the pin is that DenormFlushToZero emits exactly the default lowering.
  *
  * The DenormFlushToZero sin test pins the one keyed change: a zero-comparing
  * subnormal argument must produce a sign-preserving flushed zero instead of
@@ -78,64 +78,49 @@ class LowerMathTest : public ::testing::Test {
       }
       return n;
    }
+
+   /* ALU op histogram of fdiv (or frcp) lowered under one float-control mode */
+   std::map<nir_op, unsigned> lowered_division(unsigned mode, bool reciprocal)
+   {
+      nir_builder s = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+                                                     &options, "lower fdiv");
+      s.shader->info.float_controls_execution_mode = mode;
+      nir_def *x = nir_undef(&s, 1, 32);
+      if (reciprocal)
+         nir_frcp(&s, x);
+      else
+         nir_fdiv(&s, nir_undef(&s, 1, 32), x);
+
+      EXPECT_TRUE(agx_nir_lower_fdiv(s.shader));
+
+      std::map<nir_op, unsigned> ops;
+      nir_foreach_function_impl(impl, s.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_alu)
+                  ops[nir_instr_as_alu(instr)->op]++;
+            }
+         }
+      }
+      ralloc_free(s.shader);
+      return ops;
+   }
 };
 
 const nir_shader_compiler_options LowerMathTest::options = {};
 
-TEST_F(LowerMathTest, DivDefaultFastSequencePinned)
-{
-   set_mode(0);
-   nir_def *a = nir_undef(&b, 1, 32);
-   nir_def *d = nir_undef(&b, 1, 32);
-   nir_fdiv(&b, a, d);
-
-   ASSERT_TRUE(agx_nir_lower_fdiv(b.shader));
-
-   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
-   EXPECT_EQ(count_alu(nir_op_frcp), 1u);
-   EXPECT_EQ(count_alu(nir_op_ffma), 4u);
-   EXPECT_EQ(count_alu(nir_op_fmul), 1u);
-   EXPECT_EQ(count_alu(nir_op_fneg), 2u);
-   EXPECT_EQ(count_alu(nir_op_bcsel), 2u);
-   EXPECT_EQ(count_alu(nir_op_fneu), 2u);
-   EXPECT_EQ(count_alu(nir_op_feq), 1u);
-   EXPECT_EQ(count_alu(nir_op_ior), 1u);
-   /* The mantissa-normalizing exact sequence is integer arithmetic; its
-    * absence is the marker that the default emission is untouched. */
-   EXPECT_EQ(count_alu(nir_op_iand), 0u);
-   EXPECT_EQ(count_alu(nir_op_ushr), 0u);
-   EXPECT_EQ(count_alu(nir_op_ishl), 0u);
-}
-
 TEST_F(LowerMathTest, DivFtzModeUnchanged)
 {
-   set_mode(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32);
-   nir_def *a = nir_undef(&b, 1, 32);
-   nir_def *d = nir_undef(&b, 1, 32);
-   nir_fdiv(&b, a, d);
-
-   ASSERT_TRUE(agx_nir_lower_fdiv(b.shader));
-
-   /* Hardware flushes arithmetic outputs, so the refined form already
-    * satisfies DenormFlushToZero; no keyed emission is warranted. */
-   EXPECT_EQ(count_alu(nir_op_iand), 0u);
-   EXPECT_EQ(count_alu(nir_op_ushr), 0u);
-   EXPECT_EQ(count_alu(nir_op_ishl), 0u);
-   EXPECT_EQ(count_alu(nir_op_frcp), 1u);
+   auto ftz = lowered_division(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32, false);
+   EXPECT_EQ(ftz.count(nir_op_fdiv), 0u);
+   EXPECT_EQ(ftz, lowered_division(0, false));
 }
 
-TEST_F(LowerMathTest, FrcpDefaultSequencePinned)
+TEST_F(LowerMathTest, FrcpFtzModeUnchanged)
 {
-   set_mode(0);
-   nir_def *x = nir_undef(&b, 1, 32);
-   nir_frcp(&b, x);
-
-   ASSERT_TRUE(agx_nir_lower_fdiv(b.shader));
-
-   EXPECT_EQ(count_alu(nir_op_frcp), 1u);
-   EXPECT_EQ(count_alu(nir_op_ffma), 2u);
-   EXPECT_EQ(count_alu(nir_op_bcsel), 1u);
-   EXPECT_EQ(count_alu(nir_op_fneu), 1u);
+   auto ftz = lowered_division(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32, true);
+   EXPECT_EQ(ftz.count(nir_op_frcp), 1u);
+   EXPECT_EQ(ftz, lowered_division(0, true));
 }
 
 TEST_F(LowerMathTest, SinDefaultKeepsSelect)
