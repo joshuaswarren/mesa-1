@@ -49,6 +49,11 @@ struct hk_g17p_patch_plan {
    uint8_t leader[HK_G17P_PATCH_MAX_RANGES];
    uint8_t range_count;
    uint8_t reloc_count;
+   /* Whether any range shares a cluster with another, and the relocations
+    * with a 2-byte LDIMM: what hk_g17p_patch_plan_fits() has to check. */
+   bool shared;
+   uint8_t short_count;
+   uint8_t short_relocs[HK_G17P_PATCH_MAX_RELOCS];
    struct hk_g17p_patch_reloc relocs[HK_G17P_PATCH_MAX_RELOCS];
 };
 
@@ -79,6 +84,7 @@ hk_g17p_patch_plan_init(struct hk_g17p_patch_plan *plan,
 
    uint64_t end = 0;
    unsigned leader = 0;
+   plan->shared = false;
    for (unsigned k = 0; k < range_count; ++k) {
       const unsigned i = order[k];
       const uint64_t start = ranges[i].address;
@@ -87,9 +93,11 @@ hk_g17p_patch_plan_init(struct hk_g17p_patch_plan *plan,
          end = 0;
       }
       plan->leader[i] = leader;
+      plan->shared |= leader != i;
       end = MAX2(end, start + (uint64_t)ranges[i].size_halfs * 2);
    }
 
+   plan->short_count = 0;
    for (unsigned r = 0; r < reloc_count; ++r) {
       const struct agx_ioto_load_relocation *rel = &relocs[r];
       unsigned i = 0;
@@ -113,6 +121,8 @@ hk_g17p_patch_plan_init(struct hk_g17p_patch_plan *plan,
          .short_mask = (rel->low_length == 2 ? 1 : 0) |
                        (rel->high_length == 2 ? 2 : 0),
       };
+      if (plan->relocs[r].short_mask)
+         plan->short_relocs[plan->short_count++] = r;
    }
    return true;
 }
@@ -121,15 +131,16 @@ static inline bool
 hk_g17p_patch_plan_fits(const struct hk_g17p_patch_plan *plan,
                         const struct agx3_ioto_uniform_range *ranges)
 {
-   for (unsigned i = 0; i < plan->range_count; ++i) {
+   for (unsigned i = 0; plan->shared && i < plan->range_count; ++i) {
       const unsigned l = plan->leader[i];
       if (ranges[i].address - plan->address[i] !=
           ranges[l].address - plan->address[l])
          return false;
    }
 
-   for (unsigned r = 0; r < plan->reloc_count; ++r) {
-      const struct hk_g17p_patch_reloc *rel = &plan->relocs[r];
+   for (unsigned k = 0; k < plan->short_count; ++k) {
+      const struct hk_g17p_patch_reloc *rel =
+         &plan->relocs[plan->short_relocs[k]];
       const uint64_t base = ranges[rel->range].address + rel->delta;
       if (((rel->short_mask & 1) && (uint32_t)base >= 128) ||
           ((rel->short_mask & 2) && (base >> 32) >= 128))
