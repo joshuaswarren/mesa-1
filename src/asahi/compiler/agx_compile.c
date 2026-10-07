@@ -6815,6 +6815,174 @@ agx_remove_empty_preamble(nir_shader *nir)
    entrypoint->preamble = NULL;
 }
 
+/* Halves of the uniform file a preamble load/store covers. */
+static unsigned
+agx_preamble_halfs(const nir_def *def)
+{
+   return MAX2(def->bit_size, 16) * def->num_components / 16;
+}
+
+/*
+ * A G17P vertex constant program runs once per vertex batch, not once per
+ * draw, and costs a launch of its own there. One left with a few arithmetic
+ * operations after the launch copies (a select on a copied flag, a mask)
+ * saves the main program nothing it would not fold into the instructions
+ * that use the result, so it is pure per-batch overhead (21 of 57 vertex
+ * constant programs of a Subnautica frame: main +0..4 instructions without
+ * them). Move such a program back into the main program. One that loads
+ * from memory or does real work (a matrix product) stays.
+ */
+static void
+agx3_inline_cheap_vertex_preamble(nir_shader *nir)
+{
+   /* Arithmetic the main program would repeat per vertex. */
+   const unsigned max_ops = 4;
+
+   nir_function_impl *main = nir_shader_get_entrypoint(nir);
+   if (!main->preamble)
+      return;
+
+   nir_function_impl *pre = main->preamble->impl;
+   if (exec_list_length(&pre->body) != 1)
+      return;
+
+   nir_block *block = nir_start_block(pre);
+   /* Per half: 1 + the base of the store writing it, or 0. */
+   uint16_t stored_halfs[512] = {0};
+   const nir_def *stored[512] = {NULL};
+   unsigned ops = 0;
+
+   nir_foreach_instr(instr, block) {
+      switch (instr->type) {
+      case nir_instr_type_load_const:
+      case nir_instr_type_undef:
+         break;
+      case nir_instr_type_alu: {
+         nir_op op = nir_instr_as_alu(instr)->op;
+         if (op != nir_op_mov && !nir_op_is_vec(op) &&
+             op != nir_op_pack_64_2x32_split &&
+             op != nir_op_unpack_64_2x32_split_x &&
+             op != nir_op_unpack_64_2x32_split_y &&
+             op != nir_op_pack_32_2x16_split &&
+             op != nir_op_unpack_32_2x16_split_x &&
+             op != nir_op_unpack_32_2x16_split_y && ++ops > max_ops)
+            return;
+         break;
+      }
+      case nir_instr_type_intrinsic: {
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_load_preamble) {
+            if (nir_intrinsic_preamble_class(intr) !=
+                nir_preamble_class_general)
+               return;
+            /* Reads its own results: not a straight copy into main. */
+            const unsigned base = nir_intrinsic_base(intr);
+            const unsigned size = agx_preamble_halfs(&intr->def);
+            if (base + size > ARRAY_SIZE(stored_halfs))
+               return;
+            for (unsigned h = base; h < base + size; ++h) {
+               if (stored_halfs[h])
+                  return;
+            }
+         } else if (intr->intrinsic == nir_intrinsic_store_preamble) {
+            if (nir_intrinsic_preamble_class(intr) !=
+                nir_preamble_class_general)
+               return;
+            const unsigned base = nir_intrinsic_base(intr);
+            const unsigned size = agx_preamble_halfs(intr->src[0].ssa);
+            if (base + size > ARRAY_SIZE(stored_halfs))
+               return;
+            for (unsigned h = base; h < base + size; ++h) {
+               if (stored_halfs[h])
+                  return;
+               stored_halfs[h] = base + 1;
+            }
+            stored[base] = intr->src[0].ssa;
+         } else {
+            return;
+         }
+         break;
+      }
+      default:
+         return;
+      }
+   }
+
+   /* Every main read of a result must be exactly one store's value. */
+   nir_foreach_block(b, main) {
+      nir_foreach_instr(instr, b) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_bindless_image_agx ||
+             intr->intrinsic == nir_intrinsic_bindless_sampler_agx) {
+            const unsigned base = nir_intrinsic_desc_set(intr);
+            for (unsigned h = base; h < MIN2(base + 4, 512); ++h) {
+               if (stored_halfs[h])
+                  return;
+            }
+            continue;
+         }
+         if (intr->intrinsic != nir_intrinsic_load_preamble)
+            continue;
+         const unsigned base = nir_intrinsic_base(intr);
+         const unsigned size = agx_preamble_halfs(&intr->def);
+         if (base + size > ARRAY_SIZE(stored_halfs))
+            return;
+         bool any = false;
+         for (unsigned h = base; h < base + size; ++h)
+            any |= stored_halfs[h] != 0;
+         if (any && (stored_halfs[base] != base + 1 ||
+                     stored[base]->bit_size != intr->def.bit_size ||
+                     stored[base]->num_components !=
+                        intr->def.num_components))
+            return;
+      }
+   }
+
+   /* Recompute the results at the top of main, then read them there. */
+   struct hash_table *remap = _mesa_pointer_hash_table_create(NULL);
+   nir_def *value[512] = {NULL};
+   nir_builder b = nir_builder_at(nir_before_impl(main));
+
+   nir_foreach_instr(instr, block) {
+      if (instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(instr)->intrinsic ==
+             nir_intrinsic_store_preamble) {
+         nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+         struct hash_entry *e =
+            _mesa_hash_table_search(remap, store->src[0].ssa);
+         value[nir_intrinsic_base(store)] = e ? e->data : store->src[0].ssa;
+         continue;
+      }
+
+      nir_instr *clone = nir_instr_clone_deep(nir, instr, remap);
+      nir_builder_instr_insert(&b, clone);
+   }
+
+   nir_foreach_block(blk, main) {
+      nir_foreach_instr_safe(instr, blk) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+         if (load->intrinsic != nir_intrinsic_load_preamble)
+            continue;
+         const unsigned base = nir_intrinsic_base(load);
+         nir_def *v = value[base];
+         if (!v || !stored_halfs[base])
+            continue;
+         assert(v->bit_size == load->def.bit_size &&
+                v->num_components == load->def.num_components);
+         nir_def_replace(&load->def, v);
+      }
+   }
+
+   _mesa_hash_table_destroy(remap, NULL);
+   exec_node_remove(&main->preamble->node);
+   main->preamble = NULL;
+   nir_progress(true, main, nir_metadata_none);
+}
+
 static bool agx3_nir_lower_uniform_dma(nir_shader *nir,
                                        const struct agx_shader_key *key,
                                        struct agx_shader_info *info);
@@ -7012,6 +7180,12 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
           agx3_nir_lower_uniform_dma(nir, dma_key, dma_info)) {
          NIR_PASS(_, nir, nir_opt_dce);
          agx_remove_empty_preamble(nir);
+      }
+
+      if (dma_key && dma_key->g17p_uniform_dma &&
+          nir->info.stage == MESA_SHADER_VERTEX) {
+         agx3_inline_cheap_vertex_preamble(nir);
+         NIR_PASS(_, nir, nir_opt_dce);
       }
 
       if (ts_count && state_promotion)
