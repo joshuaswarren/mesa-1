@@ -225,6 +225,17 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->flags |= DRM_ASAHI_RENDER_DBIAS_IS_INT;
    }
 
+   /* Native sets the fragment stage's few-primitives bit at the end of a
+    * render pass whose known primitive count is at most four, and never for
+    * a continued pass or one with uncounted (indirect, mesh) work. This
+    * stream's bound counts every draw of the whole pass, so it proves that. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       (dev->dev.params.features & DRM_ASAHI_FEATURE_FEW_PRIMITIVES) &&
+       cs->g17p_pass_begins && cs->g17p_pass_ends &&
+       cs->g17p_primitive_bound <= 4) {
+      c->flags |= DRM_ASAHI_RENDER_FEW_PRIMITIVES;
+   }
+
    if ((dev->dev.debug & AGX_DBG_NOCLUSTER) &&
        dev->dev.chip != AGX_CHIP_G17P) {
       c->flags |= DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING;

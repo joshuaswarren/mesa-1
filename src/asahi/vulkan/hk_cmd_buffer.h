@@ -781,6 +781,17 @@ struct hk_cs {
    uint64_t g17p_layer_zero_draws;
    bool g17p_layer_zero_unknown;
 
+   /* An upper bound of the primitives every draw recorded into this G17P
+    * render stream submits (hk_draw_primitive_bound()), saturating at
+    * UINT64_MAX, which also stands for "not bounded when recorded". Secondary
+    * command buffers replay into the primary's stream and add to it there. */
+   uint64_t g17p_primitive_bound;
+
+   /* This stream begins (vkCmdBeginRendering without RESUMING) and ends
+    * (vkCmdEndRendering without SUSPENDING) its render pass: it is the whole
+    * pass, not a part split off or continued. */
+   bool g17p_pass_begins, g17p_pass_ends;
+
    /* Statistics */
    struct {
       uint32_t calls, cmds, flushes, merged;

@@ -269,6 +269,12 @@ enum drm_asahi_feature {
 	DRM_ASAHI_FEATURE_VM_STATUS_MIRROR = (1UL) << 4,
 	/** Exact queue-local prior hardware command prefixes in extended payloads. */
 	DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS = (1UL) << 5,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_FEW_PRIMITIVES: Render commands accept
+	 * DRM_ASAHI_RENDER_FEW_PRIMITIVES.
+	 */
+	DRM_ASAHI_FEATURE_FEW_PRIMITIVES = (1UL) << 6,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -927,6 +933,21 @@ enum drm_asahi_render_flags {
 	 * so we match that here for efficiency.
 	 */
 	DRM_ASAHI_RENDER_DBIAS_IS_INT = (1U << 18),
+
+	/**
+	 * @DRM_ASAHI_RENDER_FEW_PRIMITIVES: The render pass is known to rasterize
+	 * at most four primitives in total.
+	 *
+	 * The count includes every primitive the pass generates: topology-derived
+	 * primitive counts of all draws multiplied by their instance counts, plus
+	 * internal work (clears, visibility, scissor/state generated work). Passes
+	 * with indirect draws, mesh work or any work whose primitive count is not
+	 * known at record time must not set this flag. The flag sets bit 0 of the
+	 * auxiliary framebuffer control word for the fragment stage; the hardware
+	 * effect is an optimization for small known passes and its omission is
+	 * always safe. Requires DRM_ASAHI_FEATURE_FEW_PRIMITIVES.
+	 */
+	DRM_ASAHI_RENDER_FEW_PRIMITIVES = (1U << 19),
 };
 
 /**

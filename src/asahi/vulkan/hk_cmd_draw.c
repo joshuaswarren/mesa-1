@@ -2511,6 +2511,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    cs->cr.bg.main = render->cr.bg.main;
    cs->cr.zls_control = render->cr.zls_control;
+   cs->g17p_pass_begins = true;
    render->zls_first_cs = cs;
 
    /* Reordering barrier for post-gfx, in case we had any. */
@@ -2717,6 +2718,7 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    struct hk_cs *cs = cmd->current_cs.gfx;
    if (cs) {
       cs->cr.eot.main = render->cr.eot.main;
+      cs->g17p_pass_ends = !(render->flags & VK_RENDERING_SUSPENDING_BIT);
       const bool zls_elided = hk_g17p_zls_elide(cmd);
 
       /* Precise depth store: see hk_pack_zls_control_final(). A
@@ -8244,6 +8246,48 @@ hk_g17p_note_layer_zero_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       cs->g17p_layer_zero_unknown = true;
 }
 
+/* An upper bound of the primitives one view of an API draw submits, or
+ * UINT64_MAX when recording cannot bound it: an indirect count, or geometry
+ * and tessellation stages, whose amplification is not bounded cheaply.
+ * Primitive restart only lowers the true count; adjacency topologies (which
+ * without a geometry shader rasterize their base primitives) are counted as
+ * one primitive per vertex. */
+static inline uint64_t
+hk_draw_primitive_bound(const struct hk_cmd_buffer *cmd,
+                        const struct agx_draw *draw)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (agx_is_indirect(draw->b) || gfx->shaders[MESA_SHADER_GEOMETRY] ||
+       gfx->shaders[MESA_SHADER_TESS_EVAL])
+      return UINT64_MAX;
+
+   const uint64_t n = draw->b.count[0];
+   uint64_t primitives;
+   switch (cmd->vk.dynamic_graphics_state.ia.primitive_topology) {
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+      primitives = n / 2;
+      break;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+      primitives = n >= 1 ? n - 1 : 0;
+      break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+      primitives = n / 3;
+      break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+      primitives = n >= 2 ? n - 2 : 0;
+      break;
+   case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
+      return UINT64_MAX;
+   default:
+      primitives = n;
+      break;
+   }
+
+   /* Both factors are below 2^32, so the product fits. */
+   return primitives * draw->b.count[1];
+}
+
 static __attribute__((hot)) void
 hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
              struct agx_draw draw_)
@@ -8275,6 +8319,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    }
    const struct agx_draw api_draw = draw_;
    bool conditional_direct_indexed = false;
+   const uint64_t primitive_bound = dev->dev.chip == AGX_CHIP_G17P
+      ? hk_draw_primitive_bound(cmd, &api_draw) : 0;
 
    /* There is no native conditional-render packet on AGX. Lower the command
     * to the API's indirect record and let an ordered compute kernel either
@@ -8393,6 +8439,12 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          return;
       if (vk_command_buffer_has_error(&cmd->vk))
          return;
+
+      /* Each view's draw counts: multiview replays the draw per view. */
+      cs->g17p_primitive_bound =
+         primitive_bound > UINT64_MAX - cs->g17p_primitive_bound
+            ? UINT64_MAX
+            : cs->g17p_primitive_bound + primitive_bound;
 
       struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
       bool geom = cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY];
@@ -8834,6 +8886,9 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
+
+   /* An indirect count is not known when the draw is recorded. */
+   cs->g17p_primitive_bound = UINT64_MAX;
 
    bool tail_emitted = false;
    if (republishes) {
