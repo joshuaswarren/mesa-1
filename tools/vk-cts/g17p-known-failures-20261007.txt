@@ -33,3 +33,6 @@ dEQP-VK.glsl.builtin_var.fragdepth.triangle_list_d32_sfloat_no_depth_clamp
 dEQP-VK.glsl.builtin_var.fragdepth.triangle_list_d32_sfloat_s8_uint
 dEQP-VK.glsl.builtin_var.fragdepth.triangle_list_d32_sfloat_s8_uint_no_depth_clamp
 dEQP-VK.pipeline.fast_linked_library.blend.dual_source.multi_attachments.r8g8b8a8_snorm
+dEQP-VK.api.object_management.max_concurrent.device_group
+dEQP-VK.api.object_management.multithreaded_per_thread_device.descriptor_set
+dEQP-VK.api.object_management.private_data.command_buffer_primary
