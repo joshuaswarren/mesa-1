@@ -5293,8 +5293,10 @@ agx3_retire_select_waits(struct util_dynarray *emission,
 
 /* Find the exact scalar operand carrying a live scoreboard slot, including
  * the previous destination value for a write-after-write dependency. Search
- * backward to its latest physical-register writer; a synchronous overwrite
- * terminates the search for that operand. */
+ * backward from each half of the operand to its latest physical-register
+ * writer (the halves of a 32-bit operand may be written separately, as
+ * constant-program input imports are); a synchronous overwrite terminates the
+ * search for that half. */
 static bool
 agx3_find_select_wait_operand(const struct agx3_slot_instr *sl,
                               const struct agx3_slot_result *res,
@@ -5310,20 +5312,20 @@ agx3_find_select_wait_operand(const struct agx3_slot_instr *sl,
          continue;
 
       const unsigned halves = agx_index_size_16(operand);
-      for (unsigned j = consumer; j-- > 0;) {
-         bool writes = false;
-         for (unsigned d = 0; d < sl[j].nr_dsts; ++d) {
-            writes |= sl[j].dst[d] >= operand.value &&
-                      sl[j].dst[d] < operand.value + halves;
-         }
-         if (!writes)
-            continue;
+      for (unsigned h = operand.value; h < operand.value + halves; ++h) {
+         for (unsigned j = consumer; j-- > 0;) {
+            bool writes = false;
+            for (unsigned d = 0; d < sl[j].nr_dsts; ++d)
+               writes |= sl[j].dst[d] == h;
+            if (!writes)
+               continue;
 
-         if (res[j].slot == slot) {
-            *out = operand;
-            return true;
+            if (res[j].slot == slot) {
+               *out = operand;
+               return true;
+            }
+            break;
          }
-         break;
       }
    }
 
