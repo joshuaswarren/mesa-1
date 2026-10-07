@@ -7642,7 +7642,8 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &st->info;
    const struct agx_linked_shader *linked = &st->linked;
-   const bool native_sample = fragment && st->g17p_sample.valid;
+   const bool native_sample = st->g17p_sample.valid &&
+      (fragment || st->g17p_sample.indexed_fetch);
    const bool native_fetch = native_sample && st->g17p_sample.indexed_fetch;
    if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
        !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
@@ -7771,9 +7772,19 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
       };
    }
    ranges[count++] = (struct agx3_ioto_uniform_range){
-      .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT : D12_UNIFORM_ROOT,
+      .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT
+                             : native_fetch ? AGX_G17P_TXF_ROOT_HALFS
+                                            : D12_UNIFORM_ROOT,
       .size_halfs = D12_UNIFORM_ROOT_REGS, .address = root_gpu,
    };
+   /* Vertex buffer loads also inspect descriptor words through the original
+    * native32 table pointer. Keep that descriptor ABI alongside indexed TXF. */
+   if (!fragment && native_fetch) {
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = D12_UNIFORM_TEXTURES,
+         .size_halfs = D12_UNIFORM_TEXTURE_REGS, .address = textures_gpu,
+      };
+   }
    /* Mesh rasterization consumes its own parameter block. Do not load an
     * unused DRAW range from the application's indirect argument buffer. */
    const uint64_t draw_halfs =
@@ -7902,12 +7913,14 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    if (device->dev.chip == AGX_CHIP_G17P) {
       /* The frontend usage proof decides admission: a stage with a texture
        * or image instruction needs the native indexed texture/sampler ABI,
-       * which no graphics producer supplies yet. The binding collector
+       * supplied by the indexed-fetch publication above. The binding collector
        * always uploads the root-slot texture/PBE tables and, when a heap is
        * bound, its parallel native texture/PBE/sampler arrays; a root-only
        * stage cannot read any of those, so their presence is not a
        * refusal. */
-      if (!st->g17p_root_only && !(fragment && st->g17p_sample.valid)) {
+      if (!st->g17p_root_only &&
+          !(st->g17p_sample.valid &&
+            (fragment || st->g17p_sample.indexed_fetch))) {
          mesa_loge("native graphics texture stage producer unavailable");
          list->state = D12_LIST_ERROR;
          return 0;
@@ -10541,7 +10554,9 @@ d12_emit_g17p_raster(struct d12_cmd_list *list, struct d12_segment *seg,
    const struct agx_unlinked_uvs_layout *uvs =
       mesh_draw ? &pso->ms_uvs : &pso->uvs;
    if (!d12_g17p_baseline_graphics_enabled(&list->device->dev) ||
-       !seg->agx3_active_context_selector_valid || !vs->g17p_root_only ||
+       !seg->agx3_active_context_selector_valid ||
+       !(vs->g17p_root_only ||
+         (vs->g17p_sample.valid && vs->g17p_sample.indexed_fetch)) ||
        (!mesh_draw && !d12_g17p_smooth_varyings_supported(pso)) ||
        !(pso->fs.g17p_root_only || pso->fs.g17p_sample.valid) ||
        vs->g17p_writes_memory ||

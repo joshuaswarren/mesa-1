@@ -19,6 +19,7 @@ main(int argc, char **argv)
    bool print_nir = false;
 #ifdef AGX_REPLAY_D3D12
    bool lower_d3d12_fetch = false;
+   bool lower_d3d12_vertex = false;
 #endif
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--print-nir")) {
@@ -26,6 +27,10 @@ main(int argc, char **argv)
          continue;
       }
 #ifdef AGX_REPLAY_D3D12
+      if (!strcmp(argv[i], "--lower-d3d12-vertex-fetch")) {
+         lower_d3d12_vertex = true;
+         continue;
+      }
       if (!strcmp(argv[i], "--lower-d3d12-fragment-fetch")) {
          lower_d3d12_fetch = true;
          continue;
@@ -59,6 +64,10 @@ main(int argc, char **argv)
       if (print_nir)
          nir_print_shader(nir, stderr);
 #ifdef AGX_REPLAY_D3D12
+      if (lower_d3d12_vertex && nir->info.stage == MESA_SHADER_VERTEX &&
+          key.dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          d12_nir_lower_g17p_txf(nir, 9))
+         d12_nir_shift_g17p_txf_root(nir);
       if (lower_d3d12_fetch && nir->info.stage == MESA_SHADER_FRAGMENT &&
           key.dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          struct d12_nir_g17p_fragment_sample binding;

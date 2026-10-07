@@ -2882,6 +2882,12 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
       struct agx_varyings_vs linked = {0};
       agx_assign_uvs(&linked, &o->uvs, 0, 0);
       NIR_PASS(_, nir, d12_dxil_lower_uvs_index, linked.slots);
+      if (descriptor_generation == 9 && d12_nir_lower_g17p_txf(nir, 9)) {
+         NIR_PASS(_, nir, d12_nir_shift_g17p_txf_root);
+         o->g17p_fragment_sample = true;
+         o->g17p_fragment_fetch = true;
+      }
+
    }
 
    if (stage == MESA_SHADER_FRAGMENT) {
@@ -2914,7 +2920,9 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
     * than assuming the root signature's visibility describes actual use. */
    const unsigned root_base = stage == MESA_SHADER_FRAGMENT
                                  ? D12_UNIFORM_FRAGMENT_ROOT
-                                 : D12_UNIFORM_ROOT;
+                                 : o->g17p_fragment_fetch
+                                      ? AGX_G17P_TXF_ROOT_HALFS
+                                      : D12_UNIFORM_ROOT;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -5256,6 +5264,8 @@ d12_pipeline_state_create_graphics(
    }
    pso->uvs = vs_entry->out.uvs;
    pso->vs.g17p_root_only = vs_entry->out.root_only;
+   pso->vs.g17p_sample.valid = vs_entry->out.g17p_fragment_sample;
+   pso->vs.g17p_sample.indexed_fetch = vs_entry->out.g17p_fragment_fetch;
    pso->vs.reads_root = vs_entry->out.reads_root;
    pso->vs.g17p_writes_memory = vs_entry->out.writes_memory;
    const uint8_t cull_distance_size = vs_entry->out.cull_distance_size;
@@ -5931,7 +5941,9 @@ d12_pipeline_state_create_graphics(
 
    agx_assign_uvs(&pso->varyings, &pso->uvs, 0, 0);
    if (device->dev.chip == AGX_CHIP_G17P && !pso->has_gs && !pso->has_tess &&
-       !pso->has_mesh && pso->vs.g17p_root_only && !pso->vs.info.has_preamble) {
+       !pso->has_mesh && (pso->vs.g17p_root_only ||
+                         pso->vs.g17p_sample.indexed_fetch) &&
+       !pso->vs.info.has_preamble) {
       const struct agx_g17p_vertex_compile_info compiler_info = {
          .hardware_vertex = pso->vs.info.stage == MESA_SHADER_VERTEX,
          .has_preamble = pso->vs.info.has_preamble,

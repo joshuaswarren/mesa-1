@@ -11,7 +11,8 @@ bool
 d12_nir_g17p_txf_supported(nir_shader *nir, bool *has_txf)
 {
    if (!nir || !has_txf || (nir->info.stage != MESA_SHADER_COMPUTE &&
-                            nir->info.stage != MESA_SHADER_FRAGMENT))
+                            nir->info.stage != MESA_SHADER_FRAGMENT &&
+                            nir->info.stage != MESA_SHADER_VERTEX))
       return false;
    bool found = false;
    nir_foreach_function_impl(impl, nir) {
@@ -24,9 +25,13 @@ d12_nir_g17p_txf_supported(nir_shader *nir, bool *has_txf)
                continue;
             nir_tex_instr *tex = nir_instr_as_tex(instr);
             int h = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+            const int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+            const bool coords_2d = coord >= 0
+               ? nir_src_num_components(tex->src[coord].src) == 2
+               : tex->coord_components == 2;
             if (tex->op != nir_texop_txf ||
                 tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
-                tex->is_shadow || tex->coord_components != 2 || h < 0 ||
+                tex->is_shadow || !coords_2d || h < 0 ||
                 nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0)
                return false;
             nir_intrinsic_instr *handle = nir_src_as_intrinsic(tex->src[h].src);

@@ -88,6 +88,42 @@ int main(void)
       ralloc_free(b.shader);
    }
 
+   /* Buffer access has already become a 2D native fetch, while
+    * coord_components retains the API's one-dimensional metadata. Include
+    * index 16, just beyond the packer's four-bit immediate index. */
+   {
+      nir_builder v = builder();
+      v.shader->info.stage = MESA_SHADER_VERTEX;
+      nir_tex_instr *t = make_fetch(&v, nir_imm_int(&v, 16 * 32));
+      nir_instr *store = nir_block_last_instr(t->instr.block);
+      CHECK(store->type == nir_instr_type_intrinsic);
+      CHECK(nir_instr_as_intrinsic(store)->intrinsic == nir_intrinsic_store_global);
+      nir_instr_remove(store);
+      v.cursor = nir_after_instr(&t->instr);
+      int coord = nir_tex_instr_src_index(t, nir_tex_src_coord);
+      t->src[coord].src_type = nir_tex_src_backend1;
+      t->coord_components = 1;
+      for (unsigned i = 0; i < 4; ++i)
+         nir_store_uvs_agx(&v, nir_channel(&v, &t->def, i),
+                           nir_imm_intN_t(&v, i, 16));
+      nir_store_uvs_agx(&v, nir_imm_float(&v, 1.0f),
+                        nir_imm_intN_t(&v, 4, 16));
+      bool found = false;
+      CHECK(d12_nir_g17p_txf_supported(v.shader, &found) && found);
+      CHECK(d12_nir_lower_g17p_txf(v.shader, 9));
+      NIR_PASS(_, v.shader, nir_opt_constant_folding);
+      CHECK(t->texture_index == 16);
+      v.shader->info.outputs_written = VARYING_BIT_POS | VARYING_BIT_PSIZ;
+      agx_preprocess_nir_g17p(v.shader);
+      struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                                  .no_preamble = true};
+      struct agx_shader_part part = {0};
+      CHECK(agx_compile_shader_nir(v.shader, &key, &part));
+      CHECK(part.binary && part.info.uses_txf);
+      free(part.binary);
+      ralloc_free(v.shader);
+   }
+
    /* Constant byte offsets become exactly one zero-extended native index. */
    const uint32_t offsets[] = {0,32,96,8192,UINT32_MAX & ~31u};
    for (unsigned i=0; i<sizeof(offsets)/sizeof(offsets[0]); i++) {
