@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_cmd_buffer.h"
+#include "hk_g17p_patch.h"
 
 #include "agx_abi.h"
 #include "agx_bo.h"
@@ -2428,9 +2429,9 @@ hk_g17p_graphics_setup_get(
 }
 
 /* A G17P graphics stage program of one linked executable for one uniform
- * layout. It is composed once with every range loaded from its own patchable
- * base; a draw copies it and writes its range addresses into the bases. */
-#define HK_G17P_GFX_LOADER_MAX_RELOCATIONS 16
+ * layout and address shape (hk_g17p_patch.h). A draw copies it with its own
+ * range base immediates. */
+#define HK_G17P_GFX_LOADER_MAX_SHAPES 4
 
 struct hk_g17p_gfx_loader {
    struct hk_g17p_gfx_loader *next;
@@ -2439,15 +2440,8 @@ struct hk_g17p_gfx_loader {
    uint16_t range_start[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
    uint16_t range_size[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
    uint8_t range_count;
-   uint8_t reloc_count;
    uint16_t length;
-   struct {
-      /* agx_ioto_load_ldimm_long_dest() of the low and high halves */
-      uint64_t dest[2];
-      uint32_t delta;
-      uint16_t offset;
-      uint8_t range;
-   } relocs[HK_G17P_GFX_LOADER_MAX_RELOCATIONS];
+   struct hk_g17p_patch_plan plan;
    uint8_t bytes[];
 };
 
@@ -2474,13 +2468,14 @@ hk_g17p_gfx_loader_matches(const struct hk_g17p_gfx_loader *l,
 
 static struct hk_g17p_gfx_loader *
 hk_g17p_gfx_loader_create(struct hk_device *dev, const struct hk_shader *s,
-                          const struct hk_agx3_g17p_graphics_program_desc *desc)
+                          const struct hk_agx3_g17p_graphics_program_desc *desc,
+                          bool independent)
 {
-   struct hk_agx3_g17p_graphics_program_desc patchable = *desc;
+   struct hk_agx3_g17p_graphics_program_desc composed = *desc;
    /* Any aligned address inside the USC window: with absolute constant
     * program branches the bytes do not depend on it. */
-   patchable.program_va = dev->dev.shader_base + 0x10000;
-   patchable.patchable = true;
+   composed.program_va = dev->dev.shader_base + 0x10000;
+   composed.patchable = independent;
 
    struct agx3_g17p_graphics_program_template *t = malloc(sizeof(*t));
    if (!t)
@@ -2488,8 +2483,7 @@ hk_g17p_gfx_loader_create(struct hk_device *dev, const struct hk_shader *s,
 
    struct hk_g17p_gfx_loader *l = NULL;
    if (!hk_agx3_g17p_graphics_program_template_generate(dev->dev.chip,
-                                                         &patchable, t) ||
-       t->relocation_count > HK_G17P_GFX_LOADER_MAX_RELOCATIONS ||
+                                                         &composed, t) ||
        (desc->constant_program.code_size &&
         !desc->constant_program.absolute_branch))
       goto out;
@@ -2501,7 +2495,6 @@ hk_g17p_gfx_loader_create(struct hk_device *dev, const struct hk_shader *s,
    l->s = s;
    l->imageblock = desc->imageblock;
    l->range_count = desc->uniform_range_count;
-   l->reloc_count = t->relocation_count;
    l->length = t->program.length;
    memcpy(l->bytes, t->program.bytes, t->program.length);
    for (unsigned i = 0; i < l->range_count; ++i) {
@@ -2509,30 +2502,10 @@ hk_g17p_gfx_loader_create(struct hk_device *dev, const struct hk_shader *s,
       l->range_size[i] = desc->uniform_ranges[i].size_halfs;
    }
 
-   unsigned based = 0;
-   for (unsigned r = 0; r < t->relocation_count; ++r) {
-      const struct agx_ioto_load_relocation *rel = &t->relocations[r];
-      unsigned i = 0;
-      while (i < l->range_count &&
-             (rel->address < desc->uniform_ranges[i].address ||
-              rel->address - desc->uniform_ranges[i].address >=
-                 desc->uniform_ranges[i].size_halfs * 2u))
-         ++i;
-      if (i == l->range_count || rel->low_length != 8 ||
-          rel->high_length != 8 || rel->offset + 16u > l->length) {
-         free(l);
-         l = NULL;
-         goto out;
-      }
-      l->relocs[r].offset = rel->offset;
-      l->relocs[r].dest[0] = agx_ioto_load_ldimm_long_dest(rel->dest_half);
-      l->relocs[r].dest[1] =
-         agx_ioto_load_ldimm_long_dest(rel->dest_half + 2);
-      l->relocs[r].range = i;
-      l->relocs[r].delta = rel->address - desc->uniform_ranges[i].address;
-      based |= BITFIELD_BIT(i);
-   }
-   if (based != BITFIELD_MASK(l->range_count)) {
+   if (!hk_g17p_patch_plan_init(&l->plan, desc->uniform_ranges,
+                                desc->uniform_range_count, t->relocations,
+                                t->relocation_count, t->program.length,
+                                independent)) {
       free(l);
       l = NULL;
    }
@@ -2553,17 +2526,7 @@ hk_g17p_gfx_loader_emit(struct hk_cmd_buffer *cmd,
       return 0;
 
    memcpy(r.map, l->bytes, l->length);
-   for (unsigned i = 0; i < l->reloc_count; ++i) {
-      const uint64_t address = ranges[l->relocs[i].range].address +
-                               l->relocs[i].delta;
-      const uint64_t ldimm[2] = {
-         util_cpu_to_le64(l->relocs[i].dest[0] |
-                          agx_ioto_load_ldimm_long_immediate(address)),
-         util_cpu_to_le64(l->relocs[i].dest[1] |
-                          agx_ioto_load_ldimm_long_immediate(address >> 32)),
-      };
-      memcpy((uint8_t *)r.map + l->relocs[i].offset, ldimm, sizeof(ldimm));
-   }
+   hk_g17p_patch_plan_apply(&l->plan, ranges, r.map);
 
    return hk_cmd_publish_ioto_program(cmd, &r, l->length);
 }
@@ -2593,17 +2556,22 @@ hk_g17p_publish_gfx_loader(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    };
 
    const struct hk_g17p_gfx_loader *l = cached->loader;
+   unsigned shapes = 0;
    if (!l || cached->loader_linked != linked ||
-       !hk_g17p_gfx_loader_matches(l, s, &imageblock, ranges, range_count)) {
+       !hk_g17p_gfx_loader_matches(l, s, &imageblock, ranges, range_count) ||
+       !hk_g17p_patch_plan_fits(&l->plan, ranges)) {
       l = NULL;
       for (struct hk_g17p_gfx_loader *it =
               p_atomic_read(&linked->g17p_gfx_loaders);
            it; it = it->next) {
-         if (hk_g17p_gfx_loader_matches(it, s, &imageblock, ranges,
-                                        range_count)) {
+         if (!hk_g17p_gfx_loader_matches(it, s, &imageblock, ranges,
+                                         range_count))
+            continue;
+         if (hk_g17p_patch_plan_fits(&it->plan, ranges)) {
             l = it;
             break;
          }
+         ++shapes;
       }
    }
 
@@ -2613,8 +2581,10 @@ hk_g17p_publish_gfx_loader(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                                               range_count, &desc))
          return 0;
 
-      struct hk_g17p_gfx_loader *created =
-         hk_g17p_gfx_loader_create(dev, s, &desc);
+      /* A layout whose ranges keep moving relative to each other gets one
+       * program with a base per range, which fits any addresses. */
+      struct hk_g17p_gfx_loader *created = hk_g17p_gfx_loader_create(
+         dev, s, &desc, shapes >= HK_G17P_GFX_LOADER_MAX_SHAPES);
       if (!created)
          return 0;
 

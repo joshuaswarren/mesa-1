@@ -13,6 +13,7 @@
 #include "agx_tilebuffer.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
+#include "hk_g17p_patch.h"
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
@@ -42,20 +43,13 @@ static const uint8_t hk_g17p_native_write_control[32] = {
 };
 
 #define HK_G17P_COMPUTE_MAX_RANGES 8u
-#define HK_G17P_LOADER_MAX_RELOCATIONS 32u
+#define HK_G17P_LOADER_MAX_SHAPES  4u
+static_assert(HK_G17P_COMPUTE_MAX_RANGES <= HK_G17P_PATCH_MAX_RANGES,
+              "patch plan capacity");
 
-struct hk_g17p_loader_relocation {
-   /* agx_ioto_load_ldimm_long_dest() of the low and high halves */
-   uint64_t dest[2];
-   uint32_t delta;
-   uint16_t offset;
-   uint8_t range;
-};
-
-/* The uniform loader of a G17P launch, composed once per program and uniform
- * layout. Its bytes do not depend on the uniform addresses: every range base
- * is materialized by a fixed-size LDIMM pair listed in relocs, which each
- * launch rewrites in its own copy. */
+/* The uniform loader of a G17P launch, composed once per program, uniform
+ * layout and address shape (hk_g17p_patch.h); each launch copies it with its
+ * own range base immediates. */
 struct hk_g17p_loader {
    struct hk_g17p_loader *next;
 
@@ -78,8 +72,7 @@ struct hk_g17p_loader {
 
    struct agx3_compute_program launch;
    uint16_t length;
-   uint8_t reloc_count;
-   struct hk_g17p_loader_relocation relocs[HK_G17P_LOADER_MAX_RELOCATIONS];
+   struct hk_g17p_patch_plan plan;
    uint8_t bytes[];
 };
 
@@ -150,21 +143,22 @@ hk_g17p_loader_matches(const struct hk_g17p_loader *l,
 
 static struct hk_g17p_loader *
 hk_g17p_loader_create(struct hk_device *dev,
-                      const struct agx3_g17p_compute_program_desc *desc)
+                      const struct agx3_g17p_compute_program_desc *desc,
+                      bool independent)
 {
    if (desc->uniform_range_count > HK_G17P_COMPUTE_MAX_RANGES)
       return NULL;
 
-   struct agx_ioto_load_relocation rels[HK_G17P_LOADER_MAX_RELOCATIONS];
+   struct agx_ioto_load_relocation rels[HK_G17P_PATCH_MAX_RELOCS];
    size_t rel_count = 0;
-   struct agx3_g17p_compute_program_desc patchable = *desc;
+   struct agx3_g17p_compute_program_desc composed = *desc;
    /* Any aligned address inside the USC window: the bytes do not depend on
     * it, and every launch binds its own copy. */
-   patchable.program_va = dev->dev.shader_base + 0x10000;
-   patchable.patchable = true;
-   patchable.relocations = rels;
-   patchable.relocation_capacity = ARRAY_SIZE(rels);
-   patchable.relocation_count = &rel_count;
+   composed.program_va = dev->dev.shader_base + 0x10000;
+   composed.relocations = rels;
+   composed.relocation_capacity = ARRAY_SIZE(rels);
+   composed.relocation_count = &rel_count;
+   composed.patchable = independent;
 
    /* The composer's output object is too large for the recording stack. */
    struct agx3_g17p_compute_program *program = malloc(sizeof(*program));
@@ -172,9 +166,8 @@ hk_g17p_loader_create(struct hk_device *dev,
       return NULL;
 
    struct hk_g17p_loader *l = NULL;
-   if (!agx3_g17p_compute_program_generate(dev->dev.chip, &patchable,
-                                           program) ||
-       rel_count > HK_G17P_LOADER_MAX_RELOCATIONS)
+   if (!agx3_g17p_compute_program_generate(dev->dev.chip, &composed,
+                                           program))
       goto out;
 
    l = calloc(1, sizeof(*l) + program->length);
@@ -198,38 +191,16 @@ hk_g17p_loader_create(struct hk_device *dev,
       .range_count = desc->uniform_range_count,
       .launch = program->launch,
       .length = program->length,
-      .reloc_count = rel_count,
    };
    memcpy(l->bytes, program->bytes, program->length);
-
-   unsigned ranges_based = 0;
    for (unsigned i = 0; i < l->range_count; ++i) {
       l->range_start[i] = desc->uniform_ranges[i].start_halfs;
       l->range_size[i] = desc->uniform_ranges[i].size_halfs;
    }
-   for (unsigned r = 0; r < rel_count; ++r) {
-      unsigned i = 0;
-      while (i < l->range_count &&
-             (rels[r].address < desc->uniform_ranges[i].address ||
-              rels[r].address - desc->uniform_ranges[i].address >=
-                 desc->uniform_ranges[i].size_halfs * 2u))
-         ++i;
-      if (i == l->range_count || rels[r].low_length != 8 ||
-          rels[r].high_length != 8) {
-         free(l);
-         l = NULL;
-         goto out;
-      }
-      l->relocs[r] = (struct hk_g17p_loader_relocation){
-         .offset = rels[r].offset,
-         .dest = {agx_ioto_load_ldimm_long_dest(rels[r].dest_half),
-                  agx_ioto_load_ldimm_long_dest(rels[r].dest_half + 2)},
-         .range = i,
-         .delta = rels[r].address - desc->uniform_ranges[i].address,
-      };
-      ranges_based |= BITFIELD_BIT(i);
-   }
-   if (ranges_based != BITFIELD_MASK(l->range_count)) {
+
+   if (!hk_g17p_patch_plan_init(&l->plan, desc->uniform_ranges,
+                                desc->uniform_range_count, rels, rel_count,
+                                program->length, independent)) {
       free(l);
       l = NULL;
    }
@@ -245,19 +216,27 @@ static const struct hk_g17p_loader *
 hk_g17p_loader_get(struct hk_device *dev, void **head,
                    const struct agx3_g17p_compute_program_desc *desc)
 {
+   unsigned shapes = 0;
    for (struct hk_g17p_loader *l = p_atomic_read(head); l; l = l->next) {
-      if (hk_g17p_loader_matches(l, desc))
+      if (!hk_g17p_loader_matches(l, desc))
+         continue;
+      if (hk_g17p_patch_plan_fits(&l->plan, desc->uniform_ranges))
          return l;
+      ++shapes;
    }
 
-   struct hk_g17p_loader *created = hk_g17p_loader_create(dev, desc);
+   /* A layout whose ranges keep moving relative to each other gets one
+    * program with a base per range, which fits any addresses. */
+   struct hk_g17p_loader *created =
+      hk_g17p_loader_create(dev, desc, shapes >= HK_G17P_LOADER_MAX_SHAPES);
    if (!created)
       return NULL;
 
    while (true) {
       struct hk_g17p_loader *first = p_atomic_read(head);
       for (struct hk_g17p_loader *l = first; l; l = l->next) {
-         if (hk_g17p_loader_matches(l, desc)) {
+         if (hk_g17p_loader_matches(l, desc) &&
+             hk_g17p_patch_plan_fits(&l->plan, desc->uniform_ranges)) {
             free(created);
             return l;
          }
@@ -279,17 +258,7 @@ hk_g17p_loader_emit(struct hk_cmd_buffer *cmd, const struct hk_g17p_loader *l,
       return false;
 
    memcpy(r.map, l->bytes, l->length);
-   for (unsigned i = 0; i < l->reloc_count; ++i) {
-      const struct hk_g17p_loader_relocation *rel = &l->relocs[i];
-      const uint64_t address = ranges[rel->range].address + rel->delta;
-      const uint64_t ldimm[2] = {
-         util_cpu_to_le64(rel->dest[0] |
-                          agx_ioto_load_ldimm_long_immediate(address)),
-         util_cpu_to_le64(rel->dest[1] |
-                          agx_ioto_load_ldimm_long_immediate(address >> 32)),
-      };
-      memcpy((uint8_t *)r.map + rel->offset, ldimm, sizeof(ldimm));
-   }
+   hk_g17p_patch_plan_apply(&l->plan, ranges, r.map);
 
    const uint64_t va = hk_cmd_publish_ioto_program(cmd, &r, l->length);
    if (!va)
