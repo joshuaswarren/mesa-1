@@ -39,6 +39,10 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
                            struct hk_api_shader *shader)
 {
    cmd->state.cs.shader = shader;
+
+   /* The compute root is uploaded at every dispatch; no dirty flag needed. */
+   cmd->state.cs.descriptors.root.cs.const_data =
+      shader ? hk_only_variant(shader)->data_addr : 0;
 }
 
 void
