@@ -125,6 +125,12 @@ struct hk_root_descriptor_table {
    uint8_t set_dynamic_buffer_start[HK_MAX_SETS];
 };
 
+/* cs shares a union with draw; growing it past draw would move every later
+ * root offset (push constants, dynamic buffers). */
+static_assert(sizeof(((struct hk_root_descriptor_table *)0)->cs) <=
+                 sizeof(((struct hk_root_descriptor_table *)0)->draw),
+              "root cs fields must fit in the draw union member");
+
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
    offsetof(struct hk_root_descriptor_table, member)

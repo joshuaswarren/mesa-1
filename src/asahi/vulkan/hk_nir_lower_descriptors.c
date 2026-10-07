@@ -62,6 +62,9 @@ load_root(nir_builder *b, unsigned num_components, unsigned bit_size,
 
 /* Large constant arrays (nir_opt_large_constants, compute only) live in the
  * shader's data BO; the root table carries its address for the bound shader.
+ * The load may be speculated past the branch that guards its index, so the
+ * offset is clamped into the variable's range: an unguarded index past the
+ * BO would read unmapped memory.
  */
 static bool
 lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
@@ -72,7 +75,11 @@ lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
 
    b->cursor = nir_before_instr(&load->instr);
 
-   nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, nir_intrinsic_base(load));
+   uint32_t base = nir_intrinsic_base(load);
+   uint32_t bytes = load->def.num_components * load->def.bit_size / 8;
+   uint32_t last = MAX2(nir_intrinsic_range(load), bytes) - bytes;
+   nir_def *offset = nir_iadd_imm(
+      b, nir_umin(b, load->src[0].ssa, nir_imm_int(b, last)), base);
    nir_def *data = load_root(b, 1, 64,
                              nir_imm_int(b, hk_root_descriptor_offset(cs.const_data)), 8);
    nir_def *val = load_speculatable(b, load->def.num_components, load->def.bit_size,
