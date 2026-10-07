@@ -56,12 +56,12 @@ with tempfile.TemporaryDirectory(prefix="large-constants-") as td:
     subprocess.run(["glslangValidator", "-V", str(td / "p.comp"), "-o", str(td / "p.spv")], check=True,
                    capture_output=True, timeout=60)
     (td / "in.bin").write_bytes(np.array([SEED], dtype=np.uint32).tobytes())
-    for arm, flag in (("off", None), ("on", "1")):
+    for arm, on in (("off", False), ("on", True)):
         env = dict(os.environ, VK_DRIVER_FILES=icd, VK_ICD_FILENAMES=icd, AGX_MESA_DEBUG="shaderdb",
                    MESA_SHADER_CACHE_DISABLE="true")
         env.pop("HK_LARGE_CONSTANTS", None)
-        if flag:
-            env["HK_LARGE_CONSTANTS"] = flag
+        if on:
+            env["HK_LARGE_CONSTANTS"] = "1"
         r = subprocess.run(["flock", "-w", "1800", "/tmp/m1-gpu.lock", runner, str(td / "p.spv"),
                             str(td / "in.bin"), str(td / "out.bin"), str(n * 4), str(N_WG)],
                            env=env, capture_output=True, text=True, timeout=2100)
@@ -69,5 +69,5 @@ with tempfile.TemporaryDirectory(prefix="large-constants-") as td:
         scratch = [int(m.group(1)) for l in stats for m in [re.search(r"(\d+) scratch", l)] if m]
         bad = int((np.fromfile(td / "out.bin", dtype=np.uint32) != want).sum())
         print(f"{arm}: {bad} mismatches of {n}, scratch {scratch[0] if scratch else 'unknown'}")
-        failed |= r.returncode != 0 or bad != 0 or (flag and scratch != [0])
+        failed |= r.returncode != 0 or bad != 0 or (on and scratch != [0])
 sys.exit(1 if failed else 0)
