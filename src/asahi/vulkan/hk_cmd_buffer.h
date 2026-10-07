@@ -820,6 +820,14 @@ struct hk_cs {
    struct util_dynarray scissor, depth_bias;
    uint64_t uploaded_scissor, uploaded_zbias;
 
+   /* G17P: the last uploaded draw-state selector record and the scissor /
+    * depth-bias array sizes and viewport count it selects for. */
+   struct {
+      uint32_t offset;
+      uint32_t scissor_size, depth_bias_size;
+      uint8_t viewport_count;
+   } g17p_draw_state;
+
    /* We can only set ppp_multisamplectl once per batch. has_sample_locations
     * tracks if we've committed to a set of sample locations yet. vk_meta
     * operations do not set has_sample_locations since they don't care and it

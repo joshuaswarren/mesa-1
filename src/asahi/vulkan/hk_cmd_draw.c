@@ -8001,10 +8001,51 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    }
 }
 
+/* The draw-state selector record names the stream's latest viewport_count
+ * scissor and depth-bias records. A draw record carries its context offset
+ * only right after a fresh bind tail; consecutive tails that select the same
+ * records share one upload. */
+static bool
+hk_g17p_draw_state_offset(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                          uint32_t *offset)
+{
+   const unsigned viewport_count =
+      MAX2(cmd->vk.dynamic_graphics_state.vp.viewport_count, 1);
+
+   if (cs->g17p_draw_state.offset &&
+       cs->g17p_draw_state.scissor_size == cs->scissor.size &&
+       cs->g17p_draw_state.depth_bias_size == cs->depth_bias.size &&
+       cs->g17p_draw_state.viewport_count == viewport_count) {
+      *offset = cs->g17p_draw_state.offset;
+      return true;
+   }
+
+   struct agx_ptr state = hk_pool_vdm_alloc(cmd, 8, 4);
+   if (!state.cpu ||
+       !hk_g17p_upload_draw_indices(state.cpu, 8, state.gpu,
+                                    cs->scissor.size, cs->depth_bias.size,
+                                    viewport_count, offset))
+      return false;
+
+   cs->g17p_draw_state.offset = *offset;
+   cs->g17p_draw_state.scissor_size = cs->scissor.size;
+   cs->g17p_draw_state.depth_bias_size = cs->depth_bias.size;
+   cs->g17p_draw_state.viewport_count = viewport_count;
+   return true;
+}
+
+/* The primitives of the HAL200 direct Index List tables: 0, 1, 3, 5, 6, 9,
+ * 11, 13, 14 and 15. */
+static inline bool
+hk_g17p_draw_primitive_supported(enum agx_primitive topology)
+{
+   return topology < 16 && (UINT32_C(0xea6b) >> topology) & 1;
+}
+
 /* The G17P draw record after any state publication: the context-relative
- * draw-state selector record, then the HAL200 draw body (indirect, indexed
- * or direct).  Shared by hk_draw_impl() and
- * hk_g17p_emit_indirect_record().  Returns false with the command buffer
+ * draw-state selector record when a fresh bind tail precedes it, then the
+ * HAL200 draw body (indirect, indexed or direct).  Shared by hk_draw_impl()
+ * and hk_g17p_emit_indirect_record().  Returns false with the command buffer
  * error set when the draw cannot be encoded. */
 static bool
 hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
@@ -8013,26 +8054,16 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* This context-relative PPP record selects the latest scissor
-    * and depth-bias array entries. Header0x100 is PPP selector bit8,
-    * not a direct-draw shape; +4 contains indices, not enable flags.
-    * Native bind-state emission appended those owned records above.
-    */
-   struct agx_ptr draw_state = hk_pool_vdm_alloc(cmd, 8, 4);
-   uint32_t draw_state_offset;
-   if (!draw_state.cpu ||
-       !hk_g17p_upload_draw_indices(
-          draw_state.cpu, 8, draw_state.gpu, cs->scissor.size,
-          cs->depth_bias.size,
-          MAX2(cmd->vk.dynamic_graphics_state.vp.viewport_count, 1),
-          &draw_state_offset)) {
-      vk_command_buffer_set_error(&cmd->vk,
-                                  VK_ERROR_FEATURE_NOT_PRESENT);
-      return false;
-   }
+   /* The selector completes a fresh bind tail. Without one the draw record
+    * starts at its body; a bare selector would be parsed as a header. */
+   uint32_t draw_state_offset = 0;
+   if (tail_emitted && !hk_g17p_draw_state_offset(cmd, cs, &draw_state_offset))
+      goto refused;
+
    if (agx_is_indirect(draw.b)) {
       const struct agx_vdm_hal200_indirect_draw_fields fields = {
-         .draw_state_context_offset = draw_state_offset,
+         /* Not emitted without a fresh tail, but packed regardless. */
+         .draw_state_context_offset = tail_emitted ? draw_state_offset : 4,
          .primitive = (uint8_t)topology,
          .indexed = draw.indexed,
          .index_size_B =
@@ -8054,94 +8085,83 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
          .indirect_buffer = draw.b.ptr,
       };
       struct agx_vdm_hal200_indirect_draw encoded;
+      size_t emitted;
       if (!agx_vdm_hal200_indirect_draw_pack(dev->dev.chip, &fields,
-                                              &encoded)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return false;
-      }
-      /* The selector completes the native bind tail. With unchanged
-       * state, indirect draws need the same body-only framing as
-       * direct draws; a bare selector would be parsed as a header. */
-      size_t emitted;
-      if (!agx_vdm_hal200_draw_emit(
-             dev->dev.chip, encoded.bytes, encoded.length,
-             tail_emitted, out,
-             (uint8_t *)cs->end - out, &emitted)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return false;
-      }
+                                              &encoded) ||
+          !agx_vdm_hal200_draw_emit(dev->dev.chip, encoded.bytes,
+                                    encoded.length, tail_emitted, out,
+                                    (uint8_t *)cs->end - out, &emitted))
+         goto refused;
       cs->current = out + emitted;
-   } else if (draw.indexed) {
-      const struct agx_vdm_hal200_indexed_draw_fields fields = {
-         .primitive = (uint8_t)topology,
-         .index_size_B = agx_index_size_to_B(draw.index_size),
-         .restart_enable = draw.restart,
-         .restart_index =
-            agx_primitive_restart_index(draw.index_size),
-         .draw_state_context_offset = draw_state_offset,
-         .index_buffer = draw.index_buffer,
-         .index_buffer_range_B = draw.index_buffer_range_B,
-         .first_index = draw.start,
-         .index_count = draw.b.count[0],
-         .instance_count = draw.b.count[1],
-         .base_vertex = (int32_t)draw.index_bias,
-      };
-      struct agx_vdm_hal200_indexed_draw encoded;
-      if (!agx_vdm_hal200_indexed_draw_pack(dev->dev.chip, &fields,
-                                             &encoded)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return false;
-      }
-      /* Metal's indexed entry point emits the 36-byte draw body
-       * after encodeAndEmitRenderState.  Its leading four-byte PPP
-       * selector is emitted only with a fresh native bind tail. */
-      size_t emitted;
-      if (!agx_vdm_hal200_draw_emit(
-             dev->dev.chip, encoded.bytes, encoded.length,
-             tail_emitted, out,
-             (uint8_t *)cs->end - out,
-             &emitted)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return false;
-      }
-      cs->current = out + emitted;
-   } else {
-      const struct agx_vdm_hal200_direct_draw_fields fields = {
-         .draw_state_context_offset = draw_state_offset,
-         .primitive = (uint8_t)topology,
-         .vertex_count = draw.b.count[0],
-         .instance_count = draw.b.count[1],
-         .vertex_start = draw.start,
-      };
-      struct agx_vdm_hal200_direct_draw encoded;
-      if (!agx_vdm_hal200_direct_draw_pack(dev->dev.chip, &fields,
-                                            &encoded)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return false;
-      }
-
-      /* The native non-indexed entry point likewise emits a bare
-       * 16-byte body when render state is unchanged.  A standalone
-       * selector before it makes 0x61c4 part of a bogus VDM address. */
-      size_t emitted;
-      if (!agx_vdm_hal200_draw_emit(
-             dev->dev.chip, encoded.bytes, encoded.length,
-             tail_emitted, out,
-             (uint8_t *)cs->end - out,
-             &emitted)) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_FEATURE_NOT_PRESENT);
-         return false;
-      }
-      cs->current = out + emitted;
+      return true;
    }
 
+   if (!hk_g17p_draw_primitive_supported(topology) || !draw.b.count[1])
+      goto refused;
+
+   uint32_t w[10];
+   unsigned n = 0;
+   if (tail_emitted)
+      w[n++] = draw_state_offset;
+
+   if (draw.indexed) {
+      /* Native direct indexed 0x47e57c..0x47e678: a restart State Update
+       * precedes every indexed draw (restart disabled or not), the index
+       * buffer is relocated to the first index, and its remaining length is
+       * rounded up to dwords minus one. The whole requested span must lie
+       * inside the bound range, except the one-dword zero page that stands in
+       * for a null index buffer. */
+      const unsigned index_size_B = agx_index_size_to_B(draw.index_size);
+      const uint64_t range_B = draw.index_buffer_range_B;
+      const uint64_t offset_B = (uint64_t)draw.start * index_size_B;
+      const uint64_t count_B = (uint64_t)draw.b.count[0] * index_size_B;
+      const bool zero_indices = draw.index_buffer == AGX_ZERO_PAGE_ADDRESS &&
+                                range_B == 4 && draw.start == 0;
+      const uint64_t limit = UINT64_C(1) << 48;
+      if (draw.index_size > AGX_INDEX_SIZE_U32 || !draw.index_buffer ||
+          (draw.index_buffer & (index_size_B - 1)) ||
+          draw.index_buffer >= limit || !range_B || range_B > UINT32_MAX ||
+          range_B > limit - draw.index_buffer || !draw.b.count[0] ||
+          offset_B >= range_B ||
+          (!zero_indices && count_B > range_B - offset_B))
+         goto refused;
+
+      const uint64_t ib = draw.index_buffer + offset_B;
+      w[n++] = UINT32_C(0x40000001);
+      w[n++] = index_size_B == 1   ? UINT32_C(0xff)
+               : index_size_B == 2 ? UINT32_C(0xffff)
+                                   : UINT32_MAX;
+      w[n++] = UINT32_C(0x61f00000) | (uint32_t)((ib >> 32) & 0xff) |
+               ((uint32_t)topology << 8) |
+               ((uint32_t)draw.index_size << 17) |
+               (draw.restart ? UINT32_C(1) << 16 : 0);
+      w[n++] = (uint32_t)ib;
+      w[n++] = draw.b.count[0];
+      w[n++] = draw.b.count[1];
+      w[n++] = (uint32_t)(int32_t)draw.index_bias;
+      w[n++] = (uint32_t)(((range_B - offset_B + 3) >> 2) - 1);
+      w[n++] = (uint32_t)((ib >> 40) & 0xff);
+   } else {
+      if (!draw.b.count[0])
+         goto refused;
+
+      w[n++] = (AGX_VDM_HAL200_DIRECT_DRAW_OPCODE << 16) |
+               ((uint32_t)topology << 8);
+      w[n++] = draw.b.count[0];
+      w[n++] = draw.b.count[1];
+      w[n++] = draw.start;
+   }
+
+   if ((size_t)((uint8_t *)cs->end - out) < n * 4)
+      goto refused;
+
+   memcpy(out, w, n * 4);
+   cs->current = out + n * 4;
    return true;
+
+refused:
+   vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+   return false;
 }
 
 /* Capture the selected last producer at each successful emission, never
@@ -8464,8 +8484,10 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          continue;
       }
 
+      /* hk_g17p_emit_draw() validates a direct draw as it encodes it. */
       enum agx_primitive topology = cmd->state.gfx.topology;
-      if (!agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
+      if ((dev->dev.chip != AGX_CHIP_G17P || agx_is_indirect(draw.b)) &&
+          !agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
