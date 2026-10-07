@@ -210,8 +210,11 @@ lower_load_store(nir_builder *b, struct hash_table *tm, nir_intrinsic_instr *int
     * and trade one half with quad_swap_vertical (lane xor 2):
     *   L   loads (r,c),(r+1,c)     keeps x, receives (r,c+1)   from L^2
     *   L^2 loads (r,c+1),(r+1,c+1) keeps y, receives (r+1,c)   from L
-    * One vec2 load and one quad swap replace two scalar loads. The pair is
-    * vec2-aligned under the same even-stride rule as the row-major path. */
+    * One vec2 load and one quad swap replace two scalar loads. Like the
+    * row-major vec2 path, it assumes an even stride and an even base (an
+    * odd stride pairs the wrong rows, an odd base misaligns the vec2);
+    * callers that cannot guarantee both must not enable it, and it needs a
+    * compile-time or runtime parity gate before it can default on. */
    const bool colpair = is_load && v2dref &&
                         layout == GLSL_MATRIX_LAYOUT_COLUMN_MAJOR &&
                         getenv("AGX_HWMAT_COLPAIR") != NULL;
