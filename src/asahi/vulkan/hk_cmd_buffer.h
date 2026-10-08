@@ -1840,6 +1840,15 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        AGX_CS_GENERATION_HAL200) {
       hk_reserve_scratch(cmd, cs, s);
       hk_dispatch_g17p_native(cmd, cs, s, grid, local_size);
+      /* Software graphics stages communicate through memory: VS outputs,
+       * geometry counts and XFB bases are consumed by the next dispatch.
+       * The application cannot supply barriers between these internal
+       * stages. Preserve the AGX2 flush-after-launch contract, including
+       * indirect launches, by strengthening the native ordering barrier. */
+      if (s->info.stage != MESA_SHADER_COMPUTE) {
+         hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
+         hk_cdm_cache_flush(dev, cs);
+      }
       return;
    }
 
