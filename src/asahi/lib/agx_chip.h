@@ -185,19 +185,6 @@ enum agx_isa agx_chip_isa(enum agx_chip chip);
  * enum; UNKNOWN only for AGX_CHIP_UNKNOWN. */
 enum agx_isa_encoding agx_chip_isa_encoding(enum agx_chip chip);
 
-/* Exhaustive switch definitions, kept as the reference the inline lookups
- * below are tested against (tests/test-chip.c). */
-enum agx_command_stream_generation
-agx_chip_command_stream_generation_reference(enum agx_chip chip);
-
-enum agx_descriptor_generation
-agx_chip_descriptor_generation_reference(enum agx_chip chip);
-
-enum agx_sampler_generation
-agx_chip_sampler_generation_reference(enum agx_chip chip);
-
-unsigned agx_chip_sampler_heap_element_size_reference(enum agx_chip chip);
-
 /* These are queried several times per recorded draw and dispatch. Answer them
  * with one bounded table load instead of an out-of-line call through a jump
  * table: an indirect branch per query is especially costly when the x86
