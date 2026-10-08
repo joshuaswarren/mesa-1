@@ -10594,8 +10594,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_SCOPED_BARRIER_AGX3) {
-            if (!agx3_emit_scoped_barrier(emission, enc, I, wait))
+            /* Image-write slots are assigned by the staging allocator after
+             * the general scheduler. A device fence must also complete these
+             * issued writes, which the scheduler's drain cannot see. */
+            const bool device = I->imm == AGX3_BARRIER_SCOPE_DEVICE ||
+                                I->imm == AGX3_BARRIER_SCOPE_DEVICE_FENCE;
+            const uint16_t retire = wait | (device ? outstanding_here : 0);
+            if (!agx3_emit_scoped_barrier(emission, enc, I, retire))
                AGX3_REFUSE(I);
+            outstanding &= (uint16_t)~retire;
+            agx3_staging_forget(&staging_banks, retire);
             continue;
          }
 
