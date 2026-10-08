@@ -441,8 +441,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t length)
     * may therefore inherit a mapping from an earlier allocation even though
     * the new VkDeviceMemory object has never been mapped.  A placed map must
     * move that stale process mapping to the application's reserved address;
-    * returning it would violate VK_EXT_map_memory_placed and used to trip the
-    * caller's exact-address assertion.
+    * returning it would violate VK_EXT_map_memory_placed.
     *
     * Keep ordinary mapping reuse unchanged.  Only the explicit placed-map
     * contract is allowed to relocate an existing BO mapping. */

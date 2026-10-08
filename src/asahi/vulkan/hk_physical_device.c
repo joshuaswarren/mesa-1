@@ -359,20 +359,9 @@ hk_get_device_features(
        * type-correct widening at ST_VARY and narrowing after interpolation. */
       .storageInputOutput16 = dev->chip == AGX_CHIP_G17P,
       .multiview = true,
-      /* Honeykrisp lowers ViewIndex into the layer output of the last
-       * pre-rasterization stage and duplicates the draw per view on the CPU,
-       * which is stage-agnostic: with tessellation or a geometry shader the
-       * store simply moves to the tessellation-evaluation or geometry shader.
-       * Held behind the opt-in until a two-view tessellated and a two-view
-       * geometry-shaded render are witnessed on hardware. */
-      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4: a 384-case
-       * multiview tessellation/no-position sample is 12 Pass / 372
-       * NotSupported with these bits withheld and 204 Pass / 0 Fail / 180
-       * NotSupported with them advertised -- 192 cases gained and not one
-       * failure.  hk_lower_multiview() now runs on the last pre-rasterization
-       * stage rather than always on the vertex shader, which is what makes a
-       * tessellated or geometry-shaded multiview render write ViewIndex to
-       * the layer the rasterizer reads. */
+      /* ViewIndex is lowered into the layer output of the last
+       * pre-rasterization stage and the draw is duplicated per view, so
+       * tessellation and geometry shaders work with multiview too. */
       .multiviewGeometryShader = true,
       .multiviewTessellationShader = true,
       .variablePointersStorageBuffer = true,
@@ -770,35 +759,9 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       /* Geometry and tessellation shaders run in compute and draw through
        * their raster and evaluation vertex programs, as on AGX2. */
-      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4. A 1,182-case
-       * sample -- every 40th geometry-shader case of draw, pipeline,
-       * binding-model, spirv-assembly, query-pool, transform-feedback and
-       * renderpasses -- is 1182 NotSupported with the gate off and
-       * 877 Pass / 2 Fail / 303 NotSupported with it on; the 303 are held by
-       * other gates (binding_model.shader_access, spec_constant). A separate
-       * 4,561-case general sample gains no regression: not one passing case
-       * changes state when the bit is advertised.
-       *
-       * The two failures are one defect, not a class:
-       * pipeline.*.interface_matching.shader_layout_component_matching.
-       * vert_tesc_tese_geom_frag.{loose_var.float16.single_location.
-       * vec3_scalar, in_block.float16.multiple_locations.vec2_vec2}, which
-       * read (0.5, -1, 0.625, 1) where (0.125, 0.25, 0.5, 1) is owed. It is
-       * specific to the tessellation-to-geometry handoff of 16-bit varyings:
-       * the same case passes as vert_frag, vert_geom_frag and
-       * vert_tesc_tese_frag, and only the combination fails. Tracked, not a
-       * reason to withhold the bit from the ~35,000 cases it gates. */
+      /* Known issue: 16-bit varyings across the tessellation-to-geometry
+       * handoff (interface_matching.*.vert_tesc_tese_geom_frag float16). */
       features->geometryShader = true;
-      /* Qualified on hardware, Neo, native Vulkan 1.4: the whole
-       * dEQP-VK.tessellation group is 496 Pass / 607 NotSupported / 0 Fail,
-       * and the 4,961-case stratified sample gains 54 NotSupported -> Pass
-       * with no case going the other way. The one interaction that kept this
-       * gated -- a self-dependency MSAA render pass failing after a
-       * tessellated draw in the same process -- was the geometry heap
-       * descriptor sharing a buffer object with the sampler table, fixed in
-       * the preceding commit. The remaining NotSupported inside the group are
-       * other gates: shaderFloat64, vertex-pipeline stores and geometry
-       * shaders. */
       features->tessellationShader = true;
       features->shaderTessellationAndGeometryPointSize =
          features->geometryShader || features->tessellationShader;
@@ -1540,13 +1503,9 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    /* The driver id names the single-file cache directory: keep it to the
     * 20-byte build-id (40 hex digits), not the zero-padded 32-byte buffer.
-    * Steam points each game's Mesa cache at its shadercache directory in
-    * single-file mode, records it as bucket "L7:<driver id>" cut to 64
-    * characters, and prunes each mesa_shader_cache_sf/<driver id> directory
-    * that matches no current bucket. A 64-digit id never matches its own cut
-    * bucket, so whenever the bucket set changes Steam deletes the live cache
-    * as old (seen in Steam's shader_log.txt on Neo) and the next launch
-    * compiles everything again.
+    * Steam records single-file cache directories as "L7:<driver id>" cut
+    * to 64 characters and prunes directories that match no bucket, so a
+    * longer id would get the live cache deleted.
     */
    const unsigned id_bytes = 20;
    static_assert(sizeof(instance->driver_build_sha) >= 20);
@@ -1821,13 +1780,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * per-device guarantee: an application may create a device with that
        * many queues and expect it to succeed. Handing the shared pool out as
        * the guarantee makes any application that asks for queueCount queues
-       * fail with VK_ERROR_OUT_OF_DEVICE_MEMORY as soon as anything else is
-       * running -- measured on Neo with a desktop up, the kernel reports 58
-       * and the 39th queue fails, deterministically.
-       *
-       * Advertise a count we can deliver instead. A real guarantee needs a
-       * per-client reservation in the kernel; until then this is the number,
-       * and it still exercises every multi-queue path. */
+       * fail as soon as other clients hold contexts. Advertise a count we
+       * can deliver; a real guarantee needs a per-client reservation in the
+       * kernel. */
       queue_count = MIN2(limits.max_queues, HK_ADVERTISED_QUEUES);
    }
 

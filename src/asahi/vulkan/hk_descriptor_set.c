@@ -391,27 +391,9 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (info && info->imageView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_image_view, view, info->imageView);
 
-      /* This used to also require R8G8B8A8_UINT/UNORM, which made every other
-       * storage format fall into the !supported branch below and be written as
-       * a NULL descriptor -- silently, because vkUpdateDescriptorSets cannot
-       * fail.  That included the formats Vulkan mandates storage support for
-       * (r32_uint/sint/sfloat, r32g32*, r32g32b32a32*, r16g16b16a16*,
-       * r8g8b8a8_snorm/sint), so dEQP-VK.api.info.format_properties fails
-       * either way: silently wrong if advertised, non-conformant if not.
-       *
-       * The allowlist was conservative rather than necessary.  The PBE packer
-       * has no format gate at all: agx_pbe_agx3_core.c's fields_valid()
-       * accepts any uncompressed channel layout with type <= 5, and
-       * hk_pack_native_pbe() passes channels/type straight through.  Measured
-       * under the drm-shim, an R32G32B32A32_UINT view packs valid=1 and its
-       * descriptor differs from the RGBA8_UINT one only in the channel/type
-       * field (224a88.. -> 224e88..).
-       *
-       * So gate on what the packer actually accepts -- storage_pbe_valid
-       * already carries every real constraint -- plus the shape limits this
-       * fallback is built for.  Whether such a store LANDS is a hardware
-       * question that no offline check can answer; it is queued as a probe.
-       */
+      /* Gate on what the PBE packer accepts (storage_pbe_valid carries every
+       * real constraint) plus the shape limits of this fallback; any
+       * uncompressed channel layout packs. */
       /* Layered views carry the native array PBE that PACK_IMGWIR-staged
        * writes address (1D and 2D arrays, and cubes, which storage packs as
        * 2D arrays), and 3D views the native 3D PBE. */

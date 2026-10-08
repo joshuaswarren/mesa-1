@@ -672,26 +672,9 @@ hk_g17p_compute_uniform_ranges(
       return false;
 
    /* A shader that reads neither the root descriptor nor any descriptor set
-    * needs NO preamble loads at all.
-    *
-    * This path used to build a root range unconditionally, so every dispatch
-    * got an Ioto program that loads the root descriptor and sets[0] from
-    * memory before the first shader instruction runs -- even a shader that
-    * touches nothing.  That matters because the preamble's loads happen
-    * whatever the shader does: a null-shader dispatch still faults with
-    * reason=3 and zero retire duration, which is a fault BEFORE the first
-    * instruction, and the preamble is the only thing that executes there.
-    *
-    * `agx3_uses_root` already records whether the compiler emitted
-    * load_root_agx (hk_shader.c:1156, and hk_cmd_buffer.c:979 already gates on
-    * it), and `hk_agx3_g17p_compute_program_generate` already composes a
-    * no-resource program when range_count == 0.  Both halves existed; compute
-    * simply never connected them.
-    *
-    * Zero ranges is therefore both a correctness improvement (no load the
-    * shader cannot consume) and the bisect the null probe needs: a dispatch
-    * whose preamble performs no memory access whatsoever.
-    */
+    * needs no preamble loads at all: agx3_uses_root records whether the
+    * compiler emitted load_root_agx, and the program generator composes a
+    * no-resource program when range_count == 0. */
    /* Uniform DMA is never enabled for compute (see hk_shader.c). */
    if (s->b.info.agx3_uniform_dma_count)
       return false;

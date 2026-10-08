@@ -108,12 +108,9 @@ struct agx_bo {
    /* Bytes actually mapped at `_map`, which is NOT always `size`.  A placed
     * map (VK_EXT_map_memory_placed) covers only the VkDeviceMemory's
     * allocationSize, while the BO behind it comes from the cache and is
-    * routinely larger.  Unmapping `size` then reaches past the end of the
-    * mapping into address space the application owns -- measured on G17P
-    * 2026-09-18 as vk.size=64 against bo->size=16384, a 16320-byte overshoot,
-    * 12434 times in one dEQP-VK.memory.* process, which is exactly the guard
-    * region dEQP-VK.memory.map_placed.* reserves and then reads back.  Zero
-    * means "the whole BO", the ordinary non-placed case. */
+    * routinely larger; unmapping `size` would reach into address space the
+    * application owns.  Zero means "the whole BO", the ordinary non-placed
+    * case. */
    size_t _map_size;
 
    /* Process-local index */

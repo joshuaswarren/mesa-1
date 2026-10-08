@@ -159,13 +159,9 @@ hk_upload_rodata(struct hk_device *dev)
    /* The heap descriptor is NOT read-only data: hk_init_heap() writes it from
     * the CPU on the first tessellated or geometry-shaded draw, and the libagx
     * allocator then atomically bumps poly_heap::bottom from the GPU on every
-    * such draw (src/poly/geometry.h poly_heap_alloc_offs). It used to be
-    * suballocated out of the buffer object above, 32 bytes after the texel
-    * fetch sampler whose base address is handed to every G17P background
-    * reload program as a sampler table pointer -- so one tessellation draw
-    * turned bytes the fragment path can address from zero into live allocator
-    * state. Give it its own buffer object; the sampler table then never
-    * changes after device creation.
+    * such draw (src/poly/geometry.h poly_heap_alloc_offs). Keep it in its
+    * own buffer object so the sampler table next to the texel-fetch sampler
+    * never changes after device creation.
     */
    dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
                                        0, "Geometry heap descriptor");
@@ -757,10 +753,8 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
       mesa_logw("G17P indirect compute unavailable: grid helper refused");
 
    /* Only a sparse residency buffer can carry a residency bitmap, so only a
-    * device that enabled the feature can ever select this helper.  Compiling
-    * it unconditionally cost every vkCreateDevice about 2.5 ms -- 32 device
-    * create/destroy cycles went from 419 ms to 499 ms, measured on G17P -- for
-    * a program most devices never launch. */
+    * device that enabled the feature can ever select this helper; skip
+    * compiling it otherwise. */
    if (!dev->vk.enabled_features.sparseResidencyBuffer)
       return;
 

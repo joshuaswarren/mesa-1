@@ -24,12 +24,6 @@
  * stricter question: G17P is admitted only through its exact T8140 contract,
  * while other AGX3 identities stay outside the runnable Honeykrisp path until
  * their independently-versioned pieces are connected.
- *
- * Evidence for every claim below is in research/gpu/, principally
- * GPU_AGX3_APPLE_ENCODER_TABLES_2026-08-23.md (encodings, Apple's tables),
- * GPU_DRIVER_CONTRACT_G15_G17_2026-08-23.md (the kernel core-name and chip-ID
- * decode that makes the mapping below well-founded) and
- * GPU_G15_G16_ISA_GENERATION_2026-08-23.md.
  */
 
 enum agx_chip {

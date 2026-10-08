@@ -948,16 +948,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    ssize_t params_size = -1;
 
-   /*
-    * honeykrisp-h1-execution.md SS2.1 row ":511-535": the DRM
-    * version-probe block below is HAVE_LIBDRM/Linux-only (drmGetVersion)
-    * and used to run unconditionally, clobbering any preset dev->ops.
-    * agx_win_open_device() (agx_device_win.c, SS1) presets dev->ops to
-    * agx_device_win_ops *before* calling this function, so skip the probe
-    * whenever a backend has already been selected -- Linux/virtio callers
-    * (which never preset dev->ops) are unaffected, they still take this
-    * branch exactly as before.
-    */
+   /* A backend that preset dev->ops (the Windows path) skips the DRM
+    * version probe. */
    if (dev->ops.get_params == NULL) {
 #ifdef HAVE_LIBDRM
       dev->ops = agx_device_drm_ops;

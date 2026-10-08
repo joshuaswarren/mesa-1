@@ -26,8 +26,7 @@ extern "C" {
  * only the count/instances/start live in a GPU-side argument buffer the VDM
  * dereferences at execution via the Index List "Indirect buffer" pointer.
  * G15/G16/G17P are 12 B (non-indexed) / 32 B (indexed); HAL300 (M5) appends an
- * Unk2=7 word to each, making them 16 B / 36 B. AGX2 is not a target here.
- * Grade A: research/gpu/GPU_AGX3_INDIRECT_DRAW_ICB_2026-08-24.md. */
+ * Unk2=7 word to each, making them 16 B / 36 B. AGX2 is not a target here. */
 #define AGX_VDM_INDEX_LIST_INDIRECT_NONINDEXED_MAX_LENGTH 16u
 #define AGX_VDM_INDEX_LIST_INDIRECT_INDEXED_MAX_LENGTH 36u
 

@@ -13,11 +13,6 @@
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
  * of the architecture.
- *
- * The 2026-09-10 G17P experiment admitting 32768 bytes with 32x32 pixels at
- * 4x lost the device. That configuration also uses 4096 raster samples, so
- * it does not isolate storage capacity from the raster-sample budget. Keep
- * this legacy default; callers must supply independently qualified limits.
  */
 #define MAX_BYTES_PER_TILE (32768 - 1)
 

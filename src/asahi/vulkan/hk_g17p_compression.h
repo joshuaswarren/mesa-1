@@ -180,11 +180,9 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
       /* hk_CmdBlitImage2 generates RGBA8/BGRA8 UNORM mip chains with the raw
        * AIL compute kernels (hk_g17p_compute_blit), which cannot write
        * compression metadata; a compressed destination falls back to one
-       * render job per level, the startup cost that path exists to avoid
-       * (GTK/STK create hundreds of such textures). An image the application
-       * never renders to is written only by uploads and those blits, so keep
-       * it on the compute path. Render targets and atlases that are also
-       * attachments (Minecraft's 0x17 atlas) stay compressed. */
+       * render job per level. An image the application never renders to is
+       * written only by uploads and those blits, so keep it on the compute
+       * path. Images that are also attachments stay compressed. */
       if ((info->format == VK_FORMAT_R8G8B8A8_UNORM ||
            info->format == VK_FORMAT_B8G8R8A8_UNORM) &&
           info->mipLevels > 1 &&
