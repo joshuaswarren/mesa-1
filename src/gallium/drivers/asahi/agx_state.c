@@ -3600,6 +3600,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
    const unsigned image_records = cs->so->info.image_records;
    for (unsigned i = 0; i < nr_images; ++i) {
+      batch->stage_uniforms[stage].image_buffer_size[i] = 0;
       /* Image descriptors come in pairs after the textures, each followed on
        * G17P by its software tail record. */
       const unsigned image = nr_textures + (image_records * i);
@@ -3625,6 +3626,9 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
       struct pipe_image_view *view = &ctx->stage[stage].images[i];
       agx_batch_track_image(batch, view);
+      if (dev->chip == AGX_CHIP_G17P && view->resource->target == PIPE_BUFFER)
+         batch->stage_uniforms[stage].image_buffer_size[i] =
+            agx_texture_buffer_size_el(view->format, view->u.buf.size);
 
       struct pipe_sampler_view sampler_view = util_image_to_sampler_view(view);
 

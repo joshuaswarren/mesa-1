@@ -193,6 +193,22 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          return false;
       }
 
+      /* A buffer image's logical extent is not the width/height of its 2D
+       * hardware view. AGX2 stores that extent in descriptor software bits;
+       * Gen9 does not. Read the bound view's texel count from the stage table,
+       * including for the bounds queries inserted by robustness lowering. */
+      if (options->g17p_bindless_storage &&
+          intr->intrinsic == nir_intrinsic_image_size &&
+          nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
+         struct agx_stage_uniforms *s = NULL;
+         STATIC_ASSERT(PIPE_MAX_SHADER_IMAGES == PIPE_MAX_SAMPLERS);
+         nir_def *size = load_stage_array(
+            b, intr->src[0].ssa, 1, 32, (uintptr_t)&s->image_buffer_size,
+            sizeof(s->image_buffer_size[0]), 4);
+         nir_def_replace(&intr->def, nir_u2uN(b, size, intr->def.bit_size));
+         return true;
+      }
+
 
       nir_def *index = intr->src[0].ssa;
       nir_scalar index_scalar = nir_scalar_resolved(index, 0);
