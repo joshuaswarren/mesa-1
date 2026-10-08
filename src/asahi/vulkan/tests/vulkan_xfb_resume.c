@@ -89,7 +89,7 @@ verify(uint32_t *map, unsigned offset, VkPrimitiveTopology topology,
       unsigned base = first + (strip ? p : p * (adjacency ? 4 : 2)) + adjacency;
       for (unsigned v = 0; v < 2; ++v) {
          uint32_t id = base + v;
-         uint32_t expected[4] = {id, tag, id ^ tag, id + tag};
+         uint32_t expected[4] = {id, id ^ tag, (id * 7) + tag, ~id};
          for (unsigned c = 0; c < 4; ++c) {
             unsigned index = (offset + p * 2 + v) * 4 + c;
             if (map[index] != expected[c]) {
@@ -242,8 +242,16 @@ main(int argc, char **argv)
        .pPushConstantRanges = &pc};
    VkPipelineLayout layout;
    CHECK(vkCreatePipelineLayout(device, &lci, NULL, &layout));
+   VkVertexInputBindingDescription binding = {
+       .binding = 0, .stride = 16, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+   VkVertexInputAttributeDescription attribute = {
+       .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_UINT};
    VkPipelineVertexInputStateCreateInfo vi = {
-       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+       .vertexBindingDescriptionCount = 1,
+       .pVertexBindingDescriptions = &binding,
+       .vertexAttributeDescriptionCount = 1,
+       .pVertexAttributeDescriptions = &attribute};
    VkPipelineInputAssemblyStateCreateInfo ia = {
        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
    VkViewport viewport = {0, 0, 1, 1, 0, 1};
@@ -297,6 +305,15 @@ main(int argc, char **argv)
                                          &pipelines[t][d]));
       }
    }
+   struct buffer input =
+       buffer_create(physical, device, (VkDeviceSize)vertices_per_draw * 3 * 16,
+                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+   for (unsigned v = 0; v < vertices_per_draw * 3; ++v) {
+      input.map[v * 4] = v;
+      input.map[v * 4 + 1] = v * 7;
+      input.map[v * 4 + 2] = ~v;
+      input.map[v * 4 + 3] = UINT32_C(0xbadc0ffe);
+   }
    struct buffer output =
        buffer_create(physical, device, output_size,
                      VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT);
@@ -339,6 +356,7 @@ main(int argc, char **argv)
                                .layerCount = 1};
          vkCmdBeginRendering(cmd, &ri);
          VkDeviceSize offset = 0, size = output_size;
+         vkCmdBindVertexBuffers(cmd, 0, 1, &input.buffer, &offset);
          bind_xfb(cmd, 0, 1, &output.buffer, &offset, &size);
          uint32_t tags[2] = {i * 17 + 3, i * 17 + 11};
          for (unsigned d = 0; d < 2; ++d) {
@@ -403,6 +421,7 @@ main(int argc, char **argv)
    vkDestroyFence(device, fence, NULL);
    vkDestroyCommandPool(device, pool, NULL);
    buffer_destroy(device, &indirect);
+   buffer_destroy(device, &input);
    buffer_destroy(device, &counter);
    buffer_destroy(device, &output);
    for (unsigned t = 0; t < 4; ++t)
