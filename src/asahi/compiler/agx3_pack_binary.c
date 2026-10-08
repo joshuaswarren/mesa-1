@@ -8180,8 +8180,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
        * (field 5, 4 -> 6) and the IMGWBLK dimension class (field 30,
        * 1 -> 2, which straddles bytes 60 and 61). Nothing else moves --
        * no extra instruction computes a sample index, because the block
-       * store covers every sample of the tile. Witness generation and the
-       * round-tripped field vectors are in isa/README-metal-witness.md.
+       * store covers every sample of the tile.
        */
       static const uint8_t g17p_rt0_eot_ms[][68] = {{
          /* 0x75 -> 0x72: U8NORM/S8NORM/RGB10A2, the RT0 baseline. */

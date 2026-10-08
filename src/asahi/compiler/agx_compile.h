@@ -499,11 +499,10 @@ struct agx_shader_key {
    /* Store the tile without resolving it. Apple's own builtin end-of-tile
     * factory emits a second program per selector whose only differences are
     * the PACK_IMGWIR wire width and the IMGWBLK dimension class (2D -> 2D
-    * multisample); see isa/README-metal-witness.md. The two forms
-    * are byte-distinct, so the backend must be told which one the caller
-    * means rather than inferring it from the tilebuffer sample count: a
-    * multisample tile is stored resolved through a single-sample target on
-    * every path except VK_ATTACHMENT_STORE_OP_STORE. */
+    * multisample). The two forms are byte-distinct, so the backend must be
+    * told which one the caller means rather than inferring it from the
+    * tilebuffer sample count: a multisample tile is stored resolved through a
+    * single-sample target on every path except VK_ATTACHMENT_STORE_OP_STORE. */
    bool g17p_rt0_eot_multisample;
 
    /* Authorize the exact I32 G17P EOT builtin. Set only for logical formats
