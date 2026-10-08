@@ -65,6 +65,13 @@ struct hk_physical_device {
     * features. Only then can a valid application descriptor carry a nonzero
     * hk_sampled_image_descriptor_sw::scaled_conversion kind. */
    bool scaled_sampling;
+
+   /* Set once a device of this GPU creates a sampler whose border colour G17P
+    * shaders must emulate (hk_CreateSampler). Shaders compiled before then
+    * leave the emulation out and are replaced by emulating twins when bound
+    * (hk_border_twin); the shader cache key carries it. Per physical device
+    * because the cache key is computed from it (hk_hash_graphics_state). */
+   uint32_t border_emulation;
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_physical_device, vk.base, VkPhysicalDevice,
