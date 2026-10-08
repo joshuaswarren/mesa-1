@@ -1630,8 +1630,8 @@ agx_g18_msaa4_zs_surface(const struct agx_device *dev,
  * Native331 adds sixteen-byte samples with the same geometry and bounded
  * single-target protocol, occupying the full 32-KiB imageblock.
  * Native315 also binds D32/S8 planes; colour-free renders retain this tile
- * geometry with empty colour programs. Native598/618 add layered four-sample
- * colour at eight bytes per sample; spills remain separate. */
+ * geometry with empty colour programs. Native598/618/639 add layered
+ * four-sample colour through sixteen bytes per sample; spills stay separate. */
 static bool
 agx_g18_msaa4_tile_layout(const struct agx_device *dev,
                           const struct agx_tilebuffer_layout *tib)
@@ -1643,7 +1643,7 @@ agx_g18_msaa4_tile_layout(const struct agx_device *dev,
        (tib->nr_samples != 2 && tib->nr_samples != 4) ||
        (tib->sample_size_B != 8 && tib->sample_size_B != 16) ||
        tib->tile_size != (tib->nr_samples == 2 ? 32 * 32 : 32 * 16) ||
-       (tib->layered && (tib->nr_samples != 4 || tib->sample_size_B != 8)) ||
+       (tib->layered && tib->nr_samples != 4) ||
        agx_tilebuffer_spills(tib) ||
        agx_tilebuffer_offset_B(tib, 0) != 0)
       return false;
