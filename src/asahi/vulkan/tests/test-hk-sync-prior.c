@@ -74,14 +74,9 @@ static struct hk_cs *
 add(struct hk_cmd_buffer *c, bool compute)
 {
    struct hk_cs *s = test_alloc(sizeof(*s));
-   unsigned k = compute ? 1 : 0, sq = compute ? HK_SYNC_CDM : HK_SYNC_VDM;
    s->type = compute ? HK_CS_CDM : HK_CS_VDM;
-   s->sync.kind = compute ? HK_SYNC_COMPUTE : HK_SYNC_GFX;
-   s->sync.seq = ++c->sync.next_seq;
-   hk_sync_stream_wait(s, c->sync.req[k]);
    list_addtail(&s->node, &c->control_streams);
-   c->sync.last[k][sq] = s;
-   c->sync.last_any[sq] = s;
+   hk_sync_stream_created(c, s, &s, compute);
    return s;
 }
 static bool
