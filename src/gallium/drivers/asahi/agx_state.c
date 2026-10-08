@@ -5981,8 +5981,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
     * kick 18). G17G itself has no such witness, so keep declining it there
     * rather than running a kernel without its threadgroup memory. */
    if (shared > UINT32_MAX || (g17g && shared > 32768) ||
-       (g17g && shared && dev->chip != AGX_CHIP_G18G) ||
-       (g17g && shared * 4 > 32768))
+       (g17g && shared && dev->chip != AGX_CHIP_G18G))
       return agx_g17p_compute_failed("shared memory size");
    const struct agx3_g17p_compute_program_desc desc = {
       .program_va = program.gpu,
@@ -6025,13 +6024,10 @@ agx_g17p_append_compute(struct agx_batch *batch,
          .nr_gprs = g18 ? nr_gprs : info->nr_gprs,
          .compiler_d_valid = g18 || info->agx3_staging_known,
          .compiler_d = g18 ? compiler_d : (uint32_t)info->agx3_staging_halfs * 2,
-         /* AGX3C shared indices are still over-strided 4x (agx_compile.c
-          * runs agx_nir_lower_shared_element_index for AGX3B only), so a
-          * 256 B array spans 1 KiB: with only 256 B allocated the reduction
-          * saw 16 of its 64 lanes on hardware. Allocate the strided
-          * footprint until the compiler emits element indices. */
+         /* G18 load/store indices now count scalar elements, so SPECLM
+          * needs the actual byte footprint, as in the native reduction. */
          .threadgroup_memory_size_B =
-            shared ? MAX2(256u, ALIGN_POT((uint32_t)shared * 4, 64u)) : 0,
+            shared ? MAX2(256u, ALIGN_POT((uint32_t)shared, 64u)) : 0,
       };
       struct agx3_g17p_graphics_program g17g_program;
       const struct agx3_g17p_native_compute_program_desc bind_desc = {
@@ -6185,9 +6181,10 @@ agx_g17p_append_compute(struct agx_batch *batch,
          struct agx_cdm_dispatch *dispatch = util_dynarray_element(
             &batch->cdm_dispatch, struct agx_cdm_dispatch,
             util_dynarray_num_elements(&batch->cdm_dispatch, struct agx_cdm_dispatch) - 1);
-         /* Match the effective linked program encoded above. */
+         /* Match the effective linked program encoded above. G18 API shared
+          * indices count elements, so v2 reports its actual byte footprint. */
          dispatch->resources = (struct drm_asahi_g18_compute_resources){
-            .version = 1,
+            .version = 2,
             .flags = 1u | (info->has_preamble ? 2u : 0u) |
                      (info->has_preamble && info->agx3_preamble_staging_known
                          ? 4u : 0u) | (indirect_local ? 8u : 0u),

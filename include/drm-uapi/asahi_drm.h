@@ -1348,7 +1348,10 @@ struct drm_asahi_cmd_compute {
 };
 
 /* G18 per-dispatch metadata. Counts are compiler halfwords or bytes as named;
- * the kernel converts them to native units. Version 1 is exactly 64 bytes.
+ * the kernel converts them to native units. Both versions are exactly 64 bytes.
+ * Version 1 scales local_bytes + variable_shared_bytes by four for legacy
+ * shaders using byte offsets in element-index fields. Version 2 uses actual
+ * byte footprints for shaders with correctly lowered shared element indices.
  * Flags: bit0 main staging known, bit1 constant program present, bit2 constant
  * staging known, bit3 local geometry unknown (local_size must then be zero).
  * All other flag bits and reserved must be zero. */

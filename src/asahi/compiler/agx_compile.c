@@ -12300,16 +12300,12 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
     * G17P with a byte offset in the element-index field, a fourfold
     * over-stride for a 32-bit element.
     *
-    * AGX3C shares the convention (agx_emit_local_load/store put the address in
-    * the index for every AGX3 encoding) but is deliberately left out: applying
-    * it there turns a shared read-modify-write into a refusal, because the
-    * resulting 16-bit index reaches the AGX3C
-    * zero-extend path -- `bitop [d32:reg0 s0=16:reg0 s1=16:imm#0]`,
-    * agx3_pack_binary.c:11641, the copy16 + clr pair -- which has no AGX3C
-    * form.  That gap is unrelated to threadgroup memory and no frontend in
-    * this tree compiles a shared-memory shader for AGX3C, so it is a separate
-    * fix; until then AGX3C keeps the over-stride it already had. */
-   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+    * G18's AGX3C compiler path has the same element-index convention before
+    * transcoding to AGX3D. Its address widening is supported by the native
+    * half COPY and CLR forms, so use real element indices instead of relying
+    * on an over-sized threadgroup allocation. Keep unqualified G17G shared
+    * memory behavior unchanged. */
+   if ((is_g17p || key->dev.emit_agx3d) &&
        !nir->info.shared_element_index_agx)
       NIR_PASS(_, nir, agx_nir_lower_shared_element_index);
 
