@@ -378,24 +378,6 @@ agx3_ioto_load_absolute_native(struct agx_ioto_load_core *core,
 }
 
 bool
-agx3_ioto_load_from_scs_native(struct agx_ioto_load_core *core,
-                               const struct agx_ioto_load_from_fixed *load,
-                               struct agx_ioto_load_workspace workspace,
-                               struct agx_ioto_load_allocation *allocation)
-{
-   if (core == NULL || (core->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-                        !core->gpu0_round_nops && !core->gpu0_copy_wait))
-      return false;
-
-   struct agx3_ioto_load_packer packer;
-   struct agx_ioto_load_emit_ops ops;
-   if (!agx3_ioto_load_packer_init(&packer, core->chip))
-      return false;
-   agx3_ioto_load_packer_ops(&packer, &ops);
-   return agx_ioto_load_from_scs(core, load, &ops, workspace, allocation);
-}
-
-bool
 agx3_ioto_load_from_abi_buffer_native(
    struct agx_ioto_load_core *core, enum agx_ioto_abi_buffer_slot source,
    const struct agx_ioto_load_from_fixed *load,

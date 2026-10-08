@@ -43,12 +43,6 @@ agx3_staging_conflicts(const struct agx3_staging_banks *banks, unsigned start,
    return conflicts;
 }
 
-static inline uint16_t
-agx3_staging_held(const struct agx3_staging_banks *banks)
-{
-   return agx3_staging_conflicts(banks, 0, AGX3_STAGING_HALFS);
-}
-
 static inline void
 agx3_staging_forget(struct agx3_staging_banks *banks, uint16_t slots)
 {

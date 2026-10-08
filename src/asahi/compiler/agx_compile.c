@@ -4154,32 +4154,6 @@ agx_lower_agx3_widening_iadd(agx_context *ctx)
    return progress;
 }
 
-/* Native register subtraction has no shifted-source form in the current
- * encoder. Keep modulo-32-bit semantics by shifting before subtracting. */
-static bool
-agx_lower_agx3_shifted_subtract(agx_context *ctx)
-{
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
-      return false;
-   bool progress = false;
-   agx_foreach_instr_global_safe(ctx, I) {
-      if (I->op != AGX_OPCODE_IADD || !I->shift || I->saturate ||
-          I->dest[0].size != AGX_SIZE_32 || !I->src[1].neg ||
-          I->src[1].size != AGX_SIZE_32 || I->src[1].abs)
-         continue;
-      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-      agx_index src = I->src[1];
-      src.neg = false;
-      agx_index shifted = agx_temp(ctx, AGX_SIZE_32);
-      agx_bfi_to(&b, shifted, agx_zero(), src,
-                 agx_mov_imm(&b, 32, I->shift), 0);
-      I->src[1] = agx_neg(shifted);
-      I->shift = 0;
-      progress = true;
-   }
-   return progress;
-}
-
 /* The exact operand shape of the packer's
  * "bitwise operation against an IMMEDIATE" rule (agx3_pack_binary.c): one
  * AND/OR/XOR truth table, a single 8-bit non-modified immediate and one

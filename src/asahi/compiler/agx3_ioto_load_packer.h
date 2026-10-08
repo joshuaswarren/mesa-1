@@ -50,12 +50,6 @@ agx3_ioto_load_absolute_native(struct agx_ioto_load_core *core,
                                struct agx_ioto_load_workspace workspace,
                                struct agx_ioto_load_allocation *allocation);
 
-bool
-agx3_ioto_load_from_scs_native(struct agx_ioto_load_core *core,
-                               const struct agx_ioto_load_from_fixed *load,
-                               struct agx_ioto_load_workspace workspace,
-                               struct agx_ioto_load_allocation *allocation);
-
 bool agx3_ioto_load_from_abi_buffer_native(
    struct agx_ioto_load_core *core, enum agx_ioto_abi_buffer_slot source,
    const struct agx_ioto_load_from_fixed *load,
