@@ -38,21 +38,21 @@ stage_for_descriptors(nir_shader *shader)
 static nir_def *
 load_stage_array(nir_builder *b, nir_def *index, unsigned components,
                  unsigned bit_size, uintptr_t binding, unsigned stride,
-                 unsigned align)
+                 unsigned align, unsigned count)
 {
    const unsigned table = AGX_SYSVAL_STAGE(stage_for_descriptors(b->shader));
    nir_scalar scalar = nir_scalar_resolved(index, 0);
 
    if (nir_scalar_is_const(scalar)) {
       const unsigned slot = nir_scalar_as_uint(scalar);
-      assert(slot < PIPE_MAX_SAMPLERS);
+      assert(slot < count);
       return nir_load_sysval_agx(b, components, bit_size, .desc_set = table,
                                  .binding = binding + (slot * stride));
    }
 
    /* Keep a bad dynamic GL index from escaping the fixed driver table. */
    index = nir_umin(b, index,
-                    nir_imm_intN_t(b, PIPE_MAX_SAMPLERS - 1,
+                    nir_imm_intN_t(b, count - 1,
                                    index->bit_size));
 
    struct agx_draw_uniforms *u = NULL;
@@ -96,7 +96,7 @@ load_custom_border_sampler(nir_builder *b, nir_def *index)
    struct agx_stage_uniforms *s = NULL;
    return load_stage_array(
       b, index, 1, 16, (uintptr_t)&s->custom_border_sampler_handle,
-      sizeof(s->custom_border_sampler_handle[0]), 2);
+      sizeof(s->custom_border_sampler_handle[0]), 2, PIPE_MAX_SAMPLERS);
 }
 
 static bool
@@ -115,7 +115,7 @@ lower_custom_border_query(nir_builder *b, nir_tex_instr *tex)
       struct agx_stage_uniforms *s = NULL;
       nir_def *border = load_stage_array(
          b, index, 4, 32, (uintptr_t)&s->custom_border,
-         sizeof(s->custom_border[0]), 4);
+         sizeof(s->custom_border[0]), 4, PIPE_MAX_SAMPLERS);
       replacement = nir_convert_to_bit_size(
          b, border, nir_alu_type_get_base_type(tex->dest_type),
          tex->def.bit_size);
@@ -201,10 +201,9 @@ lower(nir_builder *b, nir_instr *instr, void *data)
           intr->intrinsic == nir_intrinsic_image_size &&
           nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
          struct agx_stage_uniforms *s = NULL;
-         STATIC_ASSERT(PIPE_MAX_SHADER_IMAGES == PIPE_MAX_SAMPLERS);
          nir_def *size = load_stage_array(
             b, intr->src[0].ssa, 1, 32, (uintptr_t)&s->image_buffer_size,
-            sizeof(s->image_buffer_size[0]), 4);
+            sizeof(s->image_buffer_size[0]), 4, PIPE_MAX_SHADER_IMAGES);
          nir_def_replace(&intr->def, nir_u2uN(b, size, intr->def.bit_size));
          return true;
       }
