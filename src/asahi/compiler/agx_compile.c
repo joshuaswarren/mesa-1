@@ -1978,12 +1978,15 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
     * even half (a uchar array indexed by a 32-bit id, strided, through a
     * loaded pointer, and into a ushort), and its consumer reads that half
     * as a 16-bit operand. Its packed multi-byte form is not witnessed, so
-    * only the scalar takes this path there. */
+    * only the scalar takes this path there. G18 returns vector bytes packed
+    * into one word; unpack them for both halfword and 32-bit NIR lanes. */
    const enum agx_isa_encoding encoding = b->shader->key->dev.encoding;
+   const bool is_g18 = b->shader->key->dev.emit_agx3d;
    if ((encoding == AGX_ISA_ENCODING_AGX3B ||
         (encoding == AGX_ISA_ENCODING_AGX3C &&
-         instr->def.num_components == 1)) &&
-       fmt == AGX_FORMAT_I8 && dest.size == AGX_SIZE_16 && packed_count == 0) {
+         (instr->def.num_components == 1 || is_g18))) &&
+       fmt == AGX_FORMAT_I8 && packed_count == 0 &&
+       (dest.size == AGX_SIZE_16 || (is_g18 && dest.size == AGX_SIZE_32))) {
       const unsigned nr = instr->def.num_components;
       agx_index payload = agx_temp(b->shader, AGX_SIZE_32);
       agx_instr *load = agx_device_load_to(b, payload, addr, offset, fmt,
@@ -1991,10 +1994,10 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
                                            nir_is_coherent(instr));
       load->memory_index_is_bytes = index_bytes;
 
-      if (nr == 1) {
+      if (nr == 1 && dest.size == AGX_SIZE_16) {
          agx_subdivide_to(b, dest, payload, 0);
       } else {
-         load->memory_is_packed = true;
+         load->memory_is_packed = nr > 1;
          agx_unpack_integer_8_memory_agx3(b, dest, payload, nr);
       }
       return;
@@ -4062,13 +4065,24 @@ agx_fminmax_to(agx_builder *b, agx_index dst, agx_index s0, agx_index s1,
 static void
 agx_lower_agx3_half_converts(agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+   const bool is_g17p = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
+   if (!is_g17p && !ctx->key->dev.emit_agx3d)
       return;
 
    agx_foreach_instr_global_safe(ctx, I) {
       if (I->op != AGX_OPCODE_CONVERT || I->nr_dests != 1 ||
           I->nr_srcs != 2 ||
           I->src[0].type != AGX_INDEX_IMMEDIATE || I->saturate)
+         continue;
+
+      /* G18 supports the native signed/unsigned halfword-to-F32 forms.
+       * Extend byte inputs into those forms without enabling the unrelated
+       * AGX3B float16 and float-to-integer lowerings below. */
+      if (!is_g17p &&
+          (I->dest[0].size != AGX_SIZE_32 ||
+           I->src[1].size != AGX_SIZE_16 || I->round != AGX_ROUND_RTE ||
+           (I->src[0].value != AGX_CONVERT_U8_TO_F &&
+            I->src[0].value != AGX_CONVERT_S8_TO_F)))
          continue;
 
       if (I->src[0].value == AGX_CONVERT_U8_TO_F &&
@@ -4099,6 +4113,9 @@ agx_lower_agx3_half_converts(agx_context *ctx)
          I->src[1] = extended;
          I->src[0].value = AGX_CONVERT_S16_TO_F;
       }
+      if (!is_g17p)
+         continue;
+
       if (I->dest[0].size == AGX_SIZE_32 &&
           (I->src[0].value == AGX_CONVERT_F_TO_S32 ||
            I->src[0].value == AGX_CONVERT_F_TO_U32) &&

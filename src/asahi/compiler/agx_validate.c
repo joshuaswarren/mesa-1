@@ -199,7 +199,8 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
          return DIV_ROUND_UP(util_bitcount(I->mask), 2);
       }
       if (I->op == AGX_OPCODE_DEVICE_LOAD && I->memory_is_packed) {
-         assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+         assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+                (ctx->key->dev.emit_agx3d && I->format == AGX_FORMAT_I8));
          assert(I->dest[d].size == AGX_SIZE_32);
          const unsigned bytes = I->format == AGX_FORMAT_I8 ? 1 :
                                 I->format == AGX_FORMAT_I16 ? 2 : 4;
