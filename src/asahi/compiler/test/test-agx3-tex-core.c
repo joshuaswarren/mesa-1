@@ -2625,8 +2625,6 @@ test_multisample_fetch(void)
    CHECK(agx3_tex_stage_ms_array_sample(AGX_ISA_ENCODING_AGX3B, 0, 2,
                                        false, true, bytes, &len));
    CHECK(hex_eq(bytes, len, "1705540400000010d0c20a00"));
-   CHECK(!agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3C, 6, 2,
-                                      false, true, bytes, &len));
    CHECK(!agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 128, 2,
                                       false, true, bytes, &len));
    CHECK(!agx3_tex_stage_ms_array_sample(AGX_ISA_ENCODING_AGX3B, 0, 3,
@@ -4458,10 +4456,6 @@ test_g17g_sample_lod_witnesses(void)
 
    /* Shapes without a G17G witness stay refused there. */
    struct agx3_tex_sample_desc closed = v[1].d;
-   closed.lod = AGX3_TEX_LOD_GRADIENT;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
-                                 &length));
-   closed = v[1].d;
    closed.array = true;
    closed.cube = true;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,

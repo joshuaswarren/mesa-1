@@ -1438,6 +1438,13 @@ agx_nir_lower_fs_output_to_epilog(nir_shader *s,
 }
 
 bool
+agx_nir_lower_fs_output_to_epilog_g17p(
+   nir_shader *s, struct agx_fs_epilog_link_info *out)
+{
+   return lower_fs_output_to_epilog(s, out, true);
+}
+
+bool
 agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out)
 {

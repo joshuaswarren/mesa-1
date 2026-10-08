@@ -35,6 +35,7 @@
 
 #include "util/cache_ops.h"
 #include "util/log.h"
+#include "util/u_debug.h"
 #include "util/hash_table.h"
 #include "util/u_debug.h"
 #include "util/os_time.h"
@@ -602,7 +603,49 @@ hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
    return current;
 }
 
-static void *
+int hk_g17p_launch_trace_state = -1;
+
+int
+hk_g17p_launch_trace_init(void)
+{
+   const int enabled = debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) ? 1 : 0;
+   hk_g17p_launch_trace_state = enabled;
+   return enabled;
+}
+
+/* Single line, distinct tag. The multi-line dump below has twice been reported
+ * as "only the header printed", so anything that must not be lost in a log
+ * filter goes through this instead. */
+void
+hk_g17p_trace_line(const char *label, uint64_t base, const void *data,
+                   size_t len)
+{
+   const uint8_t *bytes = data;
+   fprintf(stderr, "G17P %s: base=%" PRIx64 " len=%zu bytes=", label, base,
+           len);
+   for (size_t i = 0; i < len; ++i)
+      fprintf(stderr, "%02x", bytes[i]);
+   fprintf(stderr, "\n");
+   fflush(stderr);
+}
+
+void
+hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,
+                      size_t len)
+{
+   const uint8_t *bytes = data;
+   fprintf(stderr, "G17P dump: %s base=%" PRIx64 " len=%zu\n", label, base,
+           len);
+   for (size_t off = 0; off < len; off += 16) {
+      fprintf(stderr, "G17P dump:   +%04zx ", off);
+      for (size_t i = 0; i < 16 && off + i < len; ++i)
+         fprintf(stderr, "%02x ", bytes[off + i]);
+      fprintf(stderr, "\n");
+   }
+   fflush(stderr);
+}
+
+void *
 hk_cmd_buffer_emit_cdm_terminate(struct hk_cmd_buffer *cmd, void *current)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);

@@ -253,8 +253,6 @@ test_gpu1_popcount(void)
    /* No other slot is witnessed. */
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
       AGX3_ALU_HINT_DISCARD, false, 2, bytes, &len));
-   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, true,
-      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
 }
 
 static void

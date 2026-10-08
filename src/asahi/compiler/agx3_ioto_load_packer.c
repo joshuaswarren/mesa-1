@@ -713,3 +713,10 @@ agx3_ioto_load_indirect_uniform_range_from_uniform_root(
       chip, root_base_half, true, pointer_offset, uniform_half, size_halfs,
       NULL, output, capacity, written);
 }
+
+bool
+agx3_ioto_load_absolute_packer_ready(enum agx_chip chip)
+{
+   return agx_ioto_load_target_encoding(chip) !=
+          AGX_IOTO_LOAD_ENCODING_UNSUPPORTED;
+}

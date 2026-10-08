@@ -404,6 +404,8 @@ bool agx_nir_lower_fs_output_to_epilog(nir_shader *s,
 /* True if every colour output component of this (not yet lowered) fragment
  * shader is a float provably in [0, 1]. Conservative: unknown is false. */
 bool agx_nir_fs_colour_outputs_unit_range(nir_shader *s);
+bool agx_nir_lower_fs_output_to_epilog_g17p(
+   nir_shader *s, struct agx_fs_epilog_link_info *out);
 bool agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out);
 

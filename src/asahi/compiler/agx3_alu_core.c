@@ -5587,6 +5587,16 @@ agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, bool src_neg, bool src_abs,
+                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_log2(enc, dest, src, false, false, src_abs, src_neg, hint,
+                        dest_cache, wait_mask, out, len);
+}
+
+bool
 agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)

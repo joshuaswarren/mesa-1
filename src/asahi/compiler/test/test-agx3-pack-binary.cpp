@@ -12184,7 +12184,7 @@ TEST_F(AGX3PackBinary, UniformStoreWaitPreservesUnrelatedPendingR0)
    std::vector<uint8_t> publication;
    ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 8, 2, bytes, &len));
    append(publication, bytes, len);
-   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(enc, 24, 8, false, bytes, &len));
+   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(enc, 24, 8, false, 0, bytes, &len));
    append(publication, bytes, len);
    const auto code = pack(b);
    EXPECT_NE(std::search(code.begin(), code.end(), publication.begin(),
@@ -12213,7 +12213,7 @@ TEST_F(AGX3PackBinary, UniformHalfStoreWaitPreservesPendingUpperHalf)
    ASSERT_TRUE(agx3_alu_bit_imm(enc, AGX3_ALU_BOR, true, 8, 8, 0,
                                AGX3_ALU_HINT_NONE, 1, bytes, &len));
    append(publication, bytes, len);
-   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(enc, 24, 8, false, bytes, &len));
+   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(enc, 24, 8, false, 0, bytes, &len));
    append(publication, bytes, len);
    const auto code = pack(b);
    EXPECT_NE(std::search(code.begin(), code.end(), publication.begin(),

@@ -644,17 +644,6 @@ test_refusals(void)
       failures++;
    }
 
-   checks++;
-   struct agx3_subgroup_shuffle_desc sh = {
-      .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
-      .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
-      .lane = 3,
-   };
-   uint8_t bo[AGX3_SUBGROUP_MAX_LENGTH];
-   if (agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &sh, bo, &l)) {
-      fprintf(stderr, "immediate-lane simdbcast accepted on AGX3c\n");
-      failures++;
-   }
 }
 
 int

@@ -1126,15 +1126,13 @@ main(void)
          }
       }
 
-      /* Unwitnessed neighbours stay closed: G17P, a narrow operand, a
-       * shifted subtract, signedness without saturation. */
+      /* Unwitnessed neighbours stay closed: G17P, a narrow operand,
+       * signedness without saturation. Shifted subtract is native-witnessed
+       * by m6-isub-shift on G17G and G18G. */
       struct agx3_iadd_desc bad = gvec[0].d;
       CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
       bad = gvec[0].d;
       bad.src_16 = true;
-      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
-      bad = gvec[4].d;
-      bad.shift = 2;
       CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
       bad = gvec[4].d;
       bad.sign_extend_32 = true;

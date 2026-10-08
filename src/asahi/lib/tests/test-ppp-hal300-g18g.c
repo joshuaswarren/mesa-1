@@ -559,10 +559,26 @@ test_compute(void)
    }
    CHECK(records == 3 && offset == size);
 
-   /* Families the capture does not contain stay closed. */
+   /* These families remain ungrounded. Indirect launch is independently
+    * grounded by AGXMetalG18G 26A428, G18-INDIRECT-COMPUTE.md section 2.4. */
    CHECK(!agx3_cdm_secondary_barrier_target_grounded(AGX_CHIP_G18G));
-   CHECK(!agx3_cdm_indirect_launch_target_grounded(AGX_CHIP_G18G));
    CHECK(!agx3_cdm_stream_link_target_grounded(AGX_CHIP_G18G));
+   struct agx3_cdm_indirect_launch_info indirect_info = {
+      .chip = AGX_CHIP_G18G,
+      .word0_payload = 0x10080000,
+      .pipeline = UINT64_C(0x100fff58400),
+      .opaque_word3 = 0x40000001,
+      .indirect_parameters = UINT64_C(0x10000123440),
+   };
+   static const uint32_t indirect_words[] = {
+      0x10080000, 0x01000000, 0x03ffd610, 0x40000001, 0x00000100, 0x00123440,
+   };
+   uint8_t indirect_packed[AGX3_CDM_INDIRECT_LAUNCH_SIZE];
+   CHECK(agx3_cdm_indirect_launch_pack(&indirect_info, indirect_packed));
+   CHECK(equal_words(indirect_packed, sizeof(indirect_packed), indirect_words,
+                     sizeof(indirect_words) / sizeof(indirect_words[0])));
+   indirect_info.pipeline |= 1;
+   CHECK(!agx3_cdm_indirect_launch_pack(&indirect_info, indirect_packed));
 
    /* Only the flag-free barrier is captured: every other flag value is
     * refused on G18G in both directions, although G17G admits all of them. */
@@ -704,14 +720,30 @@ test_closed_forms(void)
    CHECK(words.count == 8 &&
          memcmp(words.words, apple_u16_strip, sizeof(apple_u16_strip)) == 0);
 
-   /* No J873 capture contains an indirect draw, a VDM barrier, a stream
-    * link or a tessellation record. */
+   /* G18-INDIRECT-DBIAS-PBE.md section 1 grounds indirect draw words;
+    * G18-RASTERIZER-DISCARD.md section 7 grounds the VDM barrier. */
    CHECK(agx_vdm_index_list_direct_pack_words(
       AGX_CHIP_G17G, 6, true, false, AGX_VDM_INDEX_LIST_INDEX_SIZE_U16,
       0x10000100000, 3, 1, 0, 0, &words));
+   static const uint32_t apple_indirect_triangles[] = {
+      0x6c040600, 0x00000100, 0x00100000, 7,
+   };
+   CHECK(agx_vdm_index_list_indirect_pack_words(
+       AGX_CHIP_G18G, 6, false, false, 0, 0, 0x10000100000, 0, 0, &indirect));
+   CHECK(indirect.count == 4 &&
+         memcmp(indirect.words, apple_indirect_triangles,
+                sizeof(apple_indirect_triangles)) == 0);
    CHECK(!agx_vdm_index_list_indirect_pack_words(
-      AGX_CHIP_G18G, 6, false, false, 0, 0, 0x10000100000, 0, 0, &indirect));
-   CHECK(!agx_vdm_barrier_core_supported(AGX_CHIP_G18G));
+      AGX_CHIP_G18G, 6, false, false, 0, 0, 0x10000100001, 0, 0, &indirect));
+   struct agx_vdm_barrier_core vdm_barrier;
+   static const uint8_t apple_vdm_barrier[] = {0x60, 0x09, 0x00, 0x21};
+   CHECK(agx_vdm_barrier_core_pack(AGX_CHIP_G18G, &vdm_barrier));
+   CHECK(vdm_barrier.length == sizeof(apple_vdm_barrier) &&
+         memcmp(vdm_barrier.bytes, apple_vdm_barrier,
+                sizeof(apple_vdm_barrier)) == 0);
+   CHECK(!agx_vdm_barrier_core_unpack(AGX_CHIP_G18G, apple_vdm_barrier,
+                                     sizeof(apple_vdm_barrier) - 1));
+   /* Stream links and tessellation still lack G18 evidence. */
    CHECK(!agx_vdm_stream_link_core_supported(AGX_CHIP_G18G));
    CHECK(!agx_vdm_tessellate_direct_target_supported(AGX_CHIP_G18G));
 

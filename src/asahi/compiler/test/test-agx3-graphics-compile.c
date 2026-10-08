@@ -4237,18 +4237,16 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
          ok &= nir_src_bit_size(tex->src[si].src) == 64 &&
                nir_src_bit_size(tex->src[ti].src) == 64;
          nir_alu_instr *wide = nir_def_as_alu_or_null(tex->src[si].src.ssa);
-         nir_alu_instr *subtract = wide ? nir_def_as_alu_or_null(wide->src[0].src.ssa) : NULL;
-         nir_alu_instr *extend = subtract ? nir_def_as_alu_or_null(subtract->src[0].src.ssa) : NULL;
-         ok &= wide && wide->op == nir_op_u2u64 && subtract &&
-               subtract->op == nir_op_usub_sat && extend &&
-               extend->op == nir_op_u2u32 && extend->src[0].src.ssa == original[i];
+         /* G17P descriptors carry native heap indices without AGX2's bias. */
+         ok &= wide && wide->op == nir_op_u2u64 &&
+               wide->src[0].src.ssa == original[i];
       }
       if (!dynamic) {
          NIR_PASS(_, b.shader, nir_opt_constant_folding);
          for (unsigned i = 0; i < 2; ++i) {
             int si = nir_tex_instr_src_index(samples[i], nir_tex_src_sampler_handle);
             ok &= nir_src_is_const(samples[i]->src[si].src) &&
-                  nir_src_as_uint(samples[i]->src[si].src) == (i ? 56 : 52);
+                  nir_src_as_uint(samples[i]->src[si].src) == (i ? 84 : 80);
          }
       }
 
@@ -4256,7 +4254,7 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
          /* This is the indexed two-sample/control-flow shape used by desktop
           * compositors. Keep the check through RA and binary scheduling: both
           * descriptor loads must retire before SMP consumes their register
-          * indices, including the saturating sampler-heap rebase above. */
+          * indices, preserving both native sampler-heap indices. */
          struct agx_shader_key key = {
             .dev.encoding = AGX_ISA_ENCODING_AGX3B,
             .no_preamble = true,
@@ -4279,14 +4277,14 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
 }
 
 static bool
-test_indexed_sampler_rebase_boundaries(void)
+test_indexed_sampler_native_indices(void)
 {
    static const uint16_t indices[] = {0, 1, 27, 28, 29, 43, 44, UINT16_MAX};
 
    for (unsigned i = 0; i < ARRAY_SIZE(indices); ++i) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_FRAGMENT, &agx_nir_options,
-         "G17P indexed sampler rebase boundary");
+         "G17P indexed sampler native index");
       nir_def *image =
          nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
       nir_def *sampler = nir_bindless_sampler_agx(
@@ -4303,7 +4301,7 @@ test_indexed_sampler_rebase_boundaries(void)
       const int ti = nir_tex_instr_src_index(
          tex, nir_tex_src_texture_offset);
       NIR_PASS(_, b.shader, nir_opt_constant_folding);
-      const uint32_t expected = indices[i] > 28 ? indices[i] - 28 : 0;
+      const uint32_t expected = indices[i];
       ok &= si >= 0 && ti >= 0 &&
             nir_src_is_const(tex->src[si].src) &&
             nir_src_as_uint(tex->src[si].src) == expected &&
@@ -6226,7 +6224,7 @@ test_g17g_eot_block_store(void)
 
       nir_image_store_block_agx(
          &b, nir_imm_intN_t(&b, variant == 0 ? 1 : 0, 16),
-         nir_imm_int(&b, variant == 1 ? 4 : 0), coords,
+         nir_imm_int(&b, variant == 1 ? AGX_G17P_MAX_BYTES_PER_SAMPLE : 0), coords,
          .format = variant >= 5 ? PIPE_FORMAT_R16_UINT : PIPE_FORMAT_R8_UNORM,
          .image_dim = GLSL_SAMPLER_DIM_2D,
          .image_array = variant == 3, .explicit_coord = variant != 2);
@@ -7237,7 +7235,7 @@ build_vs_indexed_texture_sample(void)
    nir_def *offset = nir_imm_int(&b, 72);
    nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set = 3);
    nir_def *sampler = nir_bindless_sampler_agx(
-      &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 28, 16), .desc_set = 3);
+      &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 0, 16), .desc_set = 3);
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 4);
    tex->op = nir_texop_txl;
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
@@ -8974,10 +8972,10 @@ test_g17g_norm8_attribute(void)
    ok &= compile_vs_g17g("norm8 rgb8-unorm tight",
                          build_vs_norm8_attribute(3, false, 3),
                          AGX_ISA_ENCODING_AGX3C, false, NULL);
-   /* G17P: unchanged, the normalized device load has no witness. */
+   /* G17P lowers this to a raw byte load and the native normalized unpack. */
    ok &= compile_vs_g17g("norm8 rgba8-unorm tight",
                          build_vs_norm8_attribute(4, false, 4),
-                         AGX_ISA_ENCODING_AGX3B, false, NULL);
+                         AGX_ISA_ENCODING_AGX3B, true, NULL);
    return ok;
 }
 
@@ -9687,7 +9685,7 @@ main(int argc, char **argv)
                 test_custom_border_samplers(true, false) &&
                 test_custom_border_samplers(true, 1) &&
                 test_custom_border_samplers(true, 2) &&
-                test_indexed_sampler_rebase_boundaries() &&
+                test_indexed_sampler_native_indices() &&
                 test_indexed_sampler_sets() && test_indexed_fetch_sets();
       printf("custom border runtime branch, exact indices, mixed reads: %s\n",
              ok ? "PASS" : "FAIL");
@@ -9705,7 +9703,7 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-samplers-only")) {
       const bool ok = test_indexed_sampler_sets() &&
-                      test_indexed_sampler_rebase_boundaries() &&
+                      test_indexed_sampler_native_indices() &&
                       test_indexed_array_and_3d_compile() &&
                       test_indexed_compute_sample() &&
                       test_indexed_storage_image_read() &&
@@ -9879,7 +9877,7 @@ main(int argc, char **argv)
    CHECK_NAMED("custom_border_samplers(custom,2)",
                test_custom_border_samplers(true, 2));
    CHECK_NAMED("indexed_sampler_rebase_boundaries",
-               test_indexed_sampler_rebase_boundaries());
+               test_indexed_sampler_native_indices());
    CHECK_NAMED("indexed_array_and_3d_compile",
                test_indexed_array_and_3d_compile());
    CHECK_NAMED("g17p_quad_control_modes", test_g17p_quad_control_modes());

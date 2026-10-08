@@ -1468,17 +1468,18 @@ test_g17p_basic_graphics_program(void)
       AGX_CHIP_G17P, eight_ranges, ARRAY_SIZE(eight_ranges), &eight_bound));
    CHECK(eight_bound > drawid_bound);
 
-   /* One range beyond the budget stays refused: the budget is a real
-    * capacity of the composer's workspace, not a soft hint. */
+   /* Honeykrisp's collector and the shared composer's workspace have
+    * different hard capacities. Exercise each API's actual boundary. */
    struct agx3_ioto_uniform_range over_budget[
-      HK_AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
+      AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
    for (unsigned i = 0; i < ARRAY_SIZE(over_budget); ++i) {
       over_budget[i] = (struct agx3_ioto_uniform_range){
          .start_halfs = 2 * i, .size_halfs = 2, .address = 0x7000 + 0x10 * i};
    }
    size_t over_bound = 789;
    CHECK(!hk_agx3_g17p_graphics_program_bound(
-      AGX_CHIP_G17P, over_budget, ARRAY_SIZE(over_budget), &over_bound));
+      AGX_CHIP_G17P, over_budget, HK_AGX3_G17P_GRAPHICS_MAX_RANGES + 1,
+      &over_bound));
    CHECK(over_bound == 789);
 
    resource = vertex;
@@ -1517,7 +1518,8 @@ test_g17p_basic_graphics_program(void)
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17S, &vertex,
                                                        &program));
    invalid = resource;
-   invalid.uniform_range_count = HK_AGX3_G17P_GRAPHICS_MAX_RANGES + 1;
+   invalid.uniform_ranges = over_budget;
+   invalid.uniform_range_count = ARRAY_SIZE(over_budget);
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P, &invalid,
                                                        &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);
@@ -1838,7 +1840,7 @@ test_g17p_combined_sampler_pointers(void)
       .descriptor_set_va = UINT64_C(0x10000020000),
       .sampler_heap_va = UINT64_C(0x10000080000),
       .texture_offset_B = 64,
-      .sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX + 7,
+      .sampler_index = 7,
       .sampler_count = 1024,
       .sampler_element_size_B = 32,
    };
@@ -1849,15 +1851,15 @@ test_g17p_combined_sampler_pointers(void)
 
    /* Explicit null descriptors use software index zero. They select the
     * reserved robust sampler at native heap entry zero, never an underflowed
-    * register descriptor. The canonical biased base has the same result. */
+    * register descriptor. Raw index 1 selects the immediately following entry. */
    struct hk_agx3_g17p_combined_sampler_heap null_heap = heap;
    null_heap.sampler_index = 0;
    CHECK(hk_agx3_g17p_combined_sampler_pointers(&null_heap, pointers));
    CHECK(pointers[0] == UINT64_C(0x10000020040));
    CHECK(pointers[1] == UINT64_C(0x10000080000));
-   null_heap.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+   null_heap.sampler_index = 1;
    CHECK(hk_agx3_g17p_combined_sampler_pointers(&null_heap, pointers));
-   CHECK(pointers[1] == UINT64_C(0x10000080000));
+   CHECK(pointers[1] == UINT64_C(0x10000080020));
 
    /* Native ESL consumes these two qwords, not the inline 32-byte records
     * that they address. Both hardware table indices select entry zero.
@@ -1888,7 +1890,7 @@ test_g17p_combined_sampler_pointers(void)
 
    const uint64_t before[2] = {pointers[0], pointers[1]};
    struct hk_agx3_g17p_combined_sampler_heap bad = heap;
-   bad.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX + 1024;
+   bad.sampler_index = 1024;
    CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
    CHECK(memcmp(pointers, before, sizeof(before)) == 0);
    bad = heap;
@@ -1913,7 +1915,7 @@ test_g17p_combined_sampler_pointers(void)
    CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
    CHECK(memcmp(pointers, before, sizeof(before)) == 0);
    bad = heap;
-   bad.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+   bad.sampler_index = 0;
    bad.sampler_heap_va = UINT64_MAX - 15;
    CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
    CHECK(memcmp(pointers, before, sizeof(before)) == 0);

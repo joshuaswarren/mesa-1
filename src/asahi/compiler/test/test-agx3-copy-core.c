@@ -178,14 +178,15 @@ main(void)
       }
       uint8_t out[AGX3_COPY_MAX_LENGTH], length = 0;
       memset(out, 0xcd, sizeof(out));
-      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 128, 1,
+      /* G17G's extended form reaches all 256 halves and eight wait slots. */
+      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 256, 1,
                                      true, false, false, 0, out, &length));
       CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 0, 256,
                                      true, false, false, 0, out, &length));
       CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 0, 1,
                                      true, true, true, 0, out, &length));
       CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 0, 1,
-                                     true, false, false, 1u << 6, out, &length));
+                                     true, false, false, 1u << 8, out, &length));
       CHECK(length == 0);
       for (unsigned i = 0; i < sizeof(out); ++i)
          CHECK(out[i] == 0xcd);

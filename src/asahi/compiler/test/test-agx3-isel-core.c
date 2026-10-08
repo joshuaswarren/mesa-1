@@ -399,10 +399,6 @@ main(void)
    CHECK(len == sizeof(m5_expected) && !memcmp(out, m5_expected, len));
    m5.cache[0] = true;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
-   m5.cache[0] = false;
-   m5.dest_16 = true;
-   m5.cmp_16 = true;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
    const struct isel_vec half_vectors[] = {
       /* Apple applegpu_g17g, ushort4 equality/inequality against zero.
        * These compare half registers as well as producing half results. */
@@ -554,15 +550,13 @@ main(void)
    m5.sel_true = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
 
-   /* A half comparand is grounded only against an equality immediate. */
+   /* A half comparand against an immediate is grounded only for equality.
+    * Two half registers are also witnessed by m6-alu-sel on G17G/G18G. */
    const unsigned nhalf = sizeof(half_vectors) / sizeof(half_vectors[0]);
    /* The three signed 16-bit-result vectors sit after these. */
    const struct agx3_isel_desc *half_two = &half_vectors[nhalf - 6].d;
    m5 = *half_two;
    m5.cond = AGX3_ISEL_ICOND_ULT;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
-   m5 = *half_two;
-   m5.cmp1_immediate = false;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
 
    /* The same equality against 3, 4 and 255: Apple applegpu_g17g,

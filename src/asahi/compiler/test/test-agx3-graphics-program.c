@@ -84,8 +84,8 @@ test_g17g_programs(void)
                                                     &bare_output));
          CHECK(memcmp(bare_output.bytes, expected_tail[1], 28) == 0);
 
-         /* Every other sample size is still unwitnessed. */
-         const uint8_t ungrounded[] = {4, 12, 24, 40, 64};
+         /* The admitted single-sample layouts include 24-byte samples. */
+         const uint8_t ungrounded[] = {4, 12, 40, 64};
          for (unsigned i = 0; i < sizeof(ungrounded); ++i) {
             struct agx3_g17p_graphics_program_desc bad = desc;
             bad.imageblock.sample_size_B = ungrounded[i];

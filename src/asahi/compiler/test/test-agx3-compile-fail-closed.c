@@ -1371,13 +1371,26 @@ check_preamble_entry_gpr(enum agx_isa_encoding encoding,
          expected.known = true;
          if (input == PREAMBLE_SPARSE_UNIFORMS) {
             expected.uniform_halfs[0] = 0xf00;
-            expected.uniform_halfs[1] = UINT64_C(0x8000000000000003);
+            /* The encoded half127 read imports word u63, then extracts its
+             * upper half. Both physical halves126/127 are input bytes. */
+            expected.uniform_halfs[1] = UINT64_C(0xc000000000000003);
             expected.uniform_halfs[7] = UINT64_C(0xf000000000000000);
          } else if (input != PREAMBLE_CONSTANT_ONLY) {
             expected.uniform_halfs[0] = 0xf;
          }
       }
       const struct agx_precompiled_kernel_info compact = agx_compact_kernel_info(&part.info);
+      for (unsigned w = 0; w < AGX_IOTO_CPROG_UNIFORM_WORDS; ++w) {
+         if (part.info.agx3_preamble_encoded_inputs.uniform_halfs[w] !=
+                expected.uniform_halfs[w] ||
+             compact.agx3_preamble_encoded_inputs.uniform_halfs[w] !=
+                expected.uniform_halfs[w])
+            fprintf(stderr, "preamble input word %u: full=%016llx compact=%016llx expected=%016llx\n",
+                    w,
+                    (unsigned long long)part.info.agx3_preamble_encoded_inputs.uniform_halfs[w],
+                    (unsigned long long)compact.agx3_preamble_encoded_inputs.uniform_halfs[w],
+                    (unsigned long long)expected.uniform_halfs[w]);
+      }
       valid &= part.info.agx3_preamble_encoded_inputs.known == expected.known &&
                compact.agx3_preamble_encoded_inputs.known == expected.known &&
                memcmp(part.info.agx3_preamble_encoded_inputs.uniform_halfs, expected.uniform_halfs,

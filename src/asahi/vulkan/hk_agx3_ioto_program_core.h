@@ -165,8 +165,6 @@ bool hk_agx3_g17p_graphics_program_template_relocate(
    const struct agx3_g17p_graphics_program_template *program,
    void *output, size_t capacity, uint16_t *written);
 
-#define HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX 28u
-
 struct hk_agx3_g17p_combined_sampler_heap {
    uint64_t descriptor_set_va;
    uint64_t sampler_heap_va;
