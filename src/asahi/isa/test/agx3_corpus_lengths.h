@@ -6,8 +6,7 @@
  *
  * Real pinned G16G (agx3b, variant 0) and G17S (agx3c, variant 1) kernel
  * instructions with the exact length each is given by Apple's own encoder
- * tables (research/gpu/isa-re/gen-x/lenv2/specdis.py over the hash-pinned
- * corpus). The generated in-tree disassembler must length every one of these
+ * tables. The generated in-tree disassembler must length every one of these
  * identically. Bytes are zero-padded to the 24-byte maximum instruction.
  *
  * 5590 instructions from 120 kernels.

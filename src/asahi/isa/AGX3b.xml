@@ -5,8 +5,7 @@
   (with G15G-only 2-byte `06 xx` scheduling stalls inserted) g15g.
 
   Transcribed mechanically from the llvm::AGX3 packed encoder tables
-  inside Apple's MetalToolchain libapplegpu-nt.dylib.  See
-  research/gpu/GPU_AGX3_APPLE_ENCODER_TABLES_2026-08-23.md.
+  inside Apple's MetalToolchain libapplegpu-nt.dylib.
 
   Same grammar as Mesa src/asahi/isa/AGX2.xml.  Field names are Apple's
   numeric field ids (fNN); their semantic names are not in the binary.

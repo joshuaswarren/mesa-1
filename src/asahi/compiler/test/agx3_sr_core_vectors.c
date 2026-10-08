@@ -1,8 +1,7 @@
 /* GENERATED -- do not edit. Clean SR-read rld witnesses (f23==7) from the
  * srops/memops/lsw corpora + their exact bytes; the C encoder must reproduce
  * each. Witnesses carrying the unattributed hint/marker fields (f11 on c ep1,
- * f40/f41 on b, f44/f45 on c) are excluded -- the driver emits those as 0.
- * Generator: research/gpu/isa-re/gen-x/srops/export_sr_vectors.py */
+ * f40/f41 on b, f44/f45 on c) are excluded -- the driver emits those as 0. */
 #include <stdint.h>
 #include <stddef.h>
 
