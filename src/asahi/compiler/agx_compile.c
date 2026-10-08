@@ -10733,7 +10733,7 @@ agx3_uniform_dma_constant_reserve(nir_shader *nir)
    return MIN2(halves, 128);
 }
 
-static /* Whether a vertex constant program only moves loaded data to its results:
+/* Whether a vertex constant program only moves loaded data to its results:
  * every instruction is a load (of the preamble's inputs or of constant
  * memory), a constant, a result store, or plumbing that forwards values --
  * moves, vectors, 64-bit packs, address masks and bounds checks -- apart
