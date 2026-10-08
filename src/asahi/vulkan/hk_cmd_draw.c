@@ -2226,7 +2226,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             cmd, iview->vk.image, level, iview->vk.base_array_layer,
             iview->vk.base_array_layer + MAX2(pass_layers, 1),
             u_minify(iview->vk.image->extent.width, level),
-            u_minify(iview->vk.image->extent.height, level), render->area);
+            u_minify(iview->vk.image->extent.height, level), render->area,
+            render->view_mask &&
+               render->view_mask != BITFIELD64_MASK(pass_layers));
       }
       hk_sync_pass_footprints_done(cmd);
    }

@@ -79,7 +79,8 @@ static bool
 footprints_share_tile(const struct hk_sync_footprint *a,
                       const struct hk_sync_footprint *b)
 {
-   return a->image == b->image && a->level == b->level &&
+   return (a->preserve || b->preserve) &&
+          a->image == b->image && a->level == b->level &&
           a->layer0 < b->layer1 && b->layer0 < a->layer1 &&
           a->cx0 <= b->cx1 && b->cx0 <= a->cx1 && a->cy0 <= b->cy1 &&
           b->cy0 <= a->cy1;
@@ -89,7 +90,7 @@ void
 hk_sync_pass_footprint(struct hk_cmd_buffer *cmd, const void *image,
                        uint32_t level, uint32_t layer0, uint32_t layer1,
                        uint32_t level_width, uint32_t level_height,
-                       VkRect2D area)
+                       VkRect2D area, bool preserve_layers)
 {
    struct hk_sync_state *st = &cmd->sync;
    const int64_t w = level_width, h = level_height;
@@ -102,16 +103,18 @@ hk_sync_pass_footprint(struct hk_cmd_buffer *cmd, const void *image,
    if (!image || layer1 <= layer0 || x1 <= x0 || y1 <= y0)
       return;
 
-   /* Every tile the area touches is covered entirely. */
-   if (x0 % cell == 0 && y0 % cell == 0 && (x1 % cell == 0 || x1 == w) &&
-       (y1 % cell == 0 || y1 == h))
-      return;
+   /* Retain complete writes too: a later sparse multiview pass may reload
+    * and store these layers even though its API writes are disjoint. */
+   const bool preserve = preserve_layers || x0 % cell || y0 % cell ||
+                         (x1 % cell && x1 != w) ||
+                         (y1 % cell && y1 != h);
 
    assert(st->pass_fp_count < HK_SYNC_MAX_PASS_FOOTPRINTS);
    if (st->pass_fp_count >= HK_SYNC_MAX_PASS_FOOTPRINTS)
       return;
 
    st->pass_fp[st->pass_fp_count++] = (struct hk_sync_footprint){
+      .preserve = preserve,
       .image = image,
       .level = level,
       .layer0 = layer0,
