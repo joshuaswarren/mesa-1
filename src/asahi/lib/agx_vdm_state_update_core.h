@@ -191,17 +191,6 @@ bool agx_vdm_state_update_unpack(enum agx_chip chip, const void *bytes,
                                  size_t size,
                                  struct agx_vdm_state_update_info *info);
 
-/*
- * Materialize/pack the exact six-template path observed in:
- *
- *   G15X_M1, G16X, G17P: VertexProgramVariant + VDMEncoderGen5
- *   G17G, G17X:          VertexProgramVariant + VDMEncoderGen6
- *
- * HAL300 intentionally differs: vertex word 0 has no pre-HAL300 bit-31 rule,
- * and the six per-template output constants are 0x20/0/0x21/1/0x22/2 instead
- * of 0x30/0/0x31/1/0x32/2.  Both calls are transactional and fail closed
- * outside the directly observed target/input domains.
- */
 bool agx_vdm_state_update_template_materialize(
    enum agx_chip chip, const struct agx_vdm_state_update_template_info *info,
    struct agx_vdm_state_update_info *raw);
@@ -210,30 +199,6 @@ bool agx_vdm_state_update_template_pack(
    enum agx_chip chip, const struct agx_vdm_state_update_template_info *info,
    struct agx_vdm_state_update *out);
 
-/*
- * Publish a vertex constant program's thread-invariant (TI) resources in the
- * two state-load counts, from the compiler's TI spill-buffer bytes and TI
- * largest-IPR bytes. G17P only.
- *
- * Pinned AGXMetalG17P (HAL200):
- *
- *   VertexProgramVariantESLState ctor 0x21883C3A8..0x21883C47C stores
- *     ESL+0x128 = (thread_invariant_spill_buffer_bytes + 3) >> 2
- *     ESL+0x12c = (((thread_invariant_largest_ipr_bytes + 3) >> 2) + 1) & ~1
- *   (ShaderInfo vtable offsets 0x42 and 0x4e; the latter is 0 when absent).
- *
- *   VertexProgramVariant::finalize 0x2187B1144..0x2187B1170, after
- *   ESLStateLoadEncoderGen2::finish, packs every one of the six templates as
- *     vertex-shader word 0 |= ESL+0x12c << 8   (bfi #8, #12)
- *     pipeline template     = ESL+0x128 << 3   (ubfiz #3, #18)
- *
- * i.e. raw_state_load_count_12 is the TI IPR quad count and
- * raw_state_load_count_18 the TI spill quad count. The fragment variant
- * publishes the identical pair in its HAL200 record
- * (agx_ppp_hal200_fragment_ti_resources). A vertex shader without a constant
- * program leaves both zero. Fails closed, leaving `info` unchanged, outside
- * the encodable range.
- */
 bool agx_vdm_state_update_vertex_ti_resources(
    enum agx_chip chip, uint32_t spill_bytes, uint32_t largest_ipr_bytes,
    struct agx_vdm_state_update_template_info *info);

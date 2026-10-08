@@ -98,14 +98,11 @@ hk_device_finish_meta(struct hk_device *dev)
 }
 
 void
-hk_meta_begin_site(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
-                   VkPipelineBindPoint bind_point, const char *site)
+hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+              VkPipelineBindPoint bind_point)
 {
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    save->in_meta = cmd->in_meta;
-   save->prof_site = cmd->prof_site;
-   if (!cmd->in_meta)
-      cmd->prof_site = site;
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       save->dynamic = cmd->vk.dynamic_graphics_state;
@@ -226,7 +223,6 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 
    memcpy(desc->root.push, save->push, sizeof(save->push));
    cmd->in_meta = save->in_meta;
-   cmd->prof_site = save->prof_site;
 }
 
 void
@@ -879,8 +875,8 @@ static inline VkFormat hk_meta_bitwise_copy_format(VkFormat format);
  * (R32_UINT for any 4-byte format, R16_UINT for any 2-byte format, ...) are
  * not: an RGBA8 image written through an R32_UINT PBE is compressed as one
  * 32-bit channel and decodes as garbage through the application's RGBA8
- * view, and vice versa. That mismatch was the 2026-09-24 magenta (sampled
- * source) / white (readback of a normalized store) failure.
+ * view, and vice versa (magenta sampled sources, white readbacks of
+ * normalized stores).
  *
  * Use the canonical view of the image's own channel class, and prefer its
  * integer member where one exists so the copy stays bitwise: R16 and
@@ -2615,6 +2611,7 @@ hk_g17p_block_copy_format(struct hk_device *dev, VkFormat format)
    case HK_G17P_BLOCK_FORMAT_BC:
    case HK_G17P_BLOCK_FORMAT_ETC2_EAC:
    case HK_G17P_BLOCK_FORMAT_ASTC_LDR:
+   case HK_G17P_BLOCK_FORMAT_ASTC_HDR:
       return true;
    default:
       return false;

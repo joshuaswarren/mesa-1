@@ -239,9 +239,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
                          agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
                          mem->bo->size, 0, DRM_ASAHI_BIND_READ);
    if (ret) {
-      /* v56h/v57f: this bind fails once the VM carries a sticky error. It
-       * leaked the BO and the VkDeviceMemory and returned an error code the
-       * command is not allowed to return. */
+      /* The bind fails once the VM carries a sticky error. */
       agx_bo_unreference(&dev->dev, mem->bo);
       mem->bo = NULL;
       vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
@@ -251,7 +249,12 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_add_ext_bo(dev, mem->bo);
 
-   agx_g17p_va_lifetime_trace(&dev->dev, "hk-allocate", mem->bo);
+   uint64_t heap_used = p_atomic_add_return(&heap->used, mem->bo->size);
+   if (heap_used > heap->size) {
+      hk_FreeMemory(device, hk_device_memory_to_handle(mem), pAllocator);
+      return vk_errorf(device, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "Out of heap memory");
+   }
 
    if (fd_info && fd_info->handleType) {
       /* From the Vulkan spec:
@@ -261,16 +264,10 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
        *    implementation. The application must not perform any operations on
        *    the file descriptor after a successful import."
        *
-       * If the import fails, we leave the file descriptor open.
+       * Only consume it after heap accounting has accepted the allocation;
+       * every failure must leave the caller's file descriptor open.
        */
       close(fd_info->fd);
-   }
-
-   uint64_t heap_used = p_atomic_add_return(&heap->used, mem->bo->size);
-   if (heap_used > heap->size) {
-      hk_FreeMemory(device, hk_device_memory_to_handle(mem), pAllocator);
-      return vk_errorf(device, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                       "Out of heap memory");
    }
 
    *pMem = hk_device_memory_to_handle(mem);
@@ -297,29 +294,13 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    struct hk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
    p_atomic_add(&heap->used, -((int64_t)mem->bo->size));
 
-   agx_g17p_va_lifetime_trace(&dev->dev, "hk-free-request", mem->bo);
-
-   /* Correctness A/B for a pending fragment reading an imported client
-    * image after its read-only shadow was unmapped. Shared/imported BOs skip
-    * the ordinary mapped BO cache and GEM-close immediately at refcount zero.
-    * Waiting every current queue before that close distinguishes a missing
-    * resource-retirement dependency from an unrelated GPU address bug.
-    *
-    * This is deliberately opt-in and G17P-only: it serializes shared-memory
-    * destruction and is a diagnostic containment, not the eventual
-    * per-resource timeline-retirement implementation.
-    */
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED)) &&
-       HK_ENV_BOOL_ONCE("HK_G17P_WAIT_SHARED_MEMORY_FREE", false)) {
-      mesa_logi_once("G17P shared-memory free queue-idle containment enabled");
-      VkResult result = vk_common_DeviceWaitIdle(device);
-      if (result != VK_SUCCESS)
-         mesa_loge("G17P shared-memory free wait failed: %d", result);
-   }
-
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);
+
+   /* Freeing a mapped memory object unmaps it. The shared mapping goes with
+    * the BO; an owned one belongs to this object alone. */
+   if (mem->map_owned)
+      agx_bo_unmap_owned(mem->bo, mem->map, mem->map_size);
 
    agx_bo_unreference(&dev->dev, mem->bo);
 
@@ -376,8 +357,21 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
 
    /* Bound a placed mapping by the memory object, not the BO: the BO cache
     * may have handed us one up to twice as large, and the application has
-    * reserved only mem->vk.size at this address. */
-   mem->map = agx_bo_map_placed(mem->bo, fixed_addr, mem->vk.size);
+    * reserved only mem->vk.size at this address.
+    *
+    * An exported allocation and its imports into this device are distinct
+    * memory objects over one agx_bo. Each maps, unmaps, frees and reserves
+    * independently, so each gets a mapping of its own rather than the BO's
+    * shared one, which unmapping any of them would otherwise tear down
+    * under the others. A BO only one memory object can reach keeps the
+    * cached mapping. */
+   if (mem->bo->flags & (AGX_BO_SHARED | AGX_BO_SHAREABLE)) {
+      mem->map = agx_bo_map_owned(mem->bo, fixed_addr, mem->vk.size,
+                                  &mem->map_size);
+      mem->map_owned = mem->map != NULL;
+   }
+   if (!mem->map_owned)
+      mem->map = agx_bo_map_placed(mem->bo, fixed_addr, mem->vk.size);
    if (mem->map == NULL) {
       *ppData = NULL;
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
@@ -404,6 +398,26 @@ hk_UnmapMemory2KHR(VkDevice device,
 
    if (mem == NULL)
       return VK_SUCCESS;
+
+   if (mem->map_owned) {
+      if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
+         VK_FROM_HANDLE(hk_device, dev, device);
+
+         /* Exactly this object's mapping, as below. */
+         void *err = mmap(mem->map, mem->map_size, PROT_NONE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+         if (err == MAP_FAILED) {
+            return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                             "Failed to map over original mapping");
+         }
+      } else {
+         agx_bo_unmap_owned(mem->bo, mem->map, mem->map_size);
+      }
+      mem->map = NULL;
+      mem->map_size = 0;
+      mem->map_owned = false;
+      return VK_SUCCESS;
+   }
 
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       VK_FROM_HANDLE(hk_device, dev, device);

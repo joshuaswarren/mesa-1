@@ -10,8 +10,8 @@
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
 
 /*
- * Corpus-witnessed (SR number, width) pairs; srops probe session 2026-08-25,
- * one Apple-compiled kernel per MSL builtin, identical numbers on agx3b and
+ * Witnessed (SR number, width) pairs: one Apple-compiled kernel per MSL
+ * builtin, identical numbers on agx3b and
  * agx3c. 16-bit: 6 simdgroup_index_in_threadgroup, 7 thread_index_in_simdgroup,
  * 9/10/11 thread_position_in_threadgroup.xyz, 13 thread_index_in_threadgroup,
  * 17/18/19 threads_per_threadgroup.xyz, 20/21/22
@@ -33,8 +33,8 @@
  * barycentric is computed as 1 - u - v). metal-nt -arch applegpu_g17p reads
  * them as `0cd91006`, `2cda1046` and `1cdb1066`.
  *
- * Three more 16-bit numbers are fragment-only and were added from the G17P
- * writeout session (offline `applegpu-nt -arch applegpu_g17p`, 2026-08-31):
+ * Three more 16-bit numbers are fragment-only (`metal-nt -arch
+ * applegpu_g17p`):
  *
  *  - 39 is the *incoming* coverage word. PROVEN: a fragment shader that reads
  *    `uint m [[sample_mask]]` compiles to exactly `rld h0 <- SR 39 (W16)`,
@@ -57,7 +57,7 @@
  * feeding a derivative or a quad reduction, or inside a helper-invocation
  * guard, leaves it clear (agx3_sr_desc::fragment_active_index).
  */
-bool
+static bool
 agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)
 {
    if (width == AGX3_SR_W16) {

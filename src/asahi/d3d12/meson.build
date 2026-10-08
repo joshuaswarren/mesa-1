@@ -907,3 +907,14 @@ if not d12_is_windows
                  libpoly_nir],
   )
 endif
+
+if with_tests
+  executable(
+    'd3d12agx_shader_replay',
+    files('../compiler/test/agx-replay.c', 'd12_nir_g17p_txf.c', 'd12_debug.c'),
+    c_args : ['-DAGX_REPLAY_D3D12'],
+    include_directories : [inc_include, inc_src, inc_asahi],
+    dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx, idep_libpoly],
+    link_with : [libasahi_compiler, libasahi_lib, libasahi_layout, libpoly_nir],
+  )
+endif

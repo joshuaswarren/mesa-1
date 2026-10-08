@@ -23,6 +23,7 @@ hk_descriptor_set_layout_hash(struct hk_descriptor_set_layout *layout)
       VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
    BLAKE3_UPDATE_VALUE(push);
    BLAKE3_UPDATE_VALUE(layout->descriptor_generation);
+   BLAKE3_UPDATE_VALUE(layout->native_sampler_indices);
    BLAKE3_UPDATE_VALUE(layout->non_variable_descriptor_buffer_size);
    BLAKE3_UPDATE_VALUE(layout->vk.dynamic_descriptor_count);
    BLAKE3_UPDATE_VALUE(layout->binding_count);

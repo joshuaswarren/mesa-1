@@ -460,3 +460,22 @@ TEST_F(ssa_def_bits_used_test, bcsel_iand)
    EXPECT_EQ(nir_def_bits_used(load2), BITFIELD_BIT(3));
    EXPECT_EQ(nir_def_bits_used(load3), BITFIELD_BIT(3));
 }
+
+class num_lsb_zero_test : public nir_test {
+protected:
+   num_lsb_zero_test() : nir_test::nir_test("nir_def_num_lsb_zero") {}
+};
+
+TEST_F(num_lsb_zero_test, address_multiply)
+{
+   struct hash_table *cache = _mesa_pointer_hash_table_create(NULL);
+   for (unsigned bits : {16u, 32u, 64u}) {
+      nir_def *index = nir_u2uN(b, nir_load_local_invocation_index(b), bits);
+      for (unsigned scale : {0u, 1u, 12u, 16u, 24u}) {
+         nir_def *value = nir_amul(b, index, nir_imm_intN_t(b, scale, bits));
+         unsigned expected = scale ? ffs(scale) - 1 : bits;
+         EXPECT_EQ(nir_def_num_lsb_zero(cache, nir_get_scalar(value, 0)), expected);
+      }
+   }
+   ralloc_free(cache);
+}

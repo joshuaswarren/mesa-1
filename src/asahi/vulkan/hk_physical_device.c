@@ -12,6 +12,7 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/disk_cache.h"
+#include "util/hex.h"
 #include "util/mesa-blake3.h"
 #include "git_sha1.h"
 #include "hk_buffer.h"
@@ -85,17 +86,15 @@ hk_get_device_extensions(const struct hk_instance *instance,
     * executed on hardware, and an extension bit is a promise.  It stays off
     * until the exact-result oracle passes on a real G17P.
     */
-   const bool ray_query = hk_g17p_unverified_feature("ray_query");
+   const bool ray_query = false;
 
    /*
     * VK_KHR_ray_tracing_pipeline.  The whole pipeline compiles to one compute
     * megakernel over the same software traversal ray_query uses, so it needs
     * exactly what ray_query needs and nothing more -- but it has never
-    * executed on hardware either, and an extension bit is a promise.  It is
-    * advertised only for the probe that would let the default flip.
+    * executed on hardware either, and an extension bit is a promise.
     */
-   const bool ray_tracing_pipeline =
-      ray_query && hk_g17p_unverified_feature("ray_tracing_pipeline");
+   const bool ray_tracing_pipeline = ray_query;
 
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
@@ -282,35 +281,6 @@ hk_get_device_extensions(const struct hk_instance *instance,
    };
 }
 
-/*
- * G17P features whose implementation records correctly under the drm-shim
- * but has not yet executed on hardware.  They stay unadvertised by default: a
- * feature bit is a promise, and the only way to keep it is to flip the
- * default after the one-boot probe named next to each entry has passed.
- * Until then HK_G17P_UNVERIFIED_FEATURES=<name>[,<name>...] advertises one,
- * for exactly that probe.
- */
-bool
-hk_g17p_unverified_feature(const char *name)
-{
-   const char *list = debug_get_option("HK_G17P_UNVERIFIED_FEATURES", NULL);
-   if (!list)
-      return false;
-
-   const size_t len = strlen(name);
-   for (const char *p = list; *p;) {
-      const char *end = strchr(p, ',');
-      const size_t n = end ? (size_t)(end - p) : strlen(p);
-      if ((n == len && !strncmp(p, name, len)) ||
-          (n == 3 && !strncmp(p, "all", 3)))
-         return true;
-      if (!end)
-         break;
-      p = end + 1;
-   }
-   return false;
-}
-
 static void
 hk_get_device_features(
    const struct agx_device *dev, const struct hk_instance *instance,
@@ -389,20 +359,9 @@ hk_get_device_features(
        * type-correct widening at ST_VARY and narrowing after interpolation. */
       .storageInputOutput16 = dev->chip == AGX_CHIP_G17P,
       .multiview = true,
-      /* Honeykrisp lowers ViewIndex into the layer output of the last
-       * pre-rasterization stage and duplicates the draw per view on the CPU,
-       * which is stage-agnostic: with tessellation or a geometry shader the
-       * store simply moves to the tessellation-evaluation or geometry shader.
-       * Held behind the opt-in until a two-view tessellated and a two-view
-       * geometry-shaded render are witnessed on hardware. */
-      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4: a 384-case
-       * multiview tessellation/no-position sample is 12 Pass / 372
-       * NotSupported with these bits withheld and 204 Pass / 0 Fail / 180
-       * NotSupported with them advertised -- 192 cases gained and not one
-       * failure.  hk_lower_multiview() now runs on the last pre-rasterization
-       * stage rather than always on the vertex shader, which is what makes a
-       * tessellated or geometry-shaded multiview render write ViewIndex to
-       * the layer the rasterizer reads. */
+      /* ViewIndex is lowered into the layer output of the last
+       * pre-rasterization stage and the draw is duplicated per view, so
+       * tessellation and geometry shaders work with multiview too. */
       .multiviewGeometryShader = true,
       .multiviewTessellationShader = true,
       .variablePointersStorageBuffer = true,
@@ -818,35 +777,9 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       /* Geometry and tessellation shaders run in compute and draw through
        * their raster and evaluation vertex programs, as on AGX2. */
-      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4. A 1,182-case
-       * sample -- every 40th geometry-shader case of draw, pipeline,
-       * binding-model, spirv-assembly, query-pool, transform-feedback and
-       * renderpasses -- is 1182 NotSupported with the gate off and
-       * 877 Pass / 2 Fail / 303 NotSupported with it on; the 303 are held by
-       * other gates (binding_model.shader_access, spec_constant). A separate
-       * 4,561-case general sample gains no regression: not one passing case
-       * changes state when the bit is advertised.
-       *
-       * The two failures are one defect, not a class:
-       * pipeline.*.interface_matching.shader_layout_component_matching.
-       * vert_tesc_tese_geom_frag.{loose_var.float16.single_location.
-       * vec3_scalar, in_block.float16.multiple_locations.vec2_vec2}, which
-       * read (0.5, -1, 0.625, 1) where (0.125, 0.25, 0.5, 1) is owed. It is
-       * specific to the tessellation-to-geometry handoff of 16-bit varyings:
-       * the same case passes as vert_frag, vert_geom_frag and
-       * vert_tesc_tese_frag, and only the combination fails. Tracked, not a
-       * reason to withhold the bit from the ~35,000 cases it gates. */
+      /* Known issue: 16-bit varyings across the tessellation-to-geometry
+       * handoff (interface_matching.*.vert_tesc_tese_geom_frag float16). */
       features->geometryShader = true;
-      /* Qualified on hardware, Neo, native Vulkan 1.4: the whole
-       * dEQP-VK.tessellation group is 496 Pass / 607 NotSupported / 0 Fail,
-       * and the 4,961-case stratified sample gains 54 NotSupported -> Pass
-       * with no case going the other way. The one interaction that kept this
-       * gated -- a self-dependency MSAA render pass failing after a
-       * tessellated draw in the same process -- was the geometry heap
-       * descriptor sharing a buffer object with the sampler table, fixed in
-       * the preceding commit. The remaining NotSupported inside the group are
-       * other gates: shaderFloat64, vertex-pipeline stores and geometry
-       * shaders. */
       features->tessellationShader = true;
       features->shaderTessellationAndGeometryPointSize =
          features->geometryShader || features->tessellationShader;
@@ -862,14 +795,9 @@ hk_get_device_features(
        * graphics/compute counter now has a strict native helper or fragment-
        * prolog compiler oracle and shares the guarded compact-report ABI. */
       features->pipelineStatisticsQuery = true;
-      /* The graphics-stage descriptor, storage-write and atomic paths are
-       * complete and record through HAL200. Keep their public promise behind
-       * the exact side-effect qualification run; retain the older
-       * `graphics_memory` token as an alias for existing qualification jobs. */
-      features->vertexPipelineStoresAndAtomics =
-         instance->vertex_stores &&
-         (hk_g17p_unverified_feature("graphics_shader_side_effects") ||
-          hk_g17p_unverified_feature("graphics_memory"));
+      /* The graphics-stage descriptor, storage-write and atomic paths record
+       * through HAL200 but are not yet qualified on hardware. */
+      features->vertexPipelineStoresAndAtomics = false;
       /* Qualified on hardware: g17p-vulkan-fragment-side-effects renders
        * 1024/1024 exact pixels, 0 cleared, 0 wrong, with 0/256 mixed 2x2
        * quads and 0/32 mixed 8x4 SIMD groups, and its fragment stores,
@@ -894,10 +822,10 @@ hk_get_device_features(
        * a read-only shadow at +sparse_ro_offset, and a userspace sparse map
        * that the G17P texture descriptor points at in Sparse mode. The kernel
        * already accepts DRM_ASAHI_BIND_SINGLE_PAGE binds, and the G17P user VA
-       * window is split for the RO alias exactly as AGX2 is. Keep it behind
-       * the unverified-feature opt-in until the residency-query descriptor
-       * path is qualified on hardware; every piece below is chip-agnostic. */
-      const bool sparse = hk_g17p_unverified_feature("sparse");
+       * window is split for the RO alias exactly as AGX2 is. Keep it off until
+       * the residency-query descriptor path is qualified on hardware; every
+       * piece below is chip-agnostic. */
+      const bool sparse = false;
       features->shaderResourceResidency = sparse;
       features->sparseBinding = sparse;
       features->sparseResidencyAliased = sparse;
@@ -922,8 +850,7 @@ hk_get_device_features(
       /* VK_KHR_shader_quad_control permits quad operations and derivatives
        * inside divergent control flow.  The ordinary subgroup quad shuffles
        * exposed below do not establish that stronger execution guarantee. */
-      features->shaderQuadControl =
-         hk_g17p_unverified_feature("shader_quad_control");
+      features->shaderQuadControl = false;
    }
 
    /* A multiview promise for a stage this device does not expose is
@@ -1426,8 +1353,7 @@ hk_get_device_properties(const struct agx_device *dev,
    };
 
    if (dev->chip == AGX_CHIP_G17P) {
-      /* Measured per operation under the G17P drm-shim with
-       * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):
+      /* Measured per operation under the G17P drm-shim:
        *
        *   BASIC             g22_subgroup_basic          encodes
        *   VOTE              g21_subgroup_vote           encodes
@@ -1516,13 +1442,10 @@ hk_get_device_properties(const struct agx_device *dev,
    }
 }
 
-/* v56f/v57d: every AGX_*, HK_* and ASAHI_* environment knob that can change
- * generated code or serialized objects is part of the cache identity, not
- * only the ones hk_physical_device_compiler_flags() packs into bits
- * (AGX_MESA_DEBUG's codegen flags and the AGX_G17P_* register/scheduling/
- * packing diagnostics were missing). Knobs that only print or pick a runtime
- * path are excluded so tracing keeps a warm cache. The build is already part
- * of both identities (driver_build_sha). */
+/* Every AGX_*, HK_* and ASAHI_* environment variable that can change generated
+ * code or serialized objects is part of the cache identity, not only the bits
+ * hk_physical_device_compiler_flags() packs. Variables that only print or pick
+ * a runtime path are excluded so tracing keeps a warm cache. */
 extern char **environ;
 static int
 hk_env_cmp(const void *a, const void *b)
@@ -1536,12 +1459,7 @@ hk_codegen_env_hash(void)
    static const char *const runtime_only[] = {
       "TRACE", "DUMP", "_LOG", "PERF", "VERBOSE", "DEBUG_OBJECT", "SLOW_DRAW",
       "DISK_CACHE_ID", "LAZY_GENERIC", "FORCE_GENERIC", "BIND_PREDICT",
-      "VARIANT_TRACE",
-      /* v96: HK_G17P_SLOW_SUBMIT_US only prints. */
-      "SLOW_SUBMIT",
-      /* v96: prolog/epilog disk caching changes where a part comes from,
-       * never its bytes (the verify mode proves it). */
-      "PROLOG_DISK_CACHE",
+      "VARIANT_TRACE", "SLOW_SUBMIT", "PROLOG_DISK_CACHE",
    };
    const char *list[512];
    unsigned n = 0;
@@ -1603,8 +1521,16 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[BLAKE3_HEX_LEN];
-   _mesa_blake3_format(timestamp, instance->driver_build_sha);
+   /* The driver id names the single-file cache directory: keep it to the
+    * 20-byte build-id (40 hex digits), not the zero-padded 32-byte buffer.
+    * Steam records single-file cache directories as "L7:<driver id>" cut
+    * to 64 characters and prunes directories that match no bucket, so a
+    * longer id would get the live cache deleted.
+    */
+   const unsigned id_bytes = 20;
+   static_assert(sizeof(instance->driver_build_sha) >= 20);
+   char timestamp[2 * 20 + 1];
+   mesa_bytes_to_hex(timestamp, instance->driver_build_sha, id_bytes);
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags ^
       (env_hash * UINT64_C(0xff51afd7ed558ccd)));
@@ -1653,10 +1579,11 @@ hk_get_sysmem_heap_available(struct hk_physical_device *pdev)
       uint64_t total_used = 0;
       for (unsigned i = 0; i < pdev->mem_heap_count; i++) {
          const struct hk_memory_heap *heap = &pdev->mem_heaps[i];
-         uint64_t used = p_atomic_read(&heap->used);
+         uint64_t used = p_atomic_read(&heap->used) +
+                         p_atomic_read(&heap->cached);
          total_used += used;
       }
-      return pdev->sysmem - total_used;
+      return total_used < pdev->sysmem ? pdev->sysmem - total_used : 0;
    }
 
    uint64_t sysmem_size_B = 0;
@@ -1753,8 +1680,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
-      if (!hk_g17p_unverified_feature("shader_quad_control"))
-         supported_extensions.KHR_shader_quad_control = false;
+      supported_extensions.KHR_shader_quad_control = false;
    }
 
    struct vk_features supported_features;
@@ -1877,13 +1803,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * per-device guarantee: an application may create a device with that
        * many queues and expect it to succeed. Handing the shared pool out as
        * the guarantee makes any application that asks for queueCount queues
-       * fail with VK_ERROR_OUT_OF_DEVICE_MEMORY as soon as anything else is
-       * running -- measured on Neo with a desktop up, the kernel reports 58
-       * and the 39th queue fails, deterministically.
-       *
-       * Advertise a count we can deliver instead. A real guarantee needs a
-       * per-client reservation in the kernel; until then this is the number,
-       * and it still exercises every multi-queue path. */
+       * fail as soon as other clients hold contexts. Advertise a count we
+       * can deliver; a real guarantee needs a per-client reservation in the
+       * kernel. */
       queue_count = MIN2(limits.max_queues, HK_ADVERTISED_QUEUES);
    }
 
@@ -1970,7 +1892,8 @@ hk_GetPhysicalDeviceMemoryProperties2(
 
          for (unsigned i = 0; i < pdev->mem_heap_count; i++) {
             const struct hk_memory_heap *heap = &pdev->mem_heaps[i];
-            uint64_t used = p_atomic_read(&heap->used);
+            uint64_t used = p_atomic_read(&heap->used) +
+                            p_atomic_read(&heap->cached);
 
             /* From the Vulkan 1.3.278 spec:
              *

@@ -13,8 +13,8 @@
  * the equivalent commuted order, moving both modifiers and lifetime hints,
  * to keep subtraction in the shortest native form.
  *
- * Evidence: research/gpu/GPU_AGX3_FLOAT_MODIFIERS_2026-08-24.md (96/96 byte
- * exact from baseline + operands + modifiers).
+ * All 96 witnessed Apple encodings are reproduced byte-exactly from the
+ * baseline, the operands and the modifiers.
  */
 
 #pragma once
@@ -157,11 +157,6 @@ bool agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                               uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
                               uint8_t *len);
 
-bool agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
-                             uint16_t src0, uint16_t src1, uint8_t immediate,
-                             const struct agx3_falu_runtime *runtime,
-                             uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
-
 bool agx3_falu_fma_addend_imm_mod(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src0, uint16_t src1,
    uint8_t immediate, bool src0_abs, bool src0_neg, bool src1_abs,
@@ -209,6 +204,11 @@ bool agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
                               const struct agx3_falu_runtime *runtime,
                               uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
                               uint8_t *len);
+
+bool agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src0, uint16_t src1, uint8_t immediate,
+                             const struct agx3_falu_runtime *runtime,
+                             uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
 
 #ifdef __cplusplus
 }

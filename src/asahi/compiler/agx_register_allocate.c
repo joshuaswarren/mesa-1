@@ -699,16 +699,14 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
       }
 
       if (!found) {
-         /* Not a refusal path.  The result feeds straight into
-          * BITSET_SET_COUNT() and reg_to_ssa[], so continuing with a bad base
-          * is an out-of-bounds write rather than a poor register choice: a
-          * build where NDEBUG removes assertions would corrupt memory
-          * silently.  Fail the same way in every build instead. */
-         fprintf(stderr,
-                 "agx: no constrained region for count=%u minimum=%u limit=%u "
-                 "bound=%u\n",
-                 count, minimum, limit, rctx->bound[RA_GPR]);
-         abort();
+         /* No legal placement exists. Never write through an unset base --
+          * it feeds BITSET_SET_COUNT() and reg_to_ssa[] -- and never emit the
+          * illegal placement either: record the failure, let the ordinary
+          * eviction below place the value anywhere so allocation finishes
+          * consistently, and let agx_compile_function_nir() refuse the
+          * shader through its normal error path. */
+         rctx->shader->ra_failed = true;
+         goto unconstrained;
       }
       nr_blocked = 0;
       for (unsigned reg = base; reg < base + span;) {
@@ -733,6 +731,7 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
       set_ssa_to_reg(rctx, dest.value, base);
    }
 
+unconstrained:
    while (nr_blocked > 0) {
       /* Grab the largest var. TODO: Consider not writing O(N^2) code. */
       uint32_t ssa = ~0, nr = 0, chosen_idx = ~0;
@@ -1941,7 +1940,8 @@ agx3_tile_store_bank(agx_context *ctx)
 
 /* The packer places dynamic cube CEM scratch above every allocated operand.
  * Reserve that storage before spilling/RA, including the extra packed layer
- * word used by bias+minimum. Cube-array face staging has a seven-bit limit.
+ * word used by bias+minimum. Cube-array face staging and the register LOD
+ * operand of a plain cube sample both have seven-bit source fields.
  * Keep the allocation budget aligned to the largest SSA vector, so rounding
  * demand for live-range splitting cannot exceed the reduced file. */
 static unsigned
@@ -1966,8 +1966,9 @@ agx3_cube_register_budget(agx_context *ctx)
           I->src[4].type == AGX_INDEX_IMMEDIATE)
          continue;
 
-      budget = MIN2(budget, I->dim == AGX_DIM_CUBE_ARRAY ? 112 :
-                    AGX3B_NUM_REGS - 8 - (bias_min ? 2 : 0));
+      budget = MIN2(budget,
+                    (I->dim == AGX_DIM_CUBE_ARRAY || register_lod) ? 112 :
+                    AGX3B_NUM_REGS - 8);
    }
    return ROUND_DOWN_TO(budget, alignment);
 }
@@ -2237,6 +2238,16 @@ agx_ra(agx_context *ctx)
          BITSET_SET(low_gpr, I->src[0].value);
          if (split_source[I->src[0].value])
             BITSET_SET(low_gpr, split_source[I->src[0].value] - 1);
+      }
+
+      /* Explicit scalar publications are the coordinate GPR consumers now.
+       * Their native COPY source still has the same seven-bit domain, even
+       * though the following sample no longer exposes a GPR operand to RA.
+       */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          agx_is_texture_publication(I)) {
+         agx_foreach_ssa_src(I, s)
+            BITSET_SET(texture_gpr, I->src[s].value);
       }
 
       /* G17P publishes sampled coordinates through COPY, whose source field

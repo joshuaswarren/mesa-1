@@ -4,6 +4,7 @@
  */
 
 #include "agx_vdm_hal200_bind_tail_core.h"
+#include "agx_bytes.h"
 #include "agx_ppp_viewport_payload_core.h"
 
 #include <string.h>
@@ -24,6 +25,7 @@ agx_vdm_hal200_bind_viewport_control(size_t viewport_bytes)
    return (uint32_t)(viewport_bytes / 4) << 8;
 }
 
+/* Whether a pair's control is one the native tail can carry. */
 bool
 agx_vdm_hal200_bind_control_valid(unsigned pair, uint32_t control)
 {
@@ -35,22 +37,6 @@ agx_vdm_hal200_bind_control_valid(unsigned pair, uint32_t control)
 
    return (control & 0xff) == 0 &&
           agx_vdm_hal200_bind_viewport_control((control >> 8) * 4) == control;
-}
-
-static void
-store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
 }
 
 bool
@@ -65,7 +51,7 @@ agx_vdm_hal200_bind_tail_pack(
    if (!out || !pairs || chip != AGX_CHIP_G17P)
       return false;
 
-   store_le32(out->bytes, AGX_VDM_HAL200_BIND_HEADER_CONTROL);
+   agx_store_le32(out->bytes, AGX_VDM_HAL200_BIND_HEADER_CONTROL);
    for (unsigned i = 0; i < AGX_VDM_HAL200_BIND_COUNT; ++i) {
       if (pairs[i].context_offset == 0 ||
           (pairs[i].context_offset & UINT32_C(3)) != 0 ||
@@ -75,8 +61,8 @@ agx_vdm_hal200_bind_tail_pack(
       }
 
       const size_t offset = 4 + (8 * i);
-      store_le32(&out->bytes[offset], pairs[i].context_offset);
-      store_le32(&out->bytes[offset + 4], pairs[i].control);
+      agx_store_le32(&out->bytes[offset], pairs[i].context_offset);
+      agx_store_le32(&out->bytes[offset + 4], pairs[i].control);
    }
 
    out->length = AGX_VDM_HAL200_BIND_TAIL_LENGTH;
@@ -98,13 +84,13 @@ agx_vdm_hal200_bind_tail_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   if (load_le32(raw) != AGX_VDM_HAL200_BIND_HEADER_CONTROL)
+   if (agx_load_le32(raw) != AGX_VDM_HAL200_BIND_HEADER_CONTROL)
       return false;
 
    for (unsigned i = 0; i < AGX_VDM_HAL200_BIND_COUNT; ++i) {
       const size_t offset = 4 + (8 * i);
-      pairs[i].context_offset = load_le32(&raw[offset]);
-      pairs[i].control = load_le32(&raw[offset + 4]);
+      pairs[i].context_offset = agx_load_le32(&raw[offset]);
+      pairs[i].control = agx_load_le32(&raw[offset + 4]);
       if (pairs[i].context_offset == 0 ||
           (pairs[i].context_offset & UINT32_C(3)) != 0 ||
           !agx_vdm_hal200_bind_control_valid(i, pairs[i].control)) {

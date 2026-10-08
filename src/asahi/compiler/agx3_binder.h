@@ -53,6 +53,10 @@ struct agx3_field_kv {
  * agx3_compose/agx3d_tables.c and define AGX3_HAVE_AGX3D_TABLE. Any other
  * AGX3D request returns false.
  */
+/* Byte length of form `mnemonic.ep` for `encoding`, or 0 if there is none. */
+unsigned agx3_bind_form_size(enum agx_isa_encoding encoding,
+                             const char *mnemonic, int ep);
+
 bool agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic,
                        int ep, const struct agx3_field_kv *baseline,
                        unsigned nbaseline,

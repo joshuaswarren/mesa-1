@@ -41,6 +41,7 @@ bool d12_wine_unixlib_init(void);
 /* Open the asahi render node through the unixlib; -1 on failure. */
 int d12_wine_open_render_node(void);
 void d12_wine_close_fd(int fd);
+int d12_wine_resource_fd(uintptr_t handle);
 int d12_wine_dupfd_cloexec(int fd);
 int64_t d12_wine_dmabuf_size(int fd);
 bool d12_wine_fd_is_asahi_render_node(int fd);

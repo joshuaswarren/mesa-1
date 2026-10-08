@@ -85,6 +85,12 @@ append_stage_dest(struct agx3_field_kv *ov, unsigned n, uint16_t dest,
    return n;
 }
 
+/*
+ * staging[dest] <- reg[src], 32-bit, taking scoreboard slot `slot`.
+ *
+ * This is exactly agx3_tex_stage_copy; it is re-exported here so the writeout
+ * path does not have to include the texture header to reach a general encoder.
+ */
 bool
 agx3_stage_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                 uint8_t slot, uint16_t wait_mask,
@@ -183,6 +189,50 @@ agx3_stage_copy_kill(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return false;
 }
 
+static bool
+clr_common(enum agx_isa_encoding enc, const struct agx3_field_kv *ov,
+           unsigned n, uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len)
+{
+   const struct agx3_field_kv base[] = {KV(10, 2)};
+   /* AGX3c corpus by812/by814 and by876/by1419 cover both register
+    * widths and destination cache hints with this selector pair. */
+   const struct agx3_field_kv base_c[] = {
+      KV(10, 2), KV(14, 3), KV(15, 25),
+   };
+   const bool agx3c = enc == AGX_ISA_ENCODING_AGX3C;
+   /* Native G17G pressure loops clear high registers with ep1. G18G
+    * carries the same destination and selectors in its own CLR form. */
+   if (agx3_bind_compose(enc, "clr", agx3c ? AGX3_BIND_APPLE_ORDER : 0,
+                         agx3c ? base_c : base,
+                         agx3c ? 3 : 1, ov, n, out, len))
+      return true;
+   memset(out, 0, AGX3_STAGE_MAX_LENGTH);
+   *len = 0;
+   return false;
+}
+
+bool
+agx3_clr(enum agx_isa_encoding enc, uint16_t dest, bool half, bool hint,
+         uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_STAGE_MAX_LENGTH);
+   *len = 0;
+
+   if ((!b_only(enc) && enc != AGX_ISA_ENCODING_AGX3C) ||
+       dest >= 256 || (!half && (dest & 1)))
+      return false;
+
+   struct agx3_field_kv ov[5];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(9, 2);
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
+   ov[n++] = (struct agx3_field_kv)KV(11, hint ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(10, half ? 1 : 2);
+   return clr_common(enc, ov, n, out, len);
+}
+
 bool
 agx3_stage_ldimm(enum agx_isa_encoding enc, uint16_t dest, uint32_t imm,
                  bool kill, uint8_t slot, uint16_t wait_mask,
@@ -217,28 +267,6 @@ agx3_stage_ldimm(enum agx_isa_encoding enc, uint16_t dest, uint32_t imm,
    return false;
 }
 
-static bool
-clr_common(enum agx_isa_encoding enc, const struct agx3_field_kv *ov,
-           unsigned n, uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len)
-{
-   const struct agx3_field_kv base[] = {KV(10, 2)};
-   /* AGX3c corpus by812/by814 and by876/by1419 cover both register
-    * widths and destination cache hints with this selector pair. */
-   const struct agx3_field_kv base_c[] = {
-      KV(10, 2), KV(14, 3), KV(15, 25),
-   };
-   const bool agx3c = enc == AGX_ISA_ENCODING_AGX3C;
-   /* Native G17G pressure loops clear high registers with ep1. G18G
-    * carries the same destination and selectors in its own CLR form. */
-   if (agx3_bind_compose(enc, "clr", agx3c ? AGX3_BIND_APPLE_ORDER : 0,
-                         agx3c ? base_c : base,
-                         agx3c ? 3 : 1, ov, n, out, len))
-      return true;
-   memset(out, 0, AGX3_STAGE_MAX_LENGTH);
-   *len = 0;
-   return false;
-}
-
 bool
 agx3_stage_clr(enum agx_isa_encoding enc, uint16_t dest, bool kill,
                uint8_t slot, uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len)
@@ -253,27 +281,5 @@ agx3_stage_clr(enum agx_isa_encoding enc, uint16_t dest, bool kill,
 
    struct agx3_field_kv ov[6];
    const unsigned n = append_stage_dest(ov, 0, dest, kill, slot);
-   return clr_common(enc, ov, n, out, len);
-}
-
-bool
-agx3_clr(enum agx_isa_encoding enc, uint16_t dest, bool half, bool hint,
-         uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len)
-{
-   if (out == NULL || len == NULL)
-      return false;
-   memset(out, 0, AGX3_STAGE_MAX_LENGTH);
-   *len = 0;
-
-   if ((!b_only(enc) && enc != AGX_ISA_ENCODING_AGX3C) ||
-       dest >= 256 || (!half && (dest & 1)))
-      return false;
-
-   struct agx3_field_kv ov[5];
-   unsigned n = 0;
-   ov[n++] = (struct agx3_field_kv)KV(9, 2);
-   ov[n++] = (struct agx3_field_kv)KV(2, dest);
-   ov[n++] = (struct agx3_field_kv)KV(11, hint ? 1 : 0);
-   ov[n++] = (struct agx3_field_kv)KV(10, half ? 1 : 2);
    return clr_common(enc, ov, n, out, len);
 }

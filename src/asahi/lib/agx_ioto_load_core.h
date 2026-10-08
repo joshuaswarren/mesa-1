@@ -211,11 +211,10 @@ struct agx_ioto_load_core {
    uint8_t initial_gpr_dwords;
    uint8_t current_gpr_dwords;
    bool fast_path_enabled;
+   /* Materialize every base with the fixed 8-byte LDIMM form, so a recorded
+    * relocation can be rewritten with any address. */
+   bool long_ldimm;
    bool gpu0_round_nops;
-   /* v51y HK_G17P_NATIVE_ESL_WAIT: GPU0 without round NOPs; the packer puts
-    * the slot wait on the first COPY.  A complete round that emits loads but
-    * no COPY still drains with the NOP round. */
-   bool gpu0_copy_wait;
    /* Apple's fixed SCS base register (half-register 8) is initialized lazily
     * and survives finishRound().  ABI buffer slot 4 aliases that register.
     * The native builder relies on caller ordering for the alias, so the
@@ -236,6 +235,7 @@ struct agx_ioto_load_absolute {
 };
 
 #define AGX_IOTO_LOAD_SCS_BASE_HALF 8u
+
 #define AGX_IOTO_LOAD_SCS_BASE      UINT32_C(0x6000)
 
 /* The only ABI-buffer base selectors admitted by Apple's AGX3
@@ -273,18 +273,7 @@ enum agx_ioto_load_alloc_result {
 
 enum agx_ioto_load_encoding agx_ioto_load_target_encoding(enum agx_chip chip);
 
-/* Remains false until every live resource category and loadFrom* form is
- * grounded.  Narrow G17S minimal dispatch admission is tracked separately by
- * agx3_g17s_minimal_compute_dispatch_ready(). */
 bool agx_ioto_load_production_ready(enum agx_chip chip);
-
-/* v51y diagnostic (default off, read once from the environment).
- * HK_G17P_NATIVE_ESL_WAIT=1: G17P (GPU0) setup programs drop the four-NOP
- * load drain in front of the uniform COPYs and instead carry the slot-2
- * scoreboard wait on the first COPY, as native ESL programs do (copy
- * 2b240944).  A drain is kept only in front of a dependent LDDEV whose base
- * is a just-loaded pointer, and after a round that has no COPY. */
-bool agx_ioto_g17p_native_esl_wait_enabled(void);
 
 bool agx_ioto_load_core_init(struct agx_ioto_load_core *core,
                              enum agx_chip chip, struct agx_ioto_load_sink sink,
@@ -301,6 +290,43 @@ bool agx_ioto_load_core_init(struct agx_ioto_load_core *core,
 bool agx_ioto_load_core_set_fixed_base(struct agx_ioto_load_core *core,
                                        uint64_t address,
                                        uint16_t base_half);
+
+/* Drop every materialized base except the fixed one: later loads materialize
+ * their own. Used to give each patchable uniform range its own base. */
+void agx_ioto_load_core_forget_bases(struct agx_ioto_load_core *core);
+
+/* The 8-byte LDIMM form, valid for any immediate, as a little-endian
+ * 64-bit word: the destination fields, and the immediate fields that can be
+ * ORed into an encoding of the same destination with a zero immediate. */
+static inline uint64_t
+agx_ioto_load_ldimm_long_dest(uint16_t dest_half)
+{
+   return (uint64_t)(UINT16_C(0x800c) | (((dest_half >> 1) & 0xf) << 4)) |
+          (uint64_t)(UINT16_C(0x0002) | ((dest_half & 1) << 2) |
+                     (((dest_half >> 5) & 3) << 6) |
+                     (((dest_half >> 7) & 1) << 3)) << 16;
+}
+
+static inline uint64_t
+agx_ioto_load_ldimm_long_immediate(uint32_t immediate)
+{
+   return (uint64_t)((immediate & 0x7f) << 8) |
+          (uint64_t)(((immediate >> 25) & 0x7f) << 9) << 16 |
+          (uint64_t)((((immediate >> 7) & 0xf) << 1) |
+                     (((immediate >> 11) & 3) << 10)) << 32 |
+          (uint64_t)(((immediate >> 13) & 0xf) |
+                     (((immediate >> 17) & 0xff) << 4)) << 48;
+}
+
+static inline void
+agx_ioto_load_pack_ldimm_long(uint16_t dest_half, uint32_t immediate,
+                              uint8_t out[AGX_IOTO_LOAD_LDIMM_MAX_SIZE])
+{
+   const uint64_t word = agx_ioto_load_ldimm_long_dest(dest_half) |
+                         agx_ioto_load_ldimm_long_immediate(immediate);
+   for (unsigned i = 0; i < 8; ++i)
+      out[i] = (uint8_t)(word >> (8 * i));
+}
 
 bool agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
                               uint32_t immediate,
@@ -348,10 +374,6 @@ bool agx_ioto_load_absolute(struct agx_ioto_load_core *core,
                             struct agx_ioto_load_workspace workspace,
                             struct agx_ioto_load_allocation *allocation);
 
-/* Exact bounded direct-source forms.  loadFromSCS lazily emits
- * LDIMM r4l, 0x6000; loadFromABIBuffer addresses one of the seven native ABI
- * base registers above.  Unsafe mixing with aliased ABI slot 4 fails closed.
- * Neither API changes production readiness. */
 bool agx_ioto_load_from_scs(struct agx_ioto_load_core *core,
                             const struct agx_ioto_load_from_fixed *load,
                             const struct agx_ioto_load_emit_ops *ops,

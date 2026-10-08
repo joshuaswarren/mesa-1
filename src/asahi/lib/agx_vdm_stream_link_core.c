@@ -4,25 +4,33 @@
  */
 
 #include "agx_vdm_stream_link_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
-static void
-agx_vdm_stream_link_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_vdm_stream_link_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
+/*
+ * Pack/unpack the exact direct (non-returning) eight-byte VDM Stream Link
+ * emitted by the inspected Apple VDMEncoderGen5 and VDMEncoderGen6 paths:
+ *
+ *   word 0 bits  0..7: target address bits 32..39
+ *   word 0 bits  8..28: zero
+ *   word 0 bits 29..31: VDM block type 4 (Stream Link)
+ *   word 1 bits  0..31: target address bits 0..31
+ *
+ * Unlike other AGX3 command-stream pointers, this target deliberately remains
+ * 40-bit through HAL300. On G17P the encoded value is a render-context-relative
+ * offset, while the neighboring generations use the address domain selected
+ * by their own command-stream ABI. This byte packer preserves the supplied
+ * value; the caller owns that generation-specific translation. The
+ * returning-call form at word 0 bit 28 is not present in the pinned AGX3
+ * emitters and therefore fails closed here.
+ *
+ * The target allowlist contains only identities directly served by the
+ * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X Apple Metal plugins.
+ * G16P and G17A remain closed despite sharing neighboring command-stream
+ * generations.  This helper does not emit a live command or enable command
+ * allocation, submission, or device admission.
+ */
 bool
 agx_vdm_stream_link_core_supported(enum agx_chip chip)
 {
@@ -70,8 +78,8 @@ agx_vdm_stream_link_core_pack(enum agx_chip chip, uint64_t target,
       AGX_VDM_STREAM_LINK_CORE_HEADER | (uint32_t)(target >> 32);
    const uint32_t word1 = (uint32_t)target;
 
-   agx_vdm_stream_link_store_le32(&out->bytes[0], word0);
-   agx_vdm_stream_link_store_le32(&out->bytes[4], word1);
+   agx_store_le32(&out->bytes[0], word0);
+   agx_store_le32(&out->bytes[4], word1);
    out->length = AGX_VDM_STREAM_LINK_CORE_LENGTH;
    return true;
 }
@@ -88,12 +96,12 @@ agx_vdm_stream_link_core_unpack(enum agx_chip chip, const void *bytes,
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t word0 = agx_vdm_stream_link_load_le32(&raw[0]);
+   const uint32_t word0 = agx_load_le32(&raw[0]);
    if ((word0 & AGX_VDM_STREAM_LINK_CORE_HEADER_MASK) !=
        AGX_VDM_STREAM_LINK_CORE_HEADER)
       return false;
 
-   const uint32_t word1 = agx_vdm_stream_link_load_le32(&raw[4]);
+   const uint32_t word1 = agx_load_le32(&raw[4]);
    *target = ((uint64_t)(word0 & UINT32_C(0xff)) << 32) | word1;
    return true;
 }

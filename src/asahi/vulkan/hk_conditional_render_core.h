@@ -25,30 +25,6 @@ hk_conditional_render_is_active(
    return state && state->active && (!in_meta || conditional_meta);
 }
 
-static inline bool
-hk_conditional_render_executes(uint32_t predicate, bool inverted)
-{
-   return (predicate != 0) != inverted;
-}
-
-/* CPU reference for the GPU patch kernel. Kept here so the exact result ABI,
- * including untouched guards around a three/four/five-word record, is host
- * testable without a device. */
-static inline bool
-hk_conditional_render_patch_words(uint32_t *out, const uint32_t *in,
-                                  uint32_t words, uint32_t predicate,
-                                  bool inverted)
-{
-   if (!out || !in || words == 0 || words > HK_CONDITIONAL_RENDER_MAX_WORDS)
-      return false;
-
-   const bool execute = hk_conditional_render_executes(predicate, inverted);
-   for (uint32_t i = 0; i < words; ++i)
-      out[i] = execute ? in[i] : 0;
-
-   return true;
-}
-
 /* Build the exact Vulkan indirect record corresponding to a direct draw.
  * Indexed and non-indexed records intentionally share this helper so the GPU
  * predicate always sees the API-defined 5- or 4-word layout. */

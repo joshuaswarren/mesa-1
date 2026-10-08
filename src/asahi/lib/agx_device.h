@@ -11,6 +11,8 @@
 #endif
 #include "drm-uapi/asahi_drm.h"
 #include "util/ralloc.h"
+#include "util/cnd_monotonic.h"
+#include "util/u_thread.h"
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
 #include "util/timespec.h"
@@ -71,9 +73,9 @@ enum agx_dbg {
    AGX_DBG_FEEDBACK = BITFIELD_BIT(20),
    AGX_DBG_1QUEUE = BITFIELD_BIT(21),
    AGX_DBG_NOMERGE = BITFIELD_BIT(22),
+   AGX_DBG_FAULTTRACE = BITFIELD_BIT(23),
    /* Track BOs without serializing submissions, then decode only a failed
     * submit while its command stream and referenced allocations are live. */
-   AGX_DBG_FAULTTRACE = BITFIELD_BIT(23),
    /* Decode every command stream at submit time without waiting for the GPU. */
    AGX_DBG_ASYNCTRACE = BITFIELD_BIT(24),
 };
@@ -124,6 +126,10 @@ typedef struct {
                            uint32_t count);
    void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
                    size_t length);
+   /* bo_mmap/bo_munmap may map one BO any number of times: each bo_mmap of a
+    * copy of the agx_bo returns a new mapping and touches nothing but the
+    * copy's _map/_map_size (agx_bo_map_owned()). */
+   bool bo_mmap_independent;
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -216,6 +222,11 @@ int agx_drm_bo_sync_for_device(struct agx_device *dev, struct agx_bo *bo,
 void agx_drm_bo_close(struct agx_device *dev, uint32_t handle);
 
 struct agx_device {
+   /* Optional allocator for linked executables: returns a referenced BO with
+    * the allocation at *offset. Without it, each program gets its own BO. */
+   struct agx_bo *(*code_alloc)(struct agx_device *dev, size_t size,
+                                uint32_t *offset);
+
    uint32_t debug;
 
    /* Precompiled libagx binary table */
@@ -328,12 +339,22 @@ struct agx_device {
       /* Current size of the BO cache in bytes (sum of sizes of cached BOs) */
       size_t size;
 
+      /* Optional frontend-wide accounting, shared by logical devices. */
+      uint64_t *size_counter;
+
       /* Monotonic CPU-side trim epoch. Cached BOs stamped before the current
        * epoch were not referenced during the latest periodic interval. */
       uint64_t trim_generation;
 
       /* Number of hits/misses for the BO cache */
       uint64_t hits, misses;
+
+      /* DRM shmem pages remain pinned while a BO is cached. Wake only while
+       * the cache has entries, so an idle client can release stale BOs. */
+      mtx_t idle_lock;
+      struct u_cnd_monotonic idle_cond;
+      thrd_t idle_thread;
+      bool idle_started, idle_stop, idle_pending;
    } bo_cache;
 
    struct agxdecode_ctx *agxdecode;
@@ -421,8 +442,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t length)
     * may therefore inherit a mapping from an earlier allocation even though
     * the new VkDeviceMemory object has never been mapped.  A placed map must
     * move that stale process mapping to the application's reserved address;
-    * returning it would violate VK_EXT_map_memory_placed and used to trip the
-    * caller's exact-address assertion.
+    * returning it would violate VK_EXT_map_memory_placed.
     *
     * Keep ordinary mapping reuse unchanged.  Only the explicit placed-map
     * contract is allowed to relocate an existing BO mapping. */
@@ -442,6 +462,38 @@ static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
    return agx_bo_map_placed(bo, NULL, 0);
+}
+
+/*
+ * A CPU mapping of `bo` owned by the caller rather than shared through
+ * bo->_map: one VkDeviceMemory object's mapping of a BO that other memory
+ * objects alias (an exported allocation and its imports resolve to one
+ * agx_bo), which that object alone maps, unmaps or reserves. `length` bounds
+ * a placed mapping as for agx_bo_map_placed(); *size receives the mapped
+ * length. NULL when the backend cannot map a BO more than once.
+ */
+static inline void *
+agx_bo_map_owned(struct agx_bo *bo, void *fixed_addr, size_t length,
+                 size_t *size)
+{
+   if (!bo->dev->ops.bo_mmap_independent)
+      return NULL;
+
+   struct agx_bo copy = *bo;
+   copy._map = NULL;
+   copy._map_size = 0;
+   bo->dev->ops.bo_mmap(bo->dev, &copy, fixed_addr, fixed_addr ? length : 0);
+   *size = agx_bo_map_size(&copy);
+   return copy._map;
+}
+
+static inline void
+agx_bo_unmap_owned(struct agx_bo *bo, void *map, size_t size)
+{
+   struct agx_bo copy = *bo;
+   copy._map = map;
+   copy._map_size = size;
+   bo->dev->ops.bo_munmap(bo->dev, &copy);
 }
 
 static inline bool

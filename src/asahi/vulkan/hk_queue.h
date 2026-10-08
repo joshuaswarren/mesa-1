@@ -13,20 +13,6 @@
 
 struct hk_device;
 
-/* Camera interaction can enqueue hundreds of small ANGLE submits between the
- * causal fragment launch and the ioctl that observes DeviceLost.  Keep a
- * deeper diagnostic-only ring so the exact graphics stream is not overwritten
- * by downstream synchronization submits. */
-#define HK_G17P_FAULTTRACE_HISTORY 128
-
-struct hk_g17p_faulttrace_payload {
-   void *data;
-   size_t size;
-   void *extra;
-   size_t extra_size;
-   uint64_t sequence;
-};
-
 struct hk_queue {
    struct vk_queue vk;
 
@@ -52,15 +38,6 @@ struct hk_queue {
 
    /* Kinds of streams this queue has ever run, see hk_sync.h. */
    struct hk_sync_queue sync;
-
-   /* Failure-only rolling ioctl history.  A GPU fault is reported to
-    * userspace by a later submit, so decoding only the rejected ioctl loses
-    * the causal command.  Allocated only when faulttrace is explicitly armed. */
-   struct hk_g17p_faulttrace_payload
-      g17p_faulttrace[HK_G17P_FAULTTRACE_HISTORY];
-   uint64_t g17p_faulttrace_sequence;
-   unsigned g17p_faulttrace_head;
-   unsigned g17p_faulttrace_count;
 };
 
 static inline struct hk_device *

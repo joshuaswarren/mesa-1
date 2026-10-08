@@ -20,9 +20,6 @@
 extern "C" {
 #endif
 #define AGX3_ALU_MAX_LENGTH 16u
-/* Ops that alu_compose can carry a wait on (fmin/fmax's tied-operand fsel form
- * is not modeled here; the backend keeps those on the compact packer). */
-bool agx3_alu_wait_supported(enum agx3_alu_op op);
 bool agx3_alu_compose(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       uint16_t dest, uint16_t src0, uint16_t src1,
                       uint16_t src2, uint32_t imm, uint16_t wait_mask,
@@ -217,12 +214,6 @@ bool agx3_alu_srl_imm16(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
-/* G17P unshifted IADD/ISUB, preserving the canonical operation form. */
-bool agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
-                          uint16_t dest, const uint16_t src[2],
-                          const enum agx3_alu_hint hints[2], uint16_t wait_mask,
-                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
 /* The same, with slot B shifted left by `shift` first (f54). Witnessed for
  * ISUB at shifts 1..4; see agx3_alu_core.c for the byte ladder. */
 bool agx3_alu_integer_reg_shift_cache(enum agx_isa_encoding enc,
@@ -233,12 +224,6 @@ bool agx3_alu_integer_reg_shift_cache(enum agx_isa_encoding enc,
                                       uint16_t wait_mask,
                                       uint8_t out[AGX3_ALU_MAX_LENGTH],
                                       uint8_t *len);
-bool agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
-                                uint16_t dest, const uint16_t src[2],
-                                const enum agx3_alu_hint hints[2],
-                                uint8_t shift, uint16_t wait_mask,
-                                uint8_t out[AGX3_ALU_MAX_LENGTH],
-                                uint8_t *len);
 
 /* Native signed/unsigned32 to float32 with post-RA source hints. */
 bool agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
@@ -285,13 +270,6 @@ bool agx3_alu_fcmp_select_zero(enum agx_isa_encoding enc, uint16_t dest,
                              bool dest_cache, uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
-bool agx3_alu_fcmp_select_imm(enum agx_isa_encoding enc, uint16_t dest,
-                             const uint16_t src[2],
-                             const enum agx3_alu_hint hints[2],
-                             unsigned condition, uint8_t if_true,
-                             uint8_t if_false, bool dest_16, bool dest_cache, uint16_t wait_mask,
-                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
 bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
                              const uint16_t src[2], const bool src_16[2],
                              const enum agx3_alu_hint hints[2],
@@ -307,11 +285,9 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
  * an independent (kind, width, value) triple. Selected values use kind 1 for
  * an immediate, kind 2 for a GPR, and kind 3 for a uniform. Fresh G17P
  * select-kind.metal probes change only GPR versus constant-buffer alternatives
- * in fabs(f32) < f16 ? a : b. Kind 3 was previously mislabeled as a register,
- * causing the trig small-input guard to read pointer words from uniforms.
+ * in fabs(f32) < f16 ? a : b.
  *
- * Field map, recovered from the 84 real Apple `fsel` instructions in
- * test/agx3_compose_corpus_vectors.c:
+ * Field map, recovered from 84 Apple `fsel` instructions:
  *
  *   dest          f3    width f11   cache f12
  *   compare 0     f35   kind  f42   width f43   cache f44  last-use f46  ABS f47
@@ -387,16 +363,6 @@ bool agx3_alu_fcmp_select_imm_width_abs(
    bool dest_cache, uint16_t wait_mask, const bool src_abs[2],
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
-/* G17P `b > -a` and its relatives. f65 negates the second full-width
- * comparator and composes with every relation, both result widths and any
- * pair of selected immediates; see agx3_alu_core.c for the byte ladder. */
-bool agx3_alu_fcmp_select_imm_width_neg_second(
-   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
-   const bool src_16[2], const enum agx3_alu_hint hints[2],
-   unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
-   bool dest_cache, uint16_t wait_mask,
-   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
 /* The same, with the negate on either comparator. There is no bit for a
  * negated FIRST source: Apple spells `-a > b` as `b < -a`, so this swaps the
  * operands and reverses the relation rather than refusing. Negating both is
@@ -453,13 +419,6 @@ bool agx3_alu_fadd_stage(enum agx_isa_encoding enc, uint16_t staging_dest,
                          const enum agx3_alu_hint hints[2],
                          uint16_t wait_mask,
                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
-bool agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
-                             uint16_t src, uint8_t immediate, uint16_t addend,
-                             enum agx3_alu_hint src_hint,
-                             enum agx3_alu_hint addend_hint, bool dest_cache,
-                             uint16_t wait_mask,
-                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native f32 FMA with a minifloat multiplier and an optionally negated f32
  * register addend. The addend modifier remains fused and rounds only once. */
@@ -686,10 +645,6 @@ bool agx3_alu_fmul_mixed_half(enum agx_isa_encoding enc, uint16_t dest,
 bool agx3_alu_s16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                         enum agx3_alu_hint hint, uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-bool agx3_alu_f32_to_s16(enum agx_isa_encoding enc, uint16_t dest,
-                        uint16_t src, enum agx3_alu_hint hint,
-                        bool dest_cache, uint16_t wait_mask,
-                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 /* RTZ float-to-16-bit-integer conversion. The source width (f24) and the
  * signed/unsigned mode (f41) are separate fields from the 16-bit result width
  * (f10), so a HALF source is the same instruction with one field changed; see
@@ -759,12 +714,6 @@ bool agx3_alu_fadd_abs_negzero(enum agx_isa_encoding enc, uint16_t dest,
                                uint16_t src, bool dest_cache,
                                enum agx3_alu_hint hint, uint16_t wait_mask,
                                uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
-/* Same bounded operand/wait domain as fadd_minifloat, native f32 multiply. */
-bool agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
-                            uint16_t src, uint16_t immediate, enum agx3_alu_hint hint,
-                            uint16_t wait_mask,
-                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Full grounded G17P minifloat multiply form, including destination
  * retention. `src_abs` is retained as a fail-closed API guard but is always
@@ -941,11 +890,6 @@ bool agx3_alu_rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                   uint8_t *len);
 
-bool agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                   enum agx3_alu_hint hint, bool dest_cache,
-                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                   uint8_t *len);
-
 /*
  * Full-precision reciprocal and reciprocal square root.
  *
@@ -964,11 +908,6 @@ bool agx3_alu_f32rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      enum agx3_alu_hint hint, bool dest_cache,
                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                      uint8_t *len);
-
-bool agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                       enum agx3_alu_hint hint, bool dest_cache,
-                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                       uint8_t *len);
 
 /*
  * Reciprocal square root carrying the source's ABS (f30) and NEG (f31)
@@ -992,75 +931,6 @@ bool agx3_alu_f32rsqrt_mod(enum agx_isa_encoding enc, uint16_t dest,
                            bool dest_cache, uint16_t wait_mask, bool src_neg,
                            bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
                            uint8_t *len);
-
-/*
- * Full-precision base-2 logarithm and exponential.
- *
- * The same two Apple forms as the half encoders below, with both width
- * selectors raised: f10 for the destination and f26 for the source, 1 for one
- * 16-bit half and 2 for a 32-bit pair, exactly as reciprocal square root does
- * it. Only the half widths were wired up, so every 32-bit log2 or exp2 was
- * refused -- and with them every `pow`, which NIR lowers to
- * fexp2(fmul(y, flog2(x))). That is what an sRGB fragment epilog is made of.
- *
- * Witnessed byte-exactly against applegpu_g17p over ten compute kernels:
- *   o[i] = log2(a[i])                      2f 02 56 00 02 00 b0 40 00 00
- *   o[i] = exp2(a[i])                      af 02 56 00 02 00 b0 40 00 00
- *   l = log2(a[i]); o[i] = exp2(l) + l     2f 02 56 04 03 00 92 40 00 00
- *   l = log2(a[i]); o[i] = exp2(l * b[i])  2f 02 56 00 03 00 b0 40 00 00
- *                                          af 02 54 00 02 00 b0 40 00 00
- *
- * One further bit, f30 at bit 63, is deliberately not modelled. Across
- * nineteen witnesses it is set on exactly one shape: the `f32log2` of Metal's
- * `pow(x, y)` built-in, whose result is defined for a negative base with an
- * integral exponent and for a zero base. `powr(x, y)`, which promises a
- * non-negative base, leaves it clear, and so does the hand-written
- * exp2(log2(x) * y) -- which is byte-identical to the built-in's log2 apart
- * from that one bit, and is exactly the shape NIR produces. So the encodings
- * below are Apple's for every shape this compiler can emit; f30 belongs to a
- * domain rule the lowered form does not carry.
- */
-bool agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                      enum agx3_alu_hint hint, bool dest_cache,
-                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                      uint8_t *len);
-
-bool agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                      enum agx3_alu_hint hint, bool dest_cache,
-                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                      uint8_t *len);
-
-/*
- * The same two forms with the grounded source modifiers: f31 negates the
- * source, f30 takes its absolute value. Both are witnessed as single-field
- * differences against the plain forms above, on applegpu_g17p:
- *
- *   o[i] = exp2(a[i])        af 02 56 00 02 00 b0 40 00 00
- *   o[i] = exp2(-a[i])       af 02 56 00 02 00 b0 40 01 00   f31
- *   o[i] = exp2(fabs(a[i]))  af 02 56 00 02 00 b0 c0 00 00   f30
- *   o[i] = exp2(-fabs(a))    af 02 56 00 02 00 b0 c0 01 00   both
- *   o[i] = log2(-a[i])       2f 02 56 00 02 00 b0 40 01 00
- *   o[i] = rsqrt(-a[i])      af 01 56 00 02 00 b0 40 01 00
- *   o[i] = floor(-a[i])      2f 00 56 00 02 00 b0 40 03 00
- *
- * The half forms carry the same field: `half o[i] = exp2(-a[i])` is
- * af 02 56 02 02 04 ac 60 01 00, the plain half form with f31 set.
- *
- * This is also what the f30 note above was missing. Metal's pow(x, y) is
- * defined for a negative base with an integral exponent, so its lowering
- * takes log2 of |x| -- f30 -- while powr() and the hand-written
- * exp2(log2(x) * y) do not. f30 is the absolute-value modifier, not a domain
- * flag.
- *
- * NIR folds a negation into a float source, so `exp(-x)` -- vkQuake's fog
- * term, in every one of its fragment shaders -- reaches the packer as an
- * exp2 with a negated source and refused the whole shader.
- */
-bool agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest,
-                          uint16_t src, enum agx3_alu_hint hint,
-                          bool dest_cache, uint16_t wait_mask, bool src_neg,
-                          bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                          uint8_t *len);
 
 /* Native logarithm with independently selected scalar result/source widths.
  * Any half-width form is currently grounded for no wait or slot 6. */
@@ -1143,23 +1013,11 @@ bool agx3_alu_hrsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                      uint8_t *len);
 
-/* Native scalar half base-2 exponential. */
-bool agx3_alu_hexp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                    enum agx3_alu_hint hint, bool dest_cache,
-                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                    uint8_t *len);
-
 /* Native scalar-half base-2 exponential with the recovered source negate. */
 bool agx3_alu_hexp2_neg(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t src, enum agx3_alu_hint hint,
                         bool dest_cache, uint16_t wait_mask, bool src_neg,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
-/* Native scalar half base-2 logarithm. */
-bool agx3_alu_hlog2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                    enum agx3_alu_hint hint, bool dest_cache,
-                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                    uint8_t *len);
 
 /* Native scalar half floor. */
 bool agx3_alu_hfloor(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
@@ -1183,28 +1041,7 @@ bool agx3_alu_htrunc(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                      uint8_t *len);
 
-/* Native square-root step, multiplied by the input by common Mesa lowering. */
-bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                       enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
-/*
- * The same step with the source's absolute value folded in (f30), which is
- * what `sqrt(abs(x))` -- the standard safe-sqrt idiom -- lowers to. Witnessed
- * against Apple's own kernels, a single-field difference from the control:
- *
- *   o[i] = sqrt(a[i])          2f 01 56 04 03 00 92 40 00 00
- *   o[i] = sqrt(fabs(a[i]))    2f 01 56 04 03 00 92 c0 00 00   f30
- *
- * Source-negate is exposed by the modifier helper below. This ABS-only
- * wrapper preserves the existing call interface.
- */
-bool agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest,
-                            uint16_t src, enum agx3_alu_hint hint,
-                            bool dest_cache, uint16_t wait_mask, bool src_abs,
-                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
-/* Apple metal32023.850, applegpu_g17p, fresh 2026-10-05 kernels:
+/* Apple metal32023.850, applegpu_g17p:
  * sqrt(x)        2f015604030092400000
  * sqrt(-x)       2f015604030092400100 (f31)
  * sqrt(-fabs(x)) 2f015604030092c00100 (f30 and f31)
@@ -1314,6 +1151,90 @@ bool agx3_alu_widen_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                          enum agx3_alu_hint hint, bool src_abs, bool src_neg,
                          bool dest_cache, uint16_t wait_mask,
                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_wait_supported(enum agx3_alu_op op);
+
+bool agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                          uint16_t dest, const uint16_t src[2],
+                          const enum agx3_alu_hint hints[2], uint16_t wait_mask,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                                uint16_t dest, const uint16_t src[2],
+                                const enum agx3_alu_hint hints[2],
+                                uint8_t shift, uint16_t wait_mask,
+                                uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                uint8_t *len);
+
+bool agx3_alu_fcmp_select_imm(enum agx_isa_encoding enc, uint16_t dest,
+                             const uint16_t src[2],
+                             const enum agx3_alu_hint hints[2],
+                             unsigned condition, uint8_t if_true,
+                             uint8_t if_false, bool dest_16, bool dest_cache, uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_fcmp_select_imm_width_neg_second(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
+   const bool src_16[2], const enum agx3_alu_hint hints[2],
+   unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
+   bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src, uint8_t immediate, uint16_t addend,
+                             enum agx3_alu_hint src_hint,
+                             enum agx3_alu_hint addend_hint, bool dest_cache,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_f32_to_s16(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, enum agx3_alu_hint hint,
+                        bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, uint16_t immediate, enum agx3_alu_hint hint,
+                            uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                   enum agx3_alu_hint hint, bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *len);
+
+bool agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+
+bool agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
+bool agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
+bool agx3_alu_hexp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                    enum agx3_alu_hint hint, bool dest_cache,
+                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                    uint8_t *len);
+
+bool agx3_alu_hlog2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                    enum agx3_alu_hint hint, bool dest_cache,
+                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                    uint8_t *len);
+
+bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, enum agx3_alu_hint hint,
+                            bool dest_cache, uint16_t wait_mask, bool src_abs,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 #ifdef __cplusplus
 }

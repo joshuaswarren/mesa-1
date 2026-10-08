@@ -60,16 +60,6 @@ bool agx3_stage_vertex_alu(enum agx_isa_encoding enc, bool fma,
                            const bool live[3], const bool discard[3],
                            uint16_t wait_mask, uint8_t out[16], uint8_t *len);
 
-/*
- * staging[dest] <- reg[src], 32-bit, taking scoreboard slot `slot`.
- *
- * This is exactly agx3_tex_stage_copy; it is re-exported here so the writeout
- * path does not have to include the texture header to reach a general encoder.
- */
-bool agx3_stage_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                     uint8_t slot, uint16_t wait_mask,
-                     uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
-
 /* General-register source liveness is independent of staging liveness.
  * Vertex outputs may export the same GPR more than once; do not kill that
  * source merely because each staging value has a single UVSW consumer. */
@@ -86,16 +76,6 @@ bool agx3_stage_copy_liveness(enum agx_isa_encoding enc, uint16_t dest,
                               uint8_t slot, uint16_t wait_mask,
                               uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
 
-/* staging[dest] <- imm32, 32-bit, taking scoreboard slot `slot`. */
-bool agx3_stage_ldimm(enum agx_isa_encoding enc, uint16_t dest, uint32_t imm,
-                      bool kill, uint8_t slot, uint16_t wait_mask,
-                      uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
-
-/* staging[dest] <- 0, 32-bit, taking scoreboard slot `slot`. */
-bool agx3_stage_clr(enum agx_isa_encoding enc, uint16_t dest, bool kill,
-                    uint8_t slot, uint8_t out[AGX3_STAGE_MAX_LENGTH],
-                    uint8_t *len);
-
 /* staging[dest] <- reg[src] with the operand's last-use bit f13 set. Apple
  * escalates to the ten-byte `copy.ep1` for this; the four-byte compact form
  * cannot carry the bit. */
@@ -108,6 +88,18 @@ bool agx3_stage_copy_kill(enum agx_isa_encoding enc, uint16_t dest,
  * `hint` is the one-bit destination flag f11. */
 bool agx3_clr(enum agx_isa_encoding enc, uint16_t dest, bool half, bool hint,
               uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
+
+bool agx3_stage_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     uint8_t slot, uint16_t wait_mask,
+                     uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
+
+bool agx3_stage_ldimm(enum agx_isa_encoding enc, uint16_t dest, uint32_t imm,
+                      bool kill, uint8_t slot, uint16_t wait_mask,
+                      uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
+
+bool agx3_stage_clr(enum agx_isa_encoding enc, uint16_t dest, bool kill,
+                    uint8_t slot, uint8_t out[AGX3_STAGE_MAX_LENGTH],
+                    uint8_t *len);
 
 #ifdef __cplusplus
 }

@@ -24,12 +24,6 @@
  * stricter question: G17P is admitted only through its exact T8140 contract,
  * while other AGX3 identities stay outside the runnable Honeykrisp path until
  * their independently-versioned pieces are connected.
- *
- * Evidence for every claim below is in research/gpu/, principally
- * GPU_AGX3_APPLE_ENCODER_TABLES_2026-08-23.md (encodings, Apple's tables),
- * GPU_DRIVER_CONTRACT_G15_G17_2026-08-23.md (the kernel core-name and chip-ID
- * decode that makes the mapping below well-founded) and
- * GPU_G15_G16_ISA_GENERATION_2026-08-23.md.
  */
 
 enum agx_chip {
@@ -304,8 +298,6 @@ enum agx_isa agx_chip_isa(enum agx_chip chip);
  * enum; UNKNOWN only for AGX_CHIP_UNKNOWN. */
 enum agx_isa_encoding agx_chip_isa_encoding(enum agx_chip chip);
 
-/* Exhaustive switch definitions, kept as the reference the inline lookups
- * below are tested against (tests/test-chip.c). */
 enum agx_command_stream_generation
 agx_chip_command_stream_generation_reference(enum agx_chip chip);
 
@@ -459,29 +451,8 @@ const char *agx_chip_exact_product_name(enum agx_chip chip);
  * precompiled helper. */
 bool agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip);
 
-/*
- * Hardware ray tracing.
- *
- * Present on every AGX3 part and on none before. Measured rather than
- * assumed: an intersect() call compiles to roughly 900-980 bytes on every
- * AGX3 family against 3315 bytes of software traversal on G13, G14 and the
- * one AGX2 G15 phone part.
- */
 bool agx_chip_has_hardware_ray_tracing(enum agx_chip chip);
 
-/*
- * Whether the compiler must insert explicit scheduling stalls.
- *
- * The M3 base part needs them and nothing else does: stripping its stall words
- * leaves an instruction stream 99.5% identical in count and 85.1%
- * byte-identical to M4's, with a further 7.4% differing only by branch
- * displacements shifted by exactly the removed padding.
- *
- * This is a property of one chip's scheduler, not of its encoding -- G15G
- * shares the agx3b encoder table with every other variant-0 part. It is a
- * codegen obligation, so it is only meaningful for a chip this driver can
- * generate code for.
- */
 bool agx_chip_needs_scheduling_stalls(enum agx_chip chip);
 
 /* Stable name for diagnostics, e.g. "G15X". Never NULL. */
@@ -490,8 +461,6 @@ const char *agx_chip_name(enum agx_chip chip);
 /* Stable name for the instruction set, e.g. "AGX3". Never NULL. */
 const char *agx_isa_name(enum agx_isa isa);
 
-/* Stable name for the encoding, matching its XML table, e.g. "agx3b". Never
- * NULL. */
 const char *agx_isa_encoding_name(enum agx_isa_encoding encoding);
 
 const char *agx_command_stream_generation_name(

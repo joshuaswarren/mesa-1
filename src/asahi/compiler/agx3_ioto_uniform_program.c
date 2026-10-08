@@ -164,14 +164,6 @@ spans_overlap(const void *a, size_t a_size, const void *b, size_t b_size)
 }
 
 static bool
-array_overlaps(const void *array, size_t count, size_t element_size,
-               const void *output, size_t output_size)
-{
-   return count > SIZE_MAX / element_size ||
-          spans_overlap(array, count * element_size, output, output_size);
-}
-
-static bool
 workspace_overlaps(struct agx3_ioto_uniform_program_workspace workspace)
 {
    if (workspace.load_capacity >
@@ -230,17 +222,12 @@ agx3_ioto_uniform_program_body_generate(
           workspace.loads, workspace.load_capacity, workspace.cache,
           workspace.cache_capacity, desc->initial_gpr_dwords,
           desc->fast_path_enabled,
-          agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-             !(chip == AGX_CHIP_G17P && !desc->preshader_inputs &&
-               agx_ioto_g17p_native_esl_wait_enabled())))
+          agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0))
       return false;
-   /* v51y: only G17P has the native copy-carried wait witness. */
-   core.gpu0_copy_wait =
-      chip == AGX_CHIP_G17P && !desc->preshader_inputs &&
-      agx_ioto_g17p_native_esl_wait_enabled();
 
    core.relocations = workspace.relocations;
    core.relocation_capacity = workspace.relocation_capacity;
+   core.long_ldimm = desc->patchable;
    if (desc->preloaded_base_valid &&
        !agx_ioto_load_core_set_fixed_base(
           &core, desc->preloaded_base_address,
@@ -265,6 +252,8 @@ agx3_ioto_uniform_program_body_generate(
    for (size_t i = 0; i < desc->range_count; ++i) {
       const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
       uint32_t dword = 0;
+      if (desc->patchable)
+         agx_ioto_load_core_forget_bases(&core);
       const uint32_t dword_count = range->size_halfs / 2;
       while (dword < dword_count) {
          const uint8_t count =
@@ -314,6 +303,14 @@ agx3_ioto_uniform_program_body_generate(
    if (workspace.relocations)
       *workspace.relocation_count = core.relocation_count;
    return true;
+}
+
+static bool
+array_overlaps(const void *array, size_t count, size_t element_size,
+               const void *output, size_t output_size)
+{
+   return count > SIZE_MAX / element_size ||
+          spans_overlap(array, count * element_size, output, output_size);
 }
 
 bool

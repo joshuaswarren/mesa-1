@@ -4,25 +4,22 @@
  */
 
 #include "agx_vdm_stream_terminate_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
-static void
-agx_vdm_stream_terminate_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_vdm_stream_terminate_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
+/*
+ * Pack/unpack the exact four-byte type-6 VDM Stream Terminate copied by the
+ * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X Apple Metal render
+ * contexts.  Each matching context constructor copies the same constant pair
+ * {0, 0xc0000000}; emitEndCommandStream advances four bytes and writes its
+ * second word.
+ *
+ * The allowlist contains only identities directly served by those plugins;
+ * G16P and G17A remain closed.  The unlocated type-7 Stream Return form also
+ * remains closed.  This helper does not allocate or emit a live command,
+ * submit work, or admit a device.
+ */
 bool
 agx_vdm_stream_terminate_core_supported(enum agx_chip chip)
 {
@@ -64,7 +61,7 @@ agx_vdm_stream_terminate_core_pack(enum agx_chip chip,
    if (!out || !agx_vdm_stream_terminate_core_supported(chip))
       return false;
 
-   agx_vdm_stream_terminate_store_le32(out->bytes,
+   agx_store_le32(out->bytes,
                                        AGX_VDM_STREAM_TERMINATE_CORE_WORD);
    out->length = AGX_VDM_STREAM_TERMINATE_CORE_LENGTH;
    return true;
@@ -78,6 +75,6 @@ agx_vdm_stream_terminate_core_unpack(enum agx_chip chip, const void *bytes,
        !agx_vdm_stream_terminate_core_supported(chip))
       return false;
 
-   return agx_vdm_stream_terminate_load_le32(bytes) ==
+   return agx_load_le32(bytes) ==
           AGX_VDM_STREAM_TERMINATE_CORE_WORD;
 }

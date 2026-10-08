@@ -14,10 +14,7 @@
  * Only the masks Apple's own compiler emitted are accepted; anything else fails
  * closed rather than guessing a class the hardware may interpret differently.
  *
- * Composer-driven; reproduces Apple's witnessed bytes exactly (see
- * test/test-agx3-pixel-core.c). Evidence:
- * research/gpu/GPU_AGX3_TILE_OPS_2026-08-24.md §4 plus the raw corpus at
- * research/gpu/isa-re/gen-x/tileops/corpus/tile{1,2,3,4}/{g15g,g16g,g17s}.
+ * Composer-driven; reproduces Apple's witnessed G15G/G16G/G17S bytes exactly.
  */
 
 #pragma once
@@ -36,9 +33,6 @@ extern "C" {
 
 /* Complete native G17P colour-partition class corpus. */
 #define AGX3_G17P_MAX_COLOUR_PARTITIONS 3u
-
-/* Eight colour targets share the three native synchronization partitions. */
-#define AGX3_G17P_MAX_COLOUR_TARGETS 8u
 
 /*
  * Open the colour-tile protocol. This is the f14=512, f15=1 pixwait form

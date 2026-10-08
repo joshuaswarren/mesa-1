@@ -70,6 +70,100 @@ lower_test_root(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
 int main(void)
 {
+   /* Deadzone's first PSO blends two Texture.Load results from t0 and t1.
+    * This is the same array/index contract as compute, without an API sampler. */
+   {
+      nir_builder b = builder();
+      b.shader->info.stage = MESA_SHADER_FRAGMENT;
+      nir_tex_instr *a = make_fetch(&b, nir_imm_int(&b, 0));
+      nir_tex_instr *z = make_fetch(&b, nir_imm_int(&b, 32));
+      struct d12_nir_g17p_fragment_sample binding = {0};
+      CHECK(d12_nir_lower_g17p_fragment_sample(b.shader, 9, &binding));
+      CHECK(binding.indexed_fetch);
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      CHECK(a->texture_index == 0 && z->texture_index == 1);
+      CHECK(nir_tex_instr_src_index(a, nir_tex_src_texture_handle) < 0);
+      CHECK(nir_tex_instr_src_index(z, nir_tex_src_texture_handle) < 0);
+      nir_validate_shader(b.shader, "G17P fragment array fetches");
+      ralloc_free(b.shader);
+   }
+
+   /* Buffer access has already become a 2D native fetch, while
+    * coord_components retains the API's one-dimensional metadata. Include
+    * index 16, just beyond the packer's four-bit immediate index. */
+   {
+      nir_builder v = builder();
+      v.shader->info.stage = MESA_SHADER_VERTEX;
+      nir_tex_instr *t = make_fetch(&v, nir_imm_int(&v, 16 * 32));
+      nir_instr *store = nir_block_last_instr(t->instr.block);
+      CHECK(store->type == nir_instr_type_intrinsic);
+      CHECK(nir_instr_as_intrinsic(store)->intrinsic == nir_intrinsic_store_global);
+      nir_instr_remove(store);
+      v.cursor = nir_after_instr(&t->instr);
+      int coord = nir_tex_instr_src_index(t, nir_tex_src_coord);
+      t->src[coord].src_type = nir_tex_src_backend1;
+      t->coord_components = 1;
+      for (unsigned i = 0; i < 4; ++i)
+         nir_store_uvs_agx(&v, nir_channel(&v, &t->def, i),
+                           nir_imm_intN_t(&v, i, 16));
+      nir_store_uvs_agx(&v, nir_imm_float(&v, 1.0f),
+                        nir_imm_intN_t(&v, 4, 16));
+      bool found = false;
+      CHECK(d12_nir_g17p_txf_supported(v.shader, &found) && found);
+      CHECK(d12_nir_lower_g17p_txf(v.shader, 9));
+      NIR_PASS(_, v.shader, nir_opt_constant_folding);
+      CHECK(t->texture_index == 16);
+      v.shader->info.outputs_written = VARYING_BIT_POS | VARYING_BIT_PSIZ;
+      agx_preprocess_nir_g17p(v.shader);
+      struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                                  .no_preamble = true};
+      struct agx_shader_part part = {0};
+      CHECK(agx_compile_shader_nir(v.shader, &key, &part));
+      CHECK(part.binary && part.info.uses_txf);
+      free(part.binary);
+      ralloc_free(v.shader);
+   }
+
+   /* A vertex can mix a buffer Load with an explicit-level sample. Reuse
+    * the same native texture array while retaining sampler entry one. */
+   {
+      nir_builder b = builder();
+      b.shader->info.stage = MESA_SHADER_VERTEX;
+      nir_tex_instr *fetch = make_fetch(&b, nir_imm_int(&b, 0));
+      nir_tex_instr *sample = nir_tex_instr_create(b.shader, 4);
+      sample->op = nir_texop_txl;
+      sample->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      sample->dest_type = nir_type_float32;
+      sample->coord_components = 2;
+      sample->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1,
+         nir_imm_vec2(&b, 0.25f, 0.75f));
+      sample->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle,
+         nir_bindless_image_agx(&b, nir_imm_int(&b, 32),
+                                .desc_set = D12_UNIFORM_TEXTURES));
+      sample->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle,
+         nir_imm_intN_t(&b, 1, 16));
+      sample->src[3] = nir_tex_src_for_ssa(nir_tex_src_lod,
+         nir_imm_floatN_t(&b, 0.0f, 16));
+      nir_def_init(&sample->instr, &sample->def, 4, 32);
+      nir_builder_instr_insert(&b, &sample->instr);
+      nir_store_global(&b, &sample->def, nir_load_root_agx(&b),
+                       .align_mul = 16, .write_mask = 15);
+      struct d12_nir_g17p_fragment_sample binding = {0};
+      CHECK(d12_nir_lower_g17p_graphics_resources(b.shader, 9, &binding));
+      CHECK(binding.indexed_fetch && binding.indexed_samplers);
+      CHECK(nir_tex_instr_src_index(fetch, nir_tex_src_texture_handle) < 0);
+      CHECK(nir_tex_instr_src_index(sample, nir_tex_src_texture_handle) < 0);
+      int sampler = nir_tex_instr_src_index(sample, nir_tex_src_sampler_handle);
+      CHECK(sampler >= 0 && nir_src_bit_size(sample->src[sampler].src) == 64);
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      CHECK(sample->texture_index == 1);
+      sampler = nir_tex_instr_src_index(sample, nir_tex_src_sampler_handle);
+      CHECK(sampler >= 0);
+      CHECK(nir_src_as_uint(sample->src[sampler].src) == 1);
+      nir_validate_shader(b.shader, "mixed native32 fetch/sample");
+      ralloc_free(b.shader);
+   }
+
    /* Constant byte offsets become exactly one zero-extended native index. */
    const uint32_t offsets[] = {0,32,96,8192,UINT32_MAX & ~31u};
    for (unsigned i=0; i<sizeof(offsets)/sizeof(offsets[0]); i++) {
@@ -115,7 +209,7 @@ int main(void)
       case 4:t->coord_components=3;break;
       case 5:nir_intrinsic_set_desc_set(handle,D12_UNIFORM_HEAP_TEXTURES);break;
       case 6:break; /* Unaligned input built above with intact SSA use lists. */
-      case 7:b.shader->info.stage=MESA_SHADER_FRAGMENT;break;
+      case 7:b.shader->info.stage=MESA_SHADER_GEOMETRY;break;
       }
       char *before=snapshot(b.shader);bool found=false;
       CHECK(!d12_nir_g17p_txf_supported(b.shader,&found));

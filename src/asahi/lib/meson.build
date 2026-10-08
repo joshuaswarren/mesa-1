@@ -16,8 +16,6 @@ libasahi_lib_files = files(
   'agx3_code_container_core.h',
   'agx_ioto_core.c',
   'agx_ioto_core.h',
-  'agx_ioto_imageblock_core.c',
-  'agx_ioto_imageblock_core.h',
   'agx_ioto_load_core.c',
   'agx_ioto_load_core.h',
   'agx_ioto_preshader_core.c',
@@ -30,12 +28,11 @@ libasahi_lib_files = files(
   'agx_ioto_state_core.h',
   'agx_g17p_draw_state_upload.h',
   'agx_rt_result.h',
-  'agx_scs_layout.c',
-  'agx_scs_layout.h',
   'agx_bo.c',
   'agx_border.c',
   'agx_chip.c',
   'agx_device.c',
+  'agx_bytes.h',
   'agx_linker.c',
   'agx_bg_eot.c',
   'agx_bg_eot_key.c',
@@ -261,16 +258,6 @@ libasahi_lib = static_library(
 
 if with_tests
   test(
-    'asahi-agx-rt-bvh',
-    executable(
-      'asahi-agx-rt-bvh',
-      files('tests/test-rt-bvh.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-agx-chip',
     executable(
       'asahi-agx-chip',
@@ -279,45 +266,6 @@ if with_tests
         'tests/test-chip.c',
       ),
       include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx-bo-map-placed',
-    executable(
-      'asahi-agx-bo-map-placed',
-      files('tests/test-agx-bo-map-placed.c'),
-      include_directories : [
-        inc_include, inc_src, inc_asahi, libasahi_lib_includes,
-        include_directories('../libagx'),
-      ],
-      dependencies : [idep_mesautil],
-      c_args : ['-UNDEBUG'],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-poly-adj-map',
-    executable(
-      'asahi-poly-adj-map',
-      files('tests/test-poly-adj-map.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-precompiled-fill',
-    executable(
-      'asahi-g17p-precompiled-fill',
-      files('tests/test-g17p-precompiled-fill.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil, idep_libagx_shaders_h],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
     ),
     suite : ['asahi'],
   )
@@ -353,104 +301,6 @@ if with_tests
   )
 
   test(
-    'asahi-g17p-early-demote-epilog',
-    executable(
-      'asahi-g17p-early-demote-epilog',
-      files('tests/test-agx-g17p-early-demote-epilog.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-conditional-exports',
-    executable(
-      'asahi-g17p-conditional-exports',
-      files('tests/test-agx-g17p-conditional-exports.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-zs-emit-control-flow',
-    executable(
-      'asahi-zs-emit-control-flow',
-      files('tests/test-agx-zs-emit-control-flow.c'),
-
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-helper-samples',
-    executable(
-      'asahi-g17p-helper-samples',
-      files('tests/test-agx-g17p-helper-samples.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-sample-count',
-    executable(
-      'asahi-sample-count',
-      files('tests/test-agx-sample-count.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-advanced-blend',
-    executable(
-      'asahi-g17p-advanced-blend',
-      files('tests/test-agx-g17p-advanced-blend.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-relocated-blend-constants',
-    executable(
-      'asahi-g17p-relocated-blend-constants',
-      files('tests/test-agx-g17p-relocated-blend-constants.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-epilog-matrix',
-    executable(
-      'asahi-g17p-epilog-matrix',
-      files('tests/test-agx-g17p-epilog-matrix.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-    timeout : 120,
-  )
-
-  test(
     'asahi-g17p-srgb-epilog',
     executable(
       'asahi-g17p-srgb-epilog',
@@ -463,58 +313,10 @@ if with_tests
   )
 
   test(
-    'asahi-g17p-zero-mask-epilog',
-    executable(
-      'asahi-g17p-zero-mask-epilog',
-      files('tests/test-agx-g17p-zero-mask-epilog.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-msaa-epilog',
-    executable(
-      'asahi-g17p-msaa-epilog',
-      files('tests/test-agx-g17p-msaa-epilog.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-g17p-mrt-epilog',
     executable(
       'asahi-g17p-mrt-epilog',
       files('tests/test-agx-g17p-mrt-epilog.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-mrt-msaa-epilog',
-    executable(
-      'asahi-g17p-mrt-msaa-epilog',
-      files('tests/test-agx-g17p-mrt-msaa-epilog.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-emrt-sample-epilog',
-    executable(
-      'asahi-g17p-emrt-sample-epilog',
-      files('tests/test-agx-g17p-emrt-sample-epilog.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
@@ -547,31 +349,6 @@ if with_tests
   )
 
   test(
-    'asahi-g17p-f16-io',
-    executable(
-      'asahi-g17p-f16-io',
-      files('tests/test-agx-f16-io.c'),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-ppp-hal200-raster-core',
-    executable(
-      'asahi-ppp-hal200-raster-core',
-      files(
-        'agx_ppp_hal200_raster_core.c',
-        'tests/test-ppp-hal200-raster-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-agx-va-runtime-hole',
     executable(
       'asahi-agx-va-runtime-hole',
@@ -593,72 +370,6 @@ if with_tests
       files('tests/test-agx-m5-va.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       c_args : ['-UNDEBUG'],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx-scs-layout',
-    executable(
-      'asahi-agx-scs-layout',
-      files(
-        'agx_scs_layout.c',
-        'tests/test-agx-scs-layout.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx-ioto-core',
-    executable(
-      'asahi-agx-ioto-core',
-      files(
-        'agx_ioto_core.c',
-        'tests/test-agx-ioto-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx-ioto-profile-core',
-    executable(
-      'asahi-agx-ioto-profile-core',
-      files(
-        'agx_ioto_profile_core.c',
-        'tests/test-agx-ioto-profile-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx-ioto-imageblock-core',
-    executable(
-      'asahi-agx-ioto-imageblock-core',
-      files(
-        'agx_ioto_imageblock_core.c',
-        'tests/test-agx-ioto-imageblock-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx-ioto-state-core',
-    executable(
-      'asahi-agx-ioto-state-core',
-      files(
-        'agx_ioto_core.c',
-        'agx_ioto_state_core.c',
-        'tests/test-agx-ioto-state-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
     ),
     suite : ['asahi'],
   )
@@ -731,20 +442,6 @@ if with_tests
   )
 
   test(
-    'asahi-agx3-cdm-decode-core',
-    executable(
-      'asahi-agx3-cdm-decode-core',
-      files(
-        'agx3_cdm_decode_core.c',
-        'tests/test-agx3-cdm-decode-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_agx_pack, idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-g18g-capture-vectors',
     executable(
       'asahi-g18g-capture-vectors',
@@ -804,36 +501,6 @@ if with_tests
   )
 
   test(
-    'asahi-agx3-cdm-direct-launch-semantic-core',
-    executable(
-      'asahi-agx3-cdm-direct-launch-semantic-core',
-      files(
-        'agx3_cdm_direct_launch_semantic_core.c',
-        'tests/test-agx3-cdm-direct-launch-semantic-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_agx_pack, idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-agx3-g17p-grid-helper-core',
-    executable(
-      'asahi-agx3-g17p-grid-helper-core',
-      files(
-        'agx3_g17p_grid_helper_core.c',
-        'agx_ioto_core.c',
-        'agx_ioto_state_core.c',
-        'tests/test-agx3-g17p-grid-helper-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_agx_pack, idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-agx3-compute-program-core',
     executable(
       'asahi-agx3-compute-program-core',
@@ -850,43 +517,6 @@ if with_tests
       ),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_agx_pack, idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi_feature_matrix',
-    prog_python,
-    args : [
-      files('tests/test-feature-matrix.py'),
-      meson.project_source_root() / 'src/asahi/lib/agx_chip.h',
-      meson.project_source_root() / 'docs/asahi/apple-gpu-feature-matrix.md',
-    ],
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-texture-side-entry',
-    executable(
-      'asahi-texture-side-entry',
-      files(
-        'agx_texture_side_entry.c',
-        'tests/test-texture-side-entry.c',
-      ),
-      include_directories : [inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-barrier-core',
-    executable(
-      'asahi-vdm-barrier-core',
-      files(
-        'agx_vdm_barrier_core.c',
-        'tests/test-vdm-barrier-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
     ),
     suite : ['asahi'],
   )
@@ -918,20 +548,6 @@ if with_tests
   )
 
   test(
-    'asahi-ppp-hal200-graphics-core',
-    executable(
-      'asahi-ppp-hal200-graphics-core',
-      files(
-         'agx_ppp_hal200_graphics_core.c',
-         'agx_vdm_state_core.c',
-         'tests/test-ppp-hal200-graphics-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-ppp-hal300-graphics-core',
     executable(
       'asahi-ppp-hal300-graphics-core',
@@ -946,169 +562,6 @@ if with_tests
   )
 
   test(
-    'asahi-ppp-hal300-depth-bias-scissor-core',
-    executable(
-      'asahi-ppp-hal300-depth-bias-scissor-core',
-      files(
-        'agx_ppp_hal300_depth_bias_scissor_core.c',
-        'tests/test-ppp-hal300-depth-bias-scissor-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-ppp-hal300-depth-stencil-core',
-    executable(
-      'asahi-ppp-hal300-depth-stencil-core',
-      files(
-        'agx_ppp_hal300_depth_stencil_core.c',
-        'tests/test-ppp-hal300-depth-stencil-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-ppp-viewport-payload-core',
-    executable(
-      'asahi-ppp-viewport-payload-core',
-      files(
-        'agx_ppp_viewport_payload_core.c',
-        'tests/test-ppp-viewport-payload-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-ppp-w-clamp-cull2-core',
-    executable(
-      'asahi-ppp-w-clamp-cull2-core',
-      files(
-        'agx_ppp_w_clamp_cull2_core.c',
-        'tests/test-ppp-w-clamp-cull2-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-ppp-decode-core',
-    executable(
-      'asahi-ppp-decode-core',
-      files(
-        'agx_ppp_decode_core.c',
-        'agx_ppp_hal300_depth_bias_scissor_core.c',
-        'agx_ppp_hal300_depth_stencil_core.c',
-        'agx_ppp_viewport_payload_core.c',
-        'agx_ppp_w_clamp_cull2_core.c',
-        'tests/test-ppp-decode-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-hal200-bind-tail-core',
-    executable(
-      'asahi-vdm-hal200-bind-tail-core',
-      files(
-        'agx_vdm_hal200_bind_tail_core.c',
-        'tests/test-vdm-hal200-bind-tail-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-hal200-direct-draw-core',
-    executable(
-      'asahi-vdm-hal200-direct-draw-core',
-      files(
-        'agx_vdm_hal200_direct_draw_core.c',
-        'tests/test-vdm-hal200-direct-draw-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-ppp-state-core',
-    executable(
-      'asahi-vdm-ppp-state-core',
-      files(
-        'agx_vdm_ppp_state_core.c',
-        'tests/test-vdm-ppp-state-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-ppp-finalizer',
-    executable(
-      'asahi-ppp-finalizer',
-      files(
-        'agx_chip.c',
-        'agx_va_runtime_hole.c',
-        'agx_vdm_ppp_state_core.c',
-        'tests/test-ppp-fini.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_agx_pack, idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-stream-link-core',
-    executable(
-      'asahi-vdm-stream-link-core',
-      files(
-        'agx_vdm_stream_link_core.c',
-        'tests/test-vdm-stream-link-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-stream-terminate-core',
-    executable(
-      'asahi-vdm-stream-terminate-core',
-      files(
-        'agx_vdm_stream_terminate_core.c',
-        'tests/test-vdm-stream-terminate-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-tessellate-core',
-    executable(
-      'asahi-vdm-tessellate-core',
-      files(
-        'agx_vdm_tessellate_core.c',
-        'tests/test-vdm-tessellate-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
     'asahi-vdm-state-update-core',
     executable(
       'asahi-vdm-state-update-core',
@@ -1116,43 +569,6 @@ if with_tests
         'agx_vdm_state_core.c',
         'agx_vdm_state_update_core.c',
         'tests/test-vdm-state-update-core.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-g17p-gallium-command-stream',
-    executable(
-      'asahi-g17p-gallium-command-stream',
-      files(
-        'agx_va_runtime_hole.c',
-        'agx_ppp_hal200_graphics_core.c',
-        'agx_ppp_viewport_payload_core.c',
-        'agx_ppp_w_clamp_cull2_core.c',
-        'agx_vdm_barrier_core.c',
-        'agx_vdm_hal200_bind_tail_core.c',
-        'agx_vdm_index_list_core.c',
-        'agx_vdm_ppp_state_core.c',
-        'agx_vdm_state_core.c',
-        'agx_vdm_state_update_core.c',
-        'agx_vdm_stream_terminate_core.c',
-        'tests/test-g17p-gallium-command-stream.c',
-      ),
-      include_directories : [inc_include, inc_src, inc_asahi],
-      dependencies : [idep_mesautil],
-    ),
-    suite : ['asahi'],
-  )
-
-  test(
-    'asahi-vdm-state-core',
-    executable(
-      'asahi-vdm-state-core',
-      files(
-        'agx_vdm_state_core.c',
-        'tests/test-vdm-state-core.c',
       ),
       include_directories : [inc_include, inc_src, inc_asahi],
     ),

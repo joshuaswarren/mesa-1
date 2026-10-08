@@ -53,10 +53,6 @@ bool agx_vdm_hal200_direct_draw_body_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_direct_draw_fields *fields,
    struct agx_vdm_hal200_direct_draw_body *out);
 
-bool agx_vdm_hal200_direct_draw_unpack(
-   enum agx_chip chip, const void *bytes, size_t size,
-   struct agx_vdm_hal200_direct_draw_fields *fields);
-
 /* Metal emits the leading PPP selector as part of render-state publication.
  * When state is unchanged, only the native draw body is legal in the stream.
  * Copy the correct slice of an already validated packed draw atomically. */
@@ -103,10 +99,6 @@ bool agx_vdm_hal200_index_range(uint64_t address, uint64_t range_B,
                                 uint32_t first_index, uint32_t count,
                                 uint8_t index_size_B, uint64_t *relocated,
                                 uint32_t *size_word);
-
-bool agx_vdm_hal200_u16_index_range(uint64_t address, uint64_t range_B,
-                                    uint32_t first_index, uint32_t count,
-                                    uint64_t *relocated, uint32_t *size_word);
 
 bool agx_vdm_hal200_indexed_draw_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_indexed_draw_fields *fields,

@@ -1,8 +1,0 @@
-#version 450
-layout(local_size_x = 32) in;
-layout(set = 0, binding = 0, std430) buffer Output { uint values[]; } output_buffer;
-shared uint scratch;
-#define values output_buffer.values
-void main() {
-   if (gl_LocalInvocationID.x == 0u) scratch = 0u; barrier(); atomicAdd(scratch, 1u); barrier(); values[gl_LocalInvocationID.x] = scratch;
-}

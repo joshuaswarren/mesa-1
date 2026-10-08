@@ -2,12 +2,8 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Exact anonymous-field packing for the directly recovered AGX3 Ioto
- * SPECLM/LDSHDR/SPECTPR state tail.
- *
- * This is a research/validation surface.  It deliberately assigns no
- * graphics meaning to the recovered fields, changes no production state
- * path, and does not admit an AGX3 device.
+ * Packing of the AGX3 Ioto SPECLM/LDSHDR/SPECTPR state tail of G17P compute
+ * and graphics programs, by Apple's anonymous field ids.
  */
 
 #pragma once
@@ -34,15 +30,6 @@ extern "C" {
 struct agx_ioto_state {
    uint64_t f[AGX_IOTO_STATE_FIELD_COUNT];
 };
-
-/* Each packer is transactional: output is unchanged on every failure. */
-bool agx_ioto_state_pack_speclm(enum agx_chip chip,
-                                const struct agx_ioto_state *state,
-                                void *output, size_t capacity);
-
-bool agx_ioto_state_pack_ldshdr(enum agx_chip chip,
-                                const struct agx_ioto_state *state,
-                                void *output, size_t capacity);
 
 bool agx_ioto_state_pack_spectpr(enum agx_chip chip,
                                  const struct agx_ioto_state *state,
@@ -86,18 +73,6 @@ bool agx_ioto_g17p_fragment_speclm_build(
    const struct agx_ioto_g17p_imageblock *imageblock, void *output,
    size_t capacity);
 
-/* v51y diagnostics (default off, read once from the environment).
- *
- * HK_G17P_NATIVE_SPECLM=1: every fragment-class launch (FS, background,
- * end-of-tile) emits the no-imageblock SPECLM 77002a41 00000000 that all 45
- * native ESL programs of the light/heavy captures carry, instead of the
- * LdShdrTransformFragment imageblock record.  The imageblock geometry is
- * still validated; the render pass's tile-buffer allocation (kernel
- * register 0x10051) is unchanged.
- *
- * HK_G17P_NATIVE_ESL_WAIT is declared in agx_ioto_load_core.h. */
-bool agx_ioto_g17p_native_speclm_enabled(void);
-
 /*
  * Type 0 packs SPECLM, LDSHDR, SPECTPR in that order.  Type 1 packs only
  * LDSHDR and SPECTPR and requires every SPECLM field to be zero.  Other type
@@ -121,12 +96,6 @@ bool agx_ioto_state_tail_pack_shader(
  * fields.  `tail` is unchanged on failure. */
 bool agx_ioto_g17s_minimal_compute_tail_build(
    uint64_t shader_va, struct agx_ioto_state_tail *tail);
-
-/* Exact A18 Pro/G17P LDSHDR constructor defaults plus shader address.  This is
- * a single-record producer, not a complete G17P state tail: SPECLM/SPECTPR
- * remain runtime-context dependent.  `state` is unchanged on failure. */
-bool agx_ioto_g17p_compute_ldshdr_build(
-   uint64_t shader_va, struct agx_ioto_state *state);
 
 /* Pack the minimal G17P LDSHDR used by compiler-generated graphics and
  * compute programs directly. This is equivalent to the semantic state with
@@ -160,9 +129,6 @@ bool agx_ioto_g17p_runtime_compute_tail_build_shared(
    uint32_t threadgroup_memory_size_B,
    struct agx_ioto_state_tail_output *output);
 
-/* Build the exact pre-runtime G17P SPECTPR fields from Apple's raw compiler
- * spill-byte and D values.  These are intentionally not sourced from Mesa's
- * scratch_size: the runtime may subsequently overwrite f10/f11/f20/f22. */
 bool agx_ioto_g17p_compiler_spectpr_build(
    uint32_t spill_bytes, uint32_t d_value, struct agx_ioto_state *state);
 
@@ -171,6 +137,14 @@ bool agx_ioto_g17p_compiler_spectpr_build(
  * 27-field semantic state. `output` is unchanged on failure. */
 bool agx_ioto_g17p_compiler_spectpr_pack(
    uint32_t spill_bytes, uint32_t d_value, void *output, size_t capacity);
+
+bool agx_ioto_state_pack_speclm(enum agx_chip chip,
+                                const struct agx_ioto_state *state,
+                                void *output, size_t capacity);
+
+bool agx_ioto_state_pack_ldshdr(enum agx_chip chip,
+                                const struct agx_ioto_state *state,
+                                void *output, size_t capacity);
 
 #ifdef __cplusplus
 }

@@ -251,14 +251,6 @@ agx_ioto_find_form(enum agx_ioto_encoding encoding, enum agx_ioto_kind kind)
    return NULL;
 }
 
-size_t
-agx_ioto_kind_size(enum agx_chip chip, enum agx_ioto_kind kind)
-{
-   const struct agx_ioto_form *form =
-      agx_ioto_find_form(agx_ioto_target_encoding(chip), kind);
-   return form ? form->length : 0;
-}
-
 static bool
 agx_ioto_prefix_matches(const struct agx_ioto_form *form,
                         const uint8_t *bytes, size_t available)
@@ -495,24 +487,5 @@ agx_ioto_decode_program_record(enum agx_chip chip, const void *stream,
    out->ioto = record;
    memcpy(out->bytes, record.bytes, record.length);
    *consumed = record_size;
-   return true;
-}
-
-bool
-agx_ioto_record_copy(enum agx_chip chip, const struct agx_ioto_record *record,
-                     void *out, size_t out_size)
-{
-   if (!record || !out || record->kind <= AGX_IOTO_KIND_INVALID ||
-       record->kind >= AGX_IOTO_KIND_COUNT || record->length == 0 ||
-       record->length > AGX_IOTO_MAX_RECORD_SIZE || out_size < record->length)
-      return false;
-
-   const struct agx_ioto_form *form =
-      agx_ioto_find_form(agx_ioto_target_encoding(chip), record->kind);
-   if (!form || form->length != record->length ||
-       !agx_ioto_prefix_matches(form, record->bytes, record->length))
-      return false;
-
-   memcpy(out, record->bytes, record->length);
    return true;
 }

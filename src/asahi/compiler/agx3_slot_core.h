@@ -16,7 +16,6 @@
  * and which slots each instruction waits -- expressed over a normalized
  * instruction list so it is testable on its own. The wait-bit field ids per
  * mnemonic (agx3_wait_field_map) and the actual deposit are the caller's.
- * Evidence: research/gpu/GPU_AGX3_LOCAL_STACK_WAIT_2026-08-24.md S6.3.
  */
 
 #pragma once

@@ -169,6 +169,13 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
                     enc == AGX_ISA_ENCODING_AGX3C &&
                     width == AGX3_TILE_W32 && chan_mask == 1 &&
                     !(tile_off % 4);
+   /* Matched native G17G/G18G R32Float/Uint/Sint framebuffer-fetch
+    * programs use the whole-pixel immediate form with mask1. Only f26
+    * changes from the RGBA32 control; G18's f79=2 remains in transcode. */
+   bool scalar_pixel = enc == AGX_ISA_ENCODING_AGX3C &&
+                       !sample.reg && !sample.kill && sample.value == 1 &&
+                       width == AGX3_TILE_W32 && chan_mask == 1 &&
+                       !(tile_off % 4);
    if (sample.g17_register &&
        (enc != AGX_ISA_ENCODING_AGX3C || !sample.reg ||
         (width != AGX3_TILE_W8 && width != AGX3_TILE_W16 &&
@@ -187,7 +194,7 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
     *
     * None carries an incoming wait. */
    if (!common_ok(dest, width, chan_mask, sample, enc, wait_mask, tile_off) ||
-       (chan_mask != 15 && !scalar_ms &&
+       (chan_mask != 15 && !scalar_ms && !scalar_pixel &&
         !(is_b(enc) &&
           (chan_mask == 1 || chan_mask == 3 ||
            (chan_mask == 7 && width == AGX3_TILE_W16)))) ||

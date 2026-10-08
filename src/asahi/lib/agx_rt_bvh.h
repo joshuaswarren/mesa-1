@@ -38,6 +38,7 @@
 #define AGX_RT_BVH_H
 
 #include <stdbool.h>
+#include "agx_bytes.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -100,28 +101,6 @@ _Static_assert(sizeof(float) == sizeof(uint32_t),
                "RIA triangle leaves require 32-bit float");
 #endif
 
-static inline uint32_t
-agx_rt_bvh_load_le32(const uint8_t *src)
-{
-   uint32_t value = 0;
-
-   for (unsigned i = 0; i < 4; ++i)
-      value |= (uint32_t)src[i] << (i * 8);
-
-   return value;
-}
-
-static inline uint64_t
-agx_rt_bvh_load_le64(const uint8_t *src)
-{
-   uint64_t value = 0;
-
-   for (unsigned i = 0; i < 8; ++i)
-      value |= (uint64_t)src[i] << (i * 8);
-
-   return value;
-}
-
 /* Decode the exact 48-byte hardware AABB leaf emitted by the public Metal
  * Gen1 builder.  `available` is the remaining mapped-buffer span, so a larger
  * value is valid; this helper consumes only the first fixed-size record. */
@@ -139,22 +118,22 @@ agx_rt_bvh_gen1_hw_aabb_leaf_unpack(
       return false;
 
    const uint8_t *bytes = (const uint8_t *)packed;
-   leaf->header = agx_rt_bvh_load_le32(bytes);
+   leaf->header = agx_load_le32(bytes);
    if ((leaf->header & 0xffu) != AGX_RT_BVH_GEN1_HW_AABB_LEAF_MARKER) {
       memset(leaf, 0, sizeof(*leaf));
       return false;
    }
 
    for (unsigned axis = 0; axis < 3; ++axis) {
-      uint32_t bits = agx_rt_bvh_load_le32(bytes + 4 + axis * 4);
+      uint32_t bits = agx_load_le32(bytes + 4 + axis * 4);
       memcpy(&leaf->minimum[axis], &bits, sizeof(bits));
-      bits = agx_rt_bvh_load_le32(bytes + 16 + axis * 4);
+      bits = agx_load_le32(bytes + 16 + axis * 4);
       memcpy(&leaf->maximum[axis], &bits, sizeof(bits));
    }
 
-   leaf->packed_ids_and_flags = agx_rt_bvh_load_le64(bytes + 28);
-   leaf->word36 = agx_rt_bvh_load_le32(bytes + 36);
-   leaf->primitive_data_relative_word = agx_rt_bvh_load_le64(bytes + 40);
+   leaf->packed_ids_and_flags = agx_load_le64(bytes + 28);
+   leaf->word36 = agx_load_le32(bytes + 36);
+   leaf->primitive_data_relative_word = agx_load_le64(bytes + 40);
    if (leaf->packed_ids_and_flags & (UINT64_C(1) << 62)) {
       memcpy(&leaf->primitive_data_relative,
              &leaf->primitive_data_relative_word,
@@ -220,21 +199,21 @@ agx_rt_bvh_gen1_hw_triangle_leaf_unpack(
       return false;
 
    const uint8_t *bytes = (const uint8_t *)packed;
-   if (agx_rt_bvh_load_le32(bytes) !=
+   if (agx_load_le32(bytes) !=
        AGX_RT_BVH_GEN1_HW_TRIANGLE_LEAF_MARKER)
       return false;
 
    for (unsigned axis = 0; axis < 3; ++axis) {
       for (unsigned lane = 0; lane < 4; ++lane) {
          const uint32_t bits =
-            agx_rt_bvh_load_le32(bytes + 4 + 4 * (axis * 4 + lane));
+            agx_load_le32(bytes + 4 + 4 * (axis * 4 + lane));
          memcpy(&leaf->coordinate[axis][lane], &bits, sizeof(bits));
       }
    }
 
-   leaf->geometry_word = agx_rt_bvh_load_le32(bytes + 52);
-   leaf->primitive_word[0] = agx_rt_bvh_load_le32(bytes + 56);
-   leaf->primitive_word[1] = agx_rt_bvh_load_le32(bytes + 60);
+   leaf->geometry_word = agx_load_le32(bytes + 52);
+   leaf->primitive_word[0] = agx_load_le32(bytes + 56);
+   leaf->primitive_word[1] = agx_load_le32(bytes + 60);
    return true;
 }
 
@@ -265,7 +244,7 @@ agx_rt_bvh_gen1_header_unpack(const void *packed,
 
    const uint8_t *bytes = (const uint8_t *)packed;
    for (unsigned i = 0; i < 8; ++i)
-      header->words[i] = agx_rt_bvh_load_le64(bytes + (i * 8));
+      header->words[i] = agx_load_le64(bytes + (i * 8));
 
    return true;
 }
@@ -526,23 +505,6 @@ agx_rt_bvh_ceil_nonneg(float value)
    return truncated == value ? truncated : truncated + 1.0f;
 }
 
-/* The exponent byte of the smallest power of two at least `value`, for a
- * strictly positive finite `value`.  Zero if that power is below the
- * normal range. */
-static inline unsigned
-agx_rt_bvh_ceil_pow2_exponent(float value)
-{
-   const uint32_t bits = agx_rt_bvh_bitcast_f32_to_u32(value);
-   const uint32_t exponent = (bits >> 23) & 0xffu;
-
-   if (exponent == 0)
-      return 0; /* subnormal: below the representable step range */
-
-   /* An exact power of two is already the answer; anything else needs the
-    * next one up. */
-   return (bits & UINT32_C(0x7fffff)) ? exponent + 1u : exponent;
-}
-
 /* The per-axis grid step.  A raw binary32 exponent byte, so exp 127 is 1.0f
  * and exp 0 is +0.0f rather than a subnormal. */
 static inline float
@@ -570,35 +532,6 @@ agx_rt_bvh_gen1_quantization_frame_unpack(
    return true;
 }
 
-static inline bool
-agx_rt_bvh_gen1_quantization_frame_pack(
-   struct agx_rt_bvh_gen1_header *header,
-   const struct agx_rt_bvh_gen1_quantization_frame *frame)
-{
-   if (!header || !frame)
-      return false;
-
-   for (unsigned axis = 0; axis < 3; ++axis) {
-      const uint32_t bits = agx_rt_bvh_bitcast_f32_to_u32(frame->origin[axis]);
-
-      /* The decoder drops the low sixteen mantissa bits, so only a value that
-       * is already exactly representable may be written here.  Fitting the
-       * frame is what rounds; this only deposits. */
-      if (bits & 0xffffu)
-         return false;
-
-      header->words[1 + axis] = (header->words[1 + axis] & ~UINT64_C(0xffff)) |
-                                (uint64_t)(bits >> 16);
-   }
-
-   header->words[0] = (header->words[0] & ~(UINT64_C(0xff) << 8)) |
-                      ((uint64_t)frame->exponent[0] << 8);
-   header->words[4] = (header->words[4] & ~UINT64_C(0xffff)) |
-                      ((uint64_t)frame->exponent[1] << 8) |
-                      (uint64_t)frame->exponent[2];
-   return true;
-}
-
 /* Decode one child's bounds to world space.  Apple's exact arithmetic. */
 static inline bool
 agx_rt_bvh_gen1_child_bounds(const struct agx_rt_bvh_gen1_header *header,
@@ -620,112 +553,6 @@ agx_rt_bvh_gen1_child_bounds(const struct agx_rt_bvh_gen1_header *header,
       minimum[axis] = frame.origin[axis] + (float)bounds.component[axis] * step;
       maximum[axis] =
          frame.origin[axis] + (float)bounds.component[3 + axis] * step;
-   }
-
-   return true;
-}
-
-/* The node's own box.  Apple reconstructs it as origin .. origin + 128 * step,
- * so the grid has 128 cells per axis while a component only reaches 127. */
-static inline bool
-agx_rt_bvh_gen1_node_bounds(const struct agx_rt_bvh_gen1_header *header,
-                            float minimum[3], float maximum[3])
-{
-   struct agx_rt_bvh_gen1_quantization_frame frame;
-
-   if (!minimum || !maximum)
-      return false;
-   if (!agx_rt_bvh_gen1_quantization_frame_unpack(header, &frame))
-      return false;
-
-   for (unsigned axis = 0; axis < 3; ++axis) {
-      const float step = agx_rt_bvh_gen1_axis_step(frame.exponent[axis]);
-
-      minimum[axis] = frame.origin[axis];
-      maximum[axis] = frame.origin[axis] + 128.0f * step;
-   }
-
-   return true;
-}
-
-/* Round one coordinate down to bfloat16.  Truncating the mantissa moves a
- * positive value toward -inf already, but moves a negative one toward +inf,
- * which would put the origin above the box and make the minimum side
- * unrepresentable.  Negative values therefore round away from zero. */
-static inline float
-agx_rt_bvh_gen1_origin_round_down(float value)
-{
-   const uint32_t bits = agx_rt_bvh_bitcast_f32_to_u32(value);
-   uint32_t half = bits >> 16;
-
-   if ((bits & UINT32_C(0x80000000)) && (bits & 0xffffu))
-      ++half;
-
-   return agx_rt_bvh_bitcast_u32_to_f32(half << 16);
-}
-
-/*
- * Choose a frame that covers [minimum, maximum] on every axis with the
- * tightest step that keeps every quantised component inside 0..127.
- *
- * Fails rather than producing a frame that cannot contain the box: a
- * non-finite coordinate, an inverted box, or an extent too large for the
- * exponent range.
- */
-static inline bool
-agx_rt_bvh_gen1_quantization_frame_fit(
-   const float minimum[3], const float maximum[3],
-   struct agx_rt_bvh_gen1_quantization_frame *frame)
-{
-   if (!minimum || !maximum || !frame)
-      return false;
-
-   for (unsigned axis = 0; axis < 3; ++axis) {
-      if (!agx_rt_bvh_is_finite(minimum[axis]) ||
-          !agx_rt_bvh_is_finite(maximum[axis]))
-         return false;
-      if (!(minimum[axis] <= maximum[axis]))
-         return false;
-
-      const float origin = agx_rt_bvh_gen1_origin_round_down(minimum[axis]);
-
-      if (!agx_rt_bvh_is_finite(origin) || origin > minimum[axis])
-         return false;
-
-      const float extent = maximum[axis] - origin;
-      unsigned exponent;
-
-      if (extent <= 0.0f) {
-         /* A degenerate axis: step +0.0 puts both corners on the origin. */
-         frame->origin[axis] = origin;
-         frame->exponent[axis] = 0;
-         continue;
-      }
-
-      /* Smallest power of two at least extent / 127. */
-      exponent = agx_rt_bvh_ceil_pow2_exponent(extent / 127.0f);
-
-      if (exponent < 1)
-         exponent = 1;
-      else if (exponent > 254)
-         return false;
-
-      /* Verify rather than trust the exponent arithmetic: bump the step until
-       * the maximum corner actually quantises inside the grid.  This settles
-       * the boundary cases frexpf alone does not. */
-      for (;;) {
-         const float step = agx_rt_bvh_gen1_axis_step((uint8_t)exponent);
-
-         if (step > 0.0f &&
-             agx_rt_bvh_ceil_nonneg((maximum[axis] - origin) / step) <= 127.0f)
-            break;
-
-         if (++exponent > 254)
-            return false;
-      }
-
-      frame->origin[axis] = origin;
-      frame->exponent[axis] = (uint8_t)exponent;
    }
 
    return true;
@@ -787,50 +614,6 @@ agx_rt_bvh_gen1_quantize_child_bounds(
    return true;
 }
 
-/* Deposit six quantised components into a child's word, preserving the low
- * twenty-two bits, which carry the leaf lane counts rather than bounds. */
-static inline bool
-agx_rt_bvh_gen1_header_set_quantized_child_bounds(
-   struct agx_rt_bvh_gen1_header *header, unsigned child,
-   const struct agx_rt_bvh_gen1_quantized_bounds *bounds)
-{
-   static const unsigned shift[6] = {57, 50, 43, 36, 29, 22};
-
-   if (!header || !bounds || child >= 8)
-      return false;
-
-   uint64_t word = header->words[child] & ((UINT64_C(1) << 22) - 1);
-
-   for (unsigned i = 0; i < 6; ++i) {
-      if (bounds->component[i] > 0x7fu)
-         return false;
-
-      word |= (uint64_t)(bounds->component[i] & 0x7fu) << shift[i];
-   }
-
-   header->words[child] = word;
-   return true;
-}
-
-/* Encode one child's world-space box against the header's own frame. */
-static inline bool
-agx_rt_bvh_gen1_header_encode_child_bounds(
-   struct agx_rt_bvh_gen1_header *header, unsigned child,
-   const float minimum[3], const float maximum[3])
-{
-   struct agx_rt_bvh_gen1_quantization_frame frame;
-   struct agx_rt_bvh_gen1_quantized_bounds bounds;
-
-   if (!agx_rt_bvh_gen1_quantization_frame_unpack(header, &frame))
-      return false;
-   if (!agx_rt_bvh_gen1_quantize_child_bounds(&frame, minimum, maximum,
-                                              &bounds))
-      return false;
-
-   return agx_rt_bvh_gen1_header_set_quantized_child_bounds(header, child,
-                                                            &bounds);
-}
-
 /* Unpack explicitly instead of casting mapped GPU memory.  This accepts
  * unaligned nodes and gives the same result on either host byte order. */
 static inline bool
@@ -842,7 +625,7 @@ agx_rt_bvh_gen5_header_unpack(const void *packed,
 
    const uint8_t *bytes = (const uint8_t *)packed;
    for (unsigned i = 0; i < 8; ++i)
-      header->words[i] = agx_rt_bvh_load_le64(bytes + (i * 8));
+      header->words[i] = agx_load_le64(bytes + (i * 8));
 
    return true;
 }

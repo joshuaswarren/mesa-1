@@ -10,22 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool
-agx_ioto_env_flag(const char *name)
-{
-   const char *value = getenv(name);
-   return value && *value && strcmp(value, "0") && strcmp(value, "false");
-}
-
-bool
-agx_ioto_g17p_native_speclm_enabled(void)
-{
-   static int cached = -1;
-   if (cached < 0)
-      cached = agx_ioto_env_flag("HK_G17P_NATIVE_SPECLM");
-   return cached;
-}
-
 enum agx_ioto_state_encoding {
    AGX_IOTO_STATE_ENCODING_GPU0,
    AGX_IOTO_STATE_ENCODING_GPU1,
@@ -362,6 +346,7 @@ agx_ioto_state_pack_record(enum agx_chip chip,
    return true;
 }
 
+/* Each packer is transactional: output is unchanged on every failure. */
 bool
 agx_ioto_state_pack_speclm(enum agx_chip chip,
                            const struct agx_ioto_state *state, void *output,
@@ -460,7 +445,7 @@ agx_ioto_g17p_fragment_speclm_build(
    };
 
    uint8_t staged[AGX_IOTO_SPECLM_SIZE];
-   if (!sample_size_B || agx_ioto_g17p_native_speclm_enabled()) {
+   if (!sample_size_B) {
       memcpy(staged, no_imageblock, sizeof(staged));
    } else {
       const uint8_t *seed =
@@ -562,27 +547,6 @@ agx_ioto_g17s_minimal_compute_tail_build(
       return false;
 
    *tail = staged;
-   return true;
-}
-
-bool
-agx_ioto_g17p_compute_ldshdr_build(
-   uint64_t shader_va, struct agx_ioto_state *state)
-{
-   if (!state)
-      return false;
-
-   struct agx_ioto_state staged = {0};
-   staged.f[0] = shader_va;
-   staged.f[1] = 3;
-   staged.f[23] = 1;
-
-   uint8_t packed[AGX_IOTO_LDSHDR_SIZE];
-   if (!agx_ioto_state_pack_ldshdr(AGX_CHIP_G17P, &staged, packed,
-                                   sizeof(packed)))
-      return false;
-
-   *state = staged;
    return true;
 }
 

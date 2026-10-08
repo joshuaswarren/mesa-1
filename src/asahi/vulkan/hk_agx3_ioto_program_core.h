@@ -32,11 +32,8 @@ bool hk_agx3_g17p_constant_program_from_binary(
    uint64_t allocation_va, size_t allocation_size,
    struct agx_ioto_constant_program *output);
 
-/* Native uniform loads address 512 half-registers in complete dwords. */
 #define HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE 1024u
 
-/* Pack an argument block with zero padding through the last native load.
- * Leaves output and *written unchanged on failure. */
 bool hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
                                       void *output, size_t capacity,
                                       size_t *written);
@@ -50,26 +47,15 @@ struct hk_agx3_ioto_program_desc {
    uint16_t profile_payload1;
 };
 
-/*
- * Byte-generation bridge only; success does not admit a physical device.
- * This exposes only the straight-line absent-preshader form and preserves
- * output and *written on every failure.
- */
 bool hk_agx3_ioto_program_generate(
    enum agx_chip chip, const struct hk_agx3_ioto_program_desc *desc,
    void *output, size_t capacity, size_t *written);
 
-/*
- * Compose an exact terminal suffix without PIXREL.  Inline/external suffixes
- * replace the absent 0e terminal; they are never appended after it.
- */
 bool hk_agx3_ioto_program_generate_no_pixrel(
    enum agx_chip chip, const struct hk_agx3_ioto_program_desc *desc,
    const struct agx_ioto_preshader_desc *preshader, void *output,
    size_t capacity, size_t *written);
 
-/* Honeykrisp bridge for G17P's default-profile program with no resource-load
- * records. */
 bool hk_agx3_g17p_no_resource_program_generate(
    enum agx_chip chip, uint64_t program_va,
    const struct agx_ioto_state_tail_output *packed_tail, void *output,
@@ -90,6 +76,7 @@ struct hk_agx3_g17p_graphics_program_desc {
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
    bool preloaded_root;
+   bool patchable;
    struct agx_ioto_constant_program constant_program;
    const struct agx3_cprog_inputs *cprog_inputs;
 };
@@ -101,7 +88,7 @@ struct hk_agx3_g17p_graphics_program_desc {
  * program can publish. Aliases the composer's capacity so the driver and
  * agx3_g17p_graphics_program_bound() can never disagree about it.
  *
- * The worst case is a vertex program, which can request all seven:
+ * The worst case is a vertex program, which can request all nineteen:
  *
  *   1. vertex attribute bases              nr_attribs != 0
  *   2. vertex attribute clamps             nr_attribs != 0
@@ -110,17 +97,15 @@ struct hk_agx3_g17p_graphics_program_desc {
  *   5. texture/sampler heap pointers       agx3_indexed_sampler_valid
  *   6. root descriptor                     shader/prolog root || set_count
  *   7. promoted constants                  rodata.size_16 != 0
+ *   8-19. uniform DMA spans, two each      agx3_uniform_dma_count
  *
  * The combined-sampler range is not in that list: it is fragment-only, and
- * a fragment program's own worst case is five. hk_cmd_buffer.c static-asserts
+ * a fragment program's own worst case is seventeen. hk_cmd_buffer.c static-asserts
  * this derivation against the collector.
  */
-/* Honeykrisp has a fixed seven-range collector and a matching cache key.
+/* Honeykrisp has a fixed nineteen-range collector and a matching cache key.
  * Gallium needs a larger budget in the shared program composer. */
-#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 7u
-#define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
-#define HK_AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \
-   AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE
+#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 19u
 
 bool hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
@@ -186,7 +171,7 @@ struct hk_agx3_g17p_combined_sampler_heap {
    uint64_t descriptor_set_va;
    uint64_t sampler_heap_va;
    uint32_t texture_offset_B;
-   uint16_t sampler_index;
+   uint16_t sampler_index; /* Raw G17P heap index; zero is reserved. */
    uint16_t sampler_count;
    uint16_t sampler_element_size_B;
 };
@@ -263,26 +248,20 @@ bool hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program);
 
-/* Direct command-buffer-private writer. Output may be modified on failure and
- * must remain unpublished until success; `written` is unchanged on failure. */
-bool hk_agx3_g17p_basic_graphics_program_write_unpublished(
-   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
-   void *output, size_t capacity, size_t *written);
-
 enum hk_agx3_g17p_rt0_bg_op {
    HK_AGX3_G17P_RT0_BG_CLEAR,
    HK_AGX3_G17P_RT0_BG_RELOAD,
    HK_AGX3_G17P_RT0_BG_NONE,
 };
 
-#define HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
-#define HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
-#define HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
 #define HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 
-/* Resource spec for the bounded one-RT background shaders, not an ordinary
- * fragment shader or EOT. CLEAR/RELOAD write every live RT0 component; NONE
- * has no color output. The upper 17 bits are shader pass control, not a VA. */
+#define HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
+
+#define HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
+
+#define HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
+
 bool hk_agx3_g17p_rt0_bg_resource_spec(
    enum agx_chip chip, enum hk_agx3_g17p_rt0_bg_op op, uint64_t *resource_spec);
 
@@ -307,9 +286,6 @@ struct hk_agx3_g17p_rt0_bg_program {
    uint16_t length;
 };
 
-/* Build the bounded clear or reload background program. Clear maps RT values
- * from uniform half4 onward; reload maps two 64-bit texture/sampler pointers
- * to halfs0..7, matching the native immediate-TEX ABI. */
 bool hk_agx3_g17p_rt0_bg_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_rt0_bg_program_desc *desc,
    struct hk_agx3_g17p_rt0_bg_program *program);
@@ -340,12 +316,6 @@ struct hk_agx3_g17p_rt0_eot_program {
    uint16_t length;
 };
 
-/* Build the bounded G17P EOT Ioto program. Two LDIMM records hold the
- * raw PBE table pointer in GPR halves 4..7 across the profile setup, then COPY
- * publishes it in uniform halves 0..3. A third LDIMM/COPY supplies
- * imageblock offset through CProg GPR8 into halves4..5. The exact MRT form
- * additionally publishes its second offset at halves8..9, retaining the
- * native metadata's intervening dword. No inline PBE payload is supplied. */
 bool hk_agx3_g17p_rt0_eot_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_rt0_eot_program_desc *desc,
    struct hk_agx3_g17p_rt0_eot_program *program);
@@ -372,9 +342,7 @@ bool hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source);
 
-/* Bounded Honeykrisp bridge for the exact G17P direct-add3 Ioto/CDM pair.
- * These functions expose a tested bring-up primitive only; Vulkan compute
- * capability advertisement remains unchanged. */
+#define HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE 6144u
 bool hk_agx3_g17p_direct_add3_program_upload_prepare(
    enum agx_chip chip,
    const struct agx3_g17p_direct_add3_program_desc *desc,
@@ -386,8 +354,6 @@ bool hk_agx3_g17p_direct_add3_dispatch_append(
    const struct agx3_compute_direct_grid *grid,
    struct agx3_compute_dispatch_sink *sink);
 
-#define HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE 6144u
-#define HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS  128u
 #define HK_AGX3_G17P_MAX_ROOT_SETS            8u
 
 /* Resolve a packed precompiled-kernel argument block to the dword-granular
@@ -416,6 +382,10 @@ struct hk_agx3_g17p_compute_program_desc {
     * so both records of that pair must set this explicitly.  Only the three
     * witnessed values are accepted; anything else fails the compose. */
    enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1;
+
+   /* Optional native constant program and its TPS inputs. */
+   struct agx_ioto_constant_program constant_program;
+   const struct agx3_cprog_inputs *cprog_inputs;
 };
 
 struct hk_agx3_g17p_compute_program {
@@ -424,31 +394,19 @@ struct hk_agx3_g17p_compute_program {
    struct agx3_compute_program launch;
 };
 
-/* Build a dispatch-local Ioto program from dword-aligned root, descriptor and
- * constant ranges, then bind that exact allocation to the native A18 Pro CDM
- * launch state.  Spilling and indirect dispatch have separate contracts. */
 bool hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program);
 
-/* Arena deduplication may retain an earlier identical program and recycle the
- * reservation used by generation. Launch the retained allocation, not the
- * reservation. This changes no program bytes or launch-template fields. */
 bool hk_agx3_g17p_compute_program_rebind_published(
    struct agx3_compute_program *launch, uint64_t published_va);
 
-/* Reuse a generated one-range program by replacing its sole absolute range
- * address and rebinding the command-buffer-local program VA. The template is
- * accepted only while the load schedule is provably unchanged. */
 bool hk_agx3_g17p_compute_program_relocate_single_range(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    const struct agx3_ioto_uniform_range *template_range,
    const struct hk_agx3_g17p_compute_program *template_program,
    struct hk_agx3_g17p_compute_program *program);
 
-/* Relocate directly into the caller's executable allocation. This is the
- * recording fast path: unlike the convenience wrapper above, it does not
- * materialize another maximum-size program object before the upload. */
 bool hk_agx3_g17p_compute_program_relocate_single_range_to(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    const struct agx3_ioto_uniform_range *template_range,
@@ -473,26 +431,17 @@ bool hk_agx3_g17p_native_indirect_compute_dispatch_append(
    const struct agx3_g17p_native_indirect_dispatch *dispatch,
    struct agx3_compute_dispatch_sink *sink);
 
-/*
- * Host-only admission bridge for the exact G17S minimal compute witness.
- * The explicit chip argument is intentionally rejected for every sibling
- * identity; this does not publish a Vulkan feature or admit a device.
- */
 bool hk_agx3_g17s_minimal_compute_program_prepare(
    enum agx_chip chip,
    const struct agx3_g17s_minimal_compute_program_desc *desc, void *output,
    size_t capacity, size_t *written, struct agx3_compute_program *program);
 
-/* G17S-only mapped upload/launch-address join.  This is host-side admission
- * plumbing and does not publish a Vulkan feature or device capability. */
 bool hk_agx3_g17s_minimal_compute_program_upload_prepare(
    enum agx_chip chip,
    const struct agx3_g17s_minimal_compute_program_desc *desc,
    const struct agx3_compute_program_upload *upload, size_t *written,
    struct agx3_compute_program *program);
 
-/* Exact G17S live-resource bridge.  The shared core owns all target,
- * relocation and transactional validation; this publishes no Vulkan cap. */
 bool hk_agx3_g17s_minimal_compute_program_live_upload_prepare(
    enum agx_chip chip,
    const struct agx3_g17s_minimal_compute_program_desc *desc,
@@ -500,8 +449,6 @@ bool hk_agx3_g17s_minimal_compute_program_live_upload_prepare(
    const struct agx3_compute_program_upload *upload, size_t *written,
    struct agx3_compute_program *program);
 
-/* Append one live-admitted G17S launch plus its strong barrier.  This is a
- * bounded byte bridge only and does not publish a Vulkan capability. */
 bool hk_agx3_g17s_minimal_compute_dispatch_append(
    const struct agx3_compute_program *program,
    const struct agx3_compute_direct_grid *grid,

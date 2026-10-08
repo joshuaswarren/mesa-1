@@ -4,24 +4,9 @@
  */
 
 #include "agx_vdm_ppp_state_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
-
-static void
-agx_vdm_ppp_state_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_vdm_ppp_state_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
 
 bool
 agx_vdm_ppp_state_core_supported(enum agx_chip chip)
@@ -70,8 +55,8 @@ agx_vdm_ppp_state_core_pack(enum agx_chip chip, uint64_t pointer,
    const uint32_t word0 = (uint32_t)(pointer >> 32) | (size_words << 8);
    const uint32_t word1 = (uint32_t)pointer;
 
-   agx_vdm_ppp_state_store_le32(&out->bytes[0], word0);
-   agx_vdm_ppp_state_store_le32(&out->bytes[4], word1);
+   agx_store_le32(&out->bytes[0], word0);
+   agx_store_le32(&out->bytes[4], word1);
    out->length = AGX_VDM_PPP_STATE_CORE_LENGTH;
    return true;
 }
@@ -92,8 +77,8 @@ agx_vdm_ppp_state_core_unpack(enum agx_chip chip, const void *bytes,
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t word0 = agx_vdm_ppp_state_load_le32(&raw[0]);
-   const uint32_t word1 = agx_vdm_ppp_state_load_le32(&raw[4]);
+   const uint32_t word0 = agx_load_le32(&raw[0]);
+   const uint32_t word1 = agx_load_le32(&raw[4]);
 
    if ((word0 & AGX_VDM_PPP_STATE_CORE_RESERVED_MASK) != 0 ||
        (word1 & UINT32_C(3)) != 0)

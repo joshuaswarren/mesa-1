@@ -41,10 +41,8 @@
  * strict check requires, so a wrong value cannot silently produce a
  * valid-looking instruction.
  *
- * Evidence: research/gpu/GPU_AGX3_TILE_OPS_2026-08-24.md section 4, the
- * tileops corpus at research/gpu/isa-re/gen-x/tileops/corpus/tile{1,2}, the
- * smp-frag-re z/s probes, and the fresh discard / sample-mask probe ladder
- * documented in /tmp/g17p-re/notes/mesa-agx3-fs-discard-depthwrite.md.
+ * Derived from Apple's tile, depth/stencil, discard and sample-mask compiler
+ * output.
  */
 
 #pragma once

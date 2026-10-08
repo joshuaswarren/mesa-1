@@ -17,8 +17,7 @@
  *
  * Composer-driven; reproduces Apple's witnessed bytes exactly. Center and
  * centroid locations are explicit; the scheduling/hazard marker fields are
- * emitted zero, which is table-valid but remains unproven on hardware. Evidence:
- * research/gpu/GPU_AGX3_VARYING_OPS_2026-08-24.md.
+ * emitted zero, which is table-valid but remains unproven on hardware.
  */
 
 #pragma once
@@ -99,11 +98,6 @@ bool agx3_vary_interp_at_start(enum agx_isa_encoding enc, uint16_t dest,
                                enum agx3_vary_location location, bool first,
                                uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
 
-/* Backward-compatible center-location wrapper. */
-bool agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
-                      uint16_t coef_index, bool perspective,
-                      uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
-
 /* Load the raw coefficient triple for `coef_index` into `dest`, on scoreboard
  * slot `slot` (1..6/1..8). */
 /* Native G17P sets f48 on a plain program's first LDCF; see f63 above. */
@@ -131,6 +125,19 @@ bool agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
                                    bool value_kill, uint16_t wait_mask,
                                    uint8_t out[AGX3_VARY_MAX_LENGTH],
                                    uint8_t *len);
+
+/* The same write with the index read from the 16-bit uniform half
+ * `uniform`, so an unlinked vertex shader's per-draw index needs no copy
+ * into a register. AGX3b only. */
+bool agx3_vary_uvsw_uniform_index(enum agx_isa_encoding enc, uint16_t value,
+                                  uint16_t uniform, uint8_t slot,
+                                  bool value_kill, uint16_t wait_mask,
+                                  uint8_t out[AGX3_VARY_MAX_LENGTH],
+                                  uint8_t *len);
+
+bool agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
+                      uint16_t coef_index, bool perspective,
+                      uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
 
 #ifdef __cplusplus
 }

@@ -32,7 +32,6 @@ hk_CreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
     */
    event->bo =
       agx_bo_create(&dev->dev, HK_EVENT_MEM_SIZE, 0, AGX_BO_WRITEBACK, "Event");
-   /* v56h/v57f: a failed BO allocation used to be dereferenced right here. */
    event->status = event->bo ? agx_bo_map(event->bo) : NULL;
    if (!event->status) {
       agx_bo_unreference(&dev->dev, event->bo);

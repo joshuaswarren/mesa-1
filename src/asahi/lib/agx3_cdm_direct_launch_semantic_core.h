@@ -2,11 +2,8 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Exact semantic construction of the directly emitted AGX3 CDM launch form.
- *
- * This is a research/validation surface.  It does not allocate a pipeline,
- * construct USC state, emit a live command stream, submit work, or admit an
- * AGX3 device.
+ * Construction and decoding of the directly emitted AGX3 CDM compute launch:
+ * the 40-byte launch record and its template words.
  */
 
 #pragma once
@@ -42,15 +39,16 @@ struct agx3_cdm_direct_template_fields {
    bool subkernel_x_target_workitems;
 };
 
-/* Inputs to the exact ComputeProgramVariant::finalize transforms.  These are
- * the names and scalar types from AGCCodeTranslator.ShaderInfo in Apple's
- * embedded BFBS schema. */
+/* Inputs to the exact ComputeProgramVariant::finalize transforms: the
+ * constant program's thread-invariant (TI) resources, AGCCodeTranslator
+ * ShaderInfo fields 31 and 37 (vtable +0x42 and +0x4e), the same pair the
+ * vertex and fragment variants publish in their stage state. */
 struct agx3_cdm_direct_template_sources {
-   uint32_t max_total_threads_per_threadgroup;
+   /* thread_invariant_spill_buffer_bytes: the constant program's TPS frame. */
+   uint32_t ti_spill_bytes;
 
-   /* HAL300's ProgramVariantESLState constructor reads only the low 32 bits
-    * of this ULong before finalize constructs launch word 0. */
-   uint64_t extended_texture_write_mask_qword_1;
+   /* thread_invariant_largest_ipr_bytes: its staging footprint. */
+   uint32_t ti_largest_ipr_bytes;
 
    /* Finalize consumes only whether ShaderInfo ID32 is nonzero.  Its full
     * 32-bit RT metadata subfields remain outside this launch-only contract. */

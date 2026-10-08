@@ -3463,12 +3463,22 @@ d12_queue_GetClockCalibration(ID3D12CommandQueue *iface,
    if (!gpu_timestamp || !cpu_timestamp)
       return E_POINTER;
 
-   /* The GPU value is in the same calibrated domain used by EndQuery and
-    * GetTimestampFrequency.  Linux has no Windows QPC ABI, so expose the
-    * monotonic nanosecond clock as the paired CPU counter; callers use its
-    * own frequency on this platform. */
+   struct agx_device *dev = &queue->device->dev;
+   if (!dev->user_timestamp_to_ns.num)
+      return E_FAIL;
+#ifdef _WIN32
+   LARGE_INTEGER qpc;
+   QueryPerformanceCounter(&qpc);
+   *cpu_timestamp = qpc.QuadPart;
+#else
    *cpu_timestamp = os_time_get_nano();
-   *gpu_timestamp = agx_get_gpu_timestamp(&queue->device->dev);
+#endif
+   /* GET_TIME reports nanoseconds; firmware EndQuery writes command ticks.
+    * Match the domain advertised by GetTimestampFrequency. Use a wide
+    * intermediate so a long uptime cannot overflow during conversion. */
+   *gpu_timestamp = ((__uint128_t)agx_get_gpu_timestamp(dev) *
+                     dev->user_timestamp_to_ns.den) /
+                    dev->user_timestamp_to_ns.num;
    return S_OK;
 }
 

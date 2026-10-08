@@ -176,12 +176,7 @@ agx3_native_compute_launch_pack(
     * hard-coded -- see the note on the store below. */
    agx3_cmdstream_store_le32(packed, program->launch_template.word0);
    /* Word 1 bits 22..31 carry program_va[47:38]; the hardware reconstructs
-    * pipeline = ((word1 >> 22) << 38) | (word@+8 << 6).  This used to be the
-    * constant 0x01000000, which is only correct for a VA whose bit 40 is set
-    * (the add3 witness at 0x100000a8000, where va>>38 == 4).  For any other
-    * program -- Mesa's USC heap at 0x11fffac100, where va>>38 == 0 -- that
-    * constant injected 2^40 and the GPU fetched 0x111fffac100, taking a GMMU
-    * page fault before it ever reached the shader. */
+    * pipeline = ((word1 >> 22) << 38) | (word@+8 << 6). */
    agx3_cmdstream_store_le32(
       packed + 4,
       (uint32_t)(((program->program_va >> 38) & 0x3ff) << 22) |
@@ -577,6 +572,8 @@ agx3_g17s_minimal_compute_program_prepare(
    return true;
 }
 
+/* Narrow production condition for the independently witnessed G17S minimal
+ * root-uniform program.  This does not imply chip-wide Ioto load readiness. */
 bool
 agx3_g17s_minimal_compute_dispatch_ready(enum agx_chip chip)
 {

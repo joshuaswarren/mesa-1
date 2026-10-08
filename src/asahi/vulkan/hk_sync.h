@@ -21,8 +21,8 @@
  * prefix encoding therefore loses nothing against the barrier model on one
  * queue; what it cannot express is stage granularity (a barrier from vertex
  * work into fragment work still waits on and gates whole commands), and it
- * cannot distinguish two commands in the same prefix. Both are proposed UAPI
- * extensions, see README.md in the audit directory.
+ * cannot distinguish two commands in the same prefix. Both would need UAPI
+ * extensions.
  *
  * This module records, per stream, the latest earlier stream on each
  * subqueue that a recorded dependency orders it after ("cut"), plus which
@@ -62,9 +62,16 @@ enum hk_sync_kind {
    HK_SYNC_COMPUTE = 1 << 1,
    HK_SYNC_XFER = 1 << 2,
    HK_SYNC_ALL = HK_SYNC_GFX | HK_SYNC_COMPUTE | HK_SYNC_XFER,
+
+   /* Destination scopes only, never a stream's kind: graphics work in the
+    * fragment and attachment stages alone. A render's fragment half waits on
+    * requirements of both graphics classes, its vertex (tiling) half only on
+    * HK_SYNC_GFX ones. Every other graphics destination, and every stream
+    * kind, counts as HK_SYNC_GFX. */
+   HK_SYNC_GFX_FRAG = 1 << 3,
 };
 
-#define HK_SYNC_NUM_KINDS 3
+#define HK_SYNC_NUM_KINDS 4
 
 /* Subqueue index: 0 render (VDM), 1 compute (CDM). */
 enum hk_sync_sq {
@@ -169,6 +176,15 @@ struct hk_sync_stream {
    uint8_t kind;
 
    struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+
+   /* For a render: what its vertex (tiling) half needs, a subset of dep
+    * without the fragment-only requirements (HK_SYNC_GFX_FRAG) and tile
+    * hazards. Resolved like dep into barrier_ta/prior_ta; ta_split when
+    * they differ from barrier/prior. */
+   struct hk_sync_dep dep_ta[HK_SYNC_NUM_SQ];
+   uint16_t barrier_ta[HK_SYNC_NUM_SQ];
+   uint64_t prior_ta[HK_SYNC_NUM_SQ];
+   bool ta_split;
 };
 
 /* Per-command-buffer state. */
@@ -242,9 +258,8 @@ struct hk_sync_queue {
 
 void hk_sync_reset(struct hk_cmd_buffer *cmd);
 
-/* Stage masks to stream kinds, for the first and second scopes. */
+/* Stage masks to stream kinds, for a first synchronization scope. */
 uint8_t hk_sync_kinds_src(VkPipelineStageFlags2 stages);
-uint8_t hk_sync_kinds_dst(VkPipelineStageFlags2 stages);
 
 /* Union of the scopes of every barrier in a dependency. */
 void hk_sync_dependency_kinds(const VkDependencyInfo *info, uint8_t *src,
@@ -260,11 +275,6 @@ void hk_sync_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
  * then every stream before self), or for a stream still to be created. */
 void hk_sync_src_dep(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
                      struct hk_cs *self, struct hk_sync_dep dep[HK_SYNC_NUM_SQ]);
-
-/* Raise a stream's dependencies. */
-void hk_sync_stream_wait(struct hk_cs *cs,
-                         const struct hk_sync_dep dep[HK_SYNC_NUM_SQ]);
-void hk_sync_stream_wait_all(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 /* Every later stream of the given kinds waits on cs. */
 void hk_sync_after_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
@@ -338,5 +348,3 @@ bool hk_sync_resolve_submit(struct hk_queue *queue,
                             struct hk_cmd_buffer *const *cmdbufs,
                             unsigned count, bool first_cdm_is_flush,
                             bool chain_first, uint64_t completed);
-
-bool hk_sync_trace_enabled(void);

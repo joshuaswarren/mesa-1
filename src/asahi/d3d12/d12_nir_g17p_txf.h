@@ -12,7 +12,11 @@ bool d12_nir_g17p_txf_supported(nir_shader *nir, bool *has_txf);
 bool d12_nir_lower_g17p_txf(nir_shader *nir, uint32_t generation);
 bool d12_nir_shift_g17p_txf_root(nir_shader *nir);
 
-/* Fragment stage, G17P: rewrite the shader's single 2D sample of a root-table
+/* Fragment fetches reuse the native32 array and device sampler0, including
+ * multiple resources. Filtered samples use the bounded single-resource form
+ * below. The indexed_fetch flag selects the publication contract.
+ *
+ * Fragment stage, G17P: rewrite the shader's single 2D sample of a root-table
  * texture through a bound API sampler to the native texture0/sampler0 form.
  * Both hardware indices become zero; the driver publishes the selected 32-byte
  * texture descriptor and the 32-byte HAL200 sampler word as the two pointers
@@ -20,9 +24,15 @@ bool d12_nir_shift_g17p_txf_root(nir_shader *nir);
  * after agx_nir_lower_texture, which is what gave the sampler its +1 handle.
  * Fails closed on every other shape and leaves the shader unchanged. */
 struct d12_nir_g17p_fragment_sample {
+   bool indexed_fetch; /* complete native32 texture array */
+   bool indexed_samplers; /* complete sampler file, including sampler0 */
    uint32_t texture_offset_B;
    uint8_t sampler_slot;
 };
 bool d12_nir_lower_g17p_fragment_sample(
    nir_shader *nir, uint32_t generation,
    struct d12_nir_g17p_fragment_sample *out);
+
+/* Mixed readonly samples/fetches use the shared native indexed sampler pass. */
+bool d12_nir_lower_g17p_graphics_resources(nir_shader *nir, uint32_t generation,
+                                         struct d12_nir_g17p_fragment_sample *out);

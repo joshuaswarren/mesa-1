@@ -276,6 +276,17 @@ agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return false;
 }
 
+bool
+agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
+                         uint16_t src0, uint16_t src1, uint8_t immediate,
+                         const struct agx3_falu_runtime *runtime,
+                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_falu_fma_addend_imm_mod(enc, dest, src0, src1, immediate,
+                                       false, false, false, false, runtime,
+                                       out, len);
+}
+
 /* Half of a minifloat minus a register: f32add with a 16-bit destination,
  * the register negated in the first operand and the minifloat in the other.
  * Apple's half4(1.0 - x) and half4(-x - 1.0) (blend/native/negpack3.py
@@ -486,17 +497,6 @@ agx3_falu_fma_addend_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
          return true;
    }
    return false;
-}
-
-bool
-agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
-                         uint16_t src0, uint16_t src1, uint8_t immediate,
-                         const struct agx3_falu_runtime *runtime,
-                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_falu_fma_addend_imm_mod(enc, dest, src0, src1, immediate,
-                                       false, false, false, false, runtime,
-                                       out, len);
 }
 
 /* The immediate multiplier and addend occupy independent native fields.

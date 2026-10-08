@@ -3,19 +3,7 @@
 
 #include "asahi/lib/agx_g17p_draw_state_upload.h"
 
-#define HK_G17P_BIND_GROUP_BYTES AGX_G17P_BIND_GROUP_BYTES
-#define HK_G17P_VIEWPORT_RECORD_BYTES AGX_G17P_VIEWPORT_RECORD_BYTES
-#define HK_G17P_VARYING_RECORD_BYTES AGX_G17P_VARYING_RECORD_BYTES
-#define HK_G17P_VARYING_RECORD_OFFSET AGX_G17P_VARYING_RECORD_OFFSET
-#define HK_G17P_BIND_STATE_BYTES AGX_G17P_BIND_STATE_BYTES
-#define HK_G17P_BIND_STATE_MAX_BYTES AGX_G17P_BIND_STATE_MAX_BYTES
 #define hk_g17p_bind_state_upload agx_g17p_bind_state_upload
-
-static inline bool
-hk_g17p_draw_state_range_valid(uint64_t compact, size_t size)
-{
-   return agx_g17p_draw_state_range_valid(compact, size);
-}
 
 static inline bool
 hk_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,

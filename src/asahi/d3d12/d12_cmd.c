@@ -38,6 +38,7 @@
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
 #include "agx_abi.h"
+#include "agx_nir.h"
 #include "agx_nir_texture.h"
 #include "agx_usc.h"
 #include "agx_vdm_state_update_core.h"
@@ -2501,7 +2502,8 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
             goto fail;
          const uint64_t pointers[2] = {table_va, device->rodata_bo->va->addr};
          failure_stage = "reload-pointer-upload";
-         const uint64_t pointers_va = d12_list_upload(list, pointers, sizeof(pointers), 8);
+         const uint64_t pointers_va =
+         d12_list_upload(list, pointers, sizeof(pointers), 8);
          if (!pointers_va)
             goto fail;
          desc.texture_pointer_va = pointers_va;
@@ -6716,11 +6718,11 @@ d12_list_upload_custom_borders(struct d12_cmd_list *list,
  * one USC record for the complete file matches the proven Gallium path and
  * avoids overlapping state records with unrelated backing addresses. */
 static bool
-d12_list_push_samplers(struct d12_cmd_list *list,
-                       struct agx_usc_builder *b,
-                       const struct agx_shader_info *info,
-                       bool compute_bindings,
-                       D3D12_SHADER_VISIBILITY visibility)
+d12_list_upload_sampler_file(struct d12_cmd_list *list,
+                              const struct agx_shader_info *info,
+                              bool compute_bindings,
+                              D3D12_SHADER_VISIBILITY visibility,
+                              uint64_t *out_gpu, unsigned *out_count)
 {
    bool validate = d12_debug()->validate_bindings;
    unsigned count = info->uses_txf ? MAX2(info->sampler_state_count, 1)
@@ -6731,6 +6733,8 @@ d12_list_push_samplers(struct d12_cmd_list *list,
                 (unsigned)visibility, compute_bindings, count,
                 info->uses_txf);
 
+   *out_gpu = 0;
+   *out_count = count;
    if (!count)
       return true;
    if (count > 17) {
@@ -6806,10 +6810,28 @@ d12_list_push_samplers(struct d12_cmd_list *list,
       }
    }
 
-   agx_usc_pack(b, SAMPLER, cfg) {
-      cfg.start = 0;
-      cfg.count = count;
-      cfg.buffer = gpu;
+   *out_gpu = gpu;
+   return true;
+}
+
+static bool
+d12_list_push_samplers(struct d12_cmd_list *list,
+                       struct agx_usc_builder *b,
+                       const struct agx_shader_info *info,
+                       bool compute_bindings,
+                       D3D12_SHADER_VISIBILITY visibility)
+{
+   uint64_t gpu;
+   unsigned count;
+   if (!d12_list_upload_sampler_file(list, info, compute_bindings, visibility,
+                                     &gpu, &count))
+      return false;
+   if (count) {
+      agx_usc_pack(b, SAMPLER, cfg) {
+         cfg.start = 0;
+         cfg.count = count;
+         cfg.buffer = gpu;
+      }
    }
    return true;
 }
@@ -7132,7 +7154,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
        !pso->code_bo || !pso->code_va || !u->root ||
        !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
        info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
-       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_count ||
        info->imageblock_stride || info->texture_state_count ||
        info->uses_sampler_heap ||
        (native_txf ? (!info->uses_txf || info->sampler_state_count != 1)
@@ -7641,7 +7663,10 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &st->info;
    const struct agx_linked_shader *linked = &st->linked;
-   const bool native_sample = fragment && st->g17p_sample.valid;
+   const bool native_sample = st->g17p_sample.valid &&
+      (fragment || st->g17p_sample.indexed_fetch);
+   const bool native_fetch = native_sample && st->g17p_sample.indexed_fetch;
+   const bool sampler_array = native_fetch && st->g17p_sample.indexed_samplers;
    if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
        !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
        linked->bo->va->addr > UINT64_MAX - linked->entry_offset ||
@@ -7653,15 +7678,69 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        linked->scratch_size ||
        info->has_preamble || info->nr_preamble_gprs ||
        info->preamble_scratch_size || info->rodata.size_16 ||
-       info->agx3_uniform_dma_valid || info->texture_state_count ||
-       info->sampler_state_count || info->uses_sampler_heap || linked->uses_txf ||
+       info->agx3_uniform_dma_count || info->texture_state_count ||
+       (sampler_array ? info->sampler_state_count < 1 ||
+                          info->sampler_state_count > 17
+                      : info->sampler_state_count != (native_fetch ? 1u : 0u)) ||
+       info->uses_sampler_heap || (linked->uses_txf && !native_fetch) ||
        !root_gpu || !tib || tib->nr_samples != 1)
       goto fail;
 
    failure = "uniform-ownership";
-   struct agx3_ioto_uniform_range ranges[5];
+   struct agx3_ioto_uniform_range ranges[6];
    size_t count = 0;
-   if (native_sample) {
+   if (native_fetch) {
+      /* Reuse compute's native32 array and sampler0 publication. Validate
+       * the complete command-owned array before exposing its base pointer. */
+      const struct d12_binding_upload_cache *cache = NULL;
+      for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS; ++w) {
+         const struct d12_binding_upload_cache *e =
+            &list->binding_upload_cache[0][w];
+         if (e->valid && e->root == root_gpu && e->textures == textures_gpu)
+            cache = e;
+      }
+      struct agx_bo *sampler_bo = list->device->rodata_bo;
+      if (blend_constants_used || !cache || !cache->texture_table_size_B ||
+          (cache->texture_table_size_B & 31) ||
+          !sampler_bo || !sampler_bo->va || sampler_bo->size < 32 ||
+          !d12_list_stream_contains(list, textures_gpu, sizeof(uint64_t)) ||
+          !d12_list_stream_contains(list, cache->texture_table,
+                                    cache->texture_table_size_B))
+         goto fail;
+      const uint8_t *cpu = d12_list_stream_map(list);
+      uint64_t table = 0;
+      if (!cpu)
+         goto fail;
+      memcpy(&table, cpu + (textures_gpu - list->stream_bo->va->addr),
+             sizeof(table));
+      if (table != cache->texture_table || (table & 31))
+         goto fail;
+      uint64_t sampler_table = sampler_bo->va->addr;
+      if (sampler_array) {
+         unsigned sampler_count;
+         if (!d12_list_upload_sampler_file(
+                list, info, false,
+                fragment ? D3D12_SHADER_VISIBILITY_PIXEL
+                         : D3D12_SHADER_VISIBILITY_VERTEX,
+                &sampler_table, &sampler_count) || !sampler_table ||
+             sampler_count != info->sampler_state_count)
+            goto fail;
+         if (agx_bo_sync_for_device(list->stream_bo,
+               sampler_table - list->stream_bo->va->addr, sampler_count * 32u))
+            goto fail;
+      }
+      const uint64_t pointers[2] = {table, sampler_table};
+      const uint64_t pointers_va =
+         d12_list_upload(list, pointers, sizeof(pointers), 8);
+      if (!pointers_va || agx_bo_sync_for_device(list->stream_bo,
+            table - list->stream_bo->va->addr, cache->texture_table_size_B))
+         goto fail;
+      d12_list_track_read_bo(list, sampler_bo);
+      d12_list_track_read_range(list, table, cache->texture_table_size_B);
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0, .size_halfs = 8, .address = pointers_va,
+      };
+   } else if (native_sample) {
       /* The bounded texture0/sampler0 fragment ABI (Honeykrisp's combined
        * sampler): uniform halves 0..3 point at the one 32-byte texture
        * descriptor, 4..7 at the one 32-byte HAL200 sampler word, and the
@@ -7731,9 +7810,33 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
       };
    }
    ranges[count++] = (struct agx3_ioto_uniform_range){
-      .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT : D12_UNIFORM_ROOT,
+      .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT
+                             : native_fetch ? AGX_G17P_TXF_ROOT_HALFS
+                                            : D12_UNIFORM_ROOT,
       .size_halfs = D12_UNIFORM_ROOT_REGS, .address = root_gpu,
    };
+   /* Vertex buffer loads also inspect descriptor words through the original
+    * native32 table pointer. Keep that descriptor ABI alongside indexed TXF. */
+   if ((!fragment || sampler_array) && native_fetch) {
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = D12_UNIFORM_TEXTURES,
+         .size_halfs = D12_UNIFORM_TEXTURE_REGS, .address = textures_gpu,
+      };
+   }
+   if (sampler_array) {
+      uint64_t borders = 0;
+      if (!d12_list_upload_custom_borders(
+             list, info, false,
+             fragment ? D3D12_SHADER_VISIBILITY_PIXEL
+                      : D3D12_SHADER_VISIBILITY_VERTEX, &borders))
+         goto fail;
+      if (borders) {
+         ranges[count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = D12_UNIFORM_CUSTOM_BORDERS,
+            .size_halfs = D12_UNIFORM_CUSTOM_BORDER_REGS, .address = borders,
+         };
+      }
+   }
    /* Mesh rasterization consumes its own parameter block. Do not load an
     * unused DRAW range from the application's indirect argument buffer. */
    const uint64_t draw_halfs =
@@ -7862,12 +7965,14 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    if (device->dev.chip == AGX_CHIP_G17P) {
       /* The frontend usage proof decides admission: a stage with a texture
        * or image instruction needs the native indexed texture/sampler ABI,
-       * which no graphics producer supplies yet. The binding collector
+       * supplied by the indexed-fetch publication above. The binding collector
        * always uploads the root-slot texture/PBE tables and, when a heap is
        * bound, its parallel native texture/PBE/sampler arrays; a root-only
        * stage cannot read any of those, so their presence is not a
        * refusal. */
-      if (!st->g17p_root_only && !(fragment && st->g17p_sample.valid)) {
+      if (!st->g17p_root_only &&
+          !(st->g17p_sample.valid &&
+            (fragment || st->g17p_sample.indexed_fetch))) {
          mesa_loge("native graphics texture stage producer unavailable");
          list->state = D12_LIST_ERROR;
          return 0;
@@ -10501,7 +10606,9 @@ d12_emit_g17p_raster(struct d12_cmd_list *list, struct d12_segment *seg,
    const struct agx_unlinked_uvs_layout *uvs =
       mesh_draw ? &pso->ms_uvs : &pso->uvs;
    if (!d12_g17p_baseline_graphics_enabled(&list->device->dev) ||
-       !seg->agx3_active_context_selector_valid || !vs->g17p_root_only ||
+       !seg->agx3_active_context_selector_valid ||
+       !(vs->g17p_root_only ||
+         (vs->g17p_sample.valid && vs->g17p_sample.indexed_fetch)) ||
        (!mesh_draw && !d12_g17p_smooth_varyings_supported(pso)) ||
        !(pso->fs.g17p_root_only || pso->fs.g17p_sample.valid) ||
        vs->g17p_writes_memory ||
@@ -14711,6 +14818,10 @@ d12_list_EndQuery(ID3D12GraphicsCommandList6 *iface,
          .handle = heap->timestamp_handle,
          .offset = index * heap->stride,
       };
+      d12_segment_track_write_range(seg,
+                                    seg->type == D12_SEG_CDM
+                                       ? D12_WRITE_COMPUTE : D12_WRITE_FRAGMENT,
+                                    result, sizeof(uint64_t));
       /* A following resolve or timestamp must be a separate command, so its
        * reads/writes cannot race this retirement write. */
       d12_list_close_cdm(list);

@@ -403,7 +403,7 @@ agx_pressure_schedule(agx_context *ctx)
 }
 
 /*
- * v47 execution-efficiency candidate (AGX_G17P_ILP_SCHEDULE, default off).
+ * Latency list scheduling for G17P.
  *
  * Measured on Neo, Mesa's ALU-bound loops (compute128, heavy fragment) retire
  * exactly one instruction per lane per clock on 5 cores x 128 lanes, while
@@ -423,9 +423,11 @@ agx_pressure_schedule(agx_context *ctx)
  */
 #define AGX_ILP_ALU_LATENCY 4
 #define AGX_ILP_SLACK 2
+/* Register pressure a G17P constant-program schedule may reach (of 192). */
+#define AGX_ILP_CPROG_HALVES 128
 
 static unsigned
-ilp_latency(const agx_instr *I, unsigned alu)
+ilp_latency(const agx_instr *I, unsigned alu, unsigned load)
 {
    switch (I->op) {
    case AGX_OPCODE_DEVICE_LOAD:
@@ -437,7 +439,7 @@ ilp_latency(const agx_instr *I, unsigned alu)
    case AGX_OPCODE_LD_TILE:
    case AGX_OPCODE_ATOMIC:
    case AGX_OPCODE_LOCAL_ATOMIC:
-      return 4 * alu;
+      return load;
    default:
       return alu;
    }
@@ -459,9 +461,9 @@ ilp_max_pressure(struct sched_node **order, unsigned n,
 }
 
 /*
- * AGX_G17P_EXIT_COMPARE (v53-c3): loop-exit compare placement.
+ * Loop-exit compare placement.
  *
- * Lab ladder (v92d): on Apple's own loop, moving the `icmp` next to its
+ * On Apple's own loop, moving the `icmp` next to its
  * `cndlt` keeps only 38% of Apple's advantage over Mesa, and Mesa's order
  * (counter work at the end) keeps 8%; Apple's order puts the counter's
  * update and compare `sll, xor, srl, c+i, i++, icmp, xor, iadd, iadd, xor,
@@ -478,7 +480,7 @@ ilp_max_pressure(struct sched_node **order, unsigned n,
  *    value end together;
  *  - everything else keeps its relative order, and the group [readers, cone]
  *    goes where `distance` of those instructions still follow it, or earlier
- *    if one of them uses a group result. The packer's EARLY_COMPARE then
+ *    if one of them uses a group result. The packer's early compare then
  *    emits T's compare right after the cone.
  * This is placement by dependency and distance, not a pattern: nothing
  * depends on the shift/xor opcodes. Pressure is checked by the caller. */
@@ -489,6 +491,19 @@ ilp_defines(const agx_instr *I, unsigned ssa)
 {
    agx_foreach_ssa_dest(I, d) {
       if (I->dest[d].value == ssa)
+         return true;
+   }
+   return false;
+}
+
+/* Whether a DAG edge from `user` to `producer` carries data. The others only
+ * order the two (memory order, uniform-file access), and the later one may
+ * issue on the next cycle. */
+static bool
+ilp_reads_result(const agx_instr *user, const agx_instr *producer)
+{
+   agx_foreach_ssa_src(user, s) {
+      if (ilp_defines(producer, user->src[s].value))
          return true;
    }
    return false;
@@ -645,7 +660,7 @@ ilp_place_exit_compare(agx_block *block, struct sched_node **nodes,
 }
 
 /*
- * AGX_G17P_TILE_WAIT_SINK (default on; =0 restores the plain ILP order).
+ * Pixel-wait placement.
  *
  * WAIT_PIX has no SSA result; the list scheduler above gives it an ALU
  * latency and ranks it by the critical path to the tile access it guards, so
@@ -692,20 +707,22 @@ ilp_sink_pixel_waits(struct sched_node **order, unsigned n,
    }
 }
 
-static void
+static bool
 ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
                    bool native_uniforms, unsigned alu_latency,
-                   signed slack)
+                   unsigned load_latency, signed slack, signed cap,
+                   bool place_exit_compare, bool order_edges_free,
+                   signed fwd_cap)
 {
    struct util_dynarray all;
    util_dynarray_init(&all, memctx);
    struct dag *dag = create_dag(ctx, block, memctx, native_uniforms, &all);
    if (!dag)
-      return;
+      return false;
 
    const unsigned n = util_dynarray_num_elements(&all, struct sched_node *);
    if (n < 3)
-      return;
+      return false;
    struct sched_node **nodes = all.data;
 
    unsigned *ndeps = rzalloc_array(memctx, unsigned, n);
@@ -716,7 +733,7 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
       rzalloc_array(memctx, struct util_dynarray, n);
    struct sched_node **order = rzalloc_array(memctx, struct sched_node *, n);
    if (!ndeps || !height || !ready || !done || !dependents || !order)
-      return;
+      return false;
 
    for (unsigned i = 0; i < n; ++i)
       util_dynarray_init(&dependents[i], memctx);
@@ -733,10 +750,48 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
    /* Dependents always follow their dependencies in the original order, so
     * a reverse sweep computes the critical-path height. */
    for (unsigned i = n; i-- > 0;) {
-      unsigned tail = 0;
-      util_dynarray_foreach(&dependents[i], unsigned, d)
-         tail = MAX2(tail, height[*d]);
-      height[i] = ilp_latency(nodes[i]->instr, alu_latency) + tail;
+      const unsigned lat =
+         ilp_latency(nodes[i]->instr, alu_latency, load_latency);
+      unsigned h = lat;
+      util_dynarray_foreach(&dependents[i], unsigned, d) {
+         const bool data = !order_edges_free ||
+            ilp_reads_result(nodes[*d]->instr, nodes[i]->instr);
+         h = MAX2(h, (data ? lat : 1) + height[*d]);
+      }
+      height[i] = h;
+   }
+
+   /* With a register cap, track pressure forward: a value defined in this
+    * block occupies its halves from its definition until its last use here,
+    * or to the end when it is live out. Values from earlier blocks are not
+    * counted, so the cap applies to what this block adds. While the cap is
+    * reached, prefer instructions that define nothing (stores) and then the
+    * smallest definitions; the final check below still measures the result
+    * exactly. */
+   unsigned *uses_left = NULL;
+   bool *dies = NULL;
+   signed live = 0;
+   if (fwd_cap > 0) {
+      uses_left = rzalloc_array(memctx, unsigned, ctx->alloc);
+      dies = rzalloc_array(memctx, bool, ctx->alloc);
+      if (!uses_left || !dies)
+         return false;
+      for (unsigned i = 0; i < n; ++i) {
+         agx_foreach_ssa_src(nodes[i]->instr, si)
+            uses_left[nodes[i]->instr->src[si].value]++;
+         agx_foreach_ssa_dest(nodes[i]->instr, d) {
+            dies[nodes[i]->instr->dest[d].value] =
+               !u_sparse_bitset_test(&block->live_out,
+                                     nodes[i]->instr->dest[d].value);
+         }
+      }
+      /* Trailing control flow keeps its operands alive. */
+      agx_foreach_instr_in_block(block, I) {
+         if (!instr_after_logical_end(I))
+            continue;
+         agx_foreach_ssa_src(I, si)
+            dies[I->src[si].value] = false;
+      }
    }
 
    unsigned cycle = 0;
@@ -744,33 +799,69 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
    for (unsigned step = 0; step < n; ++step) {
       int best = -1;
       unsigned best_t = 0;
+      signed best_grow = 0;
+      bool best_fits = true;
       for (unsigned i = 0; i < n; ++i) {
          if (done[i] || ndeps[i])
             continue;
          const unsigned t = MAX2(ready[i], cycle);
-         if (best < 0 || t < best_t ||
-             (t == best_t && height[i] > height[best])) {
+         signed grow = 0;
+         if (fwd_cap > 0) {
+            agx_foreach_ssa_dest(nodes[i]->instr, d)
+               grow += agx_index_size_16(nodes[i]->instr->dest[d]);
+         }
+         const bool fits = fwd_cap <= 0 || grow == 0 || live + grow <= fwd_cap;
+         bool better;
+         if (best < 0)
+            better = true;
+         else if (fits != best_fits)
+            better = fits;
+         else if (!fits && grow != best_grow)
+            better = grow < best_grow;
+         else
+            better = t < best_t || (t == best_t && height[i] > height[best]);
+         if (better) {
             best = i;
             best_t = t;
+            best_grow = grow;
+            best_fits = fits;
          }
       }
       if (best < 0)
-         return; /* cycle in the DAG: leave the block alone */
+         return false; /* cycle in the DAG: leave the block alone */
+
+      if (fwd_cap > 0) {
+         const agx_instr *B = nodes[best]->instr;
+         live += best_grow;
+         agx_foreach_ssa_src(B, si) {
+            const unsigned v = B->src[si].value;
+            if (--uses_left[v] == 0 && dies[v])
+               live -= agx_index_size_16(B->src[si]);
+         }
+         agx_foreach_ssa_dest(B, d) {
+            const unsigned v = B->dest[d].value;
+            if (uses_left[v] == 0 && dies[v])
+               live -= agx_index_size_16(B->dest[d]);
+         }
+      }
 
       done[best] = true;
       order[step] = nodes[best];
       changed |= (unsigned)best != step;
       cycle = best_t + 1;
-      const unsigned lat = ilp_latency(nodes[best]->instr, alu_latency);
+      const unsigned lat = ilp_latency(nodes[best]->instr, alu_latency, load_latency);
       util_dynarray_foreach(&dependents[best], unsigned, d) {
+         const bool data = !order_edges_free ||
+            ilp_reads_result(nodes[*d]->instr, nodes[best]->instr);
          ndeps[*d]--;
-         ready[*d] = MAX2(ready[*d], best_t + lat);
+         ready[*d] = MAX2(ready[*d], best_t + (data ? lat : 1));
       }
    }
    /* The ILP order itself counts as a change from the source order. */
    for (unsigned i = 0; i < n; ++i)
       changed |= order[i]->index != i;
-   if (ilp_place_exit_compare(block, nodes, order, n, dependents, memctx)) {
+   if (place_exit_compare &&
+       ilp_place_exit_compare(block, nodes, order, n, dependents, memctx)) {
       changed = false;
       for (unsigned i = 0; i < n; ++i)
          changed |= order[i]->index != i;
@@ -782,7 +873,7 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
          changed |= order[i]->index != i;
    }
    if (!changed)
-      return;
+      return false;
 
    /* Live set at the logical end: walk back over the trailing control-flow
     * and export instructions, which stay where they are. */
@@ -807,8 +898,8 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
 
    const signed before = ilp_max_pressure(nodes, n, &live_end, &scratch);
    const signed after = ilp_max_pressure(order, n, &live_end, &scratch);
-   if (after > before + slack)
-      return;
+   if (after > before + slack && (cap <= 0 || after > cap))
+      return false;
 
    for (unsigned i = 0; i < n; ++i)
       agx_remove_instruction(order[i]->instr);
@@ -818,9 +909,10 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
       else
          list_addtail(&order[i]->instr->link, &block->instructions);
    }
+   return true;
 }
 
-/* v52b: only pure-ALU loop bodies are interleaved. Offline, scheduling the
+/* Only pure-ALU loop bodies are interleaved. Offline, scheduling the
  * crossos bw_copy grid-stride loops (vector device loads and stores) grew
  * that kernel from 23 to 39 GPR halves; the xorshift loops the issue-rate gap
  * was measured on contain no memory access. */
@@ -922,9 +1014,10 @@ agx_ilp_schedule(agx_context *ctx)
       native_uniforms |= native_uniform_write(I);
    }
 
-   /* Only loop bodies: that is where Apple's interleaving pays and where the
-    * issue-rate gap was measured. Straight-line code keeps the pressure
-    * schedule (offline, scheduling it grew some meta shaders' registers).
+   /* Loop bodies, single-tile blend blocks and constant programs: that is
+    * where Apple's interleaving was measured to pay. Other straight-line code
+    * keeps the pressure schedule (offline, scheduling it grew some meta
+    * shaders' registers).
     * In structured AGX control flow a loop spans the source-order interval
     * from its header to the block holding the back edge. */
    unsigned nr_blocks = 0;
@@ -949,10 +1042,24 @@ agx_ilp_schedule(agx_context *ctx)
          continue;
       if (in_loop[block->index] && !ilp_block_has_memory(block)) {
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
-                            AGX_ILP_SLACK);
+                            4 * alu_latency, AGX_ILP_SLACK, 0, true, false, 0);
       } else if (!in_loop[block->index] && ilp_single_tile_blend(ctx, block)) {
          /* Hardware-qualified color-only budget; leave loop pressure alone. */
-         ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency, 8);
+         ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
+                            4 * alu_latency, 8, 0, true, false, 0);
+      } else if (!in_loop[block->index] && ctx->is_preamble) {
+         /* A constant program's device loads are mostly independent, but the
+          * pressure schedule places each right before its uniform store, so
+          * the program waits on one load at a time: 85 loads with about 50
+          * separate waits in Subnautica's scene fragment. Apple's constant
+          * programs issue their loads in batches of up to about twenty before
+          * storing. Its registers are counted separately from the main
+          * program's (preshader_register_count), so pressure is bounded only
+          * to keep allocation comfortably inside the file. */
+         ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
+                            16 * alu_latency, AGX_ILP_SLACK,
+                            AGX_ILP_CPROG_HALVES, false, true,
+                            AGX_ILP_CPROG_HALVES - 16);
       }
    }
 

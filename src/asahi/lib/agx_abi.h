@@ -60,7 +60,6 @@
  * nothing.  Precompiled AGX3 kernels therefore place their arguments above
  * both the texture-pointer prefix and this half.  Four-half aligned so 64-bit
  * arguments keep their uniform-pair alignment. */
-#define AGX_ABI_AGX3_THREADGROUP_BASE_HALF 8
 #define AGX_ABI_AGX3_PRECOMP_ARG_HALFS 12
 
 #define AGX_ABI_FUNI_EMRT_HEAP (0)
@@ -73,10 +72,12 @@
 
 /* This address is in our reservation, and can be
  * addressed with only small integers in the low/high. That lets us do some
- * robustness optimization even without soft fault.
+ * robustness optimization even without soft fault. It spans
+ * maxUniformBufferRange, so a null uniform buffer (based here) reads zero at
+ * every offset a shader can legally use without per-load bounds checks.
  */
 #define AGX_ZERO_PAGE_ADDRESS (((uint64_t)1) << 32)
-#define AGX_ZERO_PAGE_SIZE    (16384)
+#define AGX_ZERO_PAGE_SIZE    (65536)
 
 #define AGX_SCRATCH_PAGE_ADDRESS (AGX_ZERO_PAGE_ADDRESS + AGX_ZERO_PAGE_SIZE)
 

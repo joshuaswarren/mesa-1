@@ -295,6 +295,7 @@ hk_agx3_g17p_shared_graphics_desc(
       .colour_classes = desc->colour_classes,
       .imageblock = desc->imageblock,
       .preloaded_root = desc->preloaded_root,
+      .patchable = desc->patchable,
       .constant_program = desc->constant_program,
       .cprog_inputs = desc->cprog_inputs,
    };
@@ -380,20 +381,6 @@ hk_agx3_g17p_graphics_external_launcher_template_relocate(
 }
 
 bool
-hk_agx3_g17p_basic_graphics_program_write_unpublished(
-   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
-   void *output, size_t capacity, size_t *written)
-{
-   if (!desc)
-      return false;
-
-   const struct agx3_g17p_graphics_program_desc shared_desc =
-      hk_agx3_g17p_shared_graphics_desc(desc);
-   return agx3_g17p_graphics_program_write_unpublished(
-      chip, &shared_desc, output, capacity, written);
-}
-
-bool
 hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program)
@@ -454,14 +441,9 @@ hk_agx3_g17p_combined_sampler_pointers(
        heap->sampler_element_size_B != 32)
       return false;
 
-   /* The software descriptor ABI uses zero for a null sampler. Native heap
-    * entry zero is the reserved robust sampler, while application samplers
-    * retain the legacy +28 bias. Saturating this rebase keeps both encodings
-    * on the same native entry and cannot underflow into unmapped memory. */
-   const uint32_t native_index =
-      heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX
-         ? 0
-         : heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+   /* The G17P software descriptor carries the raw native heap index. Entry
+    * zero is reserved for null/fetch sampling; bounds remain explicit. */
+   const uint32_t native_index = heap->sampler_index;
    if (native_index >= heap->sampler_count)
       return false;
 
@@ -889,6 +871,9 @@ hk_agx3_g17p_native_indirect_compute_dispatch_append(
                                                              sink);
 }
 
+/* Build a dispatch-local Ioto program from dword-aligned root, descriptor and
+ * constant ranges, then bind that exact allocation to the native A18 Pro CDM
+ * launch state.  Spilling and indirect dispatch have separate contracts. */
 bool
 hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
@@ -909,6 +894,8 @@ hk_agx3_g17p_compute_program_generate(
       .threadgroup_memory_size_B = desc->threadgroup_memory_size_B,
       .launch_sources = desc->launch_sources,
       .ldshdr_f1 = desc->ldshdr_f1,
+      .constant_program = desc->constant_program,
+      .cprog_inputs = desc->cprog_inputs,
    };
    struct agx3_g17p_compute_program common;
    if (!agx3_g17p_compute_program_generate(chip, &common_desc, &common))

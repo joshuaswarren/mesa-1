@@ -153,22 +153,6 @@ uint32_t hk_rt_group_stack_size(const struct hk_rt_stack_sizes *sizes,
                                uint32_t recursive_stage_size);
 
 /*
- * The shader-binding-table index a hit record is fetched with, from the Vulkan
- * specification's formula
- *
- *    instanceShaderBindingTableRecordOffset
- *      + sbt_offset + sbt_stride * geometryIndex
- *
- * `sbt_offset` and `sbt_stride` come from the traceRay call and are already
- * masked to four bits by the caller; `instance_sbt_offset` is the low 24 bits
- * of the instance node's sbt_offset_and_flags.  The result is taken modulo
- * 2^32, exactly as the shader computes it.
- */
-uint32_t hk_rt_hit_sbt_index(uint32_t sbt_offset, uint32_t sbt_stride,
-                             uint32_t instance_sbt_offset,
-                             uint32_t geometry_index);
-
-/*
  * Threadgroup counts for a trace-rays launch of `width` x `height` x `depth`
  * rays, for the megakernel's fixed workgroup size.  The megakernel bounds-checks
  * its own launch id, so a partial trailing workgroup is safe.

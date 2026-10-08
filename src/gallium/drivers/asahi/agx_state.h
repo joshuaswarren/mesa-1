@@ -336,6 +336,8 @@ struct agx_uncompiled_shader {
       bool uses_fbfetch;
       bool uses_sample_shading;
       bool writes_memory;
+      /* API output, excluding synthetic early depth/stencil mask updates. */
+      bool writes_api_sample_mask;
 
       /* Some image intrinsic other than a read or a size/sample query:
        * stores, atomics, texel addresses and anything not known to only
@@ -353,6 +355,13 @@ struct agx_uncompiled_shader {
 
       /* Number of bindful textures, images used */
       unsigned nr_bindful_textures, nr_bindful_images;
+
+      /* Texture-table records per image: a texture and a PBE descriptor,
+       * plus on G17P the software tail Honeykrisp's storage descriptor
+       * carries (see AGX_G17P_IMAGE_ATOMIC_SW_OFFSET).
+       */
+      uint8_t image_records;
+
    } info;
 
    struct hash_table *variants;
@@ -539,13 +548,6 @@ struct agx_batch {
 
    struct agx_pool pool, pipeline_pool;
    struct util_dynarray g17p_vdm_aliases;
-
-   /* With AGX_DBG_FAULTTRACE, retain the small DRM command wrapper while this
-    * batch is in flight. Its referenced BOs and encoders already remain live
-    * until batch cleanup, allowing an asynchronous queue fault to be decoded
-    * when a later submit observes it. */
-   struct util_dynarray faulttrace_cmdbuf;
-   uint64_t faulttrace_seqid;
 
    /* We may enqueue both CDM and VDM work, possibly to the same batch for
     * geometry/tessellation.
@@ -1190,6 +1192,8 @@ struct agx_lower_bindings_options {
    bool table_index_crawls;
    bool native_buffer_metadata;
    uint64_t *image_address_mask;
+   bool g17p_bindless_storage;
+   unsigned image_records;
    unsigned bindful_sampler_count;
 };
 
@@ -1197,6 +1201,8 @@ bool agx_nir_lower_bindings(nir_shader *shader,
                        struct agx_lower_bindings_options *options);
 bool agx_nir_lower_custom_border_g17p(nir_shader *shader);
 bool agx_nir_rebind_g17p_texture_crawls(nir_shader *shader);
+bool agx_nir_lower_g17p_storage_records(nir_shader *shader,
+                                        unsigned record_size_B);
 
 bool agx_batch_is_active(struct agx_batch *batch);
 bool agx_batch_is_submitted(struct agx_batch *batch);

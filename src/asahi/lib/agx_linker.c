@@ -4,6 +4,7 @@
  */
 
 #include "agx_linker.h"
+#include "agx_bytes.h"
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -182,15 +183,6 @@ agx3_fill_helper_table(uint8_t *image, size_t base)
    memcpy(image + base + 0x70, terminal, sizeof(terminal));
 }
 
-static void
-agx3_put_le32(uint8_t *where, uint32_t value)
-{
-   where[0] = value;
-   where[1] = value >> 8;
-   where[2] = value >> 16;
-   where[3] = value >> 24;
-}
-
 /* Total container bytes for `code_size` bytes of executable. */
 static size_t
 agx3_container_lead_size(enum agx_chip chip)
@@ -213,7 +205,7 @@ void
 agx3_build_container_lead(uint8_t *image)
 {
    memset(image, 0, AGX3_CONTAINER_LEAD);
-   agx3_put_le32(image, AGX3_CONTAINER_LEAD);
+   agx_store_le32(image, AGX3_CONTAINER_LEAD);
    for (size_t offset = 0x40; offset < AGX3_CONTAINER_LEAD; offset += 2) {
       image[offset] = 0x06;
       image[offset + 1] = 0x00;
@@ -240,7 +232,7 @@ agx3_build_container(enum agx_chip chip, uint8_t *image, size_t code_size, bool 
       agx3_build_container_lead(image);
    }
 
-   agx3_put_le32(image + lead_size,
+   agx_store_le32(image + lead_size,
                  AGX3_CONTAINER_BLOCK_HDR + AGX3_CONTAINER_CONST_PROG +
                     ALIGN_POT(code_size, 64));
 
@@ -398,11 +390,15 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    const bool container = agx3_uses_code_container(dev);
    const size_t alloc_size = container ? agx3_container_size(dev->chip, size) : size;
 
-   linked->bo = agx_bo_create(dev, alloc_size, 0, AGX_BO_EXEC | AGX_BO_LOW_VA,
-                              "Linked executable");
+   uint32_t code_offset = 0;
+   linked->bo = dev->code_alloc
+                   ? dev->code_alloc(dev, alloc_size, &code_offset)
+                   : agx_bo_create(dev, alloc_size, 0,
+                                   AGX_BO_EXEC | AGX_BO_LOW_VA,
+                                   "Linked executable");
    linked->size = size;
-   linked->entry_offset = container ? agx3_container_lead_size(dev->chip) +
-                                        AGX3_CODE_BLOCK_ENTRY_OFFSET : 0;
+   linked->entry_offset = code_offset + (container ?
+      agx3_container_lead_size(dev->chip) + AGX3_CODE_BLOCK_ENTRY_OFFSET : 0);
    if (!linked->bo) {
       fprintf(stderr,
               "agx_fast_link: executable low-VA allocation of %zu bytes "
@@ -412,7 +408,11 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    uint8_t *container_map = agx_bo_map(linked->bo);
-   uint8_t *linked_map = container_map ? container_map + linked->entry_offset : NULL;
+   if (container_map)
+      container_map += code_offset;
+   uint8_t *linked_map =
+      container_map ? container_map + (linked->entry_offset - code_offset)
+                    : NULL;
    if (!linked_map) {
       fprintf(stderr,
               "agx_fast_link: executable BO mapping failed (size %zu, "
@@ -535,7 +535,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       }
    }
 
-   if (agx_bo_sync_for_device(linked->bo, 0, alloc_size)) {
+   if (agx_bo_sync_for_device(linked->bo, code_offset, alloc_size)) {
       agx_bo_unreference(dev, linked->bo);
       linked->bo = NULL;
       return false;

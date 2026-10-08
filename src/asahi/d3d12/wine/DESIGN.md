@@ -63,12 +63,41 @@ then real titles; pass/fail and frame time recorded against the current tool.
 * **Platform backend** `d12_platform_wine.c`: open via unixlib, Win32 events
   (`SetEvent`), shared handles `E_NOTIMPL` (as Linux). `GetAdapterLuid` returns the
   LUID of the DXGI adapter the game passed in.
-* **Presentation** `d12_wine_swapchain.c`: `IDXGIVkSwapChainFactory` on
-  `ID3D12CommandQueue`; `IDXGIVkSwapChain` whose back buffers are our own
-  RENDER_TARGET textures; `Present` executes a texture->buffer copy on the
-  game's queue, waits, and blits with GDI `SetDIBitsToDevice`. CPU copy of the
-  frame (3.7 MB at 1080p) is the known cost; a Vulkan/dma-buf presenter is the
-  follow-up. Vsync: SyncInterval honoured by sleeping to the display period.
+* **Presentation** `d12_wine_swapchain.c`: the existing DXVK
+  `IDXGIVkSwapChainFactory` creates Wine Vulkan WSI surfaces. Vulkan allocates
+  uncompressed renderable images and exports Win32 memory handles; the Unix
+  bridge opens Wine's shared D3DKMT resource and obtains its dma-buf. Asahi's
+  existing BO import binds that storage into the D3D12 device. Both drivers
+  use the shared renderable/writable AIL GPU layout. Present samples the GPU
+  image into a WSI image and forces ignored alpha to one in the same GPU pass,
+  including the H17P X-byte rule. There is no presenter readback buffer, pixel
+  Map, memcpy, staging buffer, or buffer-to-image upload. Application-requested
+  readbacks retain the ordinary D3D12 copy path.
+  * Producer and consumer completion are conservatively waited on before the
+    source can be reused. These CPU waits move no pixels; their performance
+    cost must be measured separately from GPU image processing.
+  * Interval zero uses IMMEDIATE when available, otherwise MAILBOX. FIFO uses
+    KHR present IDs and presentation completion; intervals 2–4 repeat the same
+    GPU image for the requested refresh count. DXGI advances its buffer once.
+    Presentation wait timeouts report occlusion, and out-of-date surfaces are
+    recreated. Per-WSI-image semaphores avoid re-signaling a semaphore still
+    associated with another pending presentation.
+  * Resize allocates and imports replacement images before committing them;
+    failure retains the old resources. DXVK remains responsible for the window
+    and fullscreen transitions. Color-space/HDR capability policy is unchanged.
+  * Sharing requires the same Honeykrisp device UUID and the uncompressed AIL
+    layout. The Unix bridge must be built against the headers of the Wine
+    runtime loading it (`WINE_UNIX_INCLUDE`); Wine's server ABI is versioned.
+    A size-preserving CLOCK handshake refuses mismatched DLL/Unixlib pairs
+    before dispatching newly added entries. ntdll's locally loaded Unix exports
+    are resolved from the existing module, without loading another ntdll.
+* **Execution timestamps**: timestamp heaps use Asahi's shared BO timestamp
+  binding. EndQuery ends its carrier segment and asks the firmware to write
+  the command's end timestamp. Empty/consecutive queries use an executable
+  GPU copy carrier; resolve and later work retain queue ordering. Replaying a
+  recording generates new values. GetClockCalibration converts GET_TIME into
+  the query domain, and its Wine CPU counter uses QPC. The delayed-recording,
+  delayed-submission and replay probe is `tests/timestamp_execution.c`.
 * **Gates**: the `#ifndef _WIN32` guards that select Linux behaviour
   (G17P buffer cache ops, baseline/depth opt-ins) become
   `#ifndef D12_PLATFORM_D3DKMT`, so the Wine build behaves like Linux; the

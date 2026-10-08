@@ -73,6 +73,12 @@ static bool
 g17p_sample_shape(const nir_tex_instr *tex)
 {
    const bool query_lod = tex->op == nir_texop_lod;
+   const int backend_coord =
+      nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+   const unsigned coords = tex->coord_components == 0 &&
+      tex->op == nir_texop_tg4 && backend_coord >= 0
+         ? nir_src_num_components(tex->src[backend_coord].src)
+         : tex->coord_components;
    const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    const bool cube_array = cube && tex->is_array;
@@ -119,8 +125,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
         *   05800cb8b0000003000010000100
         *
         * which is the instruction agx3_tex_encode_sample() already emits for
-        * AGX3_TEX_LOD_REGISTER on a cube (test-agx3-tex-core.c, "native cube
-        * register level"), field for field. Admitting only the array form
+        * AGX3_TEX_LOD_REGISTER on a cube, field for field. Admitting only the
+        * array form
         * here was what refused textureLod(samplerCube, dir, lod) -- the
         * roughness-indexed probe lookup every image-based lighting shader
         * does, SuperTuxKart's IBL.frag included. */
@@ -139,7 +145,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
         * three extra fields and the instruction writes one more register.
         * A depth comparison and a LOD query have no sparse witness. */
        (tex->is_sparse && (tex->is_shadow || query_lod)) ||
-       tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
+       coords != (query_lod ? (three_d || cube ? 3 : 2) :
                                 cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
        (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
@@ -302,8 +308,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
       coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
 
    return coord >= 0 &&
-          nir_src_num_components(tex->src[coord].src) ==
-             tex->coord_components &&
+          nir_src_num_components(tex->src[coord].src) == coords &&
           nir_src_bit_size(tex->src[coord].src) == 32 &&
           nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) >= 0 &&
           nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0;
@@ -478,14 +483,17 @@ g17p_rewrite_combined_texture_crawls(nir_shader *shader, uint8_t set,
    return true;
 }
 
-bool
-agx_nir_lower_g17p_combined_sampler(
-   nir_shader *shader, struct agx_g17p_combined_sampler_binding *binding)
+/* The checks of agx_nir_lower_g17p_combined_sampler() made before it
+ * changes anything: the shader's one texture instruction, a sample of the
+ * supported shape, through a Gen9 sampled descriptor. */
+static nir_tex_instr *
+g17p_combined_sampler_candidate(const nir_shader *shader,
+                                uint32_t *texture_offset_B,
+                                uint32_t *sampler_state_offset_B)
 {
-   if (!shader || !binding ||
-       (shader->info.stage != MESA_SHADER_FRAGMENT &&
-        shader->info.stage != MESA_SHADER_COMPUTE))
-      return false;
+   if (!shader || (shader->info.stage != MESA_SHADER_FRAGMENT &&
+                   shader->info.stage != MESA_SHADER_COMPUTE))
+      return NULL;
 
    nir_tex_instr *sample = NULL;
    nir_foreach_function_impl(impl, shader) {
@@ -495,29 +503,51 @@ agx_nir_lower_g17p_combined_sampler(
                continue;
 
             if (sample || !g17p_sample_shape(nir_instr_as_tex(instr)))
-               return false;
+               return NULL;
             sample = nir_instr_as_tex(instr);
          }
       }
    }
 
    if (!sample)
-      return false;
+      return NULL;
 
-   uint32_t texture_offset_B, sampler_state_offset_B;
    if (!g17p_handle_offset(sample, nir_tex_src_texture_handle,
                            nir_intrinsic_bindless_image_agx,
-                           &texture_offset_B) ||
+                           texture_offset_B) ||
        !g17p_handle_offset(sample, nir_tex_src_sampler_handle,
                            nir_intrinsic_bindless_sampler_agx,
-                           &sampler_state_offset_B))
-      return false;
+                           sampler_state_offset_B))
+      return NULL;
 
    /* Gen9 sampled descriptors contain one 32-byte texture followed by the
     * eight-byte native sampler word and its 16-bit global-heap index.
     */
-   if ((texture_offset_B & 7) != 0 ||
-       sampler_state_offset_B != texture_offset_B + 32)
+   if ((*texture_offset_B & 7) != 0 ||
+       *sampler_state_offset_B != *texture_offset_B + 32)
+      return NULL;
+
+   return sample;
+}
+
+bool
+agx_nir_g17p_combined_sampler_candidate(const nir_shader *shader)
+{
+   uint32_t texture_offset_B, sampler_state_offset_B;
+   return g17p_combined_sampler_candidate(shader, &texture_offset_B,
+                                          &sampler_state_offset_B) != NULL;
+}
+
+bool
+agx_nir_lower_g17p_combined_sampler(
+   nir_shader *shader, struct agx_g17p_combined_sampler_binding *binding)
+{
+   uint32_t texture_offset_B, sampler_state_offset_B;
+   nir_tex_instr *sample =
+      binding ? g17p_combined_sampler_candidate(shader, &texture_offset_B,
+                                                &sampler_state_offset_B)
+              : NULL;
+   if (!sample)
       return false;
 
    /* The Gen9 software LOD bias is at byte 12 of sampler state, and the
@@ -637,15 +667,10 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
     * lowering; leaving the old base/byte-offset handle in place is not an
     * encoding of the native texture heap index. The fetch instruction's 3D
     * selector is orthogonal to the integer-LOD PACK_SMPIR transaction. */
-   const bool valid_lod = lod >= 0 &&
-      nir_src_num_components(tex->src[lod].src) == 1 &&
-      (nir_src_bit_size(tex->src[lod].src) == 16 ||
-       nir_src_bit_size(tex->src[lod].src) == 32) &&
-      (nir_src_is_const(tex->src[lod].src)
-         ? nir_src_as_uint(tex->src[lod].src) <= 63
-         : (nir_src_num_components(tex->src[lod].src) == 1 &&
-            (nir_src_bit_size(tex->src[lod].src) == 16 ||
-             nir_src_bit_size(tex->src[lod].src) == 32)));
+   const bool valid_lod = lod < 0 ||
+      (nir_src_num_components(tex->src[lod].src) == 1 &&
+       (nir_src_bit_size(tex->src[lod].src) == 16 ||
+        nir_src_bit_size(tex->src[lod].src) == 32));
    const unsigned lowered_coord_components =
       coord >= 0 ? nir_src_num_components(tex->src[coord].src) : 0;
    return handle >= 0 && coord >= 0 &&
@@ -656,7 +681,7 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
              /* agx_nir_lower_texture packs sample and optional array layer
               * into the third 32-bit backend coordinate. */
              lowered_coord_components == 3)
-          : (tex->num_srcs == 3 && sample < 0 && valid_lod)) &&
+          : (tex->num_srcs == (lod >= 0 ? 3 : 2) && sample < 0 && valid_lod)) &&
       nir_src_bit_size(tex->src[coord].src) == 32 &&
       (multisample || lowered_coord_components ==
                          (lowered_buffer ? 2 : tex->coord_components));
@@ -779,8 +804,8 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
  * GPU from the descriptor set. Keep descriptor-set roots alive so updates
  * after command recording and dynamically selected array elements are visible.
  */
-bool
-agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
+static bool
+lower_indexed_samplers(nir_shader *shader, int native32_set)
 {
    if (!shader || (!g17p_explicit_lod_stage(shader->info.stage) &&
                    shader->info.stage != MESA_SHADER_FRAGMENT &&
@@ -796,7 +821,7 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
                    intr->intrinsic ==
                       nir_intrinsic_bindless_image_sparse_load) {
-                  if (!g17p_indexed_image_fetch_shape(intr))
+                  if (native32_set >= 0 || !g17p_indexed_image_fetch_shape(intr))
                      return g17p_decline("image_fetch_shape", NULL, intr,
                                          shader->info.stage);
                   image_reads++;
@@ -810,11 +835,12 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             /* txb and txd reach the packer as the same sample instruction
              * with a different LOD mode; the heap-indexed descriptor operand
              * is orthogonal to it. */
-            /* Dynamic argument-buffer vertex witnesses cover explicit level
-             * and gradient samples. Vertex implicit sampling has no fragment
-             * quad derivatives; bias likewise remains fragment-only. */
+            /* Explicit levels and gradients need no fragment derivatives.
+             * Gather uses the packer's existing non-fragment level-zero form.
+             * Ordinary implicit samples and biases still remain closed. */
             if (!fetch && g17p_explicit_lod_stage(shader->info.stage) &&
-                tex->op != nir_texop_txl && tex->op != nir_texop_txd)
+                tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
+                tex->op != nir_texop_tg4)
                return g17p_decline("vertex_implicit_sample", tex, NULL,
                                    shader->info.stage);
             if (!fetch && !g17p_sample_shape(tex))
@@ -825,7 +851,28 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             if (!image || image->intrinsic != nir_intrinsic_bindless_image_agx)
                return g17p_decline("handle_not_bindless", tex, NULL,
                                    shader->info.stage);
-            if (!fetch && !g17p_sample_heap_index(tex))
+            if (native32_set >= 0 &&
+                (nir_intrinsic_desc_set(image) != native32_set ||
+                 nir_src_num_components(image->src[0]) != 1 ||
+                 nir_src_bit_size(image->src[0]) != 32 ||
+                 (nir_src_is_const(image->src[0]) &&
+                  (nir_src_as_uint(image->src[0]) & 31))))
+               return g17p_decline("native32_texture_handle", tex, NULL,
+                                   shader->info.stage);
+            const int sampler_src =
+               nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
+            if (!fetch && native32_set >= 0 &&
+                (sampler_src < 0 ||
+                 nir_src_num_components(tex->src[sampler_src].src) != 1 ||
+                 (nir_src_bit_size(tex->src[sampler_src].src) != 16 &&
+                  nir_src_bit_size(tex->src[sampler_src].src) != 32 &&
+                  nir_src_bit_size(tex->src[sampler_src].src) != 64) ||
+                 nir_src_as_intrinsic(tex->src[sampler_src].src) ||
+                 (nir_src_is_const(tex->src[sampler_src].src) &&
+                  nir_src_as_uint(tex->src[sampler_src].src) > 16)))
+               return g17p_decline("native32_sampler_index", tex, NULL,
+                                   shader->info.stage);
+            if (!fetch && native32_set < 0 && !g17p_sample_heap_index(tex))
                return g17p_decline("no_sampler_heap_index", tex, NULL,
                                    shader->info.stage);
             samples++;
@@ -894,7 +941,9 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_handle)].src);
             const bool fetch = tex->op == nir_texop_txf ||
                                tex->op == nir_texop_txf_ms;
-            nir_def *sampler = fetch ? NULL : g17p_sample_heap_index(tex);
+            nir_def *sampler = fetch ? NULL : native32_set >= 0
+               ? tex->src[nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle)].src.ssa
+               : g17p_sample_heap_index(tex);
 
             /* texture2d::read takes a uint level on AGX3.  The shared AGX2
              * texture lowering narrows every NIR LOD source to 16 bits, but
@@ -905,48 +954,42 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             if (tex->op == nir_texop_txf) {
                const int lod =
                   nir_tex_instr_src_index(tex, nir_tex_src_lod);
-               assert(lod >= 0);
-               nir_def *level = tex->src[lod].src.ssa;
-               nir_src_rewrite(&tex->src[lod].src,
-                               nir_src_is_const(tex->src[lod].src)
-                                  ? nir_imm_intN_t(
-                                       &b, nir_src_as_uint(tex->src[lod].src), 32)
-                                  : nir_u2u32(&b, level));
+               if (lod < 0) {
+                  nir_tex_instr_add_src(tex, nir_tex_src_lod,
+                                        nir_imm_intN_t(&b, 0, 32));
+               } else {
+                  nir_def *level = tex->src[lod].src.ssa;
+                  nir_src_rewrite(&tex->src[lod].src,
+                                  nir_src_is_const(tex->src[lod].src)
+                                     ? nir_imm_intN_t(
+                                          &b, nir_src_as_uint(tex->src[lod].src), 32)
+                                     : nir_u2u32(&b, level));
+               }
             }
 
-            nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(image));
-            /* Descriptor offsets are 32-bit and valid sets fit far below
-             * 4GiB. Add the field offset before widening so native LDDEV can
-             * consume base+byte-index without a separate 64-bit base add. */
-            nir_def *offset = nir_iadd_imm(&b, image->src[0].ssa,
-                                          AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET);
-            nir_def *address = nir_iadd(&b, set, nir_u2u64(&b, offset));
-            nir_def *texture_index = nir_load_global_constant(&b, 1, 32, address, .align_mul = 4);
-            /* The software sampler index includes AGX2's reservation of 28.
-             * Native G17P heaps are zero-based, as the immediate path is.
-             *
-             * Rebase by saturating, not wrapping. The descriptor ABI writes a
-             * null sampler as the unbiased base itself and leaves an untouched
-             * descriptor at all-zero, so indices below the bias do reach here.
-             * hk_agx3_g17p_combined_sampler_pointers() resolves the identical
-             * heap on the immediate path as
-             *   index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX ? 0
-             *                                                    : index - base
-             * and native entry zero is the reserved robust sampler both
-             * encodings must land on. Wrapping instead sends 0 to 0xffffffe4,
-             * a register sampler descriptor far outside the heap.
-             *
-             * G17P has no saturating-subtract encoding; agx_compile_shader_nir
-             * sets lower_usub_sat for AGX3B, so this becomes the witnessed
-             * compare/subtract/select before isel. */
+            nir_def *texture_index;
+            if (native32_set >= 0) {
+               texture_index = nir_ushr_imm(&b, image->src[0].ssa, 5);
+            } else {
+               nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(image));
+               /* Descriptor offsets are 32-bit and valid sets fit far below
+                * 4GiB. Add the field offset before widening so native LDDEV can
+                * consume base+byte-index without a separate 64-bit base add. */
+               nir_def *offset = nir_iadd_imm(&b, image->src[0].ssa,
+                                             AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET);
+               nir_def *address = nir_iadd(&b, set, nir_u2u64(&b, offset));
+               texture_index = nir_load_global_constant(&b, 1, 32, address, .align_mul = 4);
+            }
+            /* G17P Vulkan descriptors already name the native zero-based
+             * sampler heap. The packed native32 path also uses raw indices.
+             * Untouched/null descriptors select reserved entry zero. Preserve
+             * native32's explicitly admitted wider sampler sources here. */
             texture_index = nir_u2u64(&b, texture_index);
             nir_steal_tex_src(tex, nir_tex_src_texture_handle);
             nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, texture_index);
             if (!fetch) {
-               nir_def *sampler_index = nir_usub_sat(
-                  &b, nir_u2u32(&b, sampler),
-                  nir_imm_int(&b, AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX));
-               sampler_index = nir_u2u64(&b, sampler_index);
+               nir_def *sampler_index = nir_u2u64(
+                  &b, native32_set >= 0 ? nir_u2u32(&b, sampler) : sampler);
                nir_steal_tex_src(tex, nir_tex_src_sampler_handle);
                nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler_index);
             }
@@ -1026,141 +1069,16 @@ agx_nir_lower_g17g_indexed_reads(nir_shader *shader)
    return reads > 0 && agx_nir_lower_g17p_indexed_samplers(shader);
 }
 
-static bool
-g17p_cube_sample_shape(const nir_tex_instr *tex)
+bool
+agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
-   if (tex->op != nir_texop_tex ||
-       tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE || tex->is_array ||
-       tex->is_shadow || tex->is_sparse || tex->coord_components != 3 ||
-       tex->num_srcs != 3 ||
-       (tex->backend_flags & ~AGX_TEXTURE_FLAG_CLAMP_TO_0) != 0 ||
-       tex->dest_type != nir_type_float32 || tex->def.num_components != 4 ||
-       tex->def.bit_size != 32 ||
-       nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 ||
-       nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0)
-      return false;
-
-   int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-   if (coord < 0)
-      coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
-
-   return coord >= 0 && nir_src_num_components(tex->src[coord].src) == 3 &&
-          nir_src_bit_size(tex->src[coord].src) == 32;
+   return lower_indexed_samplers(shader, -1);
 }
 
-/* Lower the exact implicit, non-array cube sample to the already-qualified
- * G17P 2D-array path. Cube images are six consecutive 2D layers; select the
- * major axis and map its face coordinate to [0, 1] before the ordinary array
- * layer marshalling pass. The face ordering and transforms are the Vulkan/GL
- * cube convention (the same mapping used by Mesa's software samplers). */
 bool
-agx_nir_lower_g17p_cube_samples(nir_shader *shader)
+agx_nir_lower_g17p_native32_samplers(nir_shader *shader, uint8_t texture_set)
 {
-   if (!shader || shader->info.stage != MESA_SHADER_FRAGMENT)
-      return false;
-
-   unsigned cubes = 0;
-   nir_foreach_function_impl(impl, shader) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_tex)
-               continue;
-
-            nir_tex_instr *tex = nir_instr_as_tex(instr);
-            if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE)
-               continue;
-            if (!g17p_cube_sample_shape(tex))
-               return false;
-            cubes++;
-         }
-      }
-   }
-
-   if (!cubes)
-      return false;
-
-   nir_foreach_function_impl(impl, shader) {
-      nir_builder b = nir_builder_create(impl);
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_tex)
-               continue;
-
-            nir_tex_instr *tex = nir_instr_as_tex(instr);
-            if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE)
-               continue;
-
-            int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-            if (coord_index < 0)
-               coord_index =
-                  nir_tex_instr_src_index(tex, nir_tex_src_backend1);
-
-            nir_def *coord = tex->src[coord_index].src.ssa;
-            b.cursor = nir_before_instr(instr);
-            nir_def *x = nir_channel(&b, coord, 0);
-            nir_def *y = nir_channel(&b, coord, 1);
-            nir_def *z = nir_channel(&b, coord, 2);
-            nir_def *x2 = nir_fmul(&b, x, x);
-            nir_def *y2 = nir_fmul(&b, y, y);
-            nir_def *z2 = nir_fmul(&b, z, z);
-            nir_def *half = nir_imm_float(&b, 0.5f);
-
-            nir_def *x_positive = nir_fge_imm(&b, x, 0.0f);
-            nir_def *y_positive = nir_fge_imm(&b, y, 0.0f);
-            nir_def *z_positive = nir_fge_imm(&b, z, 0.0f);
-
-            /* rsqrt(c*c) gives 1/abs(c) without materializing fabs/fneg,
-             * whose standalone AGX3 forms are not yet qualified. */
-            nir_def *rx = nir_frsq(&b, x2);
-            nir_def *ry = nir_frsq(&b, y2);
-            nir_def *rz = nir_frsq(&b, z2);
-            nir_def *px = nir_fmul_imm(&b, rx, 0.5f);
-            nir_def *nx = nir_fmul_imm(&b, rx, -0.5f);
-            nir_def *py = nir_fmul_imm(&b, ry, 0.5f);
-            nir_def *ny = nir_fmul_imm(&b, ry, -0.5f);
-            nir_def *pz = nir_fmul_imm(&b, rz, 0.5f);
-            nir_def *nz = nir_fmul_imm(&b, rz, -0.5f);
-
-            nir_def *face_x = nir_vec3(
-               &b,
-               nir_bcsel(&b, x_positive, nir_ffma(&b, nx, z, half),
-                          nir_ffma(&b, px, z, half)),
-               nir_ffma(&b, nx, y, half),
-               nir_bcsel(&b, x_positive, nir_imm_int(&b, 0),
-                          nir_imm_int(&b, 1)));
-            nir_def *face_y = nir_vec3(
-               &b, nir_ffma(&b, py, x, half),
-               nir_bcsel(&b, y_positive, nir_ffma(&b, py, z, half),
-                          nir_ffma(&b, ny, z, half)),
-               nir_bcsel(&b, y_positive, nir_imm_int(&b, 2),
-                          nir_imm_int(&b, 3)));
-            nir_def *face_z = nir_vec3(
-               &b,
-               nir_bcsel(&b, z_positive, nir_ffma(&b, pz, x, half),
-                          nir_ffma(&b, nz, x, half)),
-               nir_ffma(&b, nz, y, half),
-               nir_bcsel(&b, z_positive, nir_imm_int(&b, 4),
-                          nir_imm_int(&b, 5)));
-
-            nir_def *use_x = nir_iand(&b, nir_fge(&b, x2, y2),
-                                      nir_fge(&b, x2, z2));
-            nir_def *use_y = nir_iand(&b, nir_fge(&b, y2, x2),
-                                      nir_fge(&b, y2, z2));
-            nir_def *mapped = nir_bcsel(
-               &b, use_x, face_x, nir_bcsel(&b, use_y, face_y, face_z));
-
-            nir_src_rewrite(&tex->src[coord_index].src, mapped);
-            tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
-            tex->is_array = true;
-            tex->array_is_lowered_cube = true;
-         }
-      }
-
-      nir_progress(true, impl, nir_metadata_control_flow);
-   }
-
-   NIR_PASS(_, shader, nir_opt_dce);
-   return true;
+   return lower_indexed_samplers(shader, texture_set);
 }
 
 static bool
@@ -1339,145 +1257,6 @@ g17p_storage_handle_offset(const nir_intrinsic_instr *intr,
 {
    uint8_t set;
    return g17p_storage_handle_binding(intr, &set, offset_B) && set == 0;
-}
-
-/* Native imgwci accepts a zero-extended descriptor-heap index in a GPR
- * pair. Load it from the bound descriptor set on the GPU so descriptor arrays
- * and updates use their current contents. Sampled and storage descriptors
- * share the native 32-byte heap addressed through u0.
- */
-bool
-agx_nir_lower_g17p_bindless_storage(nir_shader *shader)
-{
-   if (shader->info.stage != MESA_SHADER_COMPUTE &&
-       shader->info.stage != MESA_SHADER_FRAGMENT &&
-       !g17p_explicit_lod_stage(shader->info.stage))
-      return false;
-   bool progress = false;
-   nir_foreach_function_impl(impl, shader) {
-      nir_builder b = nir_builder_create(impl);
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr_safe(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic)
-               continue;
-            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic != nir_intrinsic_bindless_image_store)
-               continue;
-            const bool cube = nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_CUBE;
-            const enum pipe_format format = nir_intrinsic_format(intr);
-            nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
-            if (!handle || handle->intrinsic != nir_intrinsic_bindless_image_agx ||
-                (nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D &&
-                 nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_3D && !cube) ||
-                (nir_intrinsic_image_array(intr) && !cube &&
-                 nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D) ||
-                (format != PIPE_FORMAT_R10G10B10A2_UINT &&
-                 format != PIPE_FORMAT_B10G10R10A2_UINT &&
-                 format != PIPE_FORMAT_R8_UINT &&
-                 format != PIPE_FORMAT_R8G8_UINT &&
-                 format != PIPE_FORMAT_R8G8_UNORM &&
-                 format != PIPE_FORMAT_R16_UNORM &&
-                 format != PIPE_FORMAT_R32_UINT &&
-                 format != PIPE_FORMAT_R32_SINT &&
-                 format != PIPE_FORMAT_R32G32_UINT &&
-                 format != PIPE_FORMAT_R32G32_SINT &&
-                 format != PIPE_FORMAT_R32G32B32A32_SINT &&
-                 format != PIPE_FORMAT_R16_SINT &&
-                 format != PIPE_FORMAT_R16G16_UINT &&
-                 format != PIPE_FORMAT_R16G16_SINT &&
-                 format != PIPE_FORMAT_R8G8B8A8_UINT &&
-                 format != PIPE_FORMAT_R8_SINT &&
-                 format != PIPE_FORMAT_R8G8_SINT &&
-                 format != PIPE_FORMAT_R8G8B8A8_SINT &&
-                 format != PIPE_FORMAT_R16_UINT &&
-                 format != PIPE_FORMAT_R16G16B16A16_SINT &&
-                 format != PIPE_FORMAT_R16G16B16A16_UINT &&
-                 format != PIPE_FORMAT_R32G32B32A32_UINT &&
-                 format != PIPE_FORMAT_R11G11B10_FLOAT &&
-                 format != PIPE_FORMAT_R32_FLOAT &&
-                 format != PIPE_FORMAT_R32G32_FLOAT &&
-                 format != PIPE_FORMAT_R32G32B32A32_FLOAT &&
-                 format != PIPE_FORMAT_R16G16_UNORM &&
-                 format != PIPE_FORMAT_R16_SNORM &&
-                 format != PIPE_FORMAT_R16G16_SNORM &&
-                 format != PIPE_FORMAT_R16G16B16A16_UNORM &&
-                 format != PIPE_FORMAT_R16G16B16A16_SNORM &&
-                 format != PIPE_FORMAT_R8_UNORM &&
-                 format != PIPE_FORMAT_R8_SNORM &&
-                 format != PIPE_FORMAT_R8G8_SNORM &&
-                 format != PIPE_FORMAT_R8G8B8A8_UNORM &&
-                 format != PIPE_FORMAT_B8G8R8A8_UNORM &&
-                 format != PIPE_FORMAT_R8G8B8A8_SNORM &&
-                 format != PIPE_FORMAT_R10G10B10A2_UNORM &&
-                 /* Same RGB10A2 store lane layout as R10G10B10A2; the PBE
-                  * descriptor swizzles, as for the accepted UINT twin
-                  * (dynamic_rendering ... multisample_resolve.
-                  * a2r10g10b10_unorm_pack32.max_attachments_8_samples_4). */
-                 format != PIPE_FORMAT_B10G10R10A2_UNORM &&
-                 format != PIPE_FORMAT_R5G6B5_UNORM &&
-                 format != PIPE_FORMAT_B5G6R5_UNORM &&
-                 format != PIPE_FORMAT_R16_FLOAT &&
-                 format != PIPE_FORMAT_R16G16_FLOAT &&
-                 format != PIPE_FORMAT_R16G16B16A16_FLOAT &&
-                 !(format == PIPE_FORMAT_NONE &&
-                   (nir_intrinsic_src_type(intr) == nir_type_float32 ||
-                    nir_intrinsic_src_type(intr) == nir_type_int32 ||
-                    nir_intrinsic_src_type(intr) == nir_type_uint32)))) {
-               if (agx_compiler_debug & AGX_DBG_SHADERS)
-                  fprintf(stderr,
-                          "G17P bindless store left legacy: handle=%s dim=%u "
-                          "array=%u format=%u src_type=%u\n",
-                          handle ? nir_intrinsic_infos[handle->intrinsic].name
-                                 : "none",
-                          nir_intrinsic_image_dim(intr),
-                          nir_intrinsic_image_array(intr), format,
-                          nir_intrinsic_src_type(intr));
-               continue;
-            }
-            /* Storage cube coordinates address faces as ordinary array
-             * layers, including a non-array cube's six faces. */
-            if (cube) {
-               nir_intrinsic_set_image_dim(intr, GLSL_SAMPLER_DIM_2D);
-               nir_intrinsic_set_image_array(intr, true);
-            }
-            b.cursor = nir_before_instr(instr);
-            nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(handle));
-            if (nir_intrinsic_image_array(intr)) {
-               /* Native array stores pack the layer into a 16-bit auxiliary
-                * word. Reject negative and out-of-range layers before that
-                * truncation by routing x outside the maximum image width,
-                * as Apple's array-write kernel does. The inline software
-                * PBE has layers-1 in bits[25:12] of the word at byte 12. */
-               nir_def *pbe_address = nir_iadd(&b, set,
-                  nir_u2u64(&b, nir_iadd_imm(&b, handle->src[0].ssa, 12)));
-               nir_def *extent = nir_load_global_constant(&b, 1, 32,
-                  pbe_address, .align_mul = 4);
-               nir_def *last_layer = nir_iand_imm(&b,
-                  nir_ushr_imm(&b, extent, 12), 0x3fff);
-               nir_def *coords = intr->src[1].ssa;
-               nir_def *valid = nir_uge(&b, last_layer, nir_channel(&b, coords, 2));
-               nir_def *x = nir_bcsel(&b, valid, nir_channel(&b, coords, 0),
-                                      nir_imm_int(&b, 0xffff));
-               nir_src_rewrite(&intr->src[1], nir_vector_insert_imm(&b, coords, x, 0));
-            }
-            /* The image handle points at the inline PBE descriptor. The
-             * native heap index follows the complete descriptor pair. */
-            nir_def *offset = nir_iadd_imm(&b, handle->src[0].ssa,
-               AGX_G17P_STORAGE_HEAP_INDEX_OFFSET - 32);
-            nir_def *address = nir_iadd(&b, set, nir_u2u64(&b, offset));
-            nir_def *index = nir_load_global_constant(&b, 1, 32, address,
-                                                       .align_mul = 4);
-            nir_rewrite_image_intrinsic(intr, nir_u2u64(&b, index),
-                                        nir_image_intrinsic_type_default);
-            nir_intrinsic_set_range_base(intr, 0);
-            progress = true;
-         }
-      }
-      nir_progress(progress, impl, nir_metadata_control_flow);
-   }
-   if (progress)
-      NIR_PASS(_, shader, nir_opt_dce);
-   return progress;
 }
 
 bool

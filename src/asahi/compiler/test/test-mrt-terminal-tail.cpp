@@ -139,6 +139,13 @@ struct TailFixture {
       ralloc_free(mem);
    }
 };
+TEST(MRTTerminalTail, DemotionPrefixRetainsTheReconvergedColourTail)
+{
+   TailFixture f;
+   f.op(f.prefix, AGX_OPCODE_SAMPLE_MASK_AGX3);
+   EXPECT_EQ(agx_reconverged_mrt_tail(f.ctx), f.tail);
+}
+
 TEST(MRTTerminalTail, EligibilityRejectsUnprovenPrefixOrExit)
 {
    {
@@ -149,8 +156,7 @@ TEST(MRTTerminalTail, EligibilityRejectsUnprovenPrefixOrExit)
         {AGX_OPCODE_ST_TILE, AGX_OPCODE_LD_TILE, AGX_OPCODE_WAIT_PIX,
          AGX_OPCODE_SIGNAL_PIX, AGX_OPCODE_STOP, AGX_OPCODE_DEVICE_STORE,
          AGX_OPCODE_ATOMIC, AGX_OPCODE_LOCAL_ATOMIC, AGX_OPCODE_TRAP,
-         AGX_OPCODE_MEMORY_BARRIER, AGX_OPCODE_ZS_EMIT_AGX3,
-         AGX_OPCODE_SAMPLE_MASK_AGX3}) {
+         AGX_OPCODE_MEMORY_BARRIER, AGX_OPCODE_ZS_EMIT_AGX3}) {
       SCOPED_TRACE(op);
       TailFixture f;
       f.op(f.prefix, op);

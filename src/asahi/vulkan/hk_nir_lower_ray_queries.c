@@ -86,33 +86,6 @@ rq_copy_var(nir_builder *b, nir_def *index, rq_variable *dst, rq_variable *src, 
    rq_store_var(b, index, dst, rq_load_var(b, index, src), mask);
 }
 
-static nir_def *
-rq_load_array(nir_builder *b, nir_def *index, rq_variable *var, nir_def *array_index)
-{
-   if (var->array_length == 1)
-      return nir_load_array(b, var->variable, array_index);
-
-   return nir_load_deref(
-      b,
-      nir_build_deref_array(
-         b, nir_build_deref_array(b, nir_build_deref_var(b, var->variable), index), array_index));
-}
-
-static void
-rq_store_array(nir_builder *b, nir_def *index, rq_variable *var, nir_def *array_index,
-               nir_def *value, unsigned writemask)
-{
-   if (var->array_length == 1) {
-      nir_store_array(b, var->variable, array_index, value, writemask);
-   } else {
-      nir_store_deref(
-         b,
-         nir_build_deref_array(
-            b, nir_build_deref_array(b, nir_build_deref_var(b, var->variable), index), array_index),
-         value, writemask);
-   }
-}
-
 struct ray_query_traversal_vars {
    rq_variable *origin;
    rq_variable *direction;

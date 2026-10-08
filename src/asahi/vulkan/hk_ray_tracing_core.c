@@ -144,13 +144,6 @@ hk_rt_group_stack_size(const struct hk_rt_stack_sizes *sizes,
    }
 }
 
-uint32_t
-hk_rt_hit_sbt_index(uint32_t sbt_offset, uint32_t sbt_stride,
-                    uint32_t instance_sbt_offset, uint32_t geometry_index)
-{
-   return sbt_offset + instance_sbt_offset + sbt_stride * geometry_index;
-}
-
 void
 hk_rt_launch_group_count(uint32_t width, uint32_t height, uint32_t depth,
                          uint32_t out[3])

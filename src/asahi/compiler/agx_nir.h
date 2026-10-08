@@ -45,9 +45,6 @@ bool agx_nir_lower_bound_ms_image_stores(struct nir_shader *s);
 bool agx_nir_lower_g17p_helper_samples(struct nir_shader *s);
 bool agx_nir_lower_g17p_texture_early(struct nir_shader *s,
                                      bool support_lod_bias);
-bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
-                                                    bool support_lod_bias,
-                                                    bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
 /* robust_formatless_images: formatless image loads have not been lowered for
@@ -75,24 +72,57 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
  * storage descriptor pair. Other generations retain their existing ABI. */
 #define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
 
-bool agx_nir_lower_g17p_bindless_storage(struct nir_shader *s);
 /* G17P storage descriptors reserve the following eight bytes for the two
  * texture-heap indices.  Image atomics keep their software address metadata
  * in a separate packed word after those indices, 40 bytes past the native PBE
  * handle seen by agx_nir_lower_texture_for_generation(). */
 #define AGX_G17P_IMAGE_ATOMIC_SW_OFFSET 72
 #define AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE 40
+
+/* Pack that word: level offset [0:26] and layer stride [35:61] in 128-byte
+ * units, log2 tile width [27:30] and height [31:34] in pixels, log2 sample
+ * count [62:63]. libagx_image_texel_address_gen9() decodes it. Returns false
+ * when the addressing does not fit. Honeykrisp packs the same word with
+ * hk_pack_g17p_image_atomic_sw(), which stays in its dependency-free header. */
+static inline bool
+agx_g17p_pack_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,
+                              unsigned tile_height_px, uint64_t layer_stride_B,
+                              unsigned samples, uint64_t *out)
+{
+   if (!out || (level_offset_B & 0x7f) || (layer_stride_B & 0x7f) ||
+       tile_width_px == 0 || (tile_width_px & (tile_width_px - 1)) ||
+       tile_height_px == 0 || (tile_height_px & (tile_height_px - 1)) ||
+       (samples != 1 && samples != 2 && samples != 4 && samples != 8))
+      return false;
+
+   unsigned tile_width_log2 = 0, tile_height_log2 = 0, samples_log2 = 0;
+   for (unsigned x = tile_width_px; x > 1; x >>= 1)
+      ++tile_width_log2;
+   for (unsigned x = tile_height_px; x > 1; x >>= 1)
+      ++tile_height_log2;
+   for (unsigned x = samples; x > 1; x >>= 1)
+      ++samples_log2;
+
+   const uint64_t level_offset = level_offset_B >> 7;
+   const uint64_t layer_stride = layer_stride_B >> 7;
+   if (level_offset >= (UINT64_C(1) << 27) ||
+       layer_stride >= (UINT64_C(1) << 27) || tile_width_log2 >= 16 ||
+       tile_height_log2 >= 16 || samples_log2 >= 4)
+      return false;
+
+   *out = level_offset | ((uint64_t)tile_width_log2 << 27) |
+          ((uint64_t)tile_height_log2 << 31) | (layer_stride << 35) |
+          ((uint64_t)samples_log2 << 62);
+   return true;
+}
 /* Native texture/PBE pair, heap indices, address sideband, then padding. */
 #define AGX_G17P_EMRT_DESCRIPTOR_SIZE 96
 #define AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET 80
-/* Software sampler indices carry AGX2's reservation of the first 28 entries;
- * the native G17P heap is zero-based. Must match the runtime's
- * HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX. */
-#define AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX 28
-
+/* Declines without changing the shader, so callers need no copy. */
 bool agx_nir_lower_g17p_indexed_samplers(struct nir_shader *s);
-
-bool agx_nir_lower_g17p_cube_samples(struct nir_shader *s);
+/* Packed native32 array handles are byte offsets; sampler handles already
+ * name their native entry, including the reserved texel-fetch sampler0. */
+bool agx_nir_lower_g17p_native32_samplers(struct nir_shader *s, uint8_t texture_set);
 
 struct agx_g17p_combined_sampler_binding {
    uint32_t texture_offset_B;
@@ -149,6 +179,10 @@ bool agx_nir_lower_g17p_indexed_storage(
  * 0. The caller must place the corresponding native states in those CProg
  * regions.
  */
+/* Whether agx_nir_lower_g17p_combined_sampler() may apply: a false result
+ * is final, a true one can still be refused while lowering. */
+bool agx_nir_g17p_combined_sampler_candidate(const struct nir_shader *s);
+
 bool agx_nir_lower_g17p_combined_sampler(
    struct nir_shader *s, struct agx_g17p_combined_sampler_binding *binding);
 
@@ -182,3 +216,7 @@ bool agx_nir_lower_g17p_gallium_storage_write(struct nir_shader *s,
  * by vkQuake.  The caller publishes the four-slot native resource tuple. */
 bool agx_nir_lower_g17p_sampled_storage(
    struct nir_shader *s, struct agx_g17p_sampled_storage_binding *binding);
+
+bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
+                                                    bool support_lod_bias,
+                                                    bool lower_2d_robustness);

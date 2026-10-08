@@ -26,6 +26,8 @@ struct agx_texture_lower_options {
    bool buffer_metadata;
    /* Formatless image loads still need view-bounds robustness. */
    bool robust_formatless_images;
+   /* G17P texel fetches need explicit view-bounds checks (image robustness). */
+   bool robust_texel_fetch;
    /* Offset between a sparse resource's read/write mapping and its read-only
     * alias; see agx_device::sparse_ro_offset.  The residency map is indexed
     * from the primary mapping, so a descriptor that addresses the alias has
@@ -352,8 +354,7 @@ buffer_texel_resident(nir_builder *b, nir_def *desc, nir_def *element,
     * uniform_texel_buffer_sparse_fetch_size_2_24_r32ui, and masking to 0..31,
     * which it does remove, fails it -- the 16 MB buffer spans 1024 pages, so
     * every page past 31 read back non-resident.  A variable mask keeps the
-    * count on an ishl, which lower_sm5_shift does mask.  See
-    * src/asahi/isa/README-agx3-packer-limits.md.
+    * count on an ishl, which lower_sm5_shift does mask.
     */
    nir_def *bit = nir_iand(
       b, word,
@@ -381,8 +382,7 @@ buffer_texel_resident(nir_builder *b, nir_def *desc, nir_def *element,
  * So take the residency from the same per-page bitmap the sparse SSBO path
  * reads (lower_sparse_buffer_deref() in hk_nir_lower_descriptors.c) and drop
  * the hardware residency request.  That also keeps this shape away from the
- * AGX3 sparse fetch encoder, whose refusal is recorded in
- * src/asahi/isa/README-agx3-packer-limits.md.
+ * AGX3 sparse fetch encoder, which refuses it.
  */
 static bool
 lower_sparse_buffer_texture(nir_builder *b, nir_instr *instr, void *data)
@@ -617,6 +617,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    const struct agx_texture_lower_options *options = data;
    const bool gen9 = options && options->gen9;
    const bool gen10 = options && options->gen10;
+   const bool robust_texel_fetch = !options || options->robust_texel_fetch;
    b->cursor = nir_before_instr(instr);
 
    if (nir_tex_instr_is_query(tex) && tex->op != nir_texop_lod)
@@ -650,14 +651,16 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_def *g17p_txf_oob = NULL;
 
    /* G17P's raw integer fetch is memory-safe but does not return the Vulkan
-    * robustness value for every out-of-view coordinate. The older workaround
+    * robustness value for every out-of-view coordinate. Without image
+    * robustness an out-of-view fetch is undefined and a null descriptor
+    * swizzles every channel to zero, so only robust images need this. The older workaround
     * below relies on that value: it moves an invalid layer or level to an
     * out-of-range coordinate and keeps the level itself, which the G17P
     * indexed fetch cannot even take as an immediate. Predicate the whole
     * access explicitly, fetch texel (0,0) of level 0 for an invalid one so the
     * hardware access itself stays inside the view, and select the
     * robustImageAccess2 value after the fetch. */
-   if (gen9 && tex->op == nir_texop_txf &&
+   if (gen9 && robust_texel_fetch && tex->op == nir_texop_txf &&
        (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
         tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
        nir_tex_instr_src_index(tex, nir_tex_src_min_lod) < 0 &&
@@ -1080,7 +1083,7 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
 
    if (dim == GLSL_SAMPLER_DIM_BUF && return_index) {
       return nir_channel(b, coord, 0);
-   } else if (dim == GLSL_SAMPLER_DIM_BUF && buffer_metadata) {
+   } else if (dim == GLSL_SAMPLER_DIM_BUF && (buffer_metadata || gen9)) {
       /* Buffer atomics receive the PBE handle, but Gen9 has no AGX2
        * software address/offset fields. Use the same sideband as buffer
        * loads and stores, relative to the start of the descriptor.
@@ -1100,6 +1103,28 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
    } else if (gen9) {
       nir_def *sw_address =
          nir_iadd_imm(b, desc_address, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE);
+      if (dim == GLSL_SAMPLER_DIM_MS) {
+         /* MS storage uses a linear PBE over the tiled allocation. Its
+          * native width is the buffer window, not the source image width.
+          * Reuse the eMRT store index and original aligned-width sideband. */
+         nir_def *width_address = nir_iadd_imm(
+            b, desc_address, AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET -
+                                AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET);
+         nir_def *index = libagx_emrt_ms_index_gen9(
+            b, sw_address, width_address, coord,
+            nir_u2u32(b, intr->src[2].ssa), blocksize_B);
+         if (return_index)
+            return nir_u2u64(b, index);
+
+         /* The linear Gen9 PBE stores address>>4 in the low 40 bits of
+          * native words 2..3; the remaining bits are its row pitch. */
+         nir_def *native23 = load_buffer_metadata(b, desc_address, 8, 64);
+         nir_def *base = nir_ishl_imm(
+            b, nir_iand_imm(b, native23, UINT64_C(0xffffffffff)), 4);
+         return nir_iadd(
+            b, base, nir_imul_imm(b, nir_u2u64(b, index),
+                                  util_format_get_blocksize(format)));
+      }
       return libagx_image_texel_address_gen9(
          b, desc_address, sw_address, coord, nir_u2u32(b, intr->src[2].ssa),
          blocksize_B, nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
@@ -1340,7 +1365,8 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          return true;
 
       case GLSL_SAMPLER_DIM_BUF:
-         lower_buffer_image(b, intr, options && options->buffer_metadata,
+         lower_buffer_image(b, intr,
+                            gen9 || (options && options->buffer_metadata),
                             options);
          return true;
 
@@ -1650,14 +1676,6 @@ lower_texture_early(nir_shader *s, bool support_lod_bias,
    return progress;
 }
 
-bool
-agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
-                                               bool support_lod_bias,
-                                               bool lower_2d_robustness)
-{
-   return lower_texture_early(s, support_lod_bias, lower_2d_robustness, false);
-}
-
 static bool
 lower_lod_clamp(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 {
@@ -1685,8 +1703,8 @@ lower_lod_clamp(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 
 static bool
 lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
-              bool robust_formatless_images, uint64_t sparse_ro_offset,
-              bool sparse_buffer_residency)
+              bool robust_formatless_images, bool robust_texel_fetch,
+              uint64_t sparse_ro_offset, bool sparse_buffer_residency)
 {
    bool progress = false;
    const bool gen9 = generation == 9;
@@ -1695,6 +1713,7 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
       .gen10 = generation == 10,
       .buffer_metadata = buffer_metadata,
       .robust_formatless_images = robust_formatless_images,
+      .robust_texel_fetch = robust_texel_fetch,
       .sparse_ro_offset = sparse_ro_offset,
       .sparse_buffer_residency = sparse_buffer_residency,
    };
@@ -1779,7 +1798,7 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
 bool
 agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
 {
-   return lower_texture(s, generation, false, false, 0, false);
+   return lower_texture(s, generation, false, false, true, 0, false);
 }
 
 bool
@@ -1788,8 +1807,10 @@ agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation,
                                            uint64_t sparse_ro_offset,
                                            bool sparse_buffer_residency)
 {
+   /* hk's image robustness covers both formatless loads and texel fetches. */
    return lower_texture(s, generation, true, robust_formatless_images,
-                        sparse_ro_offset, sparse_buffer_residency);
+                        robust_formatless_images, sparse_ro_offset,
+                        sparse_buffer_residency);
 }
 
 bool
@@ -1994,4 +2015,12 @@ agx_nir_lower_g17p_helper_samples(nir_shader *shader)
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
    return nir_shader_tex_pass(shader, agx_g17p_explicit_helper_gradient,
                               nir_metadata_control_flow, NULL);
+}
+
+bool
+agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
+                                               bool support_lod_bias,
+                                               bool lower_2d_robustness)
+{
+   return lower_texture_early(s, support_lod_bias, lower_2d_robustness, false);
 }

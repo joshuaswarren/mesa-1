@@ -205,15 +205,6 @@ agx3_vary_interp_at(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
-agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
-                 uint16_t coef_index, bool perspective,
-                 uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_vary_interp_at(enc, dest, coef_index, perspective,
-                              AGX3_VARY_CENTER, out, len);
-}
-
-bool
 agx3_vary_ldcf_at_start(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t coef_index, uint8_t slot, bool first,
                         uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
@@ -322,4 +313,38 @@ agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
    return agx3_bind_compose(enc, "uvsw", agx3_bind_ep(enc, 0),
                             is_b(enc) ? base_b : base_c, is_b(enc) ? 3 : 6,
                             ov, n, out, len);
+}
+
+bool
+agx3_vary_uvsw_uniform_index(enum agx_isa_encoding enc, uint16_t value,
+                             uint16_t uniform, uint8_t slot, bool value_kill,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+{
+   /* The uniform kind of uvsw's index operand (f23 = 3, half index in f17;
+    * see agx3_vary_uvsw_register_index()). */
+   if (enc != AGX_ISA_ENCODING_AGX3B || (value & 1) != 0 || value >= 256 ||
+       uniform >= 512 || slot < 1 || slot > 6 || (wait_mask & ~0x3fu) != 0)
+      return false;
+   const struct agx3_field_kv base[] = {KV(9, 5), KV(23, 3), KV(24, 1)};
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(5, value);
+   ov[n++] = (struct agx3_field_kv)KV(17, uniform);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(13, value_kill ? 1 : 0);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
+
+   return agx3_bind_compose(enc, "uvsw", 0, base, 3, ov, n, out, len);
+}
+
+bool
+agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
+                 uint16_t coef_index, bool perspective,
+                 uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_vary_interp_at(enc, dest, coef_index, perspective,
+                              AGX3_VARY_CENTER, out, len);
 }

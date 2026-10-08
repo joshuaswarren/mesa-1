@@ -4,6 +4,7 @@
  */
 
 #include "agx_ioto_program_core.h"
+#include "agx_bytes.h"
 
 #include "agx_ioto_core.h"
 #include "agx_ioto_load_core.h"
@@ -152,10 +153,10 @@ g17p_load_le16(const uint8_t *bytes)
 static bool
 g17p_ldshdr_has_shader_va(const uint8_t *ldshdr)
 {
-   const uint16_t word1 = g17p_load_le16(ldshdr + 2);
-   const uint16_t word2 = g17p_load_le16(ldshdr + 4);
-   const uint16_t word3 = g17p_load_le16(ldshdr + 6);
-   const uint16_t word4 = g17p_load_le16(ldshdr + 8);
+   const uint16_t word1 = agx_load_le16(ldshdr + 2);
+   const uint16_t word2 = agx_load_le16(ldshdr + 4);
+   const uint16_t word3 = agx_load_le16(ldshdr + 6);
+   const uint16_t word4 = agx_load_le16(ldshdr + 8);
    return (word1 & UINT16_C(0xff80)) != 0 || word2 != 0 || word3 != 0 ||
           (word4 & UINT16_C(1)) != 0;
 }

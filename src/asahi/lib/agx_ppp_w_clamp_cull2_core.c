@@ -4,24 +4,9 @@
  */
 
 #include "agx_ppp_w_clamp_cull2_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
-
-static void
-agx_ppp_w_clamp_cull2_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_ppp_w_clamp_cull2_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
 
 static bool
 agx_ppp_w_clamp_cull2_header(enum agx_chip chip, uint32_t *header)
@@ -71,9 +56,9 @@ agx_ppp_w_clamp_cull2_core_pack(
    if (!out || !fields || !agx_ppp_w_clamp_cull2_header(chip, &header))
       return false;
 
-   agx_ppp_w_clamp_cull2_store_le32(&out->bytes[0], header);
-   agx_ppp_w_clamp_cull2_store_le32(&out->bytes[4], fields->w_clamp_raw);
-   agx_ppp_w_clamp_cull2_store_le32(&out->bytes[8], fields->cull2_raw);
+   agx_store_le32(&out->bytes[0], header);
+   agx_store_le32(&out->bytes[4], fields->w_clamp_raw);
+   agx_store_le32(&out->bytes[8], fields->cull2_raw);
    out->length = AGX_PPP_W_CLAMP_CULL2_CORE_LENGTH;
    return true;
 }
@@ -93,10 +78,10 @@ agx_ppp_w_clamp_cull2_core_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   if (agx_ppp_w_clamp_cull2_load_le32(raw) != expected_header)
+   if (agx_load_le32(raw) != expected_header)
       return false;
 
-   fields->w_clamp_raw = agx_ppp_w_clamp_cull2_load_le32(&raw[4]);
-   fields->cull2_raw = agx_ppp_w_clamp_cull2_load_le32(&raw[8]);
+   fields->w_clamp_raw = agx_load_le32(&raw[4]);
+   fields->cull2_raw = agx_load_le32(&raw[8]);
    return true;
 }

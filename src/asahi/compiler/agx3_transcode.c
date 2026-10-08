@@ -427,8 +427,14 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
    /* Native454/567's register-sample RGBA32, RGBA16Float and BGRA8 reloads
     * use the G18 long LLDCol form with f79=2 at every payload width.
     * Sample, slot and payload fields retain their G17G meaning. */
-   if (!strcmp(mnemonic, "lldcol") && fields[51] == 2 &&
-       fields[10] <= 2 && fields[26] == 15)
+   /* Matched native scalar framebuffer fetches also carry f79=2 at 1x.
+    * The immediate has already been normalized from Mesa's 0xff to 1. */
+   const bool scalar_pixel_load = fields[51] == 1 && fields[43] == 1 &&
+                                  fields[10] == 2 && fields[26] == 1 &&
+                                  !(fields[57] % 4);
+   if (!strcmp(mnemonic, "lldcol") &&
+       ((fields[51] == 2 && fields[10] <= 2 && fields[26] == 15) ||
+        scalar_pixel_load))
       fields[79] = 2;
    if (!strcmp(mnemonic, "ldcfr")) {
       /* Native G18 no-perspective interpolate_at_offset keeps the raw

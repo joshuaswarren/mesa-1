@@ -1247,6 +1247,7 @@ d12_reduction_gather(nir_builder *b, const nir_tex_instr *tex,
    gather->op = nir_texop_tg4;
    gather->component = component;
    gather->sampler_dim = tex->sampler_dim;
+   gather->coord_components = tex->coord_components;
    gather->is_array = tex->is_array;
    gather->dest_type = tex->dest_type;
    gather->texture_index = tex->texture_index;
@@ -2812,8 +2813,12 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
          NIR_PASS(_, nir, nir_opt_dce);
          struct d12_nir_g17p_fragment_sample binding;
          if (d12_nir_lower_g17p_fragment_sample(nir, descriptor_generation,
-                                                &binding)) {
+                                                &binding) ||
+             d12_nir_lower_g17p_graphics_resources(nir, descriptor_generation,
+                                                  &binding)) {
             o->g17p_fragment_sample = true;
+            o->g17p_fragment_fetch = binding.indexed_fetch;
+            o->g17p_indexed_samplers = binding.indexed_samplers;
             o->g17p_sample_slot = binding.sampler_slot;
             o->g17p_texture_offset_B = binding.texture_offset_B;
          }
@@ -2881,6 +2886,17 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
       struct agx_varyings_vs linked = {0};
       agx_assign_uvs(&linked, &o->uvs, 0, 0);
       NIR_PASS(_, nir, d12_dxil_lower_uvs_index, linked.slots);
+      struct d12_nir_g17p_fragment_sample binding = {0};
+      const bool native_resources = descriptor_generation == 9 &&
+         (d12_nir_lower_g17p_txf(nir, 9) ||
+          d12_nir_lower_g17p_graphics_resources(nir, 9, &binding));
+      if (native_resources) {
+         NIR_PASS(_, nir, d12_nir_shift_g17p_txf_root);
+         o->g17p_fragment_sample = true;
+         o->g17p_fragment_fetch = true;
+         o->g17p_indexed_samplers = binding.indexed_samplers;
+      }
+
    }
 
    if (stage == MESA_SHADER_FRAGMENT) {
@@ -2913,7 +2929,9 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
     * than assuming the root signature's visibility describes actual use. */
    const unsigned root_base = stage == MESA_SHADER_FRAGMENT
                                  ? D12_UNIFORM_FRAGMENT_ROOT
-                                 : D12_UNIFORM_ROOT;
+                                 : o->g17p_fragment_fetch
+                                      ? AGX_G17P_TXF_ROOT_HALFS
+                                      : D12_UNIFORM_ROOT;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -2939,9 +2957,11 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
    /* The native two-pointer sample consumes no USC sampler state: the
     * sampler is a pointer the Ioto program loads, not a state-file entry. */
    out->info.sampler_state_count =
-      o->g17p_fragment_sample
-         ? 0
-         : MAX2(out->info.sampler_state_count, runtime_samplers);
+      o->g17p_indexed_samplers
+         ? MAX2(runtime_samplers, map ? map->sampler_count + 1 : 1)
+         : o->g17p_fragment_sample
+            ? (o->g17p_fragment_fetch ? 1 : 0)
+            : MAX2(out->info.sampler_state_count, runtime_samplers);
    d12_report_scratch("shader", &out->info);
 
    if (d12_debug()->dump_shaders && out->binary) {
@@ -3020,7 +3040,7 @@ d12_dump_native_stage(nir_shader *nir, const struct agx_shader_part *part,
               i->local_size, i->texture_state_count, i->sampler_state_count,
               i->uses_txf ? "true" : "false",
               i->uses_sampler_heap ? "true" : "false",
-              i->agx3_uniform_dma_valid ? "true" : "false",
+              i->agx3_uniform_dma_count ? "true" : "false",
               i->rodata.offset, i->rodata.base_uniform, i->rodata.size_16,
               i->agx3_uniform_halfs_valid ? "true" : "false");
       bool first = true;
@@ -5255,6 +5275,9 @@ d12_pipeline_state_create_graphics(
    }
    pso->uvs = vs_entry->out.uvs;
    pso->vs.g17p_root_only = vs_entry->out.root_only;
+   pso->vs.g17p_sample.valid = vs_entry->out.g17p_fragment_sample;
+   pso->vs.g17p_sample.indexed_fetch = vs_entry->out.g17p_fragment_fetch;
+   pso->vs.g17p_sample.indexed_samplers = vs_entry->out.g17p_indexed_samplers;
    pso->vs.reads_root = vs_entry->out.reads_root;
    pso->vs.g17p_writes_memory = vs_entry->out.writes_memory;
    const uint8_t cull_distance_size = vs_entry->out.cull_distance_size;
@@ -5327,6 +5350,8 @@ d12_pipeline_state_create_graphics(
       fs_entry->out.flat_transport;
    pso->fs.g17p_root_only = fs_entry->out.root_only;
    pso->fs.g17p_sample.valid = fs_entry->out.g17p_fragment_sample;
+   pso->fs.g17p_sample.indexed_fetch = fs_entry->out.g17p_fragment_fetch;
+   pso->fs.g17p_sample.indexed_samplers = fs_entry->out.g17p_indexed_samplers;
    pso->fs.g17p_sample.sampler_slot = fs_entry->out.g17p_sample_slot;
    pso->fs.g17p_sample.texture_offset_B = fs_entry->out.g17p_texture_offset_B;
    pso->fs.reads_root = fs_entry->out.reads_root;
@@ -5929,7 +5954,9 @@ d12_pipeline_state_create_graphics(
 
    agx_assign_uvs(&pso->varyings, &pso->uvs, 0, 0);
    if (device->dev.chip == AGX_CHIP_G17P && !pso->has_gs && !pso->has_tess &&
-       !pso->has_mesh && pso->vs.g17p_root_only && !pso->vs.info.has_preamble) {
+       !pso->has_mesh && (pso->vs.g17p_root_only ||
+                         pso->vs.g17p_sample.indexed_fetch) &&
+       !pso->vs.info.has_preamble) {
       const struct agx_g17p_vertex_compile_info compiler_info = {
          .hardware_vertex = pso->vs.info.stage == MESA_SHADER_VERTEX,
          .has_preamble = pso->vs.info.has_preamble,

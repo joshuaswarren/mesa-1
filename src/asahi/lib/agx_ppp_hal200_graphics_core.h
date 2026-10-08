@@ -134,25 +134,6 @@ bool agx_ppp_hal200_fragment_ti_resources(
    enum agx_chip chip, uint32_t spill_bytes, uint32_t largest_ipr_bytes,
    struct agx_ppp_hal200_fragment_fields *fields);
 
-/*
- * Pack one complete fixed-layout G17P record.  Each record has its own header
- * and outer VDM PPP_STATE pointer; records must never be concatenated behind a
- * single legacy selector header.
- *
- * Payload order and word count by bundle:
- *
- *   FS:             counts, VIT, unknown-0c, stage-program-high,
- *                   stage-program-low, flags
- *   OUTPUT:         output-select, varying-counts-16, output-unknown,
- *                   output-size, primary-face header, fragment-control
- *                   (the traced seven-word window deliberately overlaps the
- *                   first two words of the following primary-face record)
- *   PRIMARY_FACE:   fragment-control, front-face, front-stencil, back-face,
- *                   back-stencil, occlusion-query
- *   SECONDARY_FACE: fragment-control-2, front-face-2, back-face-2,
- *                   occlusion-query-2
- *   CULL:           cull
- */
 bool agx_ppp_hal200_graphics_core_supported(enum agx_chip chip);
 
 bool agx_ppp_hal200_graphics_core_pack(

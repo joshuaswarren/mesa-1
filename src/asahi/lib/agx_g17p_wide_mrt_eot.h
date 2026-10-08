@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Native G17P EOT texts and metadata captured with MetalToolchain
- * v27.1.5194.15. See compiler/test/probes/README-g17p-wide-mrt.md.
+ * 27.1.5194.15.
  * Every attachment stays in physical imageblock partition zero.
  * EOT partitions are offset/sample-stride quotients, distinct from
  * fragment pixel synchronization classes. Active PBEs are packed. */

@@ -4,25 +4,32 @@
  */
 
 #include "agx_ppp_hal300_depth_stencil_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
-static void
-agx_ppp_hal300_depth_stencil_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_ppp_hal300_depth_stencil_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
+/*
+ * Pack/unpack only the exact six-word HAL300 PPP block recovered from the
+ * inspected G17G fixed-layout render-state path:
+ *
+ *   u32 header = bit 0
+ *   u32 fragment control
+ *   u32 fragment front face
+ *   u32 fragment back face
+ *   u32 fragment front stencil
+ *   u32 fragment back stencil
+ *
+ * The G17G path copies the 24-byte constant block at 0x4e8180..0x4e81c0.
+ * Its local rodata witness at file offset 0x952a40 begins with header bit 0
+ * and five recognizable depth/stencil payload words.  Dynamic lowering at
+ * 0x4ec5a4..0x4ec628 stages the same five slots in the order above.  The
+ * homologous G16 path at 0x213e49834..0x213e498b8 instead stages front
+ * stencil before back face, proving the HAL300-only adjacent-word swap.
+ *
+ * The three admitted chip identities are the HAL300 G17 GPU classes covered
+ * by the G17G/G17X plugin witnesses.  This codec neither emits the surrounding
+ * VDM PPP pointer nor admits a device or advertises a feature.
+ */
 bool
 agx_ppp_hal300_depth_stencil_core_supported(enum agx_chip chip)
 {
@@ -51,17 +58,17 @@ agx_ppp_hal300_depth_stencil_core_pack(
        !agx_ppp_hal300_depth_stencil_core_supported(chip))
       return false;
 
-   agx_ppp_hal300_depth_stencil_store_le32(
+   agx_store_le32(
       &out->bytes[0], AGX_PPP_HAL300_DEPTH_STENCIL_HEADER);
-   agx_ppp_hal300_depth_stencil_store_le32(
+   agx_store_le32(
       &out->bytes[4], fields->fragment_control_raw);
-   agx_ppp_hal300_depth_stencil_store_le32(
+   agx_store_le32(
       &out->bytes[8], fields->fragment_front_face_raw);
-   agx_ppp_hal300_depth_stencil_store_le32(
+   agx_store_le32(
       &out->bytes[12], fields->fragment_back_face_raw);
-   agx_ppp_hal300_depth_stencil_store_le32(
+   agx_store_le32(
       &out->bytes[16], fields->fragment_front_stencil_raw);
-   agx_ppp_hal300_depth_stencil_store_le32(
+   agx_store_le32(
       &out->bytes[20], fields->fragment_back_stencil_raw);
    out->length = AGX_PPP_HAL300_DEPTH_STENCIL_CORE_LENGTH;
    return true;
@@ -80,19 +87,19 @@ agx_ppp_hal300_depth_stencil_core_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   if (agx_ppp_hal300_depth_stencil_load_le32(raw) !=
+   if (agx_load_le32(raw) !=
        AGX_PPP_HAL300_DEPTH_STENCIL_HEADER)
       return false;
 
    fields->fragment_control_raw =
-      agx_ppp_hal300_depth_stencil_load_le32(&raw[4]);
+      agx_load_le32(&raw[4]);
    fields->fragment_front_face_raw =
-      agx_ppp_hal300_depth_stencil_load_le32(&raw[8]);
+      agx_load_le32(&raw[8]);
    fields->fragment_back_face_raw =
-      agx_ppp_hal300_depth_stencil_load_le32(&raw[12]);
+      agx_load_le32(&raw[12]);
    fields->fragment_front_stencil_raw =
-      agx_ppp_hal300_depth_stencil_load_le32(&raw[16]);
+      agx_load_le32(&raw[16]);
    fields->fragment_back_stencil_raw =
-      agx_ppp_hal300_depth_stencil_load_le32(&raw[20]);
+      agx_load_le32(&raw[20]);
    return true;
 }

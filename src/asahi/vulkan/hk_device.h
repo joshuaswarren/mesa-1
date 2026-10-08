@@ -12,33 +12,6 @@
 #include "asahi/lib/agx_device.h"
 #include "util/rwlock.h"
 
-/* v56f/v57d: environment knobs read on command-recording paths are read once
- * per call site. getenv() is a linear scan of the environment block and
- * showed up on Minecraft's render thread (getenv 0.93%, strncmp 0.50%). */
-#define HK_ENV_BOOL_ONCE(name, def)                                        \
-   ({                                                                      \
-      static int hk_env_once_ = -1;                                        \
-      if (unlikely(hk_env_once_ < 0))                                      \
-         hk_env_once_ = debug_get_bool_option(name, def);                  \
-      (bool)hk_env_once_;                                                  \
-   })
-#define HK_ENV_NUM_ONCE(name, def)                                         \
-   ({                                                                      \
-      static int64_t hk_env_num_once_;                                     \
-      static int hk_env_num_init_;                                         \
-      if (unlikely(!p_atomic_read(&hk_env_num_init_))) {                   \
-         hk_env_num_once_ = debug_get_num_option(name, def);               \
-         p_atomic_set(&hk_env_num_init_, 1);                               \
-      }                                                                    \
-      hk_env_num_once_;                                                    \
-   })
-#define HK_ENV_PRESENT_ONCE(name)                                          \
-   ({                                                                      \
-      static int hk_env_present_ = -1;                                     \
-      if (unlikely(hk_env_present_ < 0))                                   \
-         hk_env_present_ = getenv(name) != NULL;                           \
-      (bool)hk_env_present_;                                               \
-   })
 #include "util/simple_mtx.h"
 #include "util/u_dynarray.h"
 #include "agx_bg_eot.h"
@@ -110,6 +83,14 @@ struct hk_sampler_heap {
    struct hash_table *ht;
 };
 
+/* Executable memory for shader binaries and launch setups, bump-allocated
+ * from chunks. A chunk lives while anything allocated from it does. */
+struct hk_code_heap {
+   simple_mtx_t lock;
+   struct agx_bo *chunk;
+   uint32_t offset;
+};
+
 struct hk_device {
    struct vk_device vk;
    struct agx_device dev;
@@ -137,9 +118,6 @@ struct hk_device {
    /* frg-codegen v4 BG/EOT device cache (hk_cmd_draw.c). */
    struct hk_g17p_bg_eot_dev_cache *g17p_bg_eot_dev_cache;
 
-   /* HK_PASS_PROFILE diagnostic state, NULL unless enabled. */
-   struct hk_pass_profile *pass_profile;
-
    /* VK_KHR_ray_tracing_pipeline shader group handles.  A handle is one
     * device-unique index, so a handle captured from a pipeline library keeps
     * naming the same group in every pipeline that imports the library.  It
@@ -153,19 +131,14 @@ struct hk_device {
       void *templates[LIBAGX_NUM_PROGRAMS];
    } g17p_compute_program_cache;
 
-   /* v48: kernel-maintained copy of this VM's sticky status
+   struct hk_code_heap code_heap;
+
+   /* Kernel-maintained copy of this VM's sticky status
     * (DRM_ASAHI_FEATURE_VM_STATUS_MIRROR). NULL: query per check instead. */
    struct {
       struct agx_bo *bo;
       int32_t *word;
    } vm_status_mirror;
-
-   /* Immutable diagnostic selection. Never rescan the process environment
-    * from render-pass, draw, dispatch, or per-program publication paths. */
-
-   struct {
-      bool launch_trace;
-   } g17p_diagnostics;
 
    struct {
       /* Immutable for the device's lifetime: the native texel-fetch sampler
@@ -285,7 +258,7 @@ void hk_device_finish_meta(struct hk_device *dev);
 
 /* Force the geometry/tessellation heap to exist now rather than inside the
  * first draw that needs it.  Idempotent and safe to call from any thread. */
-void hk_device_ensure_geometry_heap(struct hk_device *dev);
+VkResult hk_device_ensure_geometry_heap(struct hk_device *dev);
 
 VkResult hk_sampler_heap_add(struct hk_device *dev,
                              const struct hk_native_sampler_descriptor *desc,
@@ -321,3 +294,9 @@ hk_device_alloc_scratch(struct hk_device *dev, mesa_shader_stage stage,
  * launch programs (hk_cmd_draw.c). */
 void hk_g17p_bg_eot_dev_cache_init(struct hk_device *dev);
 void hk_g17p_bg_eot_dev_cache_finish(struct hk_device *dev);
+
+/* Allocate size bytes of executable memory. Returns a reference to the chunk
+ * BO holding it, with the allocation at *offset; release it with
+ * agx_bo_unreference(). */
+struct agx_bo *hk_code_alloc(struct hk_device *dev, size_t size,
+                             uint32_t *offset);

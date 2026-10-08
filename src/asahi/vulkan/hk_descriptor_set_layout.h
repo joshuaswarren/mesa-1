@@ -51,6 +51,11 @@ struct hk_descriptor_set_layout {
     */
    uint8_t descriptor_generation;
 
+   /* G17P native heap indices are zero-based. Other chips retain AGX2's
+    * software descriptor bias; descriptor generation alone does not select
+    * this ABI because Gen9 covers several distinct chips. */
+   bool native_sampler_indices;
+
    /* Size of the descriptor buffer for this descriptor set */
    /* Does not contain the size needed for variable count descriptors */
    uint32_t non_variable_descriptor_buffer_size;
@@ -61,6 +66,13 @@ struct hk_descriptor_set_layout {
    /* Bindings in this descriptor set */
    struct hk_descriptor_set_binding_layout binding[0];
 };
+
+static inline uint16_t
+hk_sampler_descriptor_index(const struct hk_descriptor_set_layout *layout,
+                            uint16_t heap_index)
+{
+   return heap_index + (layout->native_sampler_indices ? 0 : 28);
+}
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_descriptor_set_layout, vk.base,
                                VkDescriptorSetLayout,

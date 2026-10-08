@@ -106,13 +106,18 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       return src_index == (op == AGX_OPCODE_LOCAL_LOAD ? 0 : 1);
    case AGX_OPCODE_IMAGE_WRITE:
       return src_index == 3;
+   case AGX_OPCODE_ST_VARY:
+      /* G17P's vertex output store reads a 16-bit index from the uniform
+       * file (agx3_vary_uvsw_uniform_index), as an unlinked vertex shader's
+       * per-draw output indices are. */
+      return encoding == AGX_ISA_ENCODING_AGX3B && src_index == 0 &&
+             size == AGX_SIZE_16;
    case AGX_OPCODE_BLOCK_IMAGE_STORE:
    case AGX_OPCODE_ZS_EMIT:
    case AGX_OPCODE_ZS_EMIT_AGX3:
    case AGX_OPCODE_ST_TILE:
    case AGX_OPCODE_LD_TILE:
    case AGX_OPCODE_UNIFORM_STORE:
-   case AGX_OPCODE_ST_VARY:
    case AGX_OPCODE_LOCAL_ATOMIC:
    case AGX_OPCODE_SAMPLE_MASK:
    case AGX_OPCODE_ITER:
@@ -201,10 +206,55 @@ agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx, const agx_instr *I,
    return any_uniform && !witnessed;
 }
 
+/*
+ * A G17P float operation reads a negated uniform only as an FMA addend.
+ * Elsewhere, move the negation to an operand that may carry it instead of
+ * copying the uniform into a register: -u * x == u * -x exactly, and
+ * x - u == fma(x, 1.0, -u) with the same single rounding.
+ */
+static agx_instr *
+agx3_move_uniform_negation(agx_context *ctx, agx_instr *I)
+{
+   if (I->op == AGX_OPCODE_FMUL || I->op == AGX_OPCODE_FFMA) {
+      for (unsigned s = 0; s < 2; ++s) {
+         agx_index *u = &I->src[s], *x = &I->src[1 - s];
+         if (u->type == AGX_INDEX_UNIFORM && u->neg && !u->abs &&
+             u->size == AGX_SIZE_32 && x->type == AGX_INDEX_NORMAL &&
+             x->size == AGX_SIZE_32) {
+            u->neg = false;
+            x->neg = !x->neg;
+         }
+      }
+      return I;
+   }
+
+   if (I->op != AGX_OPCODE_FADD || I->nr_dests != 1 ||
+       I->dest[0].size != AGX_SIZE_32)
+      return I;
+
+   for (unsigned s = 0; s < 2; ++s) {
+      const agx_index u = I->src[s], x = I->src[1 - s];
+      if (u.type == AGX_INDEX_UNIFORM && u.neg && !u.abs &&
+          u.size == AGX_SIZE_32 && x.type == AGX_INDEX_NORMAL &&
+          x.size == AGX_SIZE_32) {
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         agx_instr *fma =
+            agx_ffma_to(&b, I->dest[0], x, agx_immediate_f(1.0f), u);
+         fma->saturate = I->saturate;
+         agx_remove_instruction(I);
+         return fma;
+      }
+   }
+   return I;
+}
+
 static void
 agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
 {
    agx_foreach_instr_in_block_safe(block, I) {
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         I = agx3_move_uniform_negation(ctx, I);
+
       agx_instr *at = I;
       struct agx3_uniform_integer_desc integer_desc;
       const bool native_integer =

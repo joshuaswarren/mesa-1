@@ -13,11 +13,6 @@
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
  * of the architecture.
- *
- * The 2026-09-10 G17P experiment admitting 32768 bytes with 32x32 pixels at
- * 4x lost the device. That configuration also uses 4096 raster samples, so
- * it does not isolate storage capacity from the raster-sample budget. Keep
- * this legacy default; callers must supply independently qualified limits.
  */
 #define MAX_BYTES_PER_TILE (32768 - 1)
 
@@ -418,13 +413,11 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
 
    /* Multisample tiles repeat one sample's allocation, so what matters is the
     * physical tilebuffer format rather than the API format in front of it.
-    * A hardware sweep at four samples
-    * (src/asahi/gl-tests/test-g17p-gl-msaa-resolve.c, which reads every sample
-    * back individually before resolving) covers each physical family below:
+    * A hardware sweep at four samples, reading every sample back
+    * individually before resolving, covers each physical family below:
     * rgba8, rgb565, rgba4, rgb5_a1, rgb10_a2, r8, rg8, r16f and rgba16f all
     * reach every sample and resolve to the drawn colour. Naming the physical
-    * format also admits the BGRA and RGBX spellings of the same tiles, which
-    * the previous logical-format list had to enumerate one at a time.
+    * format also admits the BGRA and RGBX spellings of the same tiles.
     */
    if (tib->nr_samples > 1 && tib->logical_format[0] != PIPE_FORMAT_NONE) {
       switch (agx_tilebuffer_physical_format(tib, 0)) {

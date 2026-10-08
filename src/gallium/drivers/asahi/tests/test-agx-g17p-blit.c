@@ -526,7 +526,7 @@ check_direct_resolve_shapes(void)
  *
  * The body is unrolled over the samples instead, which is what Apple's own
  * compiler does, and the whole run of depth stores shares one pixel
- * transaction (probes/README-g17p-per-sample-fragment.md). Run the blit
+ * transaction. Run the blit
  * through the shim, which builds the same programs without a GPU, and hold it
  * to producing one.
  */

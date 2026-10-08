@@ -16,6 +16,7 @@
 
 typedef struct {
    nir_instr *stores[NUM_SLOTS];
+   bool indirect_uvs;
    /* Whether the output component is written only once or multiple times. */
    BITSET_DECLARE(single, NUM_SLOTS);
    BITSET_DECLARE(multiple, NUM_SLOTS);
@@ -27,32 +28,51 @@ gather_output_stores(struct nir_builder *b, nir_intrinsic_instr *intr,
 {
    output_stores_state *state = (output_stores_state *)opaque;
 
-   if (intr->intrinsic != nir_intrinsic_store_output)
+   unsigned slot;
+   if (intr->intrinsic == nir_intrinsic_store_uvs_agx) {
+      /* The scalar UVS stores use an already linked component index. A
+       * dynamic index may alias every fixed store, so leave that shader's
+       * UVS writes in place. */
+      if (!nir_src_is_const(intr->src[1])) {
+         state->indirect_uvs = true;
+         return false;
+      }
+      slot = nir_src_as_uint(intr->src[1]);
+      if (slot >= NUM_SLOTS) {
+         state->indirect_uvs = true;
+         return false;
+      }
+   } else if (intr->intrinsic == nir_intrinsic_store_output) {
+      unsigned location = nir_intrinsic_io_semantics(intr).location;
+      unsigned component = nir_intrinsic_component(intr);
+      assert(location < NUM_TOTAL_VARYING_SLOTS);
+      assert(component < 4);
+      assert(!nir_intrinsic_io_semantics(intr).high_16bits);
+      if (location == VARYING_SLOT_POS)
+         location = LAST_SLOT;
+      slot = location * 4 + component;
+   } else {
       return false;
+   }
 
-   unsigned location = nir_intrinsic_io_semantics(intr).location;
-   unsigned component = nir_intrinsic_component(intr);
-   assert(location < NUM_TOTAL_VARYING_SLOTS);
-   assert(component < 4);
-   assert(!nir_intrinsic_io_semantics(intr).high_16bits);
-   /* Stores must be in the top level block. */
-   assert(intr->instr.block->cf_node.parent->type == nir_cf_node_function);
+   /* Conditional stores do not dominate the exit. Count them as multiple
+    * writes so another store to that component is not moved across them. */
+   if (intr->instr.block->cf_node.parent->type != nir_cf_node_function) {
+      BITSET_CLEAR(state->single, slot);
+      BITSET_SET(state->multiple, slot);
+      return false;
+   }
 
-   /* Put the position in the last slot to make its store last. */
-   if (location == VARYING_SLOT_POS)
-      location = LAST_SLOT;
-
-   unsigned slot = location * 4 + component;
    unsigned num_components = intr->src[0].ssa->num_components;
 
    /* Each component must be written only once. */
    bool multiple = false;
    for (unsigned i = 0; i < num_components; i++) {
-      if (BITSET_TEST(state->multiple, slot)) {
+      if (BITSET_TEST(state->multiple, slot + i)) {
          multiple = true;
-      } else if (BITSET_TEST(state->single, slot)) {
-         BITSET_CLEAR(state->single, slot);
-         BITSET_SET(state->multiple, slot);
+      } else if (BITSET_TEST(state->single, slot + i)) {
+         BITSET_CLEAR(state->single, slot + i);
+         BITSET_SET(state->multiple, slot + i);
          multiple = true;
       }
    }
@@ -77,6 +97,9 @@ nir_move_output_stores_to_end(nir_shader *nir)
    /* Gather output stores. */
    nir_shader_intrinsics_pass(nir, gather_output_stores, nir_metadata_all,
                               &state);
+
+   if (state.indirect_uvs)
+      return false;
 
    /* Move output stores to the end (only those that we can move). */
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);

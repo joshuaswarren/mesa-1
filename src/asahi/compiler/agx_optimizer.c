@@ -255,10 +255,8 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
       /* G17P's arithmetic shift right takes its shifted VALUE in a register.
        * Only the count (source 1) has an immediate form -- `sra` is what
        * `metal-nt -arch applegpu_g17p` emits for `(-7) >> x`, and it first
-       * spends an LDIMM to put the -7 in a register
-       * (test/probes/g17p-shift-immediate-value.metal, kernel immneg_reg:
-       * `1cf922fe1e0cff0f` ldimm then `a7015408000400d8e200` sra reg,reg;
-       * decoded in test/probes/README-g17p-deep-loops-and-shift-immediates.md).
+       * spends an LDIMM to put the -7 in a register (`1cf922fe1e0cff0f`
+       * ldimm then `a7015408000400d8e200` sra reg,reg).
        * Folding the constant into source 0 leaves a shape with no encoding
        * at all -- agx3_select_core.c's AGX3_SEL_OP_ASR requires two plain
        * 32-bit registers -- and the packer then refuses the whole shader.

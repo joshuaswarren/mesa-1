@@ -163,28 +163,6 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
     * it is not an assertion of byte parity with that uncaptured EOT block.
     */
    res->ptr = allocation + lead_size + AGX3_CODE_BLOCK_ENTRY_OFFSET - main_offset;
-   if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false)) {
-      const uint8_t *block = image + lead_size;
-      const uint32_t header = (uint32_t)block[0] | ((uint32_t)block[1] << 8) |
-                              ((uint32_t)block[2] << 16) |
-                              ((uint32_t)block[3] << 24);
-      fprintf(stderr,
-              "G17P auxiliary-shader: kind=%s text=%" PRIx64
-              " entry=%" PRIx64 " block=%" PRIx64
-              " header=%x allocation_size=%zu binary_size=%u main_offset=%u"
-              " main_size=%u main_span=%zu nr_gprs=%u scratch=%u constant=",
-              bin->info.stage == MESA_SHADER_COMPUTE ? "eot" : "background",
-              res->ptr, res->ptr + main_offset, allocation + lead_size,
-              header, size, bin->info.binary_size, main_offset,
-              bin->info.main_size, main_span, bin->info.nr_gprs,
-              bin->info.scratch_size);
-      for (unsigned i = 0; i < AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE; ++i)
-         fprintf(stderr, "%02x", block[AGX3_CODE_BLOCK_HEADER_SIZE + i]);
-      fprintf(stderr, " main=");
-      for (unsigned i = 0; i < bin->info.main_size; ++i)
-         fprintf(stderr, "%02x", block[AGX3_CODE_BLOCK_ENTRY_OFFSET + i]);
-      fprintf(stderr, "\n");
-   }
    free(image);
    return true;
 }

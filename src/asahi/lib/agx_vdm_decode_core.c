@@ -4,6 +4,7 @@
  */
 
 #include "agx_vdm_decode_core.h"
+#include "agx_bytes.h"
 
 #include "agx_vdm_barrier_core.h"
 #include "agx_vdm_ppp_state_core.h"
@@ -12,13 +13,6 @@
 #include "agx_vdm_tessellate_core.h"
 
 #include <string.h>
-
-static uint32_t
-agx_vdm_decode_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
 
 static bool
 agx_vdm_decode_is_hal300(enum agx_chip chip)
@@ -37,7 +31,7 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
    if (!bytes || !record || available < sizeof(uint32_t))
       return false;
 
-   const uint32_t word0 = agx_vdm_decode_load_le32(bytes);
+   const uint32_t word0 = agx_load_le32(bytes);
    const uint8_t block_type = word0 >> 29;
 
    switch (block_type) {

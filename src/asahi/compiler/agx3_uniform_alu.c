@@ -62,7 +62,7 @@ uniform_float_encode(enum agx_isa_encoding encoding,
 
    /* Apple G17P/G16G uniform_repeat: 09010e0d210e02c2. Domain 3 selects
     * uniform f36/f53 instead of register f35/f52. ADD and MUL use the same
-    * first two operand records. See probes/agx3-optimization-corpus. */
+    * first two operand records. */
    const char *mnemonic = half ? (op == AGX3_UNIFORM_FADD   ? "f16add"
                                   : op == AGX3_UNIFORM_FMUL ? "f16mul"
                                                             : "f16fma")
@@ -117,6 +117,11 @@ uniform_float_encode(enum agx_isa_encoding encoding,
        * for multiple producers, without draining unrelated outstanding work. */
       const unsigned first_ep = (wait_mask & (wait_mask - 1)) ? last_ep : 0;
       for (unsigned ep = first_ep; ep <= last_ep; ++ep) {
+         /* Only a strictly shorter encoding can replace the first swap's,
+          * and the endpoints grow in length: stop trying once they reach it. */
+         if (best_length &&
+             agx3_bind_form_size(encoding, mnemonic, ep) >= best_length)
+            break;
          uint8_t bytes[16], size;
          if (agx3_bind_compose(encoding, mnemonic, ep, NULL, 0, fields, n,
                                bytes, &size)) {

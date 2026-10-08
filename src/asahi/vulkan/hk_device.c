@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_device.h"
-#include "hk_pass_profile.h"
 
 #include "hk_acceleration_structure.h"
 
@@ -101,14 +100,17 @@ hk_upload_rodata(struct hk_device *dev)
                        "%s has no known sampler heap element size",
                        agx_chip_name(dev->dev.chip));
 
+   VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
    const size_t rodata_size = align(sampler_size, sizeof(uint64_t));
    dev->rodata.bo =
       agx_bo_create(&dev->dev, rodata_size, 0, 0, "Read only data");
 
    if (!dev->rodata.bo)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail;
 
    uint8_t *map = agx_bo_map(dev->rodata.bo);
+   if (!map)
+      goto fail;
    uint32_t offs = 0;
 
    offs = align(offs, 8);
@@ -125,11 +127,10 @@ hk_upload_rodata(struct hk_device *dev)
 
    struct hk_native_sampler_descriptor txf;
    if (!hk_pack_native_txf_sampler(dev->dev.chip, &txf)) {
-      agx_bo_unreference(&dev->dev, dev->rodata.bo);
-      dev->rodata.bo = NULL;
-      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
-                       "%s cannot pack the texel-fetch sampler",
-                       agx_chip_name(dev->dev.chip));
+      result = vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                          "%s cannot pack the texel-fetch sampler",
+                          agx_chip_name(dev->dev.chip));
+      goto fail;
    }
    memcpy(map + offs, &txf, sampler_size);
    offs += sampler_size;
@@ -143,14 +144,13 @@ hk_upload_rodata(struct hk_device *dev)
       dev->rodata.indexed_heap_pointers_bo =
          agx_bo_create(&dev->dev, sizeof(pointers), 0, 0,
                        "Indexed descriptor heap pointers");
-      if (!dev->rodata.indexed_heap_pointers_bo) {
-         agx_bo_unreference(&dev->dev, dev->rodata.bo);
-         dev->rodata.bo = NULL;
-         return VK_ERROR_OUT_OF_HOST_MEMORY;
-      }
+      if (!dev->rodata.indexed_heap_pointers_bo)
+         goto fail;
 
-      memcpy(agx_bo_map(dev->rodata.indexed_heap_pointers_bo), pointers,
-             sizeof(pointers));
+      void *pointers_map = agx_bo_map(dev->rodata.indexed_heap_pointers_bo);
+      if (!pointers_map)
+         goto fail;
+      memcpy(pointers_map, pointers, sizeof(pointers));
       dev->rodata.indexed_heap_pointers =
          dev->rodata.indexed_heap_pointers_bo->va->addr;
    }
@@ -158,29 +158,29 @@ hk_upload_rodata(struct hk_device *dev)
    /* The heap descriptor is NOT read-only data: hk_init_heap() writes it from
     * the CPU on the first tessellated or geometry-shaded draw, and the libagx
     * allocator then atomically bumps poly_heap::bottom from the GPU on every
-    * such draw (src/poly/geometry.h poly_heap_alloc_offs). It used to be
-    * suballocated out of the buffer object above, 32 bytes after the texel
-    * fetch sampler whose base address is handed to every G17P background
-    * reload program as a sampler table pointer -- so one tessellation draw
-    * turned bytes the fragment path can address from zero into live allocator
-    * state. Give it its own buffer object; the sampler table then never
-    * changes after device creation.
+    * such draw (src/poly/geometry.h poly_heap_alloc_offs). Keep it in its
+    * own buffer object so the sampler table next to the texel-fetch sampler
+    * never changes after device creation.
     */
    dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
                                        0, "Geometry heap descriptor");
-   if (!dev->rodata.heap_bo) {
-      agx_bo_unreference(&dev->dev,
-                         dev->rodata.indexed_heap_pointers_bo);
-      dev->rodata.indexed_heap_pointers_bo = NULL;
-      agx_bo_unreference(&dev->dev, dev->rodata.bo);
-      dev->rodata.bo = NULL;
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
+   if (!dev->rodata.heap_bo)
+      goto fail;
 
-   memset(agx_bo_map(dev->rodata.heap_bo), 0, sizeof(struct poly_heap));
+   void *heap_map = agx_bo_map(dev->rodata.heap_bo);
+   if (!heap_map)
+      goto fail;
+   memset(heap_map, 0, sizeof(struct poly_heap));
    dev->rodata.heap = dev->rodata.heap_bo->va->addr;
 
    return VK_SUCCESS;
+
+fail:
+   agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   memset(&dev->rodata, 0, sizeof(dev->rodata));
+   return result;
 }
 
 static uint32_t
@@ -384,20 +384,17 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
-/* v48 (neo-host-path-mesa-v48): register the kernel-maintained VM status
- * mirror so the per-wait device-lost check is a load instead of a GET_PARAMS
- * ioctl. The kernel stores a job's sticky error in the word before it
+/* Register the kernel-maintained VM status mirror so the per-wait
+ * device-lost check is a load instead of a GET_PARAMS ioctl. The kernel stores a job's sticky error in the word before it
  * signals that job's fence, exactly the ordering the per-wait query relies
  * on, and refuses registration whenever the query could report more than the
  * VM's own status. Any failure here leaves the query path in place.
- * HK_G17P_VM_STATUS_MIRROR=0 disables registration (A/B control).
  */
 static void
 hk_init_vm_status_mirror(struct hk_device *dev)
 {
    if (!(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS) ||
-       !(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS_MIRROR) ||
-       !debug_get_bool_option("HK_G17P_VM_STATUS_MIRROR", true))
+       !(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS_MIRROR))
       return;
 
    struct agx_bo *bo =
@@ -429,6 +426,48 @@ hk_init_vm_status_mirror(struct hk_device *dev)
 
    dev->vm_status_mirror.bo = bo;
    dev->vm_status_mirror.word = word;
+}
+
+#define HK_CODE_CHUNK_SIZE (1024 * 1024)
+#define HK_CODE_ALIGNMENT  256
+
+struct agx_bo *
+hk_code_alloc(struct hk_device *dev, size_t size, uint32_t *offset)
+{
+   struct hk_code_heap *heap = &dev->code_heap;
+   struct agx_bo *bo = NULL;
+
+   simple_mtx_lock(&heap->lock);
+   uint32_t at = ALIGN_POT(heap->offset, HK_CODE_ALIGNMENT);
+   if (!heap->chunk || size > heap->chunk->size ||
+       at > heap->chunk->size - size) {
+      struct agx_bo *chunk =
+         agx_bo_create(&dev->dev, MAX2(HK_CODE_CHUNK_SIZE, size), 0,
+                       AGX_BO_EXEC | AGX_BO_LOW_VA, "Shader code");
+      if (!chunk || !agx_bo_map(chunk)) {
+         agx_bo_unreference(&dev->dev, chunk);
+         goto out;
+      }
+      agx_bo_unreference(&dev->dev, heap->chunk);
+      heap->chunk = chunk;
+      at = 0;
+   }
+
+   heap->offset = at + size;
+   *offset = at;
+   bo = heap->chunk;
+   agx_bo_reference(bo);
+
+out:
+   simple_mtx_unlock(&heap->lock);
+   return bo;
+}
+
+static struct agx_bo *
+hk_code_alloc_linked(struct agx_device *adev, size_t size, uint32_t *offset)
+{
+   return hk_code_alloc(container_of(adev, struct hk_device, dev), size,
+                        offset);
 }
 
 /* Release before agx_close_device(), whose BO-cache eviction then frees the
@@ -713,10 +752,8 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
       mesa_logw("G17P indirect compute unavailable: grid helper refused");
 
    /* Only a sparse residency buffer can carry a residency bitmap, so only a
-    * device that enabled the feature can ever select this helper.  Compiling
-    * it unconditionally cost every vkCreateDevice about 2.5 ms -- 32 device
-    * create/destroy cycles went from 419 ms to 499 ms, measured on G17P -- for
-    * a program most devices never launch. */
+    * device that enabled the feature can ever select this helper; skip
+    * compiling it otherwise. */
    if (!dev->vk.enabled_features.sparseResidencyBuffer)
       return;
 
@@ -763,6 +800,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    vk_device_dispatch_table_from_entrypoints(
       &dev->cmd_dispatch, &vk_common_device_entrypoints, false);
 
+   simple_mtx_init(&dev->code_heap.lock, mtx_plain);
+   dev->dev.code_alloc = hk_code_alloc_linked;
+
    result = vk_device_init(&dev->vk, &pdev->vk, &dispatch_table, pCreateInfo,
                            pAllocator);
    if (result != VK_SUCCESS)
@@ -802,6 +842,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       dev->vk.enabled_features.pipelineRobustness = false;
    }
 
+   /* All BOs use the single UMA heap. Cached BOs remain pinned after
+    * vkFreeMemory, so include their bytes across every logical device. */
+   assert(pdev->mem_heap_count == 1);
+   dev->dev.bo_cache.size_counter = &pdev->mem_heaps[0].cached;
    bool succ = agx_open_device(NULL, &dev->dev);
    drmFreeDevice(&drm_device);
    if (!succ) {
@@ -824,8 +868,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    assert(dev->dev.user_timestamp_to_ns.num ==
              dev->dev.user_timestamp_to_ns.den &&
           "user timestamps are in ns");
-
-   hk_pass_profile_init(dev);
 
    result = hk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)
@@ -867,9 +909,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_rodata;
    }
    hk_g17p_bg_eot_dev_cache_init(dev);
-
-   dev->g17p_diagnostics.launch_trace =
-      debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
 
    /* Geometry and tessellation are advertised core functionality on G17P.
     * Upload their immutable internal kernels with the device instead of
@@ -982,6 +1021,7 @@ fail_samplers:
    hk_destroy_sampler_heap(dev, &dev->samplers);
 fail_dev:
    hk_finish_vm_status_mirror(dev);
+   agx_bo_unreference(&dev->dev, dev->code_heap.chunk);
    agx_close_device(&dev->dev);
    /* agx_close_device owns the DRM fd after agx_open_device succeeds. */
    goto fail_init;
@@ -1020,7 +1060,6 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       hk_queue_finish(dev, queue);
    }
 
-   hk_pass_profile_fini(dev);
    vk_device_finish(&dev->vk);
 
    hk_device_finish_vdm_slabs(dev);
@@ -1060,6 +1099,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    hk_g17p_bg_eot_dev_cache_finish(dev);
    agx_bg_eot_cleanup(&dev->bg_eot);
    hk_finish_vm_status_mirror(dev);
+   agx_bo_unreference(&dev->dev, dev->code_heap.chunk);
+   simple_mtx_destroy(&dev->code_heap.lock);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
 }

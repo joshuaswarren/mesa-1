@@ -10,7 +10,9 @@
 bool
 d12_nir_g17p_txf_supported(nir_shader *nir, bool *has_txf)
 {
-   if (!nir || !has_txf || nir->info.stage != MESA_SHADER_COMPUTE)
+   if (!nir || !has_txf || (nir->info.stage != MESA_SHADER_COMPUTE &&
+                            nir->info.stage != MESA_SHADER_FRAGMENT &&
+                            nir->info.stage != MESA_SHADER_VERTEX))
       return false;
    bool found = false;
    nir_foreach_function_impl(impl, nir) {
@@ -23,9 +25,13 @@ d12_nir_g17p_txf_supported(nir_shader *nir, bool *has_txf)
                continue;
             nir_tex_instr *tex = nir_instr_as_tex(instr);
             int h = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+            const int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+            const bool coords_2d = coord >= 0
+               ? nir_src_num_components(tex->src[coord].src) == 2
+               : tex->coord_components == 2;
             if (tex->op != nir_texop_txf ||
                 tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
-                tex->is_shadow || tex->coord_components != 2 || h < 0 ||
+                tex->is_shadow || !coords_2d || h < 0 ||
                 nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0)
                return false;
             nir_intrinsic_instr *handle = nir_src_as_intrinsic(tex->src[h].src);
@@ -158,6 +164,14 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
        nir->info.stage != MESA_SHADER_FRAGMENT)
       return false;
 
+   /* Both stages consume the same native32 texture array and sampler0.
+    * Unlike filtered samples, texel fetches need no API sampler and may
+    * address several entries in that array. Reuse the compute lowering. */
+   if (d12_nir_lower_g17p_txf(nir, generation)) {
+      *out = (struct d12_nir_g17p_fragment_sample){.indexed_fetch = true};
+      return true;
+   }
+
    nir_tex_instr *sample = NULL;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
@@ -237,6 +251,7 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
       }
    }
 
+   out->indexed_fetch = false;
    out->texture_offset_B = (uint32_t)nir_src_as_uint(handle->src[0]);
    out->sampler_slot = (uint8_t)(native_sampler - 1);
    nir_steal_tex_src(sample, nir_tex_src_texture_handle);
@@ -246,5 +261,22 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
    nir_foreach_function_impl(impl, nir)
       nir_progress(true, impl, nir_metadata_control_flow);
    NIR_PASS(_, nir, nir_opt_dce);
+   return true;
+}
+
+bool
+d12_nir_lower_g17p_graphics_resources(
+   nir_shader *nir, uint32_t generation,
+   struct d12_nir_g17p_fragment_sample *out)
+{
+   if (!nir || !out || generation != 9 ||
+       (nir->info.stage != MESA_SHADER_VERTEX &&
+        nir->info.stage != MESA_SHADER_FRAGMENT))
+      return false;
+   if (!agx_nir_lower_g17p_native32_samplers(nir, D12_UNIFORM_TEXTURES))
+      return false;
+   *out = (struct d12_nir_g17p_fragment_sample){
+      .indexed_fetch = true, .indexed_samplers = true,
+   };
    return true;
 }

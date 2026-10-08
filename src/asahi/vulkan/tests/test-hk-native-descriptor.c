@@ -496,9 +496,8 @@ check_captured_rgba8_lossless_pbe(void)
 #define REJECT_COMPRESSED(change) do { p = original; change; \
    assert(!hk_pack_native_pbe(9, &actual, &p)); } while (0)
    /* Compressed mip chains and the other compressed colour classes are
-    * admitted by the G17P compression policy (the five-mip HAL200 witness in
-    * test-pbe-agx3-core.c); only shapes outside the compressed packet stay
-    * refused. */
+    * admitted by the G17P compression policy; only shapes outside the
+    * compressed packet stay refused. */
    REJECT_COMPRESSED(p.acceleration_buffer = 0);
    REJECT_COMPRESSED(p.acceleration_buffer++);
    REJECT_COMPRESSED(p.extended = false);

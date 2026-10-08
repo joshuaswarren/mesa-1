@@ -19,12 +19,9 @@
  * wrong baseline cannot silently produce a valid-looking instruction.  The
  * witnesses are the same ones the byte-level codecs in agx3_pack.c pin:
  *
- *  - intersect_ray / continue_ray: the decoded G16G/G17S corpus vectors in
- *    test/agx3_compose_corpus_vectors.c (intersect cases 263/470/561/651 and
- *    1006/1252/1351/1453; continue cases 275/482/573/663 and
- *    1017/1263/1361/1463) plus the pinned five-kernel RT corpus ladders that
- *    agx3_pack_{intersect,continue}_ray accept.  The test replays every
- *    accepted value byte-for-byte against those codecs' deposit scheme.
+ *  - intersect_ray / continue_ray: decoded G16G/G17S Apple instructions plus
+ *    the pinned five-kernel RT ladders that agx3_pack_{intersect,continue}_ray
+ *    accept.
  *  - incStk, barrier, update_node, update_bvh: the exact fixed witnesses in
  *    agx3_pack.c (agx3_pack_inc_stk_fixed_witness, agx3_pack_update_node,
  *    agx3_pack_update_bvh_fixed_witness), decoded to composer fields and
@@ -65,7 +62,7 @@
  *    FALSE -- the geometry-cull and opacity-cull variants give -2.  f63 and
  *    f92 shift when the ray-setup allocation shifts; nothing further is
  *    established.
- *  - CORRECTION (2026-09-10): f63, f77/f78 and f92 are REGISTER OPERANDS of
+ *  - f63, f77/f78 and f92 are REGISTER OPERANDS of
  *    intersect_ray, not payload or per-query descriptors, and f84/f85 are
  *    their operand-class selectors.  Two independent measurements against
  *    `metal-nt -arch applegpu_g17p`:
@@ -113,14 +110,6 @@ extern "C" {
 #define AGX3_RT_CORE_MAX_LENGTH 14u
 
 /*
- * Encode intersect_ray with the canonical anonymous-field context.
- * `state_register` is Apple's varying f5 field; accepted values are exactly
- * the corpus differential pairs: {0, 4} on AGX3b, {0, 8} on AGX3c.
- */
-bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
-                           uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
  * Replay one witnessed intersect_ray corpus site, including the sites whose
  * anonymous scheduling-context fields differ from the canonical tuple
  * (AGX3b site 2 carries f92=130 instead of 134; AGX3c sites 2 and 3 carry
@@ -129,155 +118,6 @@ bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
  * state registers.  No claim is made about what selects one context over
  * another -- that witness is missing, so the tuples are only enumerable.
  */
-/*
- * Encode one AGX3b inline-ray-query intersect_ray from the three fields that
- * actually vary across Apple's ray-query lowering.
- *
- * `per_query` is Apple's f77.  It tracks the ray query rather than anything
- * else: two and three separately named queries give two and three distinct
- * values, while the SCS ray staging offsets stay 0 and 16 for every query and
- * a six-point register-pressure ladder leaves the whole encoding
- * byte-identical, so it is neither the ray's address nor an allocator-assigned
- * register.
- *
- * It is NOT a dense per-query index, and an earlier revision of this comment
- * overstated it as one.  Extending the sweep to four and five named queries
- * gives only three and four distinct values: these kernels traverse their
- * queries one after another, so the compiler reuses a value once a traversal
- * has finished.  Read it as a per-query allocated resource id whose lifetime
- * is the traversal, not as a query number.  Written as an array traversed in a
- * loop the queries share one code path and this whole field is absent, the
- * encoding taking a different form.
- *
- * Its encodable range is exactly 0..191, the same bound agx3_scs_core applies
- * to an AGX3b scalar register index, which is consistent with a half-register
- * index but is not proof of one, so no register name is given here.
- *
- * `site` is Apple's f5, a full 13-bit field (0..8191 all encode).  It is NOT
- * the per-query discriminator: it stays within {0, 4} whether one, two or
- * three queries are live, taking one value at each of the two intersect_ray
- * sites a single query's traversal contains.
- *
- * `context` is Apple's f92.  It varies between kernels (124 in the two-query
- * corpus, 122 in the three-query one) and no differential explains it, so it
- * is carried verbatim and deliberately unnamed.
- *
- * f77 and f78 are the SAME PHYSICAL BITS, and f84 chooses which identity
- * applies.  With f84=2 (and f88 set) the composer takes f77 and refuses f78;
- * with f84=3 (and f88 clear) it takes f78 and refuses f77; it never accepts
- * both.  Both deposit identically -- byte 6 high nibble and byte 7 -- and they
- * differ only in range: f77 stops at 191, while every f78 value tested up to
- * 256 encodes.
- *
- * Which form Apple emits is NOT simply a function of how many queries are
- * live.  A single-query kernel against a primitive acceleration structure
- * uses the f84=3/f78 form and two or more queries use the f84=2/f77 form,
- * but a SINGLE-query kernel against an instance acceleration structure also
- * uses f77.  Instancing selects it too, so what f84 keys on is unmapped.
- * The per-query differential above is expressed in f77 because that is the
- * form those kernels emit.
- *
- * This entry point emits the f84=2/f77 variant, the one witnessed whenever
- * more than one query is live.  The single-query f78 variant is reachable
- * through the enumerated witnessed-site replay, not here.
- *
- * Values outside the composer's tables are refused by the composer itself.
- * AGX3c is refused: this differential is an AGX3b/G17P corpus.
- */
-bool agx3_rt_intersect_ray_query(enum agx_isa_encoding enc, uint16_t site,
-                                 uint16_t per_query, uint16_t context,
-                                 uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
-                                 uint8_t *len);
-
-unsigned agx3_rt_intersect_ray_num_witnessed_sites(enum agx_isa_encoding enc);
-bool agx3_rt_intersect_ray_witnessed_site(enum agx_isa_encoding enc,
-                                          unsigned site,
-                                          uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
-                                          uint8_t *len);
-
-/*
- * Encode continue_ray.  `state_register` is the same Apple f5 field;
- * accepted values are the pinned five-kernel RT corpus ladders, identical to
- * agx3_pack_continue_ray: {0, 2, 4, 6, 8, 10} on AGX3b and
- * {0, 2, 8, 10, 12, 16, 18} on AGX3c.  Values Apple's tables can merely
- * spell (the composer would take any 13-bit value) are refused.
- */
-bool agx3_rt_continue_ray(enum agx_isa_encoding enc, uint16_t state_register,
-                          uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
- * Encode the fixed incStk instruction witnessed once per pinned
- * rt_rayquery_committed binary (composer fields AGX3b {f2=36, f9=2, f10=2,
- * f24=4} / AGX3c {f2=18, f9=2, f10=2, f14=3, f15=90, f24=4}, recovered from
- * the exact witness bytes).  No operand is exposed; see the header comment.
- */
-bool agx3_rt_inc_stk(enum agx_isa_encoding enc,
-                     uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
- * Encode incStk with its two varying operand fields.  AGX3b only.
- *
- * The header comment above records that incStk's operand codec was blocked on
- * a missing witness: "no corpus differential correlates any argument to a
- * machine field".  That witness now exists.  Compiling five ray-query kernels
- * and a 1/2/3/4-concurrent-query family for `applegpu_g17p` with Apple's own
- * `metal-nt` yields 24 distinct incStk encodings covering 24 distinct
- * (f2, f24) pairs, and f2/f24 vary independently: (46,5) and (46,8) share f2,
- * (62,352) and (62,520) share f2 with differing f24.  Every one of the 24 is
- * reproduced exactly by this encoder, and nothing outside f2/f24 varies across
- * them (the `07 00 54` prefix, the zero tail, f9=2 and f10=2 are invariant).
- *
- * What is witnessed is the DEPOSIT, not the meaning.  f2 is an 8-bit field
- * deposited in half-register units (byte 3 = f2/2), the same convention the
- * memory forms use for a register operand; f24 is a 13-bit field at bit 37.
- * Neither field's ray-traversal role is established -- deliberately no
- * `stack_depth`/`slot` name is invented for them here, because f5 on
- * intersect_ray was named `state_register` on an inference that the measured
- * G17P corpus does not support (see agx3_rt_intersect_ray).
- *
- * AGX3c is refused: the operand differential above is an AGX3b/G17P corpus and
- * no AGX3c incStk operand pair has been witnessed.
- */
-bool agx3_rt_inc_stk_operands(enum agx_isa_encoding enc, uint16_t operand_f2,
-                              uint16_t operand_f24,
-                              uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
-                              uint8_t *len);
-
-/*
- * Encode the exact barrier instruction Apple's compiler emits ahead of the
- * update_node / update_bvh operations (the RT-expansion scope form of the
- * general barrier).  Other barrier scopes belong to a future barrier core,
- * not here.
- */
-bool agx3_rt_update_barrier(enum agx_isa_encoding enc,
-                            uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
- * Encode the fixed update_node operation (the instruction alone, without the
- * preceding barrier).
- */
-bool agx3_rt_update_node(enum agx_isa_encoding enc,
-                         uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
- * Encode the fixed update_bvh operation (instruction alone).  AGX3c only;
- * AGX3b has no witness and is refused.
- */
-bool agx3_rt_update_bvh(enum agx_isa_encoding enc,
-                        uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
- * The complete witnessed expansions: barrier followed by the update
- * operation.  Byte-identical to agx3_pack_update_node and
- * agx3_pack_update_bvh_fixed_witness respectively (asserted by the test),
- * but built from the composer rather than stored bytes.
- */
-bool agx3_rt_update_node_expansion(enum agx_isa_encoding enc,
-                                   uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
-                                   uint8_t *len);
-bool agx3_rt_update_bvh_expansion(enum agx_isa_encoding enc,
-                                  uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
-                                  uint8_t *len);
 
 #ifdef __cplusplus
 }

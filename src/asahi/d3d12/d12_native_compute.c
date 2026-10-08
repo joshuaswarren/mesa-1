@@ -32,7 +32,7 @@ d12_native_compute_code_create(struct d12_device *device,
    /* No legacy PRESHADER, helper scratch, or uniform-DMA producer is supplied
     * by the native direct-compute path yet. Keep those requirements explicit. */
    if (info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
-       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_count ||
        info->imageblock_stride)
       return E_NOTIMPL;
 
@@ -168,7 +168,7 @@ d12_native_compute_generate(
        !info->main_size || !info->nr_gprs ||
        !info->agx3_staging_known || info->has_preamble ||
        info->nr_preamble_gprs || info->scratch_size ||
-       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_count ||
        info->imageblock_stride || info->texture_state_count ||
        info->sampler_state_count || info->uses_txf ||
        info->uses_sampler_heap || info->uses_ray_traversal ||

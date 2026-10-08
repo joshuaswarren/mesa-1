@@ -13,7 +13,6 @@
  * own emissions. Only (SR, width) pairs witnessed in the corpus encode; the
  * rest fail closed. Grade A: reproduces all 306 clean Apple SR-read witnesses
  * byte-exactly via the composer.
- * Evidence: research/gpu/GPU_AGX3_SR_OPS_2026-08-25.md.
  */
 
 #pragma once
@@ -52,11 +51,6 @@ struct agx3_sr_desc {
     * it on an SR39 read that is a fragment's first input. */
    bool first;
 };
-
-/* True if (sr, width) has a byte-exact corpus witness. Unwitnessed pairs must
- * not be emitted: the composer would accept any f21 value the field can hold,
- * so this table -- not the encoder -- is the fail-closed gate. */
-bool agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width);
 
 bool agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
                     uint8_t out[AGX3_SR_MAX_LENGTH], uint8_t *len);

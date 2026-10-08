@@ -9,7 +9,7 @@
  * index is an immediate (byte or scaled-element form) or a 32-bit register.
  * Loads additionally carry a scoreboard slot and a wait mask; stores signal no
  * slot. Grade A: reproduces Apple's witnessed lddev/stdev bytes exactly via the
- * composer. Evidence: research/gpu/GPU_AGX3_MEMORY_OPS_2026-08-24.md.
+ * composer.
  */
 
 #pragma once

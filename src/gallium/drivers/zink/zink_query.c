@@ -66,6 +66,7 @@ struct zink_query {
 
    bool active; /* query is considered active by vk */
    bool needs_reset; /* query is considered active by vk and cannot be destroyed */
+   bool failed; /* a range allocation failed; results are incomplete */
    bool dead; /* query should be destroyed when its fence finishes */
    bool needs_update; /* query needs to update its qbos */
    bool needs_rast_discard_workaround; /* query needs discard disabled */
@@ -101,7 +102,7 @@ get_num_starts(struct zink_query *q)
    return util_dynarray_num_elements(&q->starts, struct zink_query_start);
 }
 
-static void
+static bool
 update_query_id(struct zink_context *ctx, struct zink_query *q);
 
 
@@ -446,15 +447,19 @@ reset_qbo(struct zink_query *q)
    q->curr_qbo->num_results = 0;
 }
 
-static void
+static bool
 query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
 {
    bool is_timestamp = q->type == PIPE_QUERY_TIMESTAMP;
    struct zink_query_start *start;
    int num_queries = get_num_queries(q);
+   unsigned old_size = q->starts.size;
+   struct zink_vk_query *new_vkq[PIPE_MAX_VERTEX_STREAMS] = {0};
    if (!is_timestamp || get_num_starts(q) == 0) {
       size_t size = q->starts.capacity;
       start = util_dynarray_grow(&q->starts, struct zink_query_start, 1);
+      if (!start)
+         goto fail;
       if (size != q->starts.capacity) {
          /* when resizing, always zero the new data to avoid garbage */
          uint8_t *data = q->starts.data;
@@ -463,7 +468,6 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
    } else {
       start = util_dynarray_top_ptr(&q->starts, struct zink_query_start);
    }
-   start->data = 0;
 
    unsigned num_pools = get_num_query_pools(q);
    for (unsigned i = 0; i < num_queries; i++) {
@@ -479,14 +483,18 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->pool->refcount++;
       } else {
          struct zink_query_pool *pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
+         if (!pool)
+            goto fail;
          if (pool->last_range == NUM_QUERIES) {
             list_del(&pool->list);
             pool = find_or_allocate_qp(ctx, q, pool_idx, &vkq_needs_reset);
+            if (!pool)
+               goto fail;
          }
          vkq = CALLOC_STRUCT(zink_vk_query);
          if (!vkq) {
             mesa_loge("ZINK: failed to allocate vkq!");
-            return;
+            goto fail;
          }
 
          pool->refcount++;
@@ -496,9 +504,24 @@ query_pool_get_range(struct zink_context *ctx, struct zink_query *q)
          vkq->started = false;
          vkq->query_id = pool->last_range++;
       }
-      unref_vk_query(ctx, start->vkq[i]);
-      start->vkq[i] = vkq;
+      new_vkq[i] = vkq;
    }
+
+   /* Publish only a complete range, including all XFB streams. */
+   start->data = 0;
+   for (unsigned i = 0; i < num_queries; i++) {
+      unref_vk_query(ctx, start->vkq[i]);
+      start->vkq[i] = new_vkq[i];
+   }
+   return true;
+
+fail:
+   for (unsigned i = 0; i < num_queries; i++)
+      unref_vk_query(ctx, new_vkq[i]);
+   q->starts.size = old_size;
+   q->failed = true;
+   q->active = false;
+   return false;
 }
 
 static struct pipe_query *
@@ -666,6 +689,9 @@ get_query_result(struct pipe_context *pctx,
 {
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_query *query = (struct zink_query *)q;
+   if (query->failed)
+      return false;
+
    unsigned flags = PIPE_MAP_READ;
 
    if (!wait)
@@ -885,23 +911,27 @@ update_qbo(struct zink_context *ctx, struct zink_query *q)
    q->needs_update = false;
 }
 
-static void
+static bool
 begin_query(struct zink_context *ctx, struct zink_query *q)
 {
    VkQueryControlFlags flags = 0;
 
+   if (q->failed)
+      return false;
+
    if (q->type == PIPE_QUERY_TIMESTAMP_DISJOINT || q->type >= PIPE_QUERY_DRIVER_SPECIFIC)
-      return;
+      return true;
 
    if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && q->index == PIPE_STAT_QUERY_CS_INVOCATIONS && ctx->in_rp) {
       /* refuse to start CS queries in renderpasses */
       if (!list_is_linked(&q->active_list))
          list_addtail(&q->active_list, &ctx->suspended_queries);
       q->suspended = true;
-      return;
+      return true;
    }
 
-   update_query_id(ctx, q);
+   if (!update_query_id(ctx, q))
+      return false;
    q->predicate_dirty = true;
    if (q->needs_reset)
       reset_qbos(ctx, q);
@@ -919,7 +949,7 @@ begin_query(struct zink_context *ctx, struct zink_query *q)
    }
    /* ignore the rest of begin_query for timestamps */
    if (is_time_query(q))
-      return;
+      return true;
 
    /* A query must either begin and end inside the same subpass of a render pass
       instance, or must both begin and end outside of a render pass instance
@@ -964,6 +994,7 @@ begin_query(struct zink_context *ctx, struct zink_query *q)
       if (zink_set_rasterizer_discard(ctx, true))
          zink_set_null_fs(ctx);
    }
+   return true;
 }
 
 static bool
@@ -972,6 +1003,8 @@ zink_begin_query(struct pipe_context *pctx,
 {
    struct zink_query *query = (struct zink_query *)q;
    struct zink_context *ctx = zink_context(pctx);
+
+   query->failed = false;
 
    /* drop all past results */
    reset_qbo(query);
@@ -987,7 +1020,7 @@ zink_begin_query(struct pipe_context *pctx,
    query->start_offset = 0;
 
    if (ctx->in_rp || (query->type == PIPE_QUERY_TIME_ELAPSED)) {
-      begin_query(ctx, query);
+      return begin_query(ctx, query);
    } else {
       /* never directly start queries out of renderpass, always defer */
       list_addtail(&query->active_list, &ctx->suspended_queries);
@@ -999,12 +1032,14 @@ zink_begin_query(struct pipe_context *pctx,
    return true;
 }
 
-static void
+static bool
 update_query_id(struct zink_context *ctx, struct zink_query *q)
 {
-   query_pool_get_range(ctx, q);
+   if (!query_pool_get_range(ctx, q))
+      return false;
    ctx->bs->has_work = true;
    q->has_draws = false;
+   return true;
 }
 
 static void
@@ -1089,7 +1124,11 @@ zink_end_query(struct pipe_context *pctx,
       query->suspended = false;
    }
    if (is_time_query(query)) {
-      update_query_id(ctx, query);
+      /* QueryCounter starts a new timestamp without begin_query. */
+      if (query->type == PIPE_QUERY_TIMESTAMP)
+         query->failed = false;
+      if (query->failed || !update_query_id(ctx, query))
+         return false;
       if (query->needs_reset)
          reset_qbos(ctx, query);
       reset_query_range(ctx, query);
@@ -1110,7 +1149,7 @@ zink_end_query(struct pipe_context *pctx,
    if (unset_null_fs)
       zink_set_null_fs(ctx);
 
-   return true;
+   return !query->failed;
 }
 
 static bool
@@ -1122,6 +1161,9 @@ zink_get_query_result(struct pipe_context *pctx,
    struct zink_query *query = (void*)q;
    struct zink_context *ctx = zink_context(pctx);
    struct zink_screen *screen = zink_screen(pctx->screen);
+
+   if (query->failed)
+      return false;
 
    if (query->type == PIPE_QUERY_TIMESTAMP_DISJOINT) {
       result->timestamp_disjoint.frequency = screen->info.props.limits.timestampPeriod * 1000000.0;
@@ -1355,7 +1397,7 @@ zink_render_condition(struct pipe_context *pctx,
    VkQueryResultFlagBits flags = 0;
 
    ctx->bs->has_work = true;
-   if (query == NULL) {
+   if (query == NULL || query->failed) {
       /* force conditional clears if they exist */
       if (ctx->clears_enabled && !ctx->in_rp)
          zink_batch_rp(ctx);
@@ -1422,6 +1464,15 @@ zink_get_query_result_resource(struct pipe_context *pctx,
    unsigned result_size = result_type <= PIPE_QUERY_TYPE_U32 ? sizeof(uint32_t) : sizeof(uint64_t);
    VkQueryResultFlagBits size_flags = result_type <= PIPE_QUERY_TYPE_U32 ? 0 : VK_QUERY_RESULT_64_BIT;
    unsigned num_queries = get_num_starts(query);
+
+   if (query->failed) {
+      /* A failed query has no available result. Never copy partial results. */
+      if (index == -1) {
+         uint64_t unavailable = 0;
+         tc_buffer_write(pctx, pres, offset, result_size, &unavailable);
+      }
+      return;
+   }
 
    /* it's possible that a query may have no data at all: write out zeroes to the buffer and return */
    uint64_t u64[4] = {0};

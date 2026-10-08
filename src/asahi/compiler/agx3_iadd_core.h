@@ -195,8 +195,7 @@ struct agx3_imad_desc {
     * the slot-B kind moves from immediate (f38/f39 = 1, value in f30) to
     * register (f38/f39 = 2, value in f31) -- the same 1/2/3 operand-kind
     * convention used throughout AGX3. Witnessed byte-exactly against Apple's
-    * own `o[i] = a[i]*b[i] + c[i]` compute kernel; see the imad vectors in
-    * test-agx3-iadd-core.c.
+    * own `o[i] = a[i]*b[i] + c[i]` compute kernel.
     */
    bool multiplier_is_register;
    uint16_t multiplier_reg;

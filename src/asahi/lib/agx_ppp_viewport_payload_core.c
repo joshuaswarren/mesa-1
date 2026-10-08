@@ -4,38 +4,9 @@
  */
 
 #include "agx_ppp_viewport_payload_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
-
-static void
-agx_ppp_viewport_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static void
-agx_ppp_viewport_store_le64(uint8_t *dst, uint64_t value)
-{
-   agx_ppp_viewport_store_le32(dst, (uint32_t)value);
-   agx_ppp_viewport_store_le32(dst + 4, (uint32_t)(value >> 32));
-}
-
-static uint32_t
-agx_ppp_viewport_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
-static uint64_t
-agx_ppp_viewport_load_le64(const uint8_t *src)
-{
-   return (uint64_t)agx_ppp_viewport_load_le32(src) |
-          ((uint64_t)agx_ppp_viewport_load_le32(src + 4) << 32);
-}
 
 static bool
 agx_ppp_viewport_header_layout(enum agx_chip chip, uint32_t *base_header,
@@ -69,6 +40,32 @@ agx_ppp_viewport_header_layout(enum agx_chip chip, uint32_t *base_header,
    }
 }
 
+/*
+ * Pack/unpack only the viewport-only PPP payload emitted by the inspected
+ * Apple fixed-layout render-state paths:
+ *
+ *   u32 PPP header (region-clip + viewport bits set)
+ *   viewport_count raw 8-byte region-clip records
+ *   u32 raw viewport-control record
+ *   viewport_count raw 24-byte viewport transform records
+ *
+ * The six transform words are directly ordered as translate/scale X, Y, Z.
+ * They remain integer bit patterns so NaNs and every other floating-point
+ * payload round-trip losslessly.  Region-clip and viewport-control semantics
+ * are deliberately not inferred here and remain raw.
+ *
+ * G15, G16, and G17P PPPEncoderGen6 place viewport_count - 1 in header bits
+ * 12..15.  G17G/G17X PPPEncoderGen7 place it in bits 14..17.  All other
+ * header bits are fixed to the exact viewport-only form, so mixed or extended
+ * PPP updates fail closed.  The region-clip and viewport selectors themselves
+ * move from bits 10/11 to bits 12/13 at Gen7, so even a one-viewport packet is
+ * generation-specific.
+ *
+ * The target allowlist contains only identities directly served by the
+ * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X plugins.  This helper
+ * does not allocate or emit a live PPP update, follow a VDM pointer, submit a
+ * command, or admit a device.
+ */
 bool
 agx_ppp_viewport_payload_core_supported(enum agx_chip chip)
 {
@@ -105,16 +102,16 @@ agx_ppp_viewport_payload_core_pack(
                            ((uint32_t)(fields->viewport_count - 1) << shift);
    size_t offset = 0;
 
-   agx_ppp_viewport_store_le32(&out->bytes[offset], header);
+   agx_store_le32(&out->bytes[offset], header);
    offset += 4;
 
    for (unsigned i = 0; i < fields->viewport_count; ++i) {
-      agx_ppp_viewport_store_le64(&out->bytes[offset],
+      agx_store_le64(&out->bytes[offset],
                                   fields->region_clip_raw[i]);
       offset += 8;
    }
 
-   agx_ppp_viewport_store_le32(&out->bytes[offset],
+   agx_store_le32(&out->bytes[offset],
                                fields->viewport_control_raw);
    offset += 4;
 
@@ -127,7 +124,7 @@ agx_ppp_viewport_payload_core_pack(
       };
 
       for (unsigned w = 0; w < 6; ++w) {
-         agx_ppp_viewport_store_le32(&out->bytes[offset], words[w]);
+         agx_store_le32(&out->bytes[offset], words[w]);
          offset += 4;
       }
    }
@@ -160,7 +157,7 @@ agx_ppp_viewport_payload_core_unpack(
       return false;
 
    const uint32_t count_mask = UINT32_C(0xf) << shift;
-   const uint32_t header = agx_ppp_viewport_load_le32(raw);
+   const uint32_t header = agx_load_le32(raw);
 
    if ((header & ~count_mask) != base_header)
       return false;
@@ -173,11 +170,11 @@ agx_ppp_viewport_payload_core_unpack(
    size_t offset = 4;
 
    for (unsigned i = 0; i < viewport_count; ++i) {
-      fields->region_clip_raw[i] = agx_ppp_viewport_load_le64(&raw[offset]);
+      fields->region_clip_raw[i] = agx_load_le64(&raw[offset]);
       offset += 8;
    }
 
-   fields->viewport_control_raw = agx_ppp_viewport_load_le32(&raw[offset]);
+   fields->viewport_control_raw = agx_load_le32(&raw[offset]);
    offset += 4;
 
    for (unsigned i = 0; i < viewport_count; ++i) {
@@ -188,7 +185,7 @@ agx_ppp_viewport_payload_core_unpack(
       };
 
       for (unsigned w = 0; w < 6; ++w) {
-         *words[w] = agx_ppp_viewport_load_le32(&raw[offset]);
+         *words[w] = agx_load_le32(&raw[offset]);
          offset += 4;
       }
    }

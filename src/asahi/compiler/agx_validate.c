@@ -292,6 +292,10 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
 {
    unsigned size = agx_size_align_16(I->src[s].size);
 
+   /* This is a sampler-private value, not a dimensional GPR coordinate. */
+   if (agx_texture_resource(I) && s == 0)
+      return agx_index_size_16(I->src[s]);
+
    switch (I->op) {
    case AGX_OPCODE_MOV:
    case AGX_OPCODE_EXPORT:

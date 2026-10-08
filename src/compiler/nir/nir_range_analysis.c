@@ -2449,6 +2449,7 @@ get_alu_num_lsb(struct analysis_state *state, struct scalar_query q, uint32_t *r
    case nir_op_ixor:
    case nir_op_iadd:
    case nir_op_iand:
+   case nir_op_amul:
    case nir_op_imul:
       if (!q.head.pushed_queries) {
          push_scalar_query(state, nir_scalar_chase_alu_src(q.scalar, 0));
@@ -2492,6 +2493,7 @@ get_alu_num_lsb(struct analysis_state *state, struct scalar_query q, uint32_t *r
       *result = MAX2(src[0], src[1]);
       break;
    }
+   case nir_op_amul:
    case nir_op_imul: {
       *result = MIN2(src[0] + src[1], q.scalar.def->bit_size);
       break;

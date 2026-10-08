@@ -124,8 +124,8 @@ divide_exact(nir_builder *b, nir_scalar s, unsigned shift, unsigned depth)
  *    base + (index << shift) + byte_offset
  *
  * where `shift` is the access width -- agx3_translate_local() sets
- * shift = width (agx3_pack_binary.c), grounded against Apple's own output in
- * src/asahi/compiler/test/test-agx3-local-tps-core.c.  The index register
+ * shift = width (agx3_pack_binary.c), grounded against Apple's own output.
+ * The index register
  * therefore counts *scalar elements*, while NIR's shared offsets count bytes.
  * AGX2's local-memory base stays byte addressed and AGX3 threadgroup atomics
  * keep their own byte-addressed immediate field (agx_local_atomic_base), so

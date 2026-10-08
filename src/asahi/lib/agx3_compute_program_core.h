@@ -19,15 +19,6 @@
 extern "C" {
 #endif
 
-/*
- * Apple derives the two launch-template fields from the same LoadShader
- * object whose instruction stream is addressed by program_va.  On HAL300,
- * ProgramVariantESLState sources ShaderInfo::max_total_threads_per_threadgroup
- * and the low word of ShaderInfo::extended_texture_write_mask_qword_1 from
- * AGC reply vtable entries +0x42 and +0x4e.  Keep the objects joined so a
- * frontend cannot accidentally launch one Ioto program with another
- * program's template or with an AGX2 shader-base-relative USC pointer.
- */
 struct agx3_compute_program_desc {
    enum agx_chip chip;
    uint64_t program_va;
@@ -41,8 +32,6 @@ struct agx3_compute_program_desc {
    struct agx3_cdm_direct_template_sources launch_sources;
 };
 
-/* Bounded A18 Pro bring-up program: the exact output-positive direct-add3
- * Ioto witness joined to its native direct-launch template. */
 struct agx3_g17p_direct_add3_program_desc {
    uint64_t program_va;
    uint64_t shader_va;
@@ -292,8 +281,6 @@ bool agx3_g17s_minimal_compute_program_live_upload_prepare(
    const struct agx3_compute_program_upload *upload, size_t *written,
    struct agx3_compute_program *program);
 
-/* Narrow production condition for the independently witnessed G17S minimal
- * root-uniform program.  This does not imply chip-wide Ioto load readiness. */
 bool agx3_g17s_minimal_compute_dispatch_ready(enum agx_chip chip);
 
 /* Append the live-admitted program's canonical 40-byte direct launch and the

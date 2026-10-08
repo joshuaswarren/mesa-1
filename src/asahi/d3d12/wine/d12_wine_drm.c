@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include "util/os_time.h"
+#include "util/log.h"
 
 #define D12_WINE_MEMORY_LOAD_UNIX_LIB 1000 /* MemoryWineLoadUnixLib */
 
@@ -108,6 +109,13 @@ d12_wine_unixlib_init(void)
       d12_wine_state = -1;
       return false;
    }
+   struct d12_wine_clock_args abi = {.monotonic_ns = D12_WINE_CLOCK_ABI_QUERY};
+   status = d12_wine_unix_call_raw(d12_wine_handle, D12_WINE_CALL_CLOCK, &abi);
+   if (status || abi.monotonic_ns != D12_WINE_CLOCK_ABI_VERSION) {
+      mesa_loge("Wine unixlib ABI mismatch: install the matching d3d12.dll and d3d12.so pair");
+      d12_wine_state = -1;
+      return false;
+   }
    d12_wine_state = 1;
    return true;
 }
@@ -137,6 +145,17 @@ d12_wine_open_render_node(void)
       errno = a.err;
       return -1;
    }
+   return a.fd;
+}
+
+int
+d12_wine_resource_fd(uintptr_t handle)
+{
+   struct d12_wine_resource_fd_args a = {.handle = (uintptr_t)handle, .fd = -1};
+   if (d12_wine_call(D12_WINE_CALL_RESOURCE_FD, &a))
+      return -1;
+   if (a.fd < 0)
+      errno = a.err;
    return a.fd;
 }
 

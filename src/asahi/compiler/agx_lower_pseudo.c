@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include "util/lut.h"
 #include "agx_builder.h"
+#include "asahi/isa/agx_minifloat.h"
 #include "agx_compiler.h"
 #include "agx_opcodes.h"
 
@@ -71,11 +72,63 @@ swap(agx_builder *b, agx_index x, agx_index y)
    }
 }
 
+/*
+ * G17P has no compare of two immediates. NIR folds constant comparisons, but
+ * backend lowering can still produce one after register allocation (an
+ * always-taken else of the structurizer, for instance), and the packer then
+ * refused the whole shader. Evaluate such a compare here: float immediates are
+ * minifloats, which have no NaN or infinity, so every known condition is exact;
+ * integer immediates go through agx_eval_immediate_icond(). Returns the truth
+ * value, or -1 to leave the instruction alone.
+ */
+static int
+agx3_immediate_compare(agx_context *ctx, const agx_instr *I)
+{
+   const agx_index a = I->src[0], c = I->src[1];
+   if (a.type != AGX_INDEX_IMMEDIATE || c.type != AGX_INDEX_IMMEDIATE ||
+       a.abs || a.neg || c.abs || c.neg)
+      return -1;
+
+   if (I->op == AGX_OPCODE_FCMP || I->op == AGX_OPCODE_FCMPSEL) {
+      const float x = agx_minifloat_decode(a.value);
+      const float y = agx_minifloat_decode(c.value);
+      switch (I->fcond) {
+      case AGX_FCOND_EQ: return x == y;
+      case AGX_FCOND_LT: return x < y;
+      case AGX_FCOND_GT: return x > y;
+      case AGX_FCOND_GE: return x >= y;
+      case AGX_FCOND_LE: return x <= y;
+      default: return -1;
+      }
+   }
+
+   bool cond;
+   return agx_eval_immediate_icond(ctx, I->icond, a, c, &cond) ? cond : -1;
+}
+
 static agx_instr *
 lower(agx_builder *b, agx_instr *I)
 {
    const bool agx3 = b->shader->key != NULL &&
                      b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+
+   if (agx3 && (I->op == AGX_OPCODE_FCMP || I->op == AGX_OPCODE_ICMP)) {
+      const int truth = agx3_immediate_compare(b->shader, I);
+      if (truth >= 0)
+         return agx_mov_imm_to(b, I->dest[0], truth != I->invert_cond);
+   }
+
+   if (agx3 && !I->invert_cond &&
+       (I->op == AGX_OPCODE_FCMPSEL || I->op == AGX_OPCODE_ICMPSEL)) {
+      const int truth = agx3_immediate_compare(b->shader, I);
+      const agx_index chosen = I->src[truth ? 2 : 3];
+      if (truth >= 0 && chosen.type == AGX_INDEX_IMMEDIATE)
+         return agx_mov_imm_to(b, I->dest[0], chosen.value);
+      if (truth >= 0 && !chosen.abs && !chosen.neg &&
+          chosen.size == I->dest[0].size)
+         return agx_bitop_to(b, I->dest[0], chosen, agx_zero(),
+                             UTIL_LUT2(a));
+   }
 
    switch (I->op) {
 

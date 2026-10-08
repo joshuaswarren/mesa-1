@@ -13,8 +13,7 @@
  * Every encoder here is grade A: it reproduces Apple's witnessed instruction
  * bytes exactly via the generated composer. What is NOT here is the lowering --
  * turning IR structured control flow into these sequences with flag-slot
- * allocation and branch fixups -- which lives in the backend. See
- * research/gpu/GPU_AGX3_CONTROL_FLOW_2026-08-24.md.
+ * allocation and branch fixups -- which lives in the backend.
  */
 
 #pragma once
@@ -59,7 +58,6 @@ enum agx3_cf_fcond {
 /* `b`/`bn`, whose displacement agx3_cf_patch_branch() fills in later. This is
  * the size a caller must RESERVE for a forward branch, which is not the same
  * number as the buffer bound above. */
-#define AGX3_CF_BRANCH_LENGTH 10u
 #define AGX3_CF_MAX_FLAG_SLOT 5u /* slots 0..5 are witnessed */
 
 struct agx3_cf_source_hints {
@@ -92,20 +90,6 @@ bool agx3_cf_icmp_uniform_imm(enum agx_isa_encoding enc,
 bool agx3_cf_icmp_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                       unsigned slot, uint16_t src0, uint8_t imm,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
-/*
- * Compare a 16-bit register against the immediate zero -- the shape every
- * branch on a boolean takes, since Mesa keeps booleans in 16-bit halves.
- *
- * The compare width lives in f10 (1 = 16-bit, 2 = 32-bit); Apple's own
- * `if (ushort != 0)` sets it to 1 and adds f14, where the 32-bit form has
- * neither. Probe-witnessed with `metal-nt -arch applegpu_g16g`; the non-zero
- * 16-bit immediate forms are not covered here. Register/register compares
- * use agx3_cf_icmp_reg16(), including its compact unsigned encoding point.
- */
-bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
-                                 unsigned slot, uint16_t src,
-                                 struct agx3_cf_source_hints hint, uint16_t wait_mask,
-                                 uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
 /*
  * The same encoding point with a non-zero immediate.  `int n; if (n < 2)` is
@@ -114,10 +98,9 @@ bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond c
  * arrives here rather than at agx3_cf_icmp_imm().
  *
  * Witnessed with `metal-nt -arch applegpu_g17p` against the zero form as the
- * control, one kernel per immediate and nothing else changed
- * (.tmp/g17p-hyprland-cf-evidence/icmp16imm.metal).  Every witness is the same
- * ten-byte instruction with only f16 different, which is the field
- * agx3_cf_icmp_imm() already uses for the 32-bit source form:
+ * control, one kernel per immediate and nothing else changed.  Every witness
+ * is the same ten-byte instruction with only f16 different, which is the
+ * field agx3_cf_icmp_imm() already uses for the 32-bit source form:
  *
  *   short x;  if (x < 0)    0a 04 23 80 02 00 07 c2 02 00   (== the zero form)
  *   short x;  if (x < 2)    0a 04 23 82 02 00 07 c2 02 00
@@ -138,10 +121,6 @@ bool agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc,
                                 struct agx3_cf_source_hints hint,
                                 uint16_t wait_mask,
                                 uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
-
-bool agx3_cf_icmp_zero16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
-                         unsigned slot, uint16_t src0,
-                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
 bool agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                       bool or_nan, unsigned slot, uint16_t src0, uint16_t src1,
@@ -212,10 +191,10 @@ bool agx3_cf_cndef(enum agx_isa_encoding enc, uint8_t out[AGX3_CF_MAX_LENGTH],
  * when lowering the same BREAK_IF. A loop owns two levels; deeper breaks use
  * CNDCF's sixteen-bit level count.
  *
- * Witnessed with `metal-nt -arch applegpu_g17p` (.tmp/g17p-deep-break-evidence)
- * from MSL that breaks out of a loop from inside 2..7 nested ifs, each
- * condition reading a distinct `device const uint *` element so the Metal
- * compiler cannot flatten them.  Apple's bytes, and ours, byte for byte:
+ * Witnessed with `metal-nt -arch applegpu_g17p` from MSL that breaks out of
+ * a loop from inside 2..7 nested ifs, each condition reading a distinct
+ * `device const uint *` element so the Metal compiler cannot flatten them.
+ * Apple's bytes, and ours, byte for byte:
  *
  *   ifs=2  cndcf slot1 count3   8f 05 54 03 00 01
  *   ifs=3  cndcf slot1 count4   8f 05 54 04 00 01
@@ -254,6 +233,13 @@ bool agx3_cf_branch(enum agx_isa_encoding enc, bool is_bn,
  * displacement. */
 bool agx3_cf_patch_branch(enum agx_isa_encoding enc, bool is_bn,
                           uint8_t *branch, int64_t displacement);
+
+#define AGX3_CF_BRANCH_LENGTH 10u
+
+bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
+                                 unsigned slot, uint16_t src,
+                                 struct agx3_cf_source_hints hint, uint16_t wait_mask,
+                                 uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
 #ifdef __cplusplus
 }

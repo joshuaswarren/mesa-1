@@ -486,14 +486,25 @@ agx_texture_resource(const agx_instr *I)
 }
 
 static inline bool
+agx_is_texture_publication(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3 ||
+          I->op == AGX_OPCODE_PUBLISH_TEXTURE_SCALAR_AGX3;
+}
+
+static inline uint32_t
+agx_publication_resource(const agx_instr *I)
+{
+   return agx_is_texture_publication(I) ? I->imm : 0;
+}
+
+static inline bool
 agx_is_vertex_store(const agx_instr *I)
 {
    return I->op == AGX_OPCODE_ST_VARY ||
           I->op == AGX_OPCODE_ST_VARY_MUL_AGX3 ||
           I->op == AGX_OPCODE_ST_VARY_FMA_AGX3;
 }
-
-bool agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2);
 
 static inline void
 agx_replace_src(agx_instr *I, unsigned src_index, agx_index replacement)
@@ -626,6 +637,9 @@ typedef struct {
     */
    agx_index preloaded[AGX_NUM_REGS];
 
+   /* AGX3B pixel-centre 1/W, computed once in the start block. */
+   agx_index agx3_center_rcp_w;
+
    /* AGX_G17P_SR32_PIXEL_COORD: the 32-bit native pixel-coordinate special
     * registers read by load_pixel_coord and the 16-bit halves NIR sees, so a
     * zero extension of a half can reuse the register (Apple reads SR80/81 as
@@ -665,6 +679,12 @@ typedef struct {
 
    /* Promoted constants. These will be appended to the binary at the end. */
    uint16_t rodata[512];
+   /* An intrinsic or ALU op this backend does not implement reached
+    * instruction selection; the compile is refused right after emission. */
+   bool unsupported_instruction;
+   /* Register allocation found no legal placement for a constrained value
+    * (agx_register_allocate.c); the compile is refused after agx_ra(). */
+   bool ra_failed;
 } agx_context;
 
 static inline void
@@ -1149,9 +1169,11 @@ void agx_lower_pseudo(agx_context *ctx);
 void agx_lower_spill(agx_context *ctx);
 void agx3_split_vector_stack_access(agx_context *ctx);
 bool agx3_lower_texture_publications(agx_context *ctx);
+bool agx3_lower_scalar_texture_publications(agx_context *ctx);
 void agx_lower_uniform_sources(agx_context *ctx);
 void agx_lower_agx3_fma_sources(agx_context *ctx);
 void agx_lower_agx3_immediates(agx_context *ctx);
+void agx_materialize_agx3_cf_constants(agx_context *ctx);
 void agx_opt_cse(agx_context *ctx);
 void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
@@ -1192,11 +1214,7 @@ bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
  * the shader writes gl_Position. A vertex program that writes no position
  * therefore starts its outputs here, and nowhere else. */
 #define AGX3_UVS_POSITION_ENTRIES 4u
-bool agx3_sink_vertex_outputs(agx_context *ctx);
-bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
-/* Materialize nonzero minifloats used by G17P structured f32 control flow so
- * the compare uses the already grounded register/register form. */
-void agx_materialize_agx3_cf_constants(agx_context *ctx);
+
 /* Number of 16-bit registers RA keeps reserved at the bottom of the register
  * file for the whole shader.
  */
@@ -1219,10 +1237,6 @@ void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
 unsigned agx3_tile_store_bank(agx_context *ctx);
 
-/* AGX3b device atomics return through their value register.  Legalize the
- * SSA three-address form before RA so the allocator can enforce that physical
- * two-address ABI without clobbering the independently evaluated index. */
-bool agx_lower_agx3_device_atomic_sources(agx_context *ctx);
 void agx_lower_64bit_postra(agx_context *ctx);
 void agx_insert_waits(agx_context *ctx);
 void agx_opt_empty_else(agx_context *ctx);
@@ -1290,16 +1304,22 @@ bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
 bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
 bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
                                           unsigned allocated);
+/* Highest uniform half a G17P sample can name directly as its texture or
+ * sampler handle (agx_instr_accepts_uniform): handles above it are copied to
+ * registers before every sample.
+ */
+#define AGX3_SMP_HANDLE_MAX_HALF 252
+
+bool agx_nir_place_preamble_handles_low(nir_shader *s, unsigned reserved,
+                                         unsigned exports_end,
+                                         unsigned *allocated);
 agx_block *agx_reconverged_mrt_tail(agx_context *ctx);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
 bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
 void agx_lower_agx3_fma_sources(agx_context *ctx);
-void agx_lower_agx3_half_converts(agx_context *ctx);
-bool agx_lower_agx3_cf_constants(agx_context *ctx);
-bool agx_lower_agx3_half_iadd_constants(agx_context *ctx);
-bool agx_lower_agx3_widening_iadd(agx_context *ctx);
+void agx_lower_agx3_mixed_width_unary(agx_context *ctx);
 
 struct agx_cycle_estimate {
    /* ALU throughput */
@@ -1319,6 +1339,14 @@ struct agx_cycle_estimate agx_estimate_cycles(agx_context *ctx);
 bool agx_is_alu(const agx_instr *I);
 
 extern int agx_compiler_debug;
+
+bool agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2);
+
+bool agx3_sink_vertex_outputs(agx_context *ctx);
+
+bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
+
+bool agx_lower_agx3_device_atomic_sources(agx_context *ctx);
 
 #ifdef __cplusplus
 } /* extern C */

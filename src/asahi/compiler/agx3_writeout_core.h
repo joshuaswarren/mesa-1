@@ -59,9 +59,6 @@ extern "C" {
 
 #define AGX3_WRITEOUT_MAX_LENGTH 10u
 
-/* rld + iadd + iadd + copy. */
-#define AGX3_WRITEOUT_SEQ_MAX 40u
-
 struct agx3_shift_add_desc {
    uint16_t dest;        /* 16-bit (half) register index */
    bool dest_hint;       /* f11 */
@@ -79,6 +76,8 @@ bool agx3_shift_add16_encode(enum agx_isa_encoding enc,
                              const struct agx3_shift_add_desc *d,
                              uint8_t out[AGX3_WRITEOUT_MAX_LENGTH],
                              uint8_t *len);
+
+#define AGX3_WRITEOUT_SEQ_MAX 40u
 
 struct agx3_coverage_desc {
    uint16_t sr_temp;        /* scratch 16-bit register for the SR 2 read */
@@ -98,10 +97,6 @@ struct agx3_coverage_desc {
    bool word_hint;
 };
 
-/*
- * Emit `rld`, two `iadd`s and the staging `copy` that together publish the
- * coverage word. Writes at most `capacity` bytes and reports the length.
- */
 bool agx3_coverage_word(enum agx_isa_encoding enc,
                         const struct agx3_coverage_desc *d, uint8_t *out,
                         unsigned capacity, unsigned *len);

@@ -354,25 +354,9 @@ agx_chip_codegen_supported(enum agx_chip chip)
     *   AGX2         -> agx_pack.c            (AGX2.xml)
     *   AGX3b/AGX3c  -> agx3_pack_binary.c    (agx3_compose/, AGX3{b,c}.xml)
     *
-    * AGX3d (G18G) has an encoder table (agx3_compose/agx3d_tables.c, which
-    * reproduces every instruction of the committed G18G witness texts), and
-    * agx3_binder encodes it -- in Apple's form order, and only for callers
-    * that ask with AGX3_BIND_APPLE_ORDER. The core encoders admit AGX3D for
-    * a first, witness-grounded instruction catalogue (the glxgears-shaped
-    * vertex and flat-colour fragment programs: SR read, vertex fetch, float
-    * ALU, ldimm, uvsw, ldcf, f32interp, fltnorm, pixwait/pixrel, lstcol,
-    * end), where the G17G field vector is the G18G one or differs by a
-    * witnessed constant (lddev f87 = 2, ldcfr f38 = 5 and f49 = 2). Every
-    * other core encoder refuses AGX3D rather than hand it agx3b or agx3c
-    * fields, and agx3_pack_binary refuses every AGX3D shader outright: its
-    * program-level pieces (end-of-tile and background programs, one-slot
-    * wait codes, Apple's G18G float-varying epilogue) are not grounded. So
-    * AGX3D stays out of this list.
-    *
-    * The AGX3 side is a real encoder, not a decoder: agx3_compose replays
-    * 1,494 corpus instructions byte-exactly (test-agx3-compose-corpus.c), and
-    * agx3_pack_binary emits compute, vertex and fragment shaders end to end
-    * (the AGX3 compile-negative and graphics-compile tests).
+    * The AGX3 side is a real encoder, not a decoder: agx3_compose
+    * reproduces Apple's instructions byte-exactly, and agx3_pack_binary
+    * emits compute, vertex and fragment shaders end to end.
     *
     * "Has a code generator" is all this predicate claims. Instruction
     * coverage is explicit: an AGX3 shader outside the grounded domain makes
@@ -483,6 +467,19 @@ agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip)
           agx_chip_command_stream_generation(chip) == AGX_CS_GENERATION_AGX2;
 }
 
+/*
+ * Whether the compiler must insert explicit scheduling stalls.
+ *
+ * The M3 base part needs them and nothing else does: stripping its stall words
+ * leaves an instruction stream 99.5% identical in count and 85.1%
+ * byte-identical to M4's, with a further 7.4% differing only by branch
+ * displacements shifted by exactly the removed padding.
+ *
+ * This is a property of one chip's scheduler, not of its encoding -- G15G
+ * shares the agx3b encoder table with every other variant-0 part. It is a
+ * codegen obligation, so it is only meaningful for a chip this driver can
+ * generate code for.
+ */
 bool
 agx_chip_has_hardware_ray_tracing(enum agx_chip chip)
 {

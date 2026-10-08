@@ -27,6 +27,11 @@ struct hk_device_memory {
    uint64_t opaque_capture_address;
 
    void *map;
+
+   /* map is this object's own mapping of map_size bytes rather than the
+    * BO's shared one: the BO may be aliased by other memory objects. */
+   size_t map_size;
+   bool map_owned;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_device_memory, vk.base, VkDeviceMemory,

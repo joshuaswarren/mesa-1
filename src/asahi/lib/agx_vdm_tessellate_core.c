@@ -4,12 +4,24 @@
  */
 
 #include "agx_vdm_tessellate_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
 #define AGX_VDM_TESSELLATE_DIRECT_FIXED UINT32_C(0xb2f00c00)
 #define AGX_VDM_TESSELLATE_INSTANCE_STRIDE_MAX UINT32_C(0x7ffff)
 
+/*
+ * This covers only the exact nine-dword direct Tessellate record constructed
+ * by the pinned G15, HAL200, and HAL300 render plugins.  The factor-buffer VA
+ * is 48-bit and split across header[7:0], word 1, and word 8[7:0].  All three
+ * inspected encoder families use byte-identical records, so the bytes cannot
+ * classify the originating generation.
+ *
+ * This is a host representation/validation surface.  It does not emit into a
+ * live VDM stream or enable tessellation lowering, scheduling, submission,
+ * device admission, or an API capability.
+ */
 static void
 agx_vdm_tessellate_store_le32(uint8_t *dst, uint32_t value)
 {
@@ -17,13 +29,6 @@ agx_vdm_tessellate_store_le32(uint8_t *dst, uint32_t value)
    dst[1] = (uint8_t)(value >> 8);
    dst[2] = (uint8_t)(value >> 16);
    dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_vdm_tessellate_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
 }
 
 bool
@@ -75,18 +80,18 @@ agx_vdm_tessellate_direct_pack(
       AGX_VDM_TESSELLATE_DIRECT_FIXED |
       (uint32_t)((info->factor_buffer >> 32) & UINT64_C(0xff));
 
-   agx_vdm_tessellate_store_le32(&out->bytes[0], header);
-   agx_vdm_tessellate_store_le32(&out->bytes[4],
+   agx_store_le32(&out->bytes[0], header);
+   agx_store_le32(&out->bytes[4],
                                  (uint32_t)info->factor_buffer);
-   agx_vdm_tessellate_store_le32(&out->bytes[8], info->patch_count);
-   agx_vdm_tessellate_store_le32(&out->bytes[12], info->instance_count);
-   agx_vdm_tessellate_store_le32(&out->bytes[16], info->base_patch);
-   agx_vdm_tessellate_store_le32(&out->bytes[20], info->base_instance);
-   agx_vdm_tessellate_store_le32(&out->bytes[24],
+   agx_store_le32(&out->bytes[8], info->patch_count);
+   agx_store_le32(&out->bytes[12], info->instance_count);
+   agx_store_le32(&out->bytes[16], info->base_patch);
+   agx_store_le32(&out->bytes[20], info->base_instance);
+   agx_store_le32(&out->bytes[24],
                                  info->instance_stride_word);
-   agx_vdm_tessellate_store_le32(&out->bytes[28],
+   agx_store_le32(&out->bytes[28],
                                  info->factor_buffer_size_minus_one);
-   agx_vdm_tessellate_store_le32(
+   agx_store_le32(
       &out->bytes[32],
       (uint32_t)((info->factor_buffer >> 40) & UINT64_C(0xff)));
    out->length = AGX_VDM_TESSELLATE_DIRECT_LENGTH;
@@ -106,10 +111,10 @@ agx_vdm_tessellate_direct_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t header = agx_vdm_tessellate_load_le32(&raw[0]);
-   const uint32_t high_word = agx_vdm_tessellate_load_le32(&raw[32]);
+   const uint32_t header = agx_load_le32(&raw[0]);
+   const uint32_t high_word = agx_load_le32(&raw[32]);
    const uint32_t instance_stride =
-      agx_vdm_tessellate_load_le32(&raw[24]);
+      agx_load_le32(&raw[24]);
 
    if ((header & UINT32_C(0xffffff00)) !=
           AGX_VDM_TESSELLATE_DIRECT_FIXED ||
@@ -118,16 +123,16 @@ agx_vdm_tessellate_direct_unpack(
       return false;
 
    info->factor_buffer =
-      (uint64_t)agx_vdm_tessellate_load_le32(&raw[4]) |
+      (uint64_t)agx_load_le32(&raw[4]) |
       ((uint64_t)(header & UINT32_C(0xff)) << 32) |
       ((uint64_t)high_word << 40);
-   info->patch_count = agx_vdm_tessellate_load_le32(&raw[8]);
-   info->instance_count = agx_vdm_tessellate_load_le32(&raw[12]);
-   info->base_patch = agx_vdm_tessellate_load_le32(&raw[16]);
-   info->base_instance = agx_vdm_tessellate_load_le32(&raw[20]);
+   info->patch_count = agx_load_le32(&raw[8]);
+   info->instance_count = agx_load_le32(&raw[12]);
+   info->base_patch = agx_load_le32(&raw[16]);
+   info->base_instance = agx_load_le32(&raw[20]);
    info->instance_stride_word = instance_stride;
    info->factor_buffer_size_minus_one =
-      agx_vdm_tessellate_load_le32(&raw[28]);
+      agx_load_le32(&raw[28]);
    return true;
 }
 
@@ -182,11 +187,11 @@ agx_vdm_tessellate_indirect_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t header = agx_vdm_tessellate_load_le32(&raw[0]);
-   const uint32_t indirect_high = agx_vdm_tessellate_load_le32(&raw[8]);
-   const uint32_t indirect_low = agx_vdm_tessellate_load_le32(&raw[12]);
-   const uint32_t instance_stride = agx_vdm_tessellate_load_le32(&raw[16]);
-   const uint32_t high_word = agx_vdm_tessellate_load_le32(&raw[24]);
+   const uint32_t header = agx_load_le32(&raw[0]);
+   const uint32_t indirect_high = agx_load_le32(&raw[8]);
+   const uint32_t indirect_low = agx_load_le32(&raw[12]);
+   const uint32_t instance_stride = agx_load_le32(&raw[16]);
+   const uint32_t high_word = agx_load_le32(&raw[24]);
 
    if ((header & UINT32_C(0xffffff00)) != AGX_VDM_TESSELLATE_INDIRECT_FIXED ||
        indirect_high > UINT32_C(0xffff) || (indirect_low & 3) ||
@@ -195,51 +200,19 @@ agx_vdm_tessellate_indirect_unpack(
       return false;
 
    info->factor_buffer =
-      (uint64_t)agx_vdm_tessellate_load_le32(&raw[4]) |
+      (uint64_t)agx_load_le32(&raw[4]) |
       ((uint64_t)(header & UINT32_C(0xff)) << 32) |
       ((uint64_t)high_word << 40);
    info->indirect_buffer = ((uint64_t)indirect_high << 32) | indirect_low;
    info->instance_stride_word = instance_stride;
    info->factor_buffer_size_minus_one =
-      agx_vdm_tessellate_load_le32(&raw[20]);
+      agx_load_le32(&raw[20]);
    return true;
 }
 
 #define AGX_VDM_TESSELLATION_STATE_HEADER UINT32_C(0x40000090)
 #define AGX_VDM_TESSELLATION_STATE_FIXED  (UINT32_C(1) << 21)
 #define AGX_VDM_TESSELLATION_STATE_ZERO   (UINT32_C(0xffff) | (UINT32_C(1) << 22))
-
-bool
-agx_vdm_tessellation_state_pack(
-   enum agx_chip chip, const struct agx_vdm_tessellation_state_info *info,
-   uint8_t out[AGX_VDM_TESSELLATION_STATE_LENGTH])
-{
-   if (out)
-      memset(out, 0, AGX_VDM_TESSELLATION_STATE_LENGTH);
-
-   if (!out || !info || !agx_vdm_tessellate_direct_target_supported(chip) ||
-       (unsigned)info->partition > AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN ||
-       (unsigned)info->step > AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE ||
-       info->max_factor < 1 || info->max_factor > 64 ||
-       (info->partition == AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD &&
-        info->max_factor < 2))
-      return false;
-
-   const unsigned odd =
-      info->partition == AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD;
-   const uint32_t word1 =
-      ((uint32_t)info->partition << 30) |
-      ((uint32_t)info->counterclockwise << 29) |
-      ((uint32_t)(info->max_factor - odd - 1) << 23) |
-      AGX_VDM_TESSELLATION_STATE_FIXED | ((uint32_t)info->quads << 20) |
-      ((uint32_t)info->float_factors << 19) |
-      ((uint32_t)info->step << 17) | ((uint32_t)info->program_flag << 16);
-
-   agx_vdm_tessellate_store_le32(&out[0], AGX_VDM_TESSELLATION_STATE_HEADER);
-   agx_vdm_tessellate_store_le32(&out[4], word1);
-   agx_vdm_tessellate_store_le32(&out[8], info->scale_half);
-   return true;
-}
 
 bool
 agx_vdm_tessellation_state_unpack(
@@ -254,9 +227,9 @@ agx_vdm_tessellation_state_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t word1 = agx_vdm_tessellate_load_le32(&raw[4]);
-   const uint32_t word2 = agx_vdm_tessellate_load_le32(&raw[8]);
-   if (agx_vdm_tessellate_load_le32(&raw[0]) !=
+   const uint32_t word1 = agx_load_le32(&raw[4]);
+   const uint32_t word2 = agx_load_le32(&raw[8]);
+   if (agx_load_le32(&raw[0]) !=
           AGX_VDM_TESSELLATION_STATE_HEADER ||
        !(word1 & AGX_VDM_TESSELLATION_STATE_FIXED) ||
        (word1 & AGX_VDM_TESSELLATION_STATE_ZERO) || word2 > UINT16_MAX)
@@ -277,4 +250,3 @@ agx_vdm_tessellation_state_unpack(
    info->scale_half = (uint16_t)word2;
    return true;
 }
-

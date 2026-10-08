@@ -101,11 +101,6 @@ bool agx3_scs_encode_store(enum agx_isa_encoding enc,
                            const struct agx3_scs_desc *desc,
                            uint8_t out[AGX3_SCS_MAX_LENGTH], uint8_t *length);
 
-bool agx3_scs_decode_load(enum agx_isa_encoding enc, const uint8_t *bytes,
-                          size_t length, struct agx3_scs_desc *out);
-bool agx3_scs_decode_store(enum agx_isa_encoding enc, const uint8_t *bytes,
-                           size_t length, struct agx3_scs_desc *out);
-
 #ifdef __cplusplus
 }
 #endif

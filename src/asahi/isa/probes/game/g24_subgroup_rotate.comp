@@ -1,9 +1,0 @@
-#version 450
-#extension GL_KHR_shader_subgroup_rotate : require
-/* VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR and ROTATE_CLUSTERED. */
-layout(local_size_x = 32) in;
-layout(set = 0, binding = 0, std430) buffer Output { uint values[]; } o;
-void main() {
-   uint g = gl_GlobalInvocationID.x;
-   o.values[g] = subgroupRotate(g, 3u) + subgroupClusteredRotate(g, 1u, 4u);
-}

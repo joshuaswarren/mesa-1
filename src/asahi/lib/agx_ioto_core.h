@@ -97,9 +97,6 @@ struct agx_ioto_program_record {
 /* Exactly the eleven byte-witnessed M3/M4/A18 Pro/M5 identities. */
 bool agx_ioto_target_supported(enum agx_chip chip);
 
-/* Return the target-specific exact record length, or zero if unsupported. */
-size_t agx_ioto_kind_size(enum agx_chip chip, enum agx_ioto_kind kind);
-
 /*
  * Validate one expected record at the start of a possibly longer stream.
  * Opaque bytes are copied byte-for-byte to out and consumed is the exact
@@ -128,14 +125,6 @@ bool agx_ioto_decode_program_record(enum agx_chip chip, const void *stream,
                                     size_t available,
                                     struct agx_ioto_program_record *out,
                                     size_t *consumed);
-
-/*
- * Copy a target-valid raw record without interpreting or rewriting opaque
- * bits.  Failure leaves the destination unchanged.
- */
-bool agx_ioto_record_copy(enum agx_chip chip,
-                          const struct agx_ioto_record *record, void *out,
-                          size_t out_size);
 
 #ifdef __cplusplus
 }

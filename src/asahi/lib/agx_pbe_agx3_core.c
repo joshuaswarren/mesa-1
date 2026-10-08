@@ -4,6 +4,7 @@
  */
 
 #include "agx_pbe_agx3_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
@@ -179,10 +180,10 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
    word1 |= (uint64_t)fields->srgb << 61;
    if (fields->compressed)
       word1 |= UINT64_C(1) << 63;
-   store_le64(&out->bytes[0], word0);
-   store_le64(&out->bytes[8], word1);
+   agx_store_le64(&out->bytes[0], word0);
+   agx_store_le64(&out->bytes[8], word1);
    if (fields->compressed)
-      store_le64(&out->bytes[16], fields->acceleration_buffer >> 4);
+      agx_store_le64(&out->bytes[16], fields->acceleration_buffer >> 4);
    out->length = AGX_PBE_AGX3_DESCRIPTOR_LENGTH;
    return true;
 }
@@ -206,10 +207,10 @@ mark_mip_chain(struct agx_pbe_agx3_descriptor *out, uint32_t level,
    if (!level && levels == 1)
       return;
 
-   store_le64(&out->bytes[0], load_le64(&out->bytes[0]) | (UINT64_C(1) << 58));
-   store_le64(&out->bytes[8], load_le64(&out->bytes[8]) | (UINT64_C(1) << 63));
-   store_le64(&out->bytes[16],
-              (load_le64(&out->bytes[16]) & ((UINT64_C(1) << 44) - 1)) |
+   agx_store_le64(&out->bytes[0], agx_load_le64(&out->bytes[0]) | (UINT64_C(1) << 58));
+   agx_store_le64(&out->bytes[8], agx_load_le64(&out->bytes[8]) | (UINT64_C(1) << 63));
+   agx_store_le64(&out->bytes[16],
+              (agx_load_le64(&out->bytes[16]) & ((UINT64_C(1) << 44) - 1)) |
               ((uint64_t)level << 44) | ((uint64_t)(levels - 1) << 48));
 }
 
@@ -269,13 +270,13 @@ pack_layered(uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
        !agx_pbe_agx3_2d_pack(generation, fields, out))
       return false;
 
-   uint64_t word0 = load_le64(&out->bytes[0]);
-   uint64_t word1 = load_le64(&out->bytes[8]);
+   uint64_t word0 = agx_load_le64(&out->bytes[0]);
+   uint64_t word1 = agx_load_le64(&out->bytes[8]);
    word0 = (word0 & ~UINT64_C(0xf)) | dimension;
    word1 |= (uint64_t)(layers - 1) << 44;
    word1 |= (uint64_t)fields->page_aligned_layers << 60;
-   store_le64(&out->bytes[0], word0);
-   store_le64(&out->bytes[8], word1);
+   agx_store_le64(&out->bytes[0], word0);
+   agx_store_le64(&out->bytes[8], word1);
    mark_mip_chain(out, level, levels);
    return true;
 }
@@ -404,10 +405,10 @@ agx_pbe_agx3_2d_multisample_pack(
     * single-sample packet.
     */
    const uint64_t selector = (uint64_t)((samples >> 2) & 3u);
-   uint64_t word0 = load_le64(&out->bytes[0]);
+   uint64_t word0 = agx_load_le64(&out->bytes[0]);
    word0 = (word0 & ~UINT64_C(0xf)) | AGX_PBE_DIMENSION_2D_MULTISAMPLE;
    word0 |= selector << AGX_PBE_SAMPLE_SELECTOR_SHIFT;
-   store_le64(&out->bytes[0], word0);
+   agx_store_le64(&out->bytes[0], word0);
    return true;
 }
 
@@ -431,10 +432,10 @@ agx_pbe_agx3_2d_array_multisample_pack(
                      out))
       return false;
 
-   uint64_t word0 = load_le64(&out->bytes[0]);
+   uint64_t word0 = agx_load_le64(&out->bytes[0]);
    word0 |= (uint64_t)((samples >> 2) & 3u)
             << AGX_PBE_SAMPLE_SELECTOR_SHIFT;
-   store_le64(&out->bytes[0], word0);
+   agx_store_le64(&out->bytes[0], word0);
    return true;
 }
 
@@ -493,10 +494,10 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
       return false;
 
    const uint8_t *raw = bytes;
-   const uint64_t word0 = load_le64(&raw[0]);
-   const uint64_t word1 = load_le64(&raw[8]);
-   const uint64_t word2 = load_le64(&raw[16]);
-   const uint64_t word3 = load_le64(&raw[24]);
+   const uint64_t word0 = agx_load_le64(&raw[0]);
+   const uint64_t word1 = agx_load_le64(&raw[8]);
+   const uint64_t word2 = agx_load_le64(&raw[16]);
+   const uint64_t word3 = agx_load_le64(&raw[24]);
    const uint64_t word0_mask =
       generation == AGX_PBE_AGX3_GENERATION_9
          ? (UINT64_C(1) << 52) - 1

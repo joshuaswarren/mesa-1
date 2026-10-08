@@ -109,18 +109,6 @@ allocator_limit(const struct agx_ioto_load_core *core)
 }
 
 bool
-agx_ioto_g17p_native_esl_wait_enabled(void)
-{
-   static int cached = -1;
-   if (cached < 0) {
-      const char *value = getenv("HK_G17P_NATIVE_ESL_WAIT");
-      cached = value && *value && strcmp(value, "0") &&
-               strcmp(value, "false");
-   }
-   return cached;
-}
-
-bool
 agx_ioto_load_core_init(struct agx_ioto_load_core *core, enum agx_chip chip,
                         struct agx_ioto_load_sink sink,
                         struct agx_ioto_inflight_load *loads,
@@ -205,23 +193,15 @@ agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
       return true;
    }
 
-   const uint16_t w0 = UINT16_C(0x800c) |
-                       (uint16_t)(((dest_half >> 1) & 0xf) << 4) |
-                       (uint16_t)((immediate & 0x7f) << 8);
-   const uint16_t w1 = UINT16_C(0x0002) | (uint16_t)((dest_half & 1) << 2) |
-                       (uint16_t)(((dest_half >> 5) & 3) << 6) |
-                       (uint16_t)(((dest_half >> 7) & 1) << 3) |
-                       (uint16_t)(((immediate >> 25) & 0x7f) << 9);
-   const uint16_t w2 = (uint16_t)(((immediate >> 7) & 0xf) << 1) |
-                       (uint16_t)(((immediate >> 11) & 3) << 10);
-   const uint16_t w3 = (uint16_t)((immediate >> 13) & 0xf) |
-                       (uint16_t)(((immediate >> 17) & 0xff) << 4);
-   store_u16(&out[0], w0);
-   store_u16(&out[2], w1);
-   store_u16(&out[4], w2);
-   store_u16(&out[6], w3);
+   agx_ioto_load_pack_ldimm_long(dest_half, immediate, out);
    *length = 8;
    return true;
+}
+
+void
+agx_ioto_load_core_forget_bases(struct agx_ioto_load_core *core)
+{
+   core->cache_count = 0;
 }
 
 void
@@ -243,6 +223,7 @@ full_fast_mask(uint8_t dwords, uint32_t *mask)
    return true;
 }
 
+/* Pure allocator step.  NEEDS_ROUND and INVALID leave core unchanged. */
 enum agx_ioto_load_alloc_result
 agx_ioto_load_allocator_reserve(struct agx_ioto_load_core *core,
                                 uint8_t requested_dwords,
@@ -321,6 +302,7 @@ compare_register(const struct agx_ioto_load_register *a,
    return compare_i32(a->value, b->value);
 }
 
+/* Exact Apple comparator: {key(base), key(data)}. */
 int
 agx_ioto_load_compare(const struct agx_ioto_inflight_load *a,
                       const struct agx_ioto_inflight_load *b)
@@ -352,6 +334,7 @@ add_size(size_t *total, size_t add)
    return true;
 }
 
+/* Maximum bytes a finish call may append for the current pending set. */
 bool
 agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
                                      bool complete_round, size_t *required)
@@ -389,7 +372,7 @@ agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
       }
    }
 
-   if (complete_round && (core->gpu0_round_nops || core->gpu0_copy_wait) &&
+   if (complete_round && core->gpu0_round_nops &&
        !add_size(&total, AGX_IOTO_LOAD_GPU0_ROUND_NOP_SIZE))
       return false;
    *required = total;
@@ -653,28 +636,6 @@ agx_ioto_load_finish_round(struct agx_ioto_load_core *core, bool complete_round,
          }
       }
 
-      /* Copy-wait mode: a round whose loads feed no COPY (pure base
-       * pointers) has nothing to carry the wait, so drain explicitly. */
-      if (core->gpu0_copy_wait && !core->gpu0_round_nops &&
-          core->load_count != 0 && core->sink.length == copies_start) {
-         static const uint8_t hazard_for_value[6] = {1, 2, 4, 8, 16, 32};
-         uint8_t hazard = 0;
-         for (size_t i = 0; i < core->load_count; ++i) {
-            const int32_t value = workspace.loads[i].data.value;
-            if (value >= 0 && value < 6)
-               hazard |= hazard_for_value[value];
-         }
-         uint8_t nop[AGX_IOTO_LOAD_NOP_SIZE];
-         agx_ioto_load_pack_nop(hazard, nop);
-         if (!append_bytes(core, nop, sizeof(nop)))
-            goto fail;
-         agx_ioto_load_pack_nop(0, nop);
-         for (unsigned i = 0; i < 3; ++i) {
-            if (!append_bytes(core, nop, sizeof(nop)))
-               goto fail;
-         }
-      }
-
       core->current_gpr_dwords = core->initial_gpr_dwords;
       core->load_count = 0;
       core->abi4_load_pending = false;
@@ -865,12 +826,19 @@ agx_ioto_load_absolute(struct agx_ioto_load_core *core,
    uint8_t low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE],
       high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
    uint8_t low_length = 0, high_length = 0;
-   if (!cache_hit &&
-       (!agx_ioto_load_pack_ldimm(core->chip, base_temp_half,
-                                  (uint32_t)load->address, low, &low_length) ||
-        !agx_ioto_load_pack_ldimm(
-           core->chip, (uint16_t)(base_temp_half + 2),
-           (uint32_t)(load->address >> 32), high, &high_length)))
+   if (!cache_hit && core->long_ldimm) {
+      agx_ioto_load_pack_ldimm_long(base_temp_half, (uint32_t)load->address,
+                                    low);
+      agx_ioto_load_pack_ldimm_long((uint16_t)(base_temp_half + 2),
+                                    (uint32_t)(load->address >> 32), high);
+      low_length = high_length = 8;
+   } else if (!cache_hit &&
+              (!agx_ioto_load_pack_ldimm(core->chip, base_temp_half,
+                                         (uint32_t)load->address, low,
+                                         &low_length) ||
+               !agx_ioto_load_pack_ldimm(
+                  core->chip, (uint16_t)(base_temp_half + 2),
+                  (uint32_t)(load->address >> 32), high, &high_length)))
       return false;
 
    size_t finish_size = 0;

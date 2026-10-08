@@ -56,6 +56,11 @@ struct agx3_g17p_graphics_program_desc {
     * materialize every absolute range themselves. */
    bool preloaded_root;
 
+   /* Address-independent shape (agx3_ioto_uniform_program_desc::patchable):
+    * every range materializes its own base with fixed-size LDIMMs, so the
+    * recorded relocations can be patched for other addresses. */
+   bool patchable;
+
    /* Executed after resource publication and the terminal state protocol.
     * program_va must name the actual first byte for relative external
     * branches; absolute G17P branches can be copied unchanged to another
@@ -112,57 +117,6 @@ struct agx3_g17p_graphics_program_template {
    uint16_t relocation_count;
    uint16_t constant_suffix_offset;
 };
-
-/* Includes the selected constant suffix. The original range-only bound
- * remains available for callers which have no constant program. */
-bool agx3_g17p_graphics_program_desc_bound(
-   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
-   size_t *size);
-
-struct agx3_g17p_graphics_root_prefix {
-   uint8_t bytes[AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE];
-   uint8_t length;
-};
-
-/* Linked-shader-owned launcher bytes.  Only the root LDIMMs at the front and
- * the PC-relative branch at the end vary per recorded draw. */
-struct agx3_g17p_graphics_external_launcher_template {
-   uint8_t bytes[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
-   uint8_t length;
-   uint8_t root_prefix_length;
-   uint8_t branch_offset;
-};
-
-/* Materialize the command-buffer-owned root-record address in r0:r1.  The
- * immutable shader-owned setup template follows inline: G17P's long B is a
- * constant-calculation suffix, not a legal entry transfer before LDSHDR. */
-bool agx3_g17p_graphics_root_prefix_generate(
-   enum agx_chip chip, uint64_t root_va,
-   struct agx3_g17p_graphics_root_prefix *prefix);
-
-/* Build the shader-owned constant-calculation suffix and its small per-draw
- * launcher. The suffix receives r0:r1 from the launcher and contains no
- * draw-varying address. With a constant program, desc->program_va names the
- * suffix allocation itself, not its separate launcher. */
-bool agx3_g17p_graphics_external_setup_suffix_generate(
-   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
-   void *output, size_t capacity, size_t *written);
-
-bool agx3_g17p_graphics_external_launcher_generate(
-   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
-   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
-   size_t capacity, size_t *written);
-
-bool agx3_g17p_graphics_external_launcher_template_generate(
-   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
-   uint64_t setup_va,
-   struct agx3_g17p_graphics_external_launcher_template *launcher);
-
-bool agx3_g17p_graphics_external_launcher_template_relocate(
-   enum agx_chip chip,
-   const struct agx3_g17p_graphics_external_launcher_template *launcher,
-   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
-   size_t capacity, size_t *written);
 
 enum agx3_g17p_rt0_bg_op {
    AGX3_G17P_RT0_BG_CLEAR,
@@ -292,3 +246,43 @@ bool agx3_g17p_graphics_program_write_unpublished(
 bool agx3_g17p_fragment_blend_constant_base(enum agx_chip chip,
                                              unsigned occupied_halfs,
                                              uint16_t *base);
+
+struct agx3_g17p_graphics_root_prefix {
+   uint8_t bytes[AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE];
+   uint8_t length;
+};
+
+struct agx3_g17p_graphics_external_launcher_template {
+   uint8_t bytes[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+   uint8_t length;
+   uint8_t root_prefix_length;
+   uint8_t branch_offset;
+};
+
+bool agx3_g17p_graphics_program_desc_bound(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   size_t *size);
+
+bool agx3_g17p_graphics_root_prefix_generate(
+   enum agx_chip chip, uint64_t root_va,
+   struct agx3_g17p_graphics_root_prefix *prefix);
+
+bool agx3_g17p_graphics_external_setup_suffix_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written);
+
+bool agx3_g17p_graphics_external_launcher_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
+
+bool agx3_g17p_graphics_external_launcher_template_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   uint64_t setup_va,
+   struct agx3_g17p_graphics_external_launcher_template *launcher);
+
+bool agx3_g17p_graphics_external_launcher_template_relocate(
+   enum agx_chip chip,
+   const struct agx3_g17p_graphics_external_launcher_template *launcher,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);

@@ -200,13 +200,8 @@ pack_sampler(const struct hk_physical_device *pdev,
    return hk_pack_native_sampler(pdev->dev.chip, out, &state);
 }
 
-/*
- * hk_pack_native_sampler() answers a bare bool, so a refused sampler used to
- * reach the application as a naked VK_ERROR_FEATURE_NOT_PRESENT with nothing
- * to say which of a dozen fields the chip's sampler packer would not take.
- * Print the whole state instead: it is a driver gap either way, and the next
- * person needs the row, not the verdict.
- */
+/* hk_pack_native_sampler() only reports success, so print the full sampler
+ * state when the chip's packer refuses one. */
 static VkResult
 hk_sampler_pack_error(struct hk_device *dev, const VkSamplerCreateInfo *info,
                       VkSamplerReductionMode reduction, const char *which)

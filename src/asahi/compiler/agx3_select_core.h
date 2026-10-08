@@ -18,8 +18,7 @@
  * plus the two nullary terminators. It fails closed on everything else --
  * modifiers, non-32-bit sizes, immediate/uniform sources, shifts, and every
  * unmapped opcode -- because emitting a plausible-but-wrong AGX3 stream is a
- * silent mis-execution, not a fault. Mapping details and grades are in
- * research/gpu/GPU_AGX3_BACKEND_INSTRUCTION_SELECTION_2026-08-24.md.
+ * silent mis-execution, not a fault.
  */
 
 #pragma once
@@ -118,11 +117,6 @@ struct agx3_sel_instr {
 bool agx3_select_encode(enum agx_isa_encoding encoding,
                         const struct agx3_sel_instr *instr,
                         uint8_t out[AGX3_SEL_MAX_LENGTH], uint8_t *len);
-
-/* Whether the core has a grade-A mapping for this op at all, independent of the
- * operand domain. Lets the shim distinguish "refused because unmapped" from
- * "refused because out of domain" for diagnostics. */
-bool agx3_select_op_supported(enum agx3_sel_op op);
 
 #ifdef __cplusplus
 }

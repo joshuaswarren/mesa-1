@@ -4,25 +4,23 @@
  */
 
 #include "agx_vdm_barrier_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
-static void
-agx_vdm_barrier_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_vdm_barrier_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
+/*
+ * Pack/unpack only the exact four-byte type-1 VDM memory barrier emitted by
+ * the inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X Apple Metal
+ * plugins.  The target allowlist contains only identities directly served by
+ * those plugins; G16P and G17A remain closed.
+ *
+ * The inspected aggregate G15X path can set word bits 2..4 when the separate
+ * DeviceConstants::hasMultipleAGCs property is true.  No per-identity value
+ * for that property is pinned, so this helper deliberately rejects that
+ * alternate form on every target.  This is a representation/validation
+ * helper only and does not emit a live command, submit work, or admit a
+ * device.
+ */
 bool
 agx_vdm_barrier_core_supported(enum agx_chip chip)
 {
@@ -65,7 +63,7 @@ agx_vdm_barrier_core_pack(enum agx_chip chip, struct agx_vdm_barrier_core *out)
    if (!out || !agx_vdm_barrier_core_supported(chip))
       return false;
 
-   agx_vdm_barrier_store_le32(out->bytes, AGX_VDM_BARRIER_CORE_WORD);
+   agx_store_le32(out->bytes, AGX_VDM_BARRIER_CORE_WORD);
    out->length = AGX_VDM_BARRIER_CORE_LENGTH;
    return true;
 }
@@ -77,5 +75,5 @@ agx_vdm_barrier_core_unpack(enum agx_chip chip, const void *bytes, size_t size)
        !agx_vdm_barrier_core_supported(chip))
       return false;
 
-   return agx_vdm_barrier_load_le32(bytes) == AGX_VDM_BARRIER_CORE_WORD;
+   return agx_load_le32(bytes) == AGX_VDM_BARRIER_CORE_WORD;
 }

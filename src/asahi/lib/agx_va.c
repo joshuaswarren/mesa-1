@@ -31,6 +31,12 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
     */
    size_B += dev->guard_size;
 
+   /* Allocate bookkeeping before reserving an address so host-memory
+    * failure cannot strand a reservation in either VA allocator. */
+   struct agx_va *va = malloc(sizeof(*va));
+   if (!va)
+      return NULL;
+
    uint64_t addr = 0;
 
    if (dev->ops.va_alloc != NULL) {
@@ -47,10 +53,11 @@ agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
       simple_mtx_unlock(&dev->vma_lock);
    }
 
-   if (addr == 0)
+   if (addr == 0) {
+      free(va);
       return NULL;
+   }
 
-   struct agx_va *va = malloc(sizeof(struct agx_va));
    *va = (struct agx_va){
       .flags = flags,
       .size_B = size_B,

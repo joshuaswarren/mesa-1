@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 /* Native G17P builtin end-of-tile texts for 2D-ARRAY (layered) attachments,
  * two through eight targets in one imageblock partition. Captured offline
- * with Apple Metal Toolchain v27.1.5194.15 for applegpu_g17p, using the
- * recorded BTNF builtin schema of compiler/test/probes/capture-g17p-mrt-eot.py
- * with the attachment dimension byte set to 3 (2D array) instead of 2 (2D).
- * The same pipeline reproduces the already-pinned non-array texts of
- * agx3_g17p_quad_eot.h byte for byte, and reproduces the recorded array
- * witnesses compiler/test/probes/g17p-native-{raw32,rgba8}-mrt{2,3,4}-array.text.hex.
+ * with Apple Metal Toolchain 27.1.5194.15 for applegpu_g17p, using the
+ * recorded BTNF builtin schema with the attachment dimension byte set to 3
+ * (2D array) instead of 2 (2D). The same pipeline reproduces the non-array
+ * texts of agx3_g17p_quad_eot.h byte for byte, and the native two- to
+ * four-target raw32/rgba8 array texts.
  *
  * Each target contributes one 12-byte IMGWBLK whose byte 8 is 0x28 (the
  * array form; the 2D form is 0xa8) and whose byte 9 is the per-format

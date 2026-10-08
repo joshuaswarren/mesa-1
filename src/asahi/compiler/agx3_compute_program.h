@@ -6,6 +6,7 @@
 #pragma once
 
 #include "agx3_ioto_uniform_program.h"
+#include "asahi/lib/agx_ioto_preshader_core.h"
 #include "asahi/lib/agx3_compute_program_core.h"
 
 #define AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE 6144u
@@ -28,6 +29,21 @@ struct agx3_g17p_compute_program_desc {
    struct agx3_cdm_direct_template_sources launch_sources;
    enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1;
    const struct agx_ioto_preshader_desc *preshader;
+
+   /* Optional native constant program, run by the loader after the uniform
+    * ranges are loaded, and the inputs it imports through its TPS frame.
+    * Its thread-invariant resources belong in launch_sources. */
+   struct agx_ioto_constant_program constant_program;
+   const struct agx3_cprog_inputs *cprog_inputs;
+
+   /* Optional: generate address-independent bytes (see
+    * agx3_ioto_uniform_program_desc::patchable) and record where each range
+    * base is materialized. Every relocation lies before the first COPY, at
+    * the same offset in the composed program. */
+   bool patchable;
+   struct agx_ioto_load_relocation *relocations;
+   size_t relocation_capacity;
+   size_t *relocation_count;
 };
 
 struct agx3_g17p_compute_program {

@@ -1,8 +1,0 @@
-#version 450
-/* Positive control. This is r02 from the packer matrix, which is known to
- * encode; if this case ever fails the harness itself is broken. */
-layout(local_size_x = 32) in;
-layout(set = 0, binding = 0, std430) buffer Output { uint values[]; } o;
-void main() {
-   o.values[0] = 0x11110000u + gl_GlobalInvocationID.x;
-}
