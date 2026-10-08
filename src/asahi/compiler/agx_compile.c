@@ -98,14 +98,11 @@ agx_set_refusal(const agx_context *ctx, const char *what, unsigned line)
             __FILE__, line);
 }
 
-/* Inline blending of the colour epilog into fast-linked fragment programs. */
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_inline_blend, "AGX_G17P_INLINE_BLEND", true)
-
+/* Fast-linked fragment programs blend the colour epilog inline. */
 uint32_t
 agx_get_fs_structure_flags(void)
 {
-   return debug_get_option_agx_g17p_inline_blend()
-             ? AGX_FS_STRUCTURE_INLINE_BLEND : 0;
+   return AGX_FS_STRUCTURE_INLINE_BLEND;
 }
 
 static agx_index
