@@ -97,6 +97,35 @@ hk_files = files(
 )
 
 if with_tests
+  # Unused recording functions require section garbage collection so the
+  # test can link the production resolver without the rest of the driver.
+  if ld_args_gc_sections.length() > 0
+    # Exercise the real resolver; unused command-recording entry points in
+    # hk_sync.c need no device implementation in this CPU-only executable.
+    test(
+      'hk_sync_prior',
+      executable(
+        'hk_sync_prior_test',
+        files('tests/test-hk-sync-prior.c', 'hk_sync.c'),
+        include_directories : [
+          include_directories('.'),
+          inc_gallium, inc_gallium_aux, inc_include, inc_src, inc_asahi,
+          inc_virtio_gpu, inc_virtio_vdrm,
+        ],
+        dependencies : [
+          idep_nir_headers, idep_mesautil, idep_libagx,
+          idep_libagx_shaders_h, idep_agx_pack,
+          idep_vulkan_runtime_headers, idep_vulkan_util_headers,
+        ],
+        c_args : [c_msvc_compat_args, '-Wno-error=pointer-arith'],
+        link_args : [ld_args_gc_sections],
+        gnu_symbol_visibility : 'hidden',
+      ),
+      suite : ['asahi'],
+    )
+
+  endif
+
   test(
     'hk_drm_render_core',
     executable(
@@ -313,3 +342,14 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+
+if with_tests
+  executable(
+    'g17p-vulkan-multiview-clear',
+    files('tests/g17p_vulkan_multiview_clear.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+endif

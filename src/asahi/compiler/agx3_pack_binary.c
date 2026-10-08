@@ -11,19 +11,10 @@
  * scheduled agx_instr IR, normalizes each instruction into agx3_select_core's
  * operand struct, and emits AGX3 bytes.
  *
- * Everything that could be wrong -- the op-to-form mapping, the grounded domain
- * of each form, how operands bind -- lives in agx3_select_core and is tested
- * byte-for-byte in the host suite. This file is the translation and the block
- * walk, nothing more.
- *
- * The production subset includes grounded ALU, device-memory, special-register
- * and structured-control-flow forms, plus the graphics path: varying
- * interpolation and UVS stores for vertex shaders, and coefficient loads, tile
- * load/store and the pixel writeout barriers for fragment shaders. It fails the
- * shader -- never aborts, since this runs inside the UMD -- on any unmapped op
- * or out-of-domain instruction. In particular, a compare after an asynchronous
- * producer is refused until the compare/cnd hazard fields are grounded;
- * emitting the witnessed all-clear form there could consume stale data.
+ * Any unmapped op or out-of-domain instruction fails the shader (never
+ * aborts: this runs inside the UMD). A compare after an asynchronous producer
+ * is refused: the compare/cnd hazard fields are not mapped, and the all-clear
+ * form could consume stale data.
  */
 
 #include "agx3_alu_core.h"
@@ -674,10 +665,8 @@ agx3_try_float_modifier(struct util_dynarray *emission,
       return 0; /* the compact no-modifier packer handles it */
 
    const unsigned want = is_fma ? 3 : 2;
-   /* The destination checks used to be carried by the source ones: a half
-    * operand failed agx3_mod_src_ok() and took the whole instruction with it,
-    * so a vector or spilled destination never reached the encoder. Admitting
-    * a narrow operand removes that accident, so state them. */
+   /* Check the destination itself: a narrow source is admitted, so a vector
+    * or spilled destination is no longer excluded by the source checks. */
    if (I->nr_dests < 1 || I->dest[0].type == AGX_INDEX_NULL ||
        !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
        agx_channels(I->dest[0]) != 1 ||
@@ -1975,17 +1964,12 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    if (register_lod && slot != 1)
       return false;
 
-   /* A staged read consumes, and kills, its coordinate bank asynchronously.
-    * A later read restaging the same bank while that read is outstanding can
-    * have its coordinates killed under it. Apple stages consecutive reads in
-    * disjoint banks instead: two texture2d::read calls at different
-    * coordinates, metal-nt -arch applegpu_g17p, publish halves 0/2 and 4/6
-    * and issue smp f19=0 then smp f19=4. A fragment function reading two
-    * indexed textures at different coordinates does the same. Callers that
-    * pass no `banks` keep one bank. Halves 4..7 carry this path's
-    * PACK_SMPIR operands, so the second plain bank starts at half 8. A read
-    * with PACK_SMPIR operands keeps the base bank and also occupies halves
-    * 0..7; any outstanding read sharing its halves is retired first. */
+   /* A staged read consumes, and kills, its coordinate bank asynchronously,
+    * so consecutive reads stage in disjoint banks, as Apple's do (smp f19=0
+    * then f19=4). Callers that pass no `banks` keep one bank. Halves 4..7
+    * carry PACK_SMPIR operands, so the second plain bank starts at half 8; a
+    * read with PACK_SMPIR operands keeps the base bank and occupies halves
+    * 0..7. An outstanding read sharing the halves is retired first. */
    const bool plain_bank = !ms_2d && !ms_array && !array && !register_lod;
    const uint16_t bank_span =
       plain_bank ? 2 * agx_channels(I->src[0]) : staging_base + 8;
@@ -2062,18 +2046,11 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
 
       const unsigned plain_coords =
          (ms_2d || ms_array || array) ? 2 : agx_channels(I->src[0]);
-      /* The staging COPY carries exactly one wait bit, so a fetch whose
-       * operands are produced on two scoreboard slots had no encoding at all
-       * and the packer refused the whole shader.
-       *
-       * Retire the extra slots by repeating the first coordinate copy, one
-       * outstanding bit each. Every repeat writes the same staging register
-       * from the same source, so the last one -- issued once every slot has
-       * retired -- leaves the correct value, whichever slot produced the
-       * coordinate. Keep that source alive until its final repeat: marking an
-       * earlier COPY as the last use lets the next COPY reread a killed
-       * coordinate. A fetch waiting on one slot or none emits exactly what it
-       * emitted before, so no shader that already encoded is affected. */
+      /* The staging COPY carries one wait bit. A fetch whose operands come
+       * from several scoreboard slots repeats the first coordinate copy, one
+       * outstanding bit each; every repeat writes the same register from the
+       * same source, so the last leaves the right value. The source stays
+       * live until the final repeat. */
       uint16_t pending_wait = staging_wait;
       for (unsigned i = 0; i < plain_coords; i++) {
        const unsigned reps =
@@ -2097,12 +2074,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        }
       }
 
-      /* Apple stages a plain 2D fragment texel fetch's level after its
-       * coordinates -- metal-nt's `t.read(uint2(uv), uint(lod))` emits the
-       * coordinate staging, then PACK_SMPIR, then SMP -- and into this
-       * fetch's own operand bank. A level published outside the
-       * sampler-private staging allocation read back as zero for every
-       * fragment texel fetch on G17P hardware. */
+      /* A plain 2D fragment texel fetch stages its level after its
+       * coordinates (coordinate copies, PACK_SMPIR, SMP) and into its own
+       * operand bank; a level published elsewhere reads back as zero. */
       if (plain_2d_lod) {
          uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
          if (!agx3_tex_stage_typed_lod_bank(
@@ -2234,24 +2208,10 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        (I->src[4].value == 1 &&
         (normalized || I->format == AGX_FORMAT_I8)));
    /* A bindless store names its descriptor set's uniform halves as the PBE
-    * heap (f79) and carries the PBE record index in a GPR (f92).
+    * heap (f79) and carries the PBE record index in a GPR (f92);
     * hk_g17p_lower_storage_records() converts the byte offset to that index.
-    * The heap and the index are independent operands: metal-nt -arch
-    * applegpu_g17p writing texture(1) of two direct uint write textures emits
-    * d74054000040000100040000881a0900, f79 0 with f91 1.
-    *
-    * The state operand's form and f70 are ORTHOGONAL, so an indexed state
-    * does not imply normalized data.  metal-nt -arch applegpu_g17p, indexed
-    * `array<texture2d<T, access::write>, 4>` (a uniform index, f93), one
-    * variable per kernel:
-    *
-    *   texture2d<float>  d72054000040001020040000883a0901
-    *   texture2d<uint>   d72054000040001020040000881a0901
-    *   texture2d<int>    d72054000040001020040000881a0901
-    *
-    * against the immediate-state controls that are already recorded in
-    * agx_compile.c (`...0000 0400 0088 3a09 00` / `...881a0900`): the state
-    * operand moves and f70 does not, and int and uint stay byte-identical. */
+    * Heap and index are independent operands, and the state operand's form
+    * is independent of f70 (normalized data): int and uint encode alike. */
    const bool heap_state =
       agx3_tex_plain_uniform64(I->src[3]) && !(I->src[3].value & 3) &&
       agx3_tex_plain_reg(I->src[4]) &&
@@ -2283,19 +2243,10 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    }
 
    /* imgwci consumes its staging bank asynchronously and signals its f12
-    * slot when done, like any producer. A later COPY into a bank whose write
-    * is still in flight can replace that write's coordinates or data first,
-    * so a bank stays held until its write's slot is synchronised.
-    *
-    * metal-nt -arch applegpu_g17p, writes to array<texture2d<int,
-    * access::write>, N> with no wait between them: six conditional scalar
-    * writes stage f5 0/8/16/24/32/40 on slots 1..6, three unconditional RGBA
-    * writes f5 0/16/32, and two computed-index writes f5 0 on slot 1 and f5
-    * 16 on slot 2. After a texture read, two conditional writes stage f5 16
-    * and 24, clear of the read's bank. Forty unconditional writes reuse a
-    * bank only once its imgwci's slot has been waited.
-    *
-    * The resolved-PBE forms below keep their witnessed bank 0 and slot 1. */
+    * slot when done, so a bank stays held until its write's slot has been
+    * waited; consecutive writes (and a write after a texture read) stage in
+    * distinct banks, as Apple's do. The resolved-PBE forms below keep bank 0
+    * and slot 1. */
    const unsigned bank_span = 16;
    uint16_t bank = 0;
    uint8_t slot = 1;
@@ -2354,35 +2305,18 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    util_dynarray_init(&staged, NULL);
    uint8_t coord_bytes[AGX3_STAGE_MAX_LENGTH], coord_len = 0;
    uint8_t layer_bytes[AGX3_TEX_MAX_LENGTH], layer_len = 0;
-   /* A 3D write stages z at half 4 and an array write packs its layer at
-    * half 6, moving the data lanes out of the way: metal-nt -arch
-    * applegpu_g17p COPYs texture3d data to halves 8/10/12/14 and
-    * texture2d_array data to halves 4/10/12/14. A bank offsets every half:
-    * the second of two texture2d_array writes stages data at 20/26/28/30
-    * with f5=16. */
+   /* A 3D write stages z at half 4 and its data at 8/10/12/14; an array
+    * write packs its layer at half 6 and its data at 4/10/12/14. A bank
+    * offsets every half (f5). */
    const uint16_t data_dest[4] = {
       bank + (three_d ? 8 : 4), bank + (array || three_d ? 10 : 6),
       bank + 12, bank + 14,
    };
-   /* imgwci consumes integer coordinates from the first two halves of its
-    * bank. Native texture/image kernels publish ordinary GPR coordinates
-    * with COPY on the same slot the instruction waits for. Keeping the source
-    * retained also matches the native write kernel, whose address
-    * calculation may reuse it.
-    *
-    * The scoreboard wait belongs on the FIRST staged COPY of the group, not
-    * on the first data COPY: the coordinate copies are emitted ahead of the
-    * data copies, so a wait carried by the data copy runs too late to protect
-    * the coordinate registers.  A coordinate produced by an outstanding
-    * async producer -- `imageStore(img, pc.coords.xy, ...)` compiles to
-    * `device_load ... slot 0` feeding image_write's src[1] directly -- was
-    * then copied into the staging bank before that load retired, so every
-    * store landed at the stale register contents (texel 0,0) regardless of
-    * the requested coordinate.  Every other staged producer in this file
-    * already waits on its first COPY: the texture-sample coordinate pair
-    * (agx3_emit_texture_sample), the ZS_EMIT pair (AGX_OPCODE_ZS_EMIT_AGX3),
-    * the UVSW transfer (agx3_emit_uvsw) and SAMPLE_MASK_AGX3.  Waiting here
-    * is also strictly conservative for the data copies, which follow. */
+   /* imgwci reads integer coordinates from the first two halves of its bank,
+    * published with COPY on the slot it waits for; the source stays live.
+    * The scoreboard wait goes on the FIRST staged COPY of the group (the
+    * coordinates), as for every other staged producer: a coordinate from an
+    * outstanding device load must retire before it is copied. */
    if (!agx3_stage_copy_source(enc, bank, I->src[1].value, false, slot,
                                wait_mask, coord_bytes, &coord_len) ||
        !agx3_append(&staged, coord_bytes, coord_len) ||
@@ -3742,14 +3676,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool array = I->dim == AGX_DIM_2D_ARRAY || cube_array;
    const bool three_d = I->dim == AGX_DIM_3D;
    const bool cube = I->dim == AGX_DIM_CUBE || cube_array;
-   /* A vertex stage has no derivatives, so a GLSL `texture()` depth
-    * comparison arrives as an explicit level zero. The cube form of that is
-    * already grounded (KHR-GL30.ext_texture_shadow_lod
-    * texturelod.samplercubeshadow_vertex), and the cube array adds only its
-    * layer, staged through the same witnessed face+layer word the implicit
-    * cube-array comparison uses (texture.samplercubearrayshadow_fragment).
-    * Excluding the cube array refuses texture.samplercubearrayshadow_vertex.
-    */
+   /* A vertex stage has no derivatives, so a `texture()` depth comparison
+    * arrives as an explicit level zero. The cube array adds only its layer,
+    * staged through the face+layer word of the implicit cube-array
+    * comparison. */
    const bool shadow_level_zero =
       shadow && valid_immediate_lod && immediate_level == 0.0f;
    /* A per-lane level and a per-lane bias share one staging form, so they
@@ -3896,9 +3826,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          (!implicit_lod && !explicit_lod && !biased_lod &&
           !register_bias && !bias_min))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
-       /* metal-nt witnesses the sparse sample on AGX3b for the implicit,
-        * immediate level, immediate bias, array, 3D, cube and gather shapes.
-        * A depth comparison and a LOD query have no witness. */
+       /* Sparse samples exist on AGX3b for the implicit, immediate level,
+        * immediate bias, array, 3D, cube and gather shapes; not for a depth
+        * comparison or a LOD query. */
        (I->sparse && (enc != AGX_ISA_ENCODING_AGX3B || shadow || query_lod)) ||
        /* A minimum LOD and a runtime offset share bank 6 only through the
         * packed word. */
@@ -3923,18 +3853,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                     /* A comparison stages a register level or bias beside
                      * the operand its dimension already owns: the noncube
                      * array with its layer (agx3_tex_stage_array_lod), the
-                     * cube with CEM's face, the cube array with both. All
-                     * three are KHR-GL30.ext_texture_shadow_lod --
-                     * texturelod and bias on sampler2DArrayShadow and on
-                     * samplerCubeArrayShadow. Admitting only the cube
-                     * refuses the array fragments, which then fail to link
-                     * while every offline gate stays green. A bias with a
-                     * minimum is witnessed for the cube only. A noncube
-                     * array comparison gradient stages its four scalars in
-                     * banks 8..14 and keeps the layer on PACK_SMPIR bank 6
-                     * and the reference at bank 4, so nothing it publishes
-                     * collides; the same shape in a pre-raster stage, which
-                     * this term never covered, already reached the encoder. */
+                     * cube with CEM's face, the cube array with both. A bias
+                     * with a minimum exists for the cube only. A noncube
+                     * array comparison gradient stages its scalars in banks
+                     * 8..14, the layer in bank 6 and the reference in bank
+                     * 4, so nothing collides. */
                     !((explicit_lod && !immediate_lod) || register_bias ||
                       (cube && bias_min) ||
                       (array && !cube && gradient_lod))))) ||
@@ -4280,10 +4203,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    }
 
    /* The comparison reference belongs to this sample's own staging group,
-    * at bank + 4 (see the sampler-private note above). Staged at a literal
-    * half 4, three sampler2DShadow samples in one fragment all read
-    * whichever reference was written last:
-    * KHR-GL30.texture_repeat_mode's depth cases are exactly that shader. */
+    * at bank + 4 (see the sampler-private note above), not at a fixed half
+    * 4 that later samples would overwrite. */
    if (shadow && !cube && !published &&
        (!agx3_tex_stage_copy_hints(
            enc, coord + 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
@@ -4420,18 +4341,11 @@ agx3_tile_format_width(enum agx_format format)
 }
 
 /*
- * The register span a tile store or load names.
- *
- * At 16 and 32 bits that is one register per written channel. At 8 bits it is
- * not: `lstcol` carries a width, not a format, so an 8-bit access moves *two*
- * channels per 16-bit register and the value is half as wide as the mask is
- * long. Apple's fragment shaders show this directly -- a four-channel 8-bit
- * store reads two 16-bit registers, a two-channel one reads a single register,
- * and a one-channel one reads the low byte of a single register.
- *
- * Anything else at 8 bits is refused. Before the `fltnorm` pack existed this
- * function accepted a four-channel 32-bit float value with an 8-bit width,
- * which would have stored the low byte of each float's raw bit pattern.
+ * The register span a tile store or load names: one register per channel at
+ * 16 and 32 bits; at 8 bits two channels per 16-bit register (`lstcol`
+ * carries a width, not a format), so four channels read two registers, two
+ * read one, and one reads the low byte of one. Other 8-bit shapes are
+ * refused.
  */
 static bool
 agx3_tile_value_ok(agx_index value, uint8_t mask, int width)
@@ -4668,19 +4582,11 @@ agx3_norm_srgb_mode(const agx_instr *I, bool two_lanes, uint8_t *srgb)
 
 /*
  * `fltnorm`: pack two 32-bit floats, clamped and scaled, into the two halves
- * of one 16-bit register. agx_pack_normalized_agx3() in agx_compile.c creates
- * these immediately before an 8-bit normalized tile store, one per channel
- * pair, which is exactly what Apple's own G17P fragment shaders do.
- *
- * The second source is null for an odd trailing channel; that selects the
- * single-lane form Apple emits for a one-component 8-bit target.
- *
- * Both sources are marked "still live" rather than "last read". The bit pair
- * is a liveness hint -- Apple sets one or the other per operand, and both
- * shapes are witnessed -- but Mesa cannot supply the fact: agx_register_like
- * drops kill/discard when RA lowers SSA to registers, so the IR's own bit
- * reads false here regardless of the truth. Claiming a value is still live is
- * the conservative half of the pair.
+ * of one 16-bit register, one per channel pair before an 8-bit normalized
+ * tile store (agx_pack_normalized_agx3()). A null second source selects the
+ * single-lane form for an odd trailing channel. Both sources are marked
+ * still live: RA drops kill/discard, so last use is unknown here, and "live"
+ * is the conservative hint.
  */
 static bool
 agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
@@ -5097,23 +5003,11 @@ agx3_translate_mem(const agx_instr *I, bool is_store, uint8_t slot,
       d->idx_signed = false;
 
       /*
-       * A REGISTER index is scaled by the shift alone -- the hardware does
-       * NOT additionally scale it by the access format. Apple's corpus is
-       * unambiguous: every register-indexed lddev/stdev carries
-       * shift == log2(element bytes) plus any vector stride (16-bit -> 1,
-       * 32-bit -> 2, vec4-of-32-bit -> 4), and shift 0 occurs only on
-       * immediate byte offsets.
-       *
-       * agx_nir_lower_address() has already SUBTRACTED the format shift
-       * (match.shift = shift - format_shift) because that is the AGX2
-       * convention, so add it back. `w` is log2(element bytes).
-       *
-       * Without this a `values[i]` store addressed base + i BYTES: 32 lanes
-       * folded onto 8 elements (the hardware aligns the access down), which
-       * read back as a bogus 4x scaling on the value and as 8-of-32 coverage.
-       * The immediate-index path above never had the bug because it converts
-       * to a byte offset itself and forces shift 0 -- which is why constant
-       * indices worked while index-derived ones did not.
+       * A REGISTER index is scaled by the shift alone, not by the access
+       * format: shift == log2(element bytes) plus any vector stride, and
+       * shift 0 only for immediate byte offsets. agx_nir_lower_address()
+       * subtracted the format shift (the AGX2 convention), so add it back;
+       * `w` is log2(element bytes).
        */
       if (total_shift > 4)
          return false;
@@ -5200,19 +5094,10 @@ agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
 
 
    /*
-    * f11, `narrow_extend`, is an AGX3c field. The AGX3b `ldtg`/`sttg` forms
-    * have no encoding for it at all -- composing either with f11 = 1 is
-    * refused at every width, while f11 = 0 composes -- so a G17P threadgroup
-    * access necessarily carries it clear, and Apple's own compiler cannot be
-    * emitting anything else. Setting it from the width regardless of encoding
-    * therefore refused EVERY 8-bit threadgroup load and store on G17P, which
-    * is 1295 of the 1393 refused instructions in the Vulkan compute block:
-    * VK_KHR_workgroup_memory_explicit_layout puts 8-bit types in shared
-    * memory, and every one of them landed here.
-    *
-    * Clearing it leaves G17P exactly where the conformant AGX2 path already
-    * is: AGX2 has no such bit either, and Mesa's IR contract (an 8-bit value
-    * held in a 16-bit register) is the same on both.
+    * f11, `narrow_extend`, exists on AGX3c only: the AGX3b `ldtg`/`sttg`
+    * forms cannot encode f11 = 1 at any width, so a G17P threadgroup access
+    * carries it clear -- as on AGX2, with an 8-bit value held in a 16-bit
+    * register.
     */
    d->narrow_extend =
       d->width == AGX3_MEM_W8 && enc == AGX_ISA_ENCODING_AGX3C;
@@ -6064,14 +5949,10 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
     * had to spend a whole synchronous prelude retiring one. */
    if (I->nr_srcs == 2 && agx3_subgroup_imm_lane(I->src[1]) &&
        enc == AGX_ISA_ENCODING_AGX3B) {
-      /* 16-bit data narrows this encoding point's width pair, which is a
-       * different field from the quad selector, so a half broadcast or
-       * butterfly encodes for quad exactly as it does for SIMD -- Apple's
-       * applegpu_g17p words are in agx3_subgroup_encode_shuffle().  Reaching
-       * for the 32-bit operand predicate here refused every 16-bit
-       * subgroupQuadBroadcast and subgroupQuadSwap, which is one refused
-       * shader per case.  The shifts keep the 32-bit predicate: their 16-bit
-       * width pair is not this composition. */
+      /* 16-bit data narrows this encoding point's width pair, a field
+       * separate from the quad selector, so a half broadcast or butterfly
+       * encodes for quad as for SIMD (agx3_subgroup_encode_shuffle()). The
+       * shifts keep the 32-bit predicate. */
       const bool half = I->nr_dests == 1 &&
                         I->dest[0].size == AGX_SIZE_16 &&
                         (op == AGX3_SUBGROUP_SHUFFLE_BROADCAST ||
@@ -6322,22 +6203,12 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
    } else {
       switch (I->icond) {
       case AGX_ICOND_UEQ:
-         /* Apple's immediate equality form is grounded for the direct
-          * predicate.
-          *
-          * MEASURED on G17P (A18 Pro): the register-zero equality form -- the
-          * one `x != 0` used to take -- is wrong.  A compute shader whose only
-          * subgroup op is simd_ballot(x != 0) returns a bogus mask AND loses
-          * its execution mask: 31 of 32 lanes stop retiring their stores from
-          * the ballot onwards.  The same shader on the immediate form
-          * (`x == 0`, `x < 5`) keeps all 32 lanes and returns the right mask.
-          * `x != 0` is exactly `x > 0` unsigned, so route the inverted sense
-          * through the immediate form the hardware agrees with.
-          *
-          * A nonzero immediate cannot be inverted this way; agx_optimizer
-          * keeps that shape out of here by balloting the opposite compare.
-          * The 16-bit quad ballot returns above on its own witnessed inverted
-          * encoding, and the immediate form is grounded for AGX3B alone.
+         /* The direct predicate uses Apple's immediate equality form. The
+          * register-zero equality form miscomputes on G17P (wrong mask and a
+          * lost execution mask), so `x != 0` goes through the immediate form
+          * as the unsigned `x > 0`. A nonzero immediate cannot be inverted
+          * this way (agx_optimizer ballots the opposite compare instead);
+          * the 16-bit quad ballot returned above. AGX3B only.
           */
          if (I->invert_cond) {
             if (!quad && enc == AGX_ISA_ENCODING_AGX3B) {
@@ -6472,16 +6343,9 @@ agx3_emit_scoped_barrier(struct util_dynarray *emission,
           agx3_append(emission, encoded.bytes, encoded.length);
 }
 
-/* The grounded AGX3 compare forms are 32-bit and address an eight-bit HALF
- * register index, so every one of the 128 architectural 32-bit registers is
- * reachable -- see the witness block above agx3_cf_icmp_reg(), where Apple's
- * own compiler compares halves 148/150 and loads into 178/182 in the same
- * kernel.  This helper stopped at half 128, which quietly halved the usable
- * register file: any shader whose live range crossed r64 had its branch
- * refused rather than encoded.
- *
- * Source modifiers and memory/uniform operands still select forms whose
- * routing has not been proved, and those keep failing closed here. */
+/* The AGX3 compare forms are 32-bit and address an eight-bit half-register
+ * index, so all 128 architectural 32-bit registers are reachable. Source
+ * modifiers and memory/uniform operands are refused here. */
 static bool
 agx3_cf_reg32(agx_index src)
 {
@@ -6685,20 +6549,11 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
-   /* Branching on a 16-bit integer against a constant. Mesa keeps booleans
-    * and small ints in 16-bit halves, so `if (b)` arrives as `r0h != 0` and
-    * `if (gradientLength < 2)` as `r0h < 2` rather than as 32-bit compares.
-    *
-    * The constant arrives on either side. `0 < x` and `x > 0` are the same
-    * branch, and which one Mesa hands the packer depends only on how the
-    * source wrote the comparison -- Hyprland's border, shadow and inner-glow
-    * shaders produce both orders. Canonicalize the constant to the right
-    * exactly as the 32-bit path below already does; the emitted bytes are
-    * the witnessed encoding either way, with the relation swapped, so the
-    * normalization admits no new encoding of its own.
-    *
-    * agx3_cf_icmp_imm16_runtime() refuses the immediates and relations that
-    * have no witness, so an ungrounded constant still fails closed here. */
+   /* Branching on a 16-bit integer against a constant (Mesa keeps booleans
+    * and small ints in halves: `if (b)` is `r0h != 0`). The constant may be
+    * on either side; it is moved to the right with the relation swapped, as
+    * on the 32-bit path. agx3_cf_icmp_imm16_runtime() refuses immediates and
+    * relations it cannot encode. */
    if (!is_float &&
        ((agx3_cf_reg16(I->src[0]) && agx3_cf_imm8(I->src[1])) ||
         (agx3_cf_imm8(I->src[0]) && agx3_cf_reg16(I->src[1])))) {
@@ -6716,12 +6571,8 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
-   /* Branching on a float against a CONSTANT. f18 is the compare's second
-    * operand; it used to be pinned to zero, so only `x < 0.0` encoded and
-    * `x < 1.0` -- what dEQP's workgroup-memory tests branch on, and 136 of
-    * the 146 instructions left refused in the Vulkan compute block -- had no
-    * encoding. The constant is the ordinary minifloat, so a zero constant
-    * still emits exactly the bytes it always did. */
+   /* Branching on a float against a constant: f18, the compare's second
+    * operand, holds the minifloat. */
    if (is_float &&
        (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
        ((agx3_cf_fminifloat(I->src[1]) &&
@@ -6815,14 +6666,10 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
-   /* An ABSOLUTE comparison source. Like `fsel`, the control-flow compare
-    * puts ABS on a longer encoding point rather than on a bit of the short
-    * one, so it needs its own encoder; letting an absolute source fall
-    * through to the plain one below would drop the modifier and encode a
-    * different branch. Qt Quick's conicalgradient.frag is the shape.
-    *
-    * ABS and NEG are not witnessed together -- NEG lives only on the short
-    * form -- so that combination still fails closed. */
+   /* An absolute comparison source: like `fsel`, the control-flow compare
+    * puts ABS on a longer encoding point, so it has its own encoder (the
+    * plain one below would drop the modifier). ABS with NEG is refused: NEG
+    * exists only on the short form. */
    if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
        agx3_src_is_register(I->src[0]) && agx3_src_is_register(I->src[1]) &&
        I->src[0].size == AGX_SIZE_32 && I->src[1].size == AGX_SIZE_32 &&
@@ -7001,23 +6848,12 @@ agx3_emit_cnd(struct util_dynarray *emission, enum agx_isa_encoding enc,
 /*
  * Retire scoreboard slots ahead of a control-flow boundary.
  *
- * agx3_slot_assign() is a linear pass, so its "waited once = satisfied
- * globally" rule is only sound when every path into a block sees the same
- * scoreboard. The sufficient condition is an empty one. A result that is
- * still in flight at a divergence would otherwise have its wait land inside
- * ONE arm -- the atomic lowering does exactly this, hoisting the descriptor
- * load above the branch and consuming it in the taken arm -- and the other
- * arm would then read it unwaited.
- *
- * Waiting early is always semantically safe (it only costs latency), so
- * rather than refusing, retire everything here. `band(r0, r0, r0)` is a true
- * no-op -- x & x == x preserves every bit -- and it is the same wait-carrying
- * form agx3_emit_alu() already uses as a prelude. This requires r0 to be ready
- * or its pending producer to be included in the mask. A partial wait for an
- * unrelated destination must use a carrier whose accesses it covers.
- *
- * bit_and carries a six-bit wait mask, so one instruction waits on the whole
- * mask before it reads r0.
+ * agx3_slot_assign() is linear: "waited once = satisfied globally" holds only
+ * if every path into a block sees the same scoreboard, so the scoreboard must
+ * be empty there. Waiting early only costs latency, so retire everything with
+ * `band(r0, r0, r0)` (an identity carrying a six-bit wait mask, as in
+ * agx3_emit_alu()'s prelude). r0 must be ready or its producer in the mask; a
+ * partial wait for an unrelated destination needs a carrier covering it.
  */
 static bool
 agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc,
@@ -7074,30 +6910,14 @@ agx3_retire_result_wait(struct util_dynarray *emission,
    return ok && agx3_append(emission, bytes, len);
 }
 
-/* The COMPACT register+minifloat ALU forms -- agx3_alu_fadd_minifloat(),
- * agx3_alu_fadd_minifloat_mod() at ep1 (unsaturated) and every
- * agx3_alu_fmul_minifloat_narrow() form -- accept only an empty wait, ONE
- * arbitrary slot, or the native slots1+2 pair 0x03. Swept over all 64 masks,
- * each of those encoders takes exactly {0x00, 0x01, 0x02, 0x03, 0x04, 0x08,
- * 0x10, 0x20}; the long forms (fadd_abs_*, saturating fadd_minifloat_mod)
- * take all 64.
- *
- * An operation that has to wait on two unrelated producers therefore has no
- * single compact encoding. Refusing it refuses the whole shader, which is what
- * `mediump` dynamic array and matrix indexing in a vertex shader hit: the
- * first `coords * 0.5` of the if-else-tree-lowered dynamic write reads one
- * async result and overwrites another, and reaches the packer with the mask
- * 0x24 or 0x0c. That refused three of the 760 dEQP-VK.glsl.indexing.* cases
- * -- tmp_array.vec4 and matrix_subscript.mat4 dynamic_write_dynamic_loop_read,
- * and matrix_subscript.mat3x2 dynamic_write_dynamic_read, all _vertex --
- * as VK_ERROR_FEATURE_NOT_PRESENT out of vkCreateGraphicsPipelines.
- *
- * Retire the complete operation wait through an identity on its destination.
- * A partial wait on r0 can race an unrelated producer of r0, and a partial
- * wait on the real destination can miss its own WAW dependency. The carrier
- * is emitted only for a mask with no direct encoding; a single slot and the
- * native pair still encode in one instruction. No independent generation is
- * added beyond the existing carrier's slot-6 contract. */
+/* The compact register+minifloat ALU forms (agx3_alu_fadd_minifloat(),
+ * agx3_alu_fadd_minifloat_mod() at ep1, agx3_alu_fmul_minifloat_narrow())
+ * take only the wait masks {0x00, 0x01, 0x02, 0x03, 0x04, 0x08, 0x10, 0x20};
+ * the long forms take all 64. A wait on two unrelated producers outside that
+ * set is retired first through an identity on the instruction's destination
+ * (a partial wait on r0 could race an unrelated producer of r0, one on the
+ * destination could miss its WAW dependency). Encodable masks still take one
+ * instruction. */
 static bool
 agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
                                  enum agx_isa_encoding enc, const agx_instr *I,
@@ -7322,20 +7142,11 @@ agx3_try_control_flow(struct util_dynarray *emission,
                         I->op == AGX_OPCODE_JMP_EXEC_NONE_AFTER;
 
    /*
-    * Slot assignment is deliberately linear, so a control-flow boundary is
-    * only safe when the scoreboard state entering it is the same on every
-    * path. The sufficient condition is that nothing is in flight: if every
-    * slot issued so far has already been waited, then every block is entered
-    * with an empty scoreboard no matter which predecessor ran, and the linear
-    * pass's "waited once = satisfied globally" reasoning never depends on a
-    * wait that some other path skipped. A result still outstanding here would
-    * carry its slot across the branch -- including around a backedge -- and
-    * that needs the predecessor-aware analysis this backend does not have, so
-    * it stays refused.
-    *
-    * This replaces a sticky "an async op appeared anywhere earlier" flag,
-    * which refused shaders whose loads were all consumed before the branch --
-    * the common case, and the one every real kernel with a bounds check hits.
+    * Slot assignment is linear, so a control-flow boundary is safe only when
+    * nothing is in flight: then every block is entered with an empty
+    * scoreboard whichever predecessor ran. A result still outstanding here
+    * would carry its slot across the branch (or a backedge), which needs a
+    * predecessor-aware analysis this backend does not have, so it is refused.
     */
    if (outstanding != 0 &&
        (I->op == AGX_OPCODE_BEGIN_CF || is_if || is_while || is_break_if ||
@@ -7368,20 +7179,11 @@ agx3_try_control_flow(struct util_dynarray *emission,
        * flow fail-closed. */
       if (wait_mask != 0)
          return -1;
-      /* A loop owns two architectural exec-mask levels -- Mesa's nest=1
-       * break and the loop's own continue test both spend them, which is
-       * CNDLT, and the shared backedge footer pops them with CNDEND(2).
-       * Every enclosing `if` the break also escapes adds one more level, and
-       * the lane has to stay inactive until all of them are popped. Apple
-       * spells that with CNDCF, whose count is exactly the number of levels
-       * open inside the innermost loop:
-       *
-       *   nest (levels in Mesa's model, loop counted once)  1  2  3  4 ...
-       *   native levels open inside the loop                2  3  4  5 ...
-       *
-       * so the native count is nest + 1 at every depth. Witnessed byte for
-       * byte against `metal-nt -arch applegpu_g17p` for two through seven
-       * nested ifs; see agx3_cf_cndcf()'s comment for the bytes. */
+      /* A loop owns two exec-mask levels (Mesa's nest=1 break and the
+       * loop's continue test, CNDLT; the backedge footer pops them with
+       * CNDEND(2)), and every enclosing `if` the break also escapes adds
+       * one. Apple's CNDCF count is the number of levels open inside the
+       * innermost loop, i.e. nest + 1. */
       if (is_if && I->nest != 1)
          return -1;
       if (is_break_if && I->nest == 0)
@@ -7391,28 +7193,13 @@ agx3_try_control_flow(struct util_dynarray *emission,
       const bool is_float = I->op == AGX_OPCODE_IF_FCMP ||
                             I->op == AGX_OPCODE_WHILE_FCMP ||
                             I->op == AGX_OPCODE_BREAK_IF_FCMP;
-      /* G16G reuses each loop's slot for its breaks and wraps deep loop nests,
-       * as witnessed by M4's seven- and eight-deep loop shaders. G17P instead
-       * assigns a deep break the next slot so it cannot overwrite the live
-       * predicate of an enclosing conditional. NEST counts exec-mask levels
-       * exited, not loop depth.
-       *
-       * There are only six flag slots, so a per-depth assignment runs out at
-       * the seventh nested loop and used to refuse the shader. It does not
-       * have to: a flag slot is an ordinary allocatable resource, not a
-       * per-depth one, and Apple reuses them freely on G17P too. Eight
-       * nested loops compiled with `metal-nt -arch applegpu_g17p` give eight
-       * CNDLT loop tests in slots 1,1,1,1,1,1,1,0: slot 1 carries seven
-       * different loops' exit predicates in one program.
-       *
-       * Our own emission is stricter still: every compare is immediately
-       * followed by the CND that consumes it (see agx3_emit_cf_compare and
-       * agx3_emit_cnd below), so a predicate is never live across another
-       * instruction and any slot is reusable.
-       *
-       * Wrapping modulo six therefore keeps every depth that already encoded
-       * byte-identical -- depths 1..6 are unchanged -- and only replaces a
-       * refusal at depth seven and beyond. */
+      /* G16G reuses each loop's slot for its breaks and wraps deep loop nests;
+       * G17P assigns a deep break the next slot so it cannot overwrite the
+       * live predicate of an enclosing conditional. NEST counts exec-mask
+       * levels exited, not loop depth. A flag slot is an ordinary resource
+       * (Apple reuses slot 1 for several loops' exit predicates), and every
+       * compare here is immediately followed by the CND consuming it, so the
+       * six slots wrap modulo six for nests deeper than six. */
       if ((is_break_if || is_while) && loop_depth == 0)
          return -1;
       const unsigned loop_slot = loop_depth - 1;
@@ -7597,22 +7384,15 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
           uvs_mask == 0xf;
 }
 
-/* Native 11/16/32/36/52/68-output VSs and the opt-in 72-output qualification
- * shape use a dense set of scalar UVSW indices and distinct staging addresses.
- * Honeykrisp's geometry and XFB vertex variants can also have a sparse suffix,
- * such as point size alone at component 4. The same component-addressed COPY
- * and high-index UVSW protocol covers that suffix without inventing an ISA
- * form. A pure producer may appear between sparse stores (the XFB raster-
- * discard path materializes default point size this way); the nonterminal
- * protocol retires each staged value before its GPR can be reused. The stores
- * may be grouped by varying rather than sorted by scalar index. Recycle the six
- * scoreboard slots after waiting for earlier writes; keep the four-position
- * golden independent. Instructions before the output suffix are encoded and
- * validated normally. In particular, real
- * WebRender vertex shaders perform texture reads before a dense 51-scalar
- * suffix; requiring every preceding producer to be DCE-safe incorrectly
- * excluded that native-shaped stream even though no instruction crosses a
- * writeout.
+/* Vertex outputs: a dense set of scalar UVSW indices with distinct staging
+ * addresses, or (geometry and XFB variants) a sparse suffix such as point size
+ * alone at component 4, through the same component-addressed COPY and
+ * high-index UVSW protocol. A pure producer may sit between sparse stores
+ * (XFB raster discard materializes the default point size); the nonterminal
+ * protocol retires each staged value before its GPR is reused. Stores may be
+ * grouped by varying instead of sorted. The six scoreboard slots are recycled
+ * after waiting for earlier writes. Instructions before the output suffix are
+ * encoded and validated normally.
  */
 /* The staging address a user output's COPY writes and its UVSW reads. Apple's
  * half-2k scheme holds for every output it can address; beyond that the
@@ -7728,24 +7508,12 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
    return next == count && stopped;
 }
 
-/* Firefox WebRender's wide vertex programs write a dense run of scalar
- * outputs, materialize the homogeneous one, then write the last.  That final
- * pure producer makes the stores nonterminal in the IR even though every
- * earlier value has already been copied to its component-addressed staging
- * word before the producer can reuse the GPR -- which is exactly why the late
- * write is safe.
- *
- * That safety argument is structural and does not depend on how many outputs
- * precede it, so the shape rather than the width is what is recognized here:
- * every store dense and in index order, the sole late producer a MOV_IMM of
- * 1.0f, that producer the exclusive source of the final store, and STOP
- * immediately after.  Anything else still fails closed, and the width ceiling
- * is still AGX3_MAX_VERTEX_OUTPUTS.
- *
- * This used to test `count != 40 && count != 51`, the two widths that had been
- * captured.  Firefox 155 emits the identical shape 49 outputs wide, so the
- * pinned pair refused its WebRender vertex program at `st_vary #4` and the
- * browser came up with no WebRender pipeline at all. */
+/* A dense run of scalar outputs, a materialized homogeneous 1.0, then the
+ * last store (wide vertex programs): the late producer makes the
+ * stores nonterminal, but every earlier value is already in its staging word
+ * before the producer can reuse a GPR. Recognized by shape at any width up to
+ * AGX3_MAX_VERTEX_OUTPUTS: stores dense and in order, the sole late producer a
+ * MOV_IMM of 1.0f feeding only the final store, then STOP. */
 static bool
 agx3_is_firefox_dense_output_suffix(agx_context *ctx, unsigned count)
 {
@@ -7864,29 +7632,16 @@ agx3_vertex_outputs_share_source(agx_context *ctx)
    return found;
 }
 
-/* Apple's real builtin EOT factory (BTNF kind5, EOT key0x10020300) emits
- * this complete 68-byte fragment program. Its ESL contract is a PBE table
- * pointer in uniform halves0..3 and imageblock byte offset in halves4..5.
- * Coordinates are group position times dispatched group dimensions, not
- * per-thread coordinates from the older compute-wrapper probe.
- * The AGX3 imgwblk is not a standalone translation of AGX2's block store: the
- * preceding pack_imgwir and coordinate-select sequence is part of its ABI.
- *
- * The program differs between formats only in its IMGWBLK selector, which
- * names the class of imageblock lanes the store reads. Sweeping the factory
- * over internal formats 0..22 with one to four components shows the selector
- * depends on the format alone, and Apple's background clears for the same
- * formats store exactly one lane class per selector: 8-bit integer 0x55,
- * 8-bit normalized or packed 32-bit 0x75, 16-bit normalized 0x95, 16-bit
- * integer or float 0x15, and raw 32-bit 0x35. Apple's render pipelines store
- * every MTLPixelFormat in the class the tilebuffer lowering uses for it, so
- * the selector follows the store format: RGB565 and the packed 5551/4444
- * formats keep 16-bit float lanes, RG32 integer formats raw 32-bit lanes,
- * and RGBA16 UNORM normalized lanes. Each witness is a 68-byte 2D program;
- * the 84-byte programs are 2D-array builtins. The word count still tells
- * the admitted RG and RGBA shapes apart after lowering. Recognize the exact
- * post-RA semantic graph and replace it atomically, so no partially grounded
- * imgwblk ever escapes for a different format or shape. */
+/* The end-of-tile program Apple's builtin factory emits (68 bytes for 2D,
+ * 84 for 2D array): PBE table pointer in uniform halves 0..3, imageblock
+ * byte offset in halves 4..5, coordinates = group position * dispatched group
+ * dimensions. The preceding pack_imgwir and coordinate select are part of
+ * imgwblk's ABI. Formats differ only in the IMGWBLK lane-class selector, a
+ * function of the store format: 8-bit integer 0x55, 8-bit normalized or packed
+ * 32-bit 0x75, 16-bit normalized 0x95, 16-bit integer or float 0x15, raw
+ * 32-bit 0x35 (RGB565/5551/4444 use 16-bit float lanes, RG32 integer raw
+ * 32-bit, RGBA16 UNORM normalized). The exact post-RA graph is recognized
+ * and replaced atomically, so no partial imgwblk escapes. */
 enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_NONE,
    AGX3_G17P_RT0_EOT_SELECTOR_75,
@@ -8543,47 +8298,32 @@ agx3_g17g_deferred_colour_wait(agx_context *ctx)
    return phase == 4 ? write : NULL;
 }
 
-/* G17P allocates two pixel classes per colour-tile partition.  Fresh native
- * two-RGBA8 and RGBA16F+R8 shaders agree on the same partition protocol even
- * though their byte offsets differ: partition 1 uses read/write/combined
- * classes 32/16/48 and partition 0 uses 8/4/12.  The mixed programmable-blend
- * witness is wboit-blend.nat SHA256
- * ae46c7cc23179c4df4f59e081eb10c69666af181da48103c1f0ebcf3d46b85e4;
- * its fragment text SHA256 is
- * ce78a72cac5cf5d4e49dc240b56ac72d7ba89d234de912a7833759d918759c44.
+/* G17P colour-tile partition protocol. Partitions are identified by their
+ * sorted physical tile offsets (not by format). Each partition has a
+ * read/write/combined pixel-class pair: partition 0 uses 8/4/12, partition 1
+ * 32/16/48, partition 2 128/64/192, and partitions from the fourth on reuse
+ * partition 0's pair. Every partition has one terminal store; loads are
+ * optional, and the pre-RA sink makes stores descend to the zero-offset final
+ * release.
  *
- * Derive partition identity from the sorted physical tile offsets rather than
- * a format or workload name.  Every partition must have one terminal store;
- * loads are optional, and the pre-RA sink guarantees stores descend to the
- * zero-offset final release. The third class pair uses 128/64/192. Every
- * partition from the fourth on reuses partition 0's class pair: Apple's
- * store-only fragments of four to eight targets acquire class 12 before the
+ * Store-only fragments of four to eight targets acquire class 12 before the
  * first store using it and release it after the last, holding it across
  * partitions 2 and 1 when partition 0 is written.
  *
- * Blending fragments of four to eight targets hold the same classes around
- * their loads. Partition 0's read class (8) is acquired once, before the
- * first load of any partition sharing its pair, and held; partitions 2 and 1
- * wait for their own read classes before their loads. The stores then
- * acquire the shared write class (4) before the first shared store when any
- * shared partition was loaded, or all of class 12 otherwise, and partitions 2
- * and 1 acquire their write class if loaded or both of their classes if not.
- * Loads go in descending partition order, as in Apple's RGBA8 fragments; its
- * RGBA16Float fragments order them differently under the same held classes.
- * The metal-nt applegpu_g17p witnesses cover two to eight RGBA8 and three,
- * four, five and eight RGBA16Float targets all blended, and 17 blended subsets
- * of four, five and eight RGBA8 targets.
+ * Blending fragments of four to eight targets acquire partition 0's read
+ * class (8) once, before the first load of any partition sharing its pair,
+ * and hold it; partitions 2 and 1 wait for their own read classes. Loads go
+ * in descending partition order. Stores then acquire the shared write class
+ * (4) before the first shared store when a shared partition was loaded, or
+ * all of class 12 otherwise; partitions 2 and 1 acquire their write class if
+ * loaded or both their classes if not.
  *
- * Those fragments also set lstcol f13 on their leading stores when they store
- * more than five targets including targets 1 and 2: on all but the last five
- * stores, whatever the formats and registers. metal-nt applegpu_g17p
- * witnesses: five to eight RGBA8 targets, six and eight RGBA32F targets, eight
- * mixed targets, and 34 written subsets of eight RGBA8 targets.
+ * Storing more than five targets including targets 1 and 2 sets lstcol f13 on
+ * all but the last five stores.
  *
  * An epilog writing only some of the framebuffer's targets takes the
- * partitions from the key instead. Apple's store-only fragments for such
- * pipelines keep every written target's classes from its position among all
- * targets and store in descending partition order.
+ * partitions from the key: each written target keeps the classes of its
+ * position among all targets, stored in descending partition order.
  */
 struct agx3_g17p_mrt_protocol {
    bool valid;
@@ -8626,31 +8366,15 @@ agx3_g17p_mrt_class_pair(unsigned partition)
    return partition < 3 ? partition : 0;
 }
 
-/* Class pair of the one colour partition a non-MRT colour transaction
- * (the single-store colour protocol or the one-load/one-store blend
- * protocol) touches.
+/* Class pair of the one colour partition a non-MRT colour transaction (the
+ * single-store colour or one-load/one-store blend protocol) touches.
  *
  * Pixel classes order fragments per tile partition, not per program: every
- * fragment of a render that accesses a partition must use that partition's
- * classes, or two overlapping fragments that touch the same tile bytes under
- * different classes are not ordered against each other. The MRT protocol
- * already selects a lone store's classes from its partition (keyed: its
- * ordinal among the key's partitions; unkeyed: its own colour target, see
- * lone_sparse_store). The colour and blend protocols used to emit class pair
- * 0 unconditionally, which is right only when that partition's pair is 0.
- *
- * dEQP-VK.renderpasses.dynamic_rendering.graphics_pipeline_library.
- * suballocation.attachment_allocation.grow_shrink.2 hit the difference on
- * G17P: attachment 0 (RGBA8) sits at tile byte 2 behind the R16 attachment 3,
- * i.e. partition 1. A split-linked two-target epilog stored it under classes
- * 48/0x230, while the next draw's inline-blend (monolithic, non-secondary,
- * hence no MRT protocol) program stored it under 12/0x20c with a loader
- * release of 0x2f3 that frees 48 at entry. On hardware the earlier draw's
- * value survived in part of a tile, as unordered stores would allow; one
- * draw per render (HK_G17P_DRAW_SPLIT=every) passed.
- *
- * Returns false when the partition cannot be identified, so the program
- * fails closed instead of synchronizing on the wrong partition. */
+ * fragment accessing a partition must use that partition's classes, or
+ * overlapping fragments touching the same tile bytes are not ordered against
+ * each other (e.g. an RGBA8 attachment at tile byte 2 behind an R16 one is
+ * partition 1, not 0). Returns false when the partition cannot be
+ * identified, so the program fails closed. */
 static bool
 agx3_g17p_lone_colour_pair(agx_context *ctx, unsigned *pair)
 {
@@ -8694,41 +8418,23 @@ agx3_g17p_colour_writeout(uint32_t writeout, unsigned pair)
    return writeout << (2 * pair);
 }
 
-/* A multisample background reload writes every sample of one tilebuffer
- * partition explicitly after fetching it from the multisample attachment.
- * These are not multiple render targets: the per-sample MSAA lowering unrolls
- * one store per sample, each carrying its own live sample-mask register
- * (coverage ANDed with that iteration's one-hot bit -- the shape Apple's own
- * unrolled per-sample fragments use), while every store retains the same RT
- * byte offset and format.
+/* Per-sample colour stores. A multisample background reload writes every
+ * sample of one tilebuffer partition after fetching it from the multisample
+ * attachment: one store per sample, each with its own sample-mask register
+ * (coverage AND the sample's one-hot bit), all at the same RT offset and
+ * format. A fragment unrolled per sample stores the same way inside the
+ * ordinary colour transaction: class 12 acquired once after the 0x200 entry,
+ * one LSTCOL per sample, release 524 once.
  *
- * A fragment unrolled per sample stores the same way inside the ordinary
- * colour transaction. Apple's fs_sample_id_2x/4x (applegpu_g17p, one RGBA8
- * target, reading [[sample_id]]) acquire class 12 once after the 0x200 entry,
- * emit one LSTCOL per sample with that sample's mask register, and release
- * 524 once, exactly as the one-sample fragment brackets its single LSTCOL.
- *
- * Keep this admission as narrow as the native evidence.  A background may
- * emit one two- or four-store set to partition zero with no pixel
- * transaction, and a multi-target background one such set per target, at
- * disjoint whole-sample tile ranges; a colour epilog emits one set to
- * partition zero, at most one per framebuffer sample, after its one class-12
- * wait. API-disabled samples have zero coverage, so their no-op colour stores
- * may already have been eliminated. They do not require a different pixel
- * transaction or a replacement store.
- * Within a target each store's mask must be computed by its own instruction
- * so a repeated one cannot masquerade as a complete sample domain.  Returns
- * the number of targets, or zero.
- *
- * Distinct mask REGISTERS were the first spelling of that, taken from
- * Apple's msaa_f_sampleid_s4, whose four stores land in four registers.  A
- * register is not the mask, though: register allocation is free to reuse one
- * register for masks that are killed at the store that reads them, and on the
- * real four-sample reload it does -- three of the four stores name the same
- * half register, each recomputed in between.  Refusing that refused the only
- * shader this protocol was written for.  Two stores carry the same mask when
- * they name the same register AND nothing redefined it in between, so that is
- * what is checked.
+ * Admitted shapes: a background emits one two- or four-store set to
+ * partition zero with no pixel transaction (one set per target, at disjoint
+ * whole-sample tile ranges, for several targets); a colour epilog emits one
+ * set to partition zero, at most one store per framebuffer sample, after its
+ * class-12 wait. Stores of API-disabled samples (zero coverage) may be
+ * missing. Within a target each store's mask must come from its own
+ * instruction: two stores carry the same mask when they name the same
+ * register and nothing redefined it in between (RA may reuse one register for
+ * masks killed at their store). Returns the number of targets, or zero.
  */
 static unsigned
 agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
@@ -9192,32 +8898,16 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    const bool single_target_blend =
       ctx->key->fs.nr_samples > 1 && tile_loads && !multi_block;
 
-   /* A multisample eMRT epilog may have one resident partition and no other:
-    * hk spills a reloaded multisample attachment wider than
-    * AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE, which leaves exactly one
-    * eight-byte target in the tile and every other target in memory. Its tile
-    * side is the same one-target unrolled sample set as above -- one LSTCol
-    * per sample through the coverage register at partition zero, inside one
-    * class-12 bracket -- because the spilled targets are image stores that
-    * carry no pixel class at all.
-    *
-    * agx3_g17p_sample_store_protocol() admits that shape directly when it is
-    * resident, but only for a straight-line shader with no tile loads, and an
-    * eMRT epilog is never straight-line: the spilled attachments' image
-    * accesses bring their own control flow (19 to 43 blocks for the four- and
-    * eight-attachment VK_EXT_rasterization_order_attachment_access render
-    * passes). So neither protocol claimed it, the packer reached
-    * "tile_stores_left > 1 with no proven partition graph", and the whole
-    * epilog failed -- reported by hk as VK_ERROR_FEATURE_NOT_PRESENT from
-    * vkEndCommandBuffer.
-    *
-    * The multisample eMRT acquire below already emits one combined wait for
-    * the stored partitions and the release already ends at the final store,
-    * so no new class or instruction shape is introduced here; only
-    * p.count == 1 is new. The resident partition may also be loaded --
-    * agx_nir_lower_tilebuffer() preserves an existing-but-unwritten resident
-    * attachment of a multisample eMRT layout with a load/store pair -- and
-    * that combined acquire covers the read class too. */
+   /* A multisample eMRT epilog may have a single resident partition: hk
+    * spills reloaded multisample attachments wider than
+    * AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE, leaving one eight-byte
+    * target in the tile and the others as image stores, which carry no pixel
+    * class. Its tile side is the one-target unrolled sample set above (one
+    * LSTCol per sample at partition zero inside one class-12 bracket), but
+    * the spilled attachments' control flow keeps it out of
+    * agx3_g17p_sample_store_protocol(). The multisample eMRT acquire below
+    * covers it, including a load/store pair of a resident attachment that is
+    * not written. */
    const bool single_target_emrt =
       ctx->key->fs.nr_samples > 1 && multi_block;
 
@@ -10483,18 +10173,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8 * multi_eot_count);
       if (ctx->key->g17p_mrt_eot_count) {
          /* The builtin for targets of any formats is the raw32 program with
-          * each target's IMGWBLK selector replaced. Apple's factory derives
-          * each selector from that target's format alone and changes no
-          * other byte.
-          *
-          * Multisample attachments (BTNF texture type 4) change three bytes
-          * per target, exactly as the one-target multisample builtin does:
-          * the wire width byte of the target's PACK_IMGWIR gains 2, and its
-          * IMGWBLK clears bit 7 of byte 8 and replaces the selector's low
-          * nibble 5 with the multisample dimension class 2. metal-nt
-          * -arch applegpu_g17p builtin EOT BTNF witnesses of two to eight
-          * RGBA8 targets in one partition, texture types 2 and 4, differ in
-          * exactly those bytes. */
+          * each target's IMGWBLK selector replaced by its format's. A
+          * multisample attachment changes three bytes per target, as the
+          * one-target multisample builtin does: its PACK_IMGWIR wire-width
+          * byte gains 2, and its IMGWBLK clears bit 7 of byte 8 and puts the
+          * multisample dimension class 2 in the selector's low nibble. */
          static const struct {
             const uint8_t *text;
             uint16_t imgwblk[AGX_MAX_RTS];
@@ -10687,12 +10370,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       return agx3_append(emission, program, sizeof(program));
    }
    if (layered_eot != AGX3_G17P_RT0_EOT_NONE) {
-      /* Apple's builtin end-of-tile factory emits one 84-byte program for a
-       * 2D-array attachment of every format (metal-nt -arch applegpu_g17p,
-       * BTNF texture type 3), differing only in the IMGWBLK lane-class
-       * selector at byte 77. The 2D multisample-array builtin (texture type
-       * 8) clears the selector's dimension nibble there and changes nothing
-       * else. */
+      /* The 2D-array end-of-tile builtin is one 84-byte program for every
+       * format, differing only in the IMGWBLK lane-class selector at byte
+       * 77; the 2D multisample-array one also clears its dimension nibble. */
       uint8_t program[] = {
          0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,
          0x0c,0x9d,0x10,0x26,0x24,0xa9,0x14,0x26,
@@ -11254,16 +10934,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const bool g17g_fragment_group = enc == AGX_ISA_ENCODING_AGX3C &&
                                     ctx->stage == MESA_SHADER_FRAGMENT;
 
-   /* CEM axis 0 writes a magnitude/face pair, while axes 1 and 2 each write
-    * one 32-bit coordinate. Native cube_compare_zero uses half8 for axis0
-    * and half10 for PACK_SMPIR's face; two_cubes uses half24 and half26.
-    * Reserve the implicit face word too, or axis1 overwrites it.
-    * The destinations used to be hardcoded to
-    * r0/r7/r2 after RA, which could overwrite live control-flow state or a
-    * register descriptor (vkQuake's sky shader puts its texture handle in
-    * r2:r3). Reserve one reusable bank immediately above RA's allocation and
-    * publish those exact registers through every CEM/reciprocal/finalizer
-    * field. The CEM destination field reaches half190. */
+   /* CEM axis 0 writes a magnitude/face pair, axes 1 and 2 one 32-bit
+    * coordinate each; the implicit face word is reserved too, or axis 1
+    * overwrites it. One reusable bank immediately above RA's allocation
+    * holds these, published through every CEM/reciprocal/finalizer field
+    * (the CEM destination field reaches half 190), so no live register is
+    * overwritten. */
    uint16_t cem_scratch[3] = {0};
    if (has_dynamic_cube_sample) {
       const unsigned base = (observed_max_reg + 2) & ~1u;
@@ -11384,11 +11060,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       }
       g17p_blend_protocol &= phase == 4;
    }
-   /* A native fragment program ends with a final release: the colour store's
-    * class 12 with 0x200, or, with no colour store, its late depth class.
-    * metal-nt -arch applegpu_g17p fragments with no colour writes end in
-    * pixwait(1), depthf, 070254010200; the same atomic fragment returning a
-    * colour releases class 1 plainly and ends in 0702540c0200. */
+   /* A fragment program ends with a final release: the colour store's class
+    * 12 with 0x200, or, with no colour store, its late depth class 1 with
+    * 0x200 (pixwait(1), depthf, release); a colour store after depth
+    * releases class 1 plainly. */
    if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_FRAGMENT ||
        ctx->key->no_stop || ctx->key->fs.ignore_tib_dependencies ||
        tile_stores_left != 0)
@@ -11457,10 +11132,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const bool g17p_terminal_outputs = g17p_output_count &&
       !g17p_legacy_single_source &&
       agx3_outputs_are_terminal(ctx, g17p_output_count, g17p_output_order);
-   /* The staging path has two deliberately separate lifetime modes: terminal
-    * bundles recycle each six-slot batch, while the six-output fallback and
-    * captured Firefox suffix retire each staging producer immediately before
-    * a later pure producer may reuse its physical GPR. */
+   /* The staging path has two lifetime modes: terminal bundles recycle each
+    * six-slot batch, while the six-output fallback and the late-producer
+    * suffix retire each staging producer before a later pure producer may
+    * reuse its GPR. */
    const bool g17p_firefox_dense_outputs =
       agx3_is_firefox_dense_output_suffix(ctx, g17p_output_count);
    const bool g17p_user_output_protocol = g17p_terminal_outputs ||
@@ -12032,23 +11707,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          has_memory_write && !ctx->key->secondary)) &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies) {
-      /* Native memory_discard enters before its first device load, then
-       * uses unmarked SR/RHW inputs throughout the coverage operation.
-       * This is the same existing entry gate, moved before the main part's
-       * root loads; do not restart the input protocol after MOVMSK.
-       *
-       * An API fragment shader with memory side effects enters before the
-       * first of them too. metal-nt -arch applegpu_g17p fragments with no
-       * colour writes emit 870254000600 ahead of a device store, a voiding
-       * atomic and a returning atomic alike. Without it, only the depth
-       * epilog opened the gate, after every side effect of the main part.
-       * agx_fast_link removes the epilog's gate.
-       *
-       * G18's native image, buffer and atomic fragments likewise acquire
-       * class 512 before memory writes. The linked API program must retain
-       * this main-part entry and remove the later epilog entry; acquiring
-       * only in the depth epilog leaves every main-part write outside the
-       * pixel transaction. Keep G18 coverage-only entry handling separate. */
+      /* A discarding or side-effecting fragment enters the pixel
+       * transaction before its first device load or memory side effect
+       * (stores and atomics alike), then uses unmarked SR/RHW inputs; the
+       * input protocol is not restarted after MOVMSK. agx_fast_link removes
+       * the epilog's gate. */
+      /* G18 memory writers retain this main-part entry; coverage-only
+       * entry handling remains separate. */
       uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
       if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
           !agx3_append(emission, entry, entry_len))
@@ -12558,21 +12223,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Native TEX reads staging coordinates, independently of GPRs.
              * This also applies to the background reload's pixel coordinates. */
             /* Apple's argument-buffer vertex read publishes uint2 coordinates
-             * before SMP.EP4. G17P indexed imageLoad uses the same read-only
-             * texture heap and coordinate ABI as texelFetch: its GPR pair is
-             * not a staging operand. Legacy immediate IMAGE_LOAD reads keep
-             * the unstaged form.
-             *
-             * A vertex texel fetch does not. The exception used to cover
-             * TEXTURE_LOAD too -- staging only when the texture operand is a
-             * run-time index -- and on AGX3B that is wrong: the unstaged form
-             * returns only the x and y components. Whether the shader asks
-             * for the whole vec4 or for .z alone, everything past y reads
-             * back as zero, while the identical fetch in a fragment shader
-             * (always staged) and a vertex textureLod are both correct.
-             * KHR-GL33.texture_swizzle hits exactly this shape: the CTS
-             * samples in the vertex stage and passes the texel through a flat
-             * varying. */
+             * before SMP.EP4. G17P indexed imageLoad uses texelFetch's
+             * read-only texture heap and coordinate ABI. Legacy immediate
+             * IMAGE_LOAD reads keep the unstaged form; a vertex texel fetch
+             * always stages (the unstaged AGX3B form returns only x and y). */
             const bool vertex_fetch_stages_coordinates =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_VERTEX &&
@@ -12593,17 +12247,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage == MESA_SHADER_VERTEX) ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
                agx3_stage_runs_as_kernel(ctx->stage);
-            /* imgwci takes its coordinates from staging halves 0/2, so a
-             * read in a shader that also writes images must not stage its
-             * coordinates there: an unwaited write COPY can replace them
-             * before the asynchronous read consumes them. Apple moves the
-             * read to halves 16/18. texture_buffer<uint>::read followed by a
-             * 2D write does, as does an indexed read-only image read followed
-             * by a write, metal-nt -arch applegpu_g17p:
-             *
-             *   read only    copy 5:0, copy 5:2, smp ep4
-             *   read, write  copy 5:16, copy 5:18, smp ep4 f19 16
-             */
+            /* imgwci takes its coordinates from staging halves 0/2, so in a
+             * shader that also writes images a read stages its coordinates at
+             * halves 16/18 (smp f19=16), as Apple does: an unwaited write
+             * COPY could replace them before the read consumes them. */
             const bool separate_write_coords =
                enc == AGX_ISA_ENCODING_AGX3B && image_writes_left != 0 &&
                ((g17p_storage_image_protocol &&
@@ -12618,30 +12265,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                I->src[1].type == AGX_INDEX_REGISTER;
             /* A staged read consumes, and kills, its coordinate bank
-             * asynchronously, so every stage that stages coordinates needs
-             * the bank allocator -- not only the kernel and API-fragment
-             * stages it was first written for.
-             *
-             * A vertex texel fetch always stages (see
-             * vertex_fetch_stages_coordinates above) but used to pass no
-             * `banks`, so every fetch in the shader republished halves 0..3
-             * with nothing tracking the read still consuming them. Measured
-             * on G17P in a ycbcr.conversion.chroma_reconstruction vertex
-             * shader with three fetches: the third restaged halves 0..3
-             * while slot 6 -- the second fetch -- was still outstanding, so
-             * the second tap sampled the third's coordinates. Scheduling
-             * only decided whether the fetches overlapped, which is why
-             * AGX_MESA_DEBUG=nosched hid it.
-             *
-             * Wherever at most one read is in flight this is a no-op: with
-             * no conflicting live bank the allocator returns the base bank
-             * and emits no retirement, so the encoding is unchanged.
-             *
-             * Background, clear and end-of-tile programs need it too. A
-             * multi-target background reloads one texel fetch per attachment
-             * with nothing tracking the bank an earlier fetch still consumes,
-             * so a later fetch restages halves 0..3 under it and that
-             * attachment reloads another target's coordinates. */
+             * asynchronously, so every stage that stages coordinates
+             * (including vertex fetches and background, clear and
+             * end-of-tile programs) uses the bank allocator: a later read
+             * must not restage a bank an earlier one still consumes. With at
+             * most one read in flight it returns the base bank and emits no
+             * retirement. */
             const bool staged_bank_reads = staged;
             if (enc == AGX_ISA_ENCODING_AGX3C) {
             if (staged) {
@@ -12860,24 +12489,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                !agx_texture_resource(I);
             {
                /* A texture sample's planned scoreboard wait is retired on a
-                * carrier instruction instead of being encoded in the sample's
-                * own staging copies, whose wait field does not take effect on
-                * G17P. Only this sample's own wait is moved, so unrelated
-                * outstanding work is not serialised.
-                *
-                * Evidence: with the wait left in the copy, the CTS case
-                * dEQP-VK.glsl.opaque_type_indexing.sampler.dynamically_uniform
-                * .fragment.sampler1darrayshadow fails 18 runs in 20 and the
-                * standalone reproducer fails ~270/300. Moving exactly that
-                * wait onto a carrier -- two instructions, +20 bytes on a 1792
-                * byte shader -- makes both 0 for 300 and 30/30. The emitted
-                * difference is precisely two copies losing byte[4] bit 0x80,
-                * their wait bit, plus the two carriers. */
+                * carrier instruction, not encoded in the sample's own staging
+                * copies: on G17P their wait field does not take effect. Only
+                * this sample's wait moves, so unrelated work is not
+                * serialised. */
                /* A LOD query is not a staged sample: it has its own operand
-                * and slot protocol, and retiring its wait here regressed all
-                * 45 dEQP-VK.glsl.texture_functions.query.texturequerylod
-                * cases while fixing the one array-shadow case. Leave it
-                * alone. */
+                * and slot protocol, so its wait stays where it is. */
                /* PERSP_MUL/FADD coordinate publications already belong to a
                 * native transaction. SMP consumes that transaction through
                 * its coordinate-slot wait below; moving the wait to a
@@ -12899,16 +12516,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN;
             /* A fragment SMP whose f156 group is still open (nonterminal)
-             * keeps the quad's helper lanes for what follows; the terminating
-             * member, or a lone member carrying neither flag, does not
-             * (measured on G17P: in
-             * dEQP-VK.glsl.helper_invocations.load_from_texture,
-             * fwidth(texture(...)) after a lone SMP read the helper lanes'
-             * results wrong -- Fail 4/4 -- and passes 2/2 with the lone SMP
-             * nonterminal; marking it terminal still fails). So the last
-             * member stays open when a quad derivative or quad shuffle
-             * follows it. Native's encoding for this shape is not yet
-             * decoded; this is the measured requirement. */
+             * keeps the quad's helper lanes for what follows; a terminating
+             * or lone member does not. So the last member stays open when a
+             * quad derivative or quad shuffle follows it (G17P hardware
+             * result; Apple's encoding of this shape is not decoded). */
             const bool keep_quad_open =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_FRAGMENT && sample_group_member &&
@@ -12938,21 +12549,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                     I->src[1].type == AGX_INDEX_IMMEDIATE &&
                                     I->dim == AGX_DIM_2D));
             }
-            /* Apple's implicit-derivative fragment programs enter the pixel
-             * transaction immediately before their first SMP, after their
-             * coefficient interpolation.  Opening it only in the colour
-             * epilog is too late: a scissor edge may then retire uncovered
-             * lanes before SMP forms its derivative quad, selecting the next
-             * mip on odd-aligned rectangles.  Keep explicit-LOD/gradient
-             * samples outside this rule; they do not consume a helper quad.
-             *
-             * A split fragment epilog carries the same entry gate for its
-             * tile write.  Publishing this main-part entry through the
-             * existing link metadata lets agx_fast_link remove that later
-             * duplicate, leaving the one native gate at the first derivative
-             * consumer.  The native corpus is straight-line; do not place an
-             * opener inside one control-flow arm and then deduplicate the
-             * unconditional epilog opener. */
+            /* Implicit-derivative fragment programs enter the pixel
+             * transaction right before their first SMP, after coefficient
+             * interpolation: entering later lets a scissor edge retire
+             * uncovered lanes before SMP forms its derivative quad.
+             * Explicit-LOD and gradient samples are exempt. The entry is
+             * published in the link metadata so agx_fast_link drops the split
+             * epilog's duplicate gate; it is never placed inside one
+             * control-flow arm. */
             const bool implicit_derivatives =
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS ||
@@ -12964,24 +12568,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                !ctx->key->fs.ignore_tib_dependencies &&
                ctx->agx3_colour_link.straight_line &&
                implicit_derivatives && !g17p_colour_open;
-            /* The implicit-LOD form needs the 2x2 quad's derivatives; every
-             * witness is a fragment shader and the hardware has no quad
-             * outside one. Apple's compute and vertex explicit-level forms
-             * are byte-identical and do not consume derivatives. A compute
-             * kernel also stages a runtime level exactly as a fragment
-             * function does (metal-nt -arch applegpu_g17p, level(l) with l
-             * computed in the kernel):
-             *
-             *   texture2d         1705540600080004f0c00800
-             *                     05800cb8b0000001000010000100
-             *   texture2d_array   1705540600040c00f0c02500
-             *                     05800cb8b0000801000010000100
-             *   texturecube       1705540600040c00f0c01100
-             *                     05800cb8b0000003000010000100
-             *   texturecube_array 1705540003140000f0880400
-             *                     1705540600040c00f0c21700
-             *                     05800cb8b0000803000010000100
-             */
+            /* Implicit LOD needs the 2x2 quad's derivatives, which exist
+             * only in fragment shaders. Compute and vertex explicit-level
+             * samples encode like fragment ones and stage a runtime level the
+             * same way. */
             const bool explicit_level = ctx->stage != MESA_SHADER_FRAGMENT &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                (I->src[1].type == AGX_INDEX_IMMEDIATE ||
@@ -13505,11 +13095,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                                 : g17p_mrt.shared_first);
                const bool release_class =
                   !shared || partition == g17p_mrt.shared_last;
-               /* Do not use the leading-store f13 hint on a live payload:
-                * reusing that payload for a later attachment produces zero
-                * on G17P (eight mixed-format attachment write-mask CTS).
-                * Preserve it until its last use. Unique-payload native MRT
-                * witnesses retain their existing leading-store hint. */
+               /* No leading-store f13 hint on a payload a later attachment
+                * reuses (it reads back as zero on G17P); the hint stays on
+                * unique payloads. */
                const bool store_f13 =
                   !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores &&
                   (I->src[0].kill || I->src[0].discard);
@@ -13799,42 +13387,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_GET_SR_COVERAGE) {
-            /* Fresh Apple G17P fragment-atomic pipeline
-             * d150404ac02e.../32cf4963515f... reads SR2 as W16 before the
-             * helper-thread predicate (`04 84 10 06`). This is the exact
-             * active-lane source used to suppress fragment side effects on
-             * helper invocations.
-             *
-             * simd_is_first() reads SR34, the active thread index in the
-             * subgroup, as W16 in compute, vertex and fragment shaders. Apple
-             * sets f48 on a fragment read only when helper invocations never
-             * need the result, so leave it clear.
-             *
-             * A uniform-address atomic_fetch_add_explicit(c, 7) in a compute
-             * or fragment shader performs the whole update from lane SR34 ==
-             * 0 as `imadd(SR36, #7)`, so SR36 is the total number of active
-             * threads in the subgroup, also W16. Other coverage
-             * pseudo-registers remain closed until separately witnessed. */
-            /* G17G reads the same W16 SR2 at the head of Apple's fragment
-             * atomic (test/native/g17g/m5-gl4-reference.metal sxAtomic,
-             * rld 14841006); the others stay G17P-only. */
+            /* Coverage pseudo-registers, all read as W16: SR2 is the
+             * active-lane source of the fragment helper-thread predicate,
+             * SR34 the active thread index in the subgroup (f48 stays clear:
+             * helpers may need it), SR36 the number of active threads. Others
+             * are refused. */
+            /* G17G admits its witnessed W16 SR2; other registers retain
+             * their existing chip-specific gates below. */
             const bool active_thread =
                I->sr == AGX_SR_IS_ACTIVE_THREAD &&
                ctx->stage == MESA_SHADER_FRAGMENT;
             const bool sample_coverage =
                I->sr == AGX_SR_INPUT_SAMPLE_MASK &&
                ctx->stage == MESA_SHADER_FRAGMENT;
-            /* A G17P tessellation-control program is a compute dispatch:
-             * hk_launch_tess() dispatches it, and hk_shader.c already selects
-             * the compute texture/sampler heaps for it on exactly that
-             * grounds ("Poly executes geometry variants through CDM, so they
-             * use the native indexed texture/sampler heaps just like compute
-             * shaders"). The stage label is a compiler-side artifact; the
-             * hardware program is the same CDM kind already witnessed here,
-             * so SR34/SR36 read the same subgroup state. Without this every
-             * subgroup op in a TCS refused the shader -- 99 of the 3,912
-             * dEQP-VK.subgroups.*tess_control mustpass cases -- which became
-             * reachable when tessellationShader was enabled by default. */
+            /* A G17P tessellation-control program is a compute dispatch
+             * (hk_launch_tess(); hk_shader.c gives it the compute
+             * texture/sampler heaps), so SR34/SR36 read the same subgroup
+             * state as in compute. */
             const bool subgroup_stage =
                ctx->stage == MESA_SHADER_COMPUTE ||
                ctx->stage == MESA_SHADER_VERTEX ||
@@ -14364,9 +13933,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Reciprocal square root, at either width. normalize() lowers to a
-          * 32-bit frsq, so the half-only gate refused every shader that
-          * normalizes a vector. */
+         /* Reciprocal square root, at either width. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_RSQRT &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
@@ -14397,13 +13964,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* f30 and f31 are the source's absolute-value and negate modifiers,
-          * witnessed as single-field differences on this exact form. NIR
-          * folds a negation into a float source, so exp(-x) -- vkQuake's fog
-          * term, in every one of its fragment shaders -- arrives here as an
-          * exp2 of a negated register and refused the shader. Only the 32-bit
-          * modifier forms are wired up. The half form also has a recovered
-          * negate bit, used by mediump exp(-x). */
+         /* f30 and f31 are the source's absolute-value and negate modifiers
+          * (NIR folds a negation into the source, e.g. exp(-x)). The half
+          * form has a negate bit too. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_EXP2 &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
@@ -14453,11 +14016,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* floor() and ceil() at either width. Only the half forms were wired
-          * up, so a 32-bit floor -- the quantized lightmap coordinate in
-          * vkQuake's world shader -- refused the shader outright. The 32-bit
-          * form is the half one with the width selectors raised, and carries
-          * the same source modifiers as the rest of this form family. */
+         /* floor() and ceil() at either width: the 32-bit form is the half
+          * one with the width selectors raised, with the same source
+          * modifiers. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FLOOR &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
@@ -14653,11 +14214,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * be compiled at all.
           */
          /*
-          * `imad dst32, srcA, #imm, srcC` -- a constant multiplier, which is
-          * how every index-derived address is formed (`gid * stride + base`).
-          * Like the iadd below it, this used to reach the wait-carrying
-          * composer, which would have deposited the multiplier into a
-          * register field.
+          * `imad dst32, srcA, #imm, srcC` -- a constant multiplier, as in
+          * every index-derived address (`gid * stride + base`); the
+          * multiplier goes in the immediate field, not a register field.
           */
          const int uniform_integer = agx3_try_uniform_integer(emission, enc, I, wait);
          if (uniform_integer < 0)
@@ -14777,21 +14336,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
                c.value <= 0xff && !c.abs && !c.memory;
             /*
-             * A bare narrow operand is SIGN-extended, the same rule the
-             * comment above names and the same one agx_optimizer_signext()
-             * enforces for iadd: it fuses a SIGNEXT into the multiply-add by
-             * dropping it and asserting the survivor carries no ABS. So
-             * `a*b + int(short c)` arrives with no modifier at all, which
-             * this gate used to refuse.
-             *
-             * Apple, one kernel per variable, everything else held fixed:
-             *
-             *   a*b + int(short  c)   9f 00 56 00 02 08 00 40 d0 2e 6a 00
-             *   a*b + int(ushort c)   9f 00 56 00 02 08 00 40 d0 2e 2a 00
-             *   a*b + int c           9f 00 56 00 02 08 00 40 d0 2f 2a 00
-             *
-             * f54 is slot C's width (1 = 16-bit, 2 = 32-bit) and f58 its
-             * sign-extension, set for `short` and clear for `ushort`.
+             * A bare narrow addend is sign-extended (agx_optimizer_signext()
+             * fuses SIGNEXT into the multiply-add by dropping it): f54 is
+             * slot C's width (1 = 16-bit, 2 = 32-bit), f58 its sign extension
+             * (set for short, clear for ushort/ABS).
              */
             const bool addend_ok =
                no_addend || addend_imm ||
@@ -14856,24 +14404,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src_c_16 = addend_reg && c.size == AGX_SIZE_16,
                   .src_c_64 = addend_reg && c.size == AGX_SIZE_64,
                   /* Bare narrow addend: sign-extend unless ABS marks it
-                   * unsigned. Identical to the old `c.neg` for every shape
-                   * that already encoded (ABS gave 0, NEG gave 1); only the
-                   * bare case, which used to be refused, is new.
-                   *
-                   * A 16-bit result widens nothing, so the bit has no meaning
-                   * there and the core encoder fails such a desc closed --
-                   * which refused the whole all-half MAD rather than just the
-                   * bit. Keep it to widening results. */
+                   * unsigned. Only for a widening result: a 16-bit result
+                   * widens nothing and the encoder refuses the bit there. */
                   .src_c_sign_extend =
                      addend_reg && !narrow &&
                      (wide ? (c.size != AGX_SIZE_64 && !c.abs)
                            : (c.size == AGX_SIZE_16 && !c.abs)),
-                  /* Subtract rather than add.  This used to have no
-                   * representation at all: a negated REGISTER addend passed
-                   * the gate above and then composed as plain `imadd`, so
-                   * `a*b - c` silently computed `a*b + c`.  A negated
-                   * immediate addend was refused instead.  Both now select
-                   * Apple's `imsub`. */
+                  /* A negated addend (register or immediate) selects Apple's
+                   * `imsub`. */
                   .negate_addend = !no_addend && c.neg,
                   .wait_mask = wait,
                };
@@ -15100,9 +14638,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Hyprland and GTK compare f32 against a minifloat and select either
-          * one full register plus zero, or two half-width byte constants.
-          * Both shapes are direct native FSEL forms. */
+         /* f32 compared against a minifloat, selecting one full register plus
+          * zero or two half-width byte constants: both are native FSEL
+          * forms. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
              agx3_fcond_witnessed_select(I->fcond) &&
@@ -15308,10 +14846,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         /* Hyprland's HLG transfer path compares a scalar-half value against
-          * a minifloat threshold and selects two full floats.  Keep the half
-          * in its assigned physical half; a leading immediate only reverses
-          * the comparison, while an inverted condition exchanges results. */
+         /* A scalar half compared against a minifloat, selecting two full
+          * floats: the half stays in its physical half; a leading immediate
+          * reverses the comparison, an inverted condition exchanges the
+          * results. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
              agx3_fcond_witnessed_select(I->fcond) &&
@@ -15376,12 +14914,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /*
           * A 32-bit float compared against a minifloat immediate, selecting
-          * either of two 32-bit registers. This is what an ordinary
-          * `x < k ? a : b` becomes: the comparison stays 32-bit and Mesa
-          * carries the constant as a minifloat, so the packer used to see a
-          * mixed-width select with nothing to widen and refuse the shader.
-          * The immediate may be on either side; a leading immediate reverses
-          * the comparison, which does not change what is selected.
+          * either of two 32-bit registers (`x < k ? a : b`). The immediate
+          * may be on either side; a leading immediate reverses the
+          * comparison.
           */
          /*
           * G17G float comparison to a 16-bit boolean: agx_lower_pseudo()
@@ -15957,22 +15492,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             for(unsigned i=0;i<4;i++) {
                const agx_index x=operands[i];
                const bool imm=x.type==AGX_INDEX_IMMEDIATE;
-               /* ADMITTED: abs and neg on EITHER comparator (i < 2). f65 is
-                * the one negate field and it names the second comparator, but
-                * the first is reachable too -- Apple spells `-a < b` by
-                * exchanging the operands and flipping the relation, and
-                * agx3_alu_fcmp_select_reg_imm() performs that rewrite rather
-                * than handing it back. This gate used to read `x.neg && i!=1`,
-                * admitting slot 1 only; slot 0 was refused on the strength of
-                * having seen the swap and declined to do it.
-                *
-                * REFUSED: abs or neg on a SELECTED value (i >= 2). Those slots
-                * carry a value, not an arithmetic operand -- there is no
-                * modifier field on them at all, and a select may carry an
-                * integer. Also refused: a killed or spilled operand, a vector
-                * operand, conflicting lifetime hints, an out-of-range
-                * immediate, and a selected register whose width does not match
-                * the destination. */
+               /* Abs and neg are admitted on either comparator (f65 negates
+                * the second; agx3_alu_fcmp_select_reg_imm() swaps the operands
+                * and flips the relation for the first). Refused: a modifier on
+                * a selected value (no field; a select may carry an integer), a
+                * killed or spilled operand, a vector operand, conflicting
+                * lifetime hints, an out-of-range immediate, and a selected
+                * register whose width does not match the destination. */
                invalid|=(i>=2 && (x.abs || x.neg)) || x.kill || x.memory ||
                   agx_channels(x)!=1 ||
                   (x.cache && x.discard) ||
@@ -16013,21 +15539,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
              I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255 &&
-             /* An ABS source takes the fourteen-byte ep28..35 endpoint, whose
-              * encoder here (agx3_alu_fcmp_select_imm_width_abs) carries only
-              * the two abs bits and has no argument for a negate, so this
-              * specialization cannot spell a comparison that wants one of
-              * each. The endpoint itself is not the limit: it holds the same
-              * comparator-1 negate as the ten-byte form, and the general
-              * compare-select below deposits f47, f64 and f65 independently
-              * and encodes the pair byte-for-byte as Apple does (see the
-              * witnessed minimal pair in the Hyprland float-select test). So
-              * decline the shape here and let it fall through, the way every
-              * other shape this block cannot spell already does. Refusing
-              * dropped the whole draw instead: `ball(feq(cf, 0))` from the
-              * cull-distance emulation folds to `|a| == -(b)` and reaches
-              * exactly this, which made every single-cull-distance fragment
-              * program unlinkable. */
+             /* This specialization's abs encoder
+              * (agx3_alu_fcmp_select_imm_width_abs) has no negate argument,
+              * so a comparison with both an abs and a negate falls through to
+              * the general compare-select, which deposits f47, f64 and f65
+              * independently. */
              !((I->src[0].abs || I->src[1].abs) &&
                (I->src[0].neg || I->src[1].neg))) {
             /* A negated comparison source. f65 names the SECOND comparator
@@ -16099,18 +15615,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /*
-          * The general compare-select: a REGISTER in a select slot, or an
-          * IMMEDIATE in a compare slot. The block above requires both selects
-          * to be immediates and both compare sources to be registers, so it
-          * skips these shapes entirely rather than refusing them. The one
-          * overlap is a register/register comparison mixing absolute and
-          * negate modifiers, which needs this endpoint's independent modifier
-          * fields.
-          *
-          * Both are ordinary GLSL. dEQP's isOk() written to a mediump output
-          * gives the first (a 16-bit destination selecting between a register
-          * and a constant); isinf() gives the second (a comparison against an
-          * immediate zero selecting between two registers).
+          * The general compare-select: a register in a select slot, or an
+          * immediate in a compare slot (the block above handles immediate
+          * selects with register comparators), and a register/register
+          * comparison mixing absolute and negate modifiers, which needs this
+          * endpoint's independent modifier fields.
           */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
@@ -16122,13 +15631,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool c0_imm = c0.type == AGX_INDEX_IMMEDIATE;
             const bool c1_imm = c1.type == AGX_INDEX_IMMEDIATE;
 
-            /* At most one compare source may be an immediate, and it is a
-             * minifloat byte -- not only zero, which was the limit of what
-             * had been measured rather than a property of the field. Apple
-             * spells `k < b` by reversing the relation so the immediate lands
-             * in slot 1, the only slot whose kind field is witnessed taking
-             * the immediate value, and a modifier on that slot is folded into
-             * the constant by the encoder. */
+            /* At most one compare source may be an immediate (any minifloat
+             * byte). As Apple does, `k < b` reverses the relation so the
+             * immediate is in slot 1, the slot whose kind field takes an
+             * immediate; a modifier on it is folded into the constant. */
             if (!(c0_imm && c1_imm) &&
                 (!c0_imm || (c0.value <= 0xff && agx3_plain_immediate(c0))) &&
                 (!c1_imm || (c1.value <= 0xff && agx3_plain_immediate(c1))) &&
@@ -16602,9 +16108,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* iadd_sat, uadd_sat, isub_sat and usub_sat over 32-bit
              * registers: the register iadd/isub point with f53. ABS on both
              * operands selects unsigned saturation; otherwise both sign
-             * fields are set, exactly as applegpu_g17p's addsat/subsat of
-             * int and uint. The wait-carrying composer used to drop the
-             * saturate bit here. */
+             * fields are set. */
             if (enc == AGX_ISA_ENCODING_AGX3B && I->saturate) {
                agx_index a = I->src[0], b = I->src[1];
                if (a.neg && !b.neg) {
@@ -16672,22 +16176,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   continue;
             }
 
-            /* SIGNEXT lowers to `iadd dst32, src16, #0`; Hyprland's signed
-             * gradient counter is the same operation with `src16 << 4`.
-             * A bare narrow integer is signed on AGX (ABS denotes unsigned),
-             * and the G17P iadd corpus witnesses the sign-extended shift-0
-             * source width as well as the exact shift-4 form.
-             *
-             * The addend's value is not part of that rule. Apple emits the
-             * same sign-extending form for a non-zero immediate:
-             *
-             *   o[i] = int(short a[i]) + 7
-             *      9f 01 54 00 02 0e 00 08 15 0c       f15 = 7, f43 = 1
-             *   o[i] = uint(ushort a[i]) + 7           f43 clear (ABS form)
-             *
-             * so gate on the source being a bare half, not on the immediate
-             * being zero. Every other bare half/shift combination stays
-             * closed. */
+            /* A bare narrow iadd source is sign-extended (ABS denotes
+             * unsigned): SIGNEXT's `iadd dst32, src16, #0`, the `src16 << 4`
+             * form and a non-zero immediate addend alike. Other bare
+             * half/shift combinations are refused. */
             const bool signed_half_widen =
                enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
                constant.type == AGX_INDEX_IMMEDIATE &&
@@ -16746,9 +16238,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              */
             const agx_index original_a = I->src[0];
             const agx_index original_b = I->src[1];
-            /* Integer add is commutative. Canonicalize Firefox's reversed
-             * signed-half accumulator onto the already-grounded slot-A32 +
-             * slot-B16 form instead of inventing a second hardware shape. */
+            /* Integer add commutes: put a reversed signed-half accumulator in
+             * the slot-A32 + slot-B16 form. */
             const bool commute_signed_half =
                enc == AGX_ISA_ENCODING_AGX3B &&
                original_a.size == AGX_SIZE_16 &&
@@ -16810,23 +16301,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
 
             /*
-             * Register +/- register where at least one operand is a 16-bit
-             * half. As on AGX2, a narrow operand is zero-extended under ABS
-             * and sign-extended otherwise, and NEG negates it: iadd(a, -b)
-             * is Apple's isub, the same fields under their own opcode
-             * (`int a - int(short b)` is 1f 01 56 00 02 00 10 28 17 0d).
-             * This used to read NEG as the sign extension and drop the
-             * negation, so `16 - count` over a narrow count added.
-             * `gl_LocalInvocationID` arrives as three 16-bit special
-             * registers, so summing it is exactly this shape.
-             *
-             * Gated on a narrow operand so the all-32-bit unshifted add keeps
-             * the select-core encoding it already had.
+             * Register +/- register with at least one 16-bit operand. As on
+             * AGX2, a narrow operand is zero-extended under ABS and
+             * sign-extended otherwise, and NEG negates it: iadd(a, -b) is
+             * Apple's isub. The all-32-bit unshifted add keeps the
+             * select-core encoding.
              */
             agx_index na = original_a, nb = original_b;
-            /* Addition commutes: keep a negated operand in slot B, and put a
-             * 32-bit operand in slot A of a mixed-width add, the order of
-             * the hardware-proven Firefox accumulator. */
+            /* Addition commutes: keep a negated operand in slot B, and a 32-bit
+             * operand in slot A of a mixed-width add. */
             if ((na.neg && !nb.neg) ||
                 (!na.neg && !nb.neg && !na.abs && !nb.abs &&
                  na.size == AGX_SIZE_16 && nb.size == AGX_SIZE_32)) {
@@ -17788,10 +17271,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /* Float to a 16-bit integer. The source width is its own field, so
-          * a HALF source is the same instruction: `int(clamp(x, 1.0, 32.0))`
-          * written in half precision -- Hyprland's motion_blur.glsl sample
-          * count, and the loop bound it then becomes -- reaches this with a
-          * 16-bit source and used to fail the whole shader closed. */
+          * a half source is the same instruction. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->round == AGX_ROUND_RTZ &&
@@ -18016,12 +17496,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * register's last-use hint and the compact form's supported waits.
           * Commuting plain operands changes no operation or rounding.
           */
-         /* The multiply's destination width is selected independently of its
-          * source width (f10 vs f26), so a 32-bit value scaled by a minifloat
-          * straight into a half is one instruction. agx_optimizer_fmov_rev()
-          * folds the f2f16 of `packHalf2x16(vec2(x * k, ...))` into the
-          * multiply and produces exactly that shape; it used to fall off this
-          * path and refuse the shader. Only FMUL is witnessed narrowing. */
+         /* The multiply's destination width is independent of its source
+          * width (f10 vs f26), so a 32-bit value scaled by a minifloat
+          * straight into a half is one instruction (agx_optimizer_fmov_rev()
+          * folds an f2f16 into the multiply). Only FMUL narrows. */
          if ((I->op == AGX_OPCODE_FADD || I->op == AGX_OPCODE_FMUL) &&
              I->nr_dests == 1 &&
              I->nr_srcs == 2 &&
@@ -18342,12 +17820,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /* AGX3b's compact 32-bit move cannot address full registers above
-          * r95. Chromium's animation_keyframes vertex shader moves values in
-          * both directions across that boundary. The native 16-bit
-          * bitwise-immediate form addresses every half register, so preserve
-          * the exact 32-bit value as two ordered `x | 0` operations. Carry
-          * the producer wait on the first half; the second half belongs to
-          * the same dependency and needs no additional wait. */
+          * r95; the 16-bit bitwise-immediate form addresses every half, so
+          * such a move is two ordered `x | 0` halves. The producer wait goes
+          * on the first. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
              (I->truth_table & 0xfu) == AGX3_SEL_TT_MOV &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
@@ -18666,26 +18141,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /* The same native FMA, with the modifiers the compact minifloat form
-          * above cannot carry.  Operand KIND (f42 selecting the f34 immediate
-          * over the f35 register slot) is a field of the same encoding point
-          * as the f30/f31 and f64/f65 modifier bits and the f26/f60 widths,
-          * so `k * fabs(a) + fabs(b)` is one instruction, not a shape without
-          * an encoding -- Apple composes exactly this cell.  glmark2's
-          * terrain noise kernel (`vec4 h = 1.0 - abs(x) - abs(y);`) is the
-          * shape that used to take the whole fragment shader down with it.
-          *
-          * A modifier on the immediate itself is folded into the minifloat:
-          * Apple encodes fma(0.5, -b, c) as f34 = -0.5, not as a neg bit,
-          * and there is no register slot here to hang one on.
-          *
-          * G17G takes the same cell for an absolute addend -- glamor's
-          * fma(-2.0, x, |y|) -- witnessed in agx3_falu_fma_mul_imm_mod(), and
-          * for an absolute multiplicand, alone or with an absolute addend:
-          * applegpu_g18g/g17g fma(fabs(a), 2.0f, fabs(b)) and
-          * fma(fabs(a), 2.0f, b) (g18ref-out/probe/m6-alu-misc ffma_abs_2,
-          * ffma_abs_first) set f30 beside f34 = 64, f42 = 1, with f64 for the
-          * absolute addend -- the cull-distance emulation's
-          * `2 * |d| + |e|`. */
+          * above cannot carry: operand kind (f42: f34 immediate or f35
+          * register) is a field of the same encoding point as the f30/f31
+          * and f64/f65 modifiers and the f26/f60 widths, so
+          * `k * fabs(a) + fabs(b)` is one instruction. A modifier on the
+          * immediate is folded into the minifloat (fma(0.5, -b, c) has
+          * f34 = -0.5). */
          if ((enc == AGX_ISA_ENCODING_AGX3B ||
               enc == AGX_ISA_ENCODING_AGX3C) && I->op == AGX_OPCODE_FFMA &&
              I->nr_dests == 1 && I->nr_srcs == 3 &&
@@ -19443,11 +18904,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /* Apple keeps exact half constants in scalar halves through an f32
-          * add.  This is the form used repeatedly by Hyprland's colour
-          * management paths; widening the retained half first costs a live
-          * full register and post-RA may legitimately preserve this native
-          * mixed operation.  Addition is commutative, so canonicalize either
-          * IR order to the native f32/f16 field order. */
+          * add (widening first would cost a full register). Addition
+          * commutes, so either IR order maps to the native f32/f16 order. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              agx3_vary_reg32(I->dest[0]) &&

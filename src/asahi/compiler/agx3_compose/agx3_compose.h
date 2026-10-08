@@ -78,6 +78,12 @@ extern const agx3_table agx3d_table;
 bool agx3_compose(const agx3_table *t, uint32_t form,
                   const uint64_t fields[AGX3_MAX_FIELDS], uint8_t *out);
 
+/* agx3_compose() for a caller that knows which fields are nonzero: bit i of
+ * nonzero is set exactly when fields[i] != 0. */
+bool agx3_compose_known(const agx3_table *t, uint32_t form,
+                        const uint64_t fields[AGX3_MAX_FIELDS],
+                        const uint64_t nonzero[3], uint8_t *out);
+
 /* First form of this mnemonic whose encode succeeds; -1 if none. */
 int32_t agx3_compose_mnemonic(const agx3_table *t, const char *mnemonic,
                               const uint64_t fields[AGX3_MAX_FIELDS],

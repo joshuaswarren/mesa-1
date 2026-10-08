@@ -573,6 +573,10 @@ struct hk_graphics_state {
    uint32_t shaders_dirty;
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
 
+   /* Stages bound to a shader compiled without custom-border emulation that
+    * has an emulating twin to switch to once the device needs it. */
+   uint32_t border_free_stages;
+
    /* Vertex buffers */
    struct hk_addr_range vb[AGX_MAX_VBUFS];
 

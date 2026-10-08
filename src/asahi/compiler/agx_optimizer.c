@@ -131,6 +131,53 @@ agx_g17p_tied_minmax(agx_context *ctx, const agx_instr *I)
    return true;
 }
 
+/*
+ * (0 < x) ? x : 0 and (0 > x) ? x : 0 are exactly G17P's tied maximum
+ * (x GTN 0) ? x : 0 and minimum (x LTN 0) ? x : 0: a NaN x compares false
+ * either way, and so does a zero of either sign. The same holds for
+ * (x < 0) ? x : 0 and (x > 0) ? x : 0. Fusion leaves the comparator zero as a
+ * minifloat and the selected zero as a bit pattern, which are the same value.
+ * Rewrite these clamps to the tied form, which has the compact native
+ * encoding Apple uses for max(0.0, x).
+ */
+static void
+agx_g17p_tie_zero_minmax(agx_context *ctx, agx_instr *I)
+{
+   if (!(ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 && !I->invert_cond &&
+         !I->saturate &&
+         (I->fcond == AGX_FCOND_LT || I->fcond == AGX_FCOND_GT)))
+      return;
+
+   for (unsigned s = 0; s < 4; ++s) {
+      if (I->src[s].abs || I->src[s].neg)
+         return;
+   }
+
+   const bool zero[4] = {
+      agx_is_equiv(I->src[0], agx_immediate(0)),
+      agx_is_equiv(I->src[1], agx_immediate(0)),
+      agx_is_equiv(I->src[2], agx_immediate(0)),
+      agx_is_equiv(I->src[3], agx_immediate(0)),
+   };
+   const bool crossed = zero[0] && zero[3] && !zero[1] &&
+                        agx_is_equiv(I->src[1], I->src[2]);
+   const bool tied = zero[1] && zero[3] && !zero[0] &&
+                     agx_is_equiv(I->src[0], I->src[2]);
+   if (!crossed && !tied)
+      return;
+
+   const agx_index x = crossed ? I->src[1] : I->src[0];
+   if (x.type != AGX_INDEX_NORMAL || x.size != I->dest[0].size)
+      return;
+
+   const bool max = crossed ? I->fcond == AGX_FCOND_LT
+                            : I->fcond == AGX_FCOND_GT;
+   I->src[0] = I->src[2] = x;
+   I->src[1] = I->src[3] = agx_immediate(0);
+   I->fcond = max ? AGX_FCOND_GTN : AGX_FCOND_LTN;
+}
+
 static void
 agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
 {
@@ -1025,6 +1072,7 @@ agx_optimizer_forward(agx_context *ctx)
          /* Fusing a compare of two inlined immediates yields a select the
           * fold below can resolve. */
          agx_optimizer_cmpsel(defs, I);
+         agx_g17p_tie_zero_minmax(ctx, I);
          agx_instr *folded = agx_optimizer_fold_icmpsel(ctx, I);
          if (folded)
             defs[folded->dest[0].value] = folded;

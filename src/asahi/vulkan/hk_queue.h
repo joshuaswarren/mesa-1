@@ -17,7 +17,7 @@ struct hk_queue {
    struct vk_queue vk;
 
    struct {
-      /* Asahi kernel queue ID */
+      /* Asahi kernel queue ID, UINT32_MAX until the first GPU submission. */
       uint32_t id;
 
       /* Timeline syncobj backing the queue */

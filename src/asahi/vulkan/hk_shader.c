@@ -34,6 +34,7 @@
 
 #include "agx_bo.h"
 #include "hk_cmd_buffer.h"
+#include "hk_descriptor_set.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
 #include "hk_image.h"
@@ -456,6 +457,27 @@ struct hk_fs_sample_source {
    uint32_t owned_mask;
 };
 
+/* What a shader compiled without custom-border emulation needs to compile
+ * its emulating twin: its NIR after hk_lower_nir(), emulation included, and
+ * the other inputs of hk_compile_shader_impl(). */
+struct hk_border_source {
+   simple_mtx_t lock;
+   void *nir;
+   size_t nir_size;
+   union hk_key key;
+   bool has_key;
+   VkShaderCreateFlagsEXT flags;
+   VkShaderStageFlags next_stage_mask;
+   struct vk_pipeline_robustness_state robustness;
+   enum hk_feature_key features;
+   uint32_t set_layout_count;
+   uint8_t static_set_mask;
+
+   /* Built by hk_border_twin() and owned by this source; published with
+    * p_atomic_set once complete. */
+   struct hk_api_shader *twin;
+};
+
 static enum hk_feature_key
 hk_make_feature_key(const struct vk_features *feats)
 {
@@ -533,6 +555,15 @@ hk_hash_graphics_state(struct vk_physical_device *device,
 
    enum hk_feature_key feature_key = hk_make_feature_key(features);
    _mesa_blake3_update(&blake3_ctx, &feature_key, sizeof(feature_key));
+
+   /* Whether G17P shaders compile the custom-border emulation in
+    * (hk_compile_shader_impl): a cached shader was compiled the same way. */
+   struct hk_physical_device *pdev =
+      container_of(device, struct hk_physical_device, vk);
+   if (agx_native_graphics(&pdev->dev)) {
+      const uint32_t border = p_atomic_read(&pdev->border_emulation);
+      _mesa_blake3_update(&blake3_ctx, &border, sizeof(border));
+   }
 
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
@@ -1352,6 +1383,89 @@ static bool
 agx_nir_lower_custom_border(nir_shader *nir)
 {
    return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
+}
+
+/* Whether nif is the branch agx_nir_lower_custom_border() put around
+ * clamp-to-0 sample tex_0, after descriptor lowering: taken iff the sampler's
+ * clamp-to-0 index c is not negative, i.e. `if (c >= 0)`, with tex_0 sampling
+ * c without its integer-border bit (hk_nir_lower_descriptors()). */
+static bool
+hk_is_border_emulation_if(nir_if *nif, nir_tex_instr *tex_0)
+{
+   const int s = nir_tex_instr_src_index(tex_0, nir_tex_src_sampler_handle);
+   if (s < 0)
+      return false;
+
+   nir_scalar index =
+      nir_scalar_chase_movs(nir_get_scalar(tex_0->src[s].src.ssa, 0));
+   if (!nir_scalar_is_alu(index) || nir_scalar_alu_op(index) != nir_op_iand)
+      return false;
+
+   nir_scalar mask = nir_scalar_chase_alu_src(index, 1);
+   nir_scalar c = nir_scalar_chase_alu_src(index, 0);
+   if (!nir_scalar_is_const(mask) ||
+       nir_scalar_as_uint(mask) != HK_BORDER_IS_INT_BIT - 1)
+      return false;
+
+   nir_scalar cond =
+      nir_scalar_chase_movs(nir_get_scalar(nif->condition.ssa, 0));
+   if (!nir_scalar_is_alu(cond) || nir_scalar_alu_op(cond) != nir_op_ige)
+      return false;
+
+   nir_scalar tested = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 0));
+   return nir_scalar_equal(tested, nir_scalar_chase_movs(c)) &&
+          nir_scalar_is_zero(nir_scalar_chase_alu_src(cond, 1));
+}
+
+/* The branches of the custom-border emulation, which hold the only
+ * clamp-to-0 samples hk makes. Returns false, and the shader keeps the
+ * emulation, unless every clamp-to-0 sample sits directly in the then-list
+ * of its branch (hk_is_border_emulation_if()). */
+static bool
+hk_find_border_emulation(nir_shader *nir, struct util_dynarray *ifs)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex ||
+                !(nir_instr_as_tex(instr)->backend_flags &
+                  AGX_TEXTURE_FLAG_CLAMP_TO_0))
+               continue;
+
+            nir_cf_node *parent = block->cf_node.parent;
+            if (parent->type != nir_cf_node_if)
+               return false;
+
+            nir_if *nif = nir_cf_node_as_if(parent);
+            bool in_then = false;
+            foreach_list_typed(nir_cf_node, node, node, &nif->then_list)
+               in_then |= node == &block->cf_node;
+            if (!in_then ||
+                !hk_is_border_emulation_if(nif, nir_instr_as_tex(instr)))
+               return false;
+
+            bool known = false;
+            util_dynarray_foreach(ifs, nir_if *, seen)
+               known |= *seen == nif;
+            if (!known)
+               util_dynarray_append(ifs, nif);
+         }
+      }
+   }
+   return true;
+}
+
+/* Compile without the custom-border emulation: no sampler the device can
+ * bind has a custom border, so none of its branches is taken. */
+static void
+hk_drop_border_emulation(struct util_dynarray *ifs)
+{
+   util_dynarray_foreach(ifs, nir_if *, nif) {
+      nir_builder b = nir_builder_at(nir_before_cf_node(&(*nif)->cf_node));
+      nir_src_rewrite(&(*nif)->condition, nir_imm_false(&b));
+      nir_progress(true, nir_cf_node_get_function(&(*nif)->cf_node),
+                   nir_metadata_control_flow);
+   }
 }
 
 /* Unformatted float images may name scaled views. Their native descriptor
@@ -2644,6 +2758,22 @@ hk_static_set_mask(uint32_t set_layout_count,
    return mask;
 }
 
+/* Bindless (descriptor-heap) samples leave num_textures at zero, yet their
+ * descriptor reads are exactly the per-draw work a constant program hoists. */
+static bool
+hk_nir_has_tex(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
@@ -3097,7 +3227,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          (dev->dev.chip == AGX_CHIP_G17P &&
          !(nir->info.stage == MESA_SHADER_FRAGMENT &&
            (nir->info.num_ubos || nir->info.num_ssbos ||
-            nir->info.num_textures || nir->info.num_images))),
+            nir->info.num_textures || nir->info.num_images ||
+            hk_nir_has_tex(nir))),
    };
 
    /* The native constant-program lowering applies exactly when G17P lets
@@ -3342,6 +3473,17 @@ hk_shader_binary_cache_entry_unref(
 }
 static void hk_fs_sample_source_destroy(struct hk_fs_sample_source *src);
 
+static void
+hk_border_source_destroy(struct hk_device *dev, struct hk_border_source *src)
+{
+   if (!src)
+      return;
+   if (src->twin)
+      hk_api_shader_destroy(&dev->vk, &src->twin->vk, NULL);
+   simple_mtx_destroy(&src->lock);
+   free(src->nir);
+   free(src);
+}
 
 void
 hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
@@ -3362,6 +3504,7 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    }
 
    hk_fs_sample_source_destroy(obj->sample_source);
+   hk_border_source_destroy(dev, obj->border_source);
 
    if (obj->binary_cache_entry)
       hk_shader_binary_cache_entry_unref(dev, obj->binary_cache_entry);
@@ -3407,7 +3550,8 @@ static VkResult
 hk_fs_sample_source_init(struct hk_api_shader *obj, const nir_shader *nir,
                          const union hk_key *key,
                          const struct vk_shader_compile_info *info,
-                         enum hk_feature_key features)
+                         enum hk_feature_key features,
+                         uint8_t static_set_mask)
 {
    struct hk_fs_sample_source *src = calloc(1, sizeof(*src));
    if (!src)
@@ -3429,8 +3573,7 @@ hk_fs_sample_source_init(struct hk_api_shader *obj, const nir_shader *nir,
    src->robustness = *info->robustness;
    src->features = features;
    src->set_layout_count = info->set_layout_count;
-   src->static_set_mask =
-      hk_static_set_mask(info->set_layout_count, info->set_layouts);
+   src->static_set_mask = static_set_mask;
    obj->sample_source = src;
    return VK_SUCCESS;
 }
@@ -3500,15 +3643,22 @@ hk_fs_build_sample_variant(struct hk_device *dev, struct hk_api_shader *obj,
    return result;
 }
 
+/* twin_of: compile the custom-border-emulating twin of the shader that
+ * saved these inputs; info then names its NIR and saved create inputs. */
 static VkResult
 hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
                   const struct vk_features *vk_features,
                   const VkAllocationCallbacks *pAllocator,
+                  const struct hk_border_source *twin_of,
                   struct hk_api_shader **shader_out)
 {
    VkResult result;
-   enum hk_feature_key features = hk_make_feature_key(vk_features);
+   enum hk_feature_key features =
+      twin_of ? twin_of->features : hk_make_feature_key(vk_features);
+   const uint8_t static_set_mask =
+      twin_of ? twin_of->static_set_mask
+              : hk_static_set_mask(info->set_layout_count, info->set_layouts);
 
    /* Retain the draw-time guard for a fixed-count shader whose exports cannot
     * be unrolled. Dynamic sample-rate shaders use native variants below.
@@ -3523,10 +3673,52 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
                     info->set_layout_count, info->set_layouts, features);
    }
 
-   union hk_key key_tmp, *key = NULL;
+   /* G17P compiles the custom-border emulation in only once the physical
+    * device has a sampler that needs it (hk_CreateSampler). Until then, drop
+    * its branches and keep this NIR to compile the emulating twin from. A
+    * shader whose emulation lost the shape it was built with keeps it. */
+   void *border_nir = NULL;
+   size_t border_nir_size = 0;
+   bool border_emulating = false;
+   if (agx_native_graphics(&dev->dev)) {
+      struct hk_physical_device *pdev = hk_device_physical(dev);
+      struct util_dynarray ifs;
+      util_dynarray_init(&ifs, NULL);
+      if (hk_find_border_emulation(nir, &ifs) && ifs.size) {
+         if (twin_of || p_atomic_read(&pdev->border_emulation)) {
+            border_emulating = true;
+         } else {
+            struct blob blob;
+            blob_init(&blob);
+            nir_serialize(&blob, nir, false);
+            if (blob.out_of_memory) {
+               blob_finish(&blob);
+               util_dynarray_fini(&ifs);
+               ralloc_free(nir);
+               return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+            }
+            blob_finish_get_buffer(&blob, &border_nir, &border_nir_size);
+            hk_drop_border_emulation(&ifs);
+         }
+      }
+      util_dynarray_fini(&ifs);
+   }
+
+   union hk_key key_tmp = {0}, *key = NULL;
+   bool has_key = false;
+   if (twin_of) {
+      key_tmp = twin_of->key;
+      has_key = twin_of->has_key;
+   } else if (info->stage == MESA_SHADER_FRAGMENT) {
+      hk_populate_fs_key(&key_tmp.fs, state, dev->dev.chip);
+      has_key = true;
+   } else if (info->stage == MESA_SHADER_VERTEX) {
+      hk_populate_vs_key(&key_tmp.vs, state);
+      has_key = true;
+   }
+
    bool sample_variants = false;
    if (info->stage == MESA_SHADER_FRAGMENT) {
-      hk_populate_fs_key(&key_tmp.fs, state, dev->dev.chip);
       /* Coverage updates also embed the raster sample count, even when the
        * application shades once per pixel. These include SampleMask writes,
        * discards, and early tests or late tests guarding memory writes. */
@@ -3548,11 +3740,36 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       vk_shader_zalloc(&dev->vk, &hk_shader_ops, info->stage, pAllocator, size);
 
    if (obj == NULL) {
+      free(border_nir);
       ralloc_free(nir);
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
    obj->g17p_sample_variants = sample_variants;
+   obj->border_emulating = border_emulating;
+
+   if (border_nir) {
+      struct hk_border_source *src = calloc(1, sizeof(*src));
+      if (!src) {
+         free(border_nir);
+         ralloc_free(nir);
+         hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+
+      simple_mtx_init(&src->lock, mtx_plain);
+      src->nir = border_nir;
+      src->nir_size = border_nir_size;
+      src->key = key_tmp;
+      src->has_key = has_key;
+      src->flags = info->flags;
+      src->next_stage_mask = info->next_stage_mask;
+      src->robustness = *info->robustness;
+      src->features = features;
+      src->set_layout_count = info->set_layout_count;
+      src->static_set_mask = static_set_mask;
+      obj->border_source = src;
+   }
 
    mesa_shader_stage sw_stage = nir->info.stage;
 
@@ -3590,7 +3807,6 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       if (!sample_variants)
          NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, false);
    } else if (sw_stage == MESA_SHADER_VERTEX) {
-      hk_populate_vs_key(&key_tmp.vs, state);
       key = &key_tmp;
    } else if (sw_stage == MESA_SHADER_TESS_CTRL) {
       NIR_PASS(_, nir, poly_nir_lower_tcs);
@@ -3640,8 +3856,7 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
                hk_compile_nir(dev, pAllocator, variant_nir, info->flags,
                               info->robustness, NULL, features, variants[v].out,
                               sw_stage, true, NULL, info->set_layout_count,
-                              hk_static_set_mask(info->set_layout_count,
-                                                 info->set_layouts));
+                              static_set_mask);
 
             if (result != VK_SUCCESS) {
                hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
@@ -3796,8 +4011,7 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             hk_compile_nir(dev, pAllocator, clone, info->flags,
                            info->robustness, key, features, shader, sw_stage,
                            hw, nir->xfb_info, info->set_layout_count,
-                           hk_static_set_mask(info->set_layout_count,
-                                              info->set_layouts));
+                           static_set_mask);
          if (result != VK_SUCCESS) {
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
             if (!last)
@@ -3827,7 +4041,8 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       }
       key->fs.g17p_samples = 0;
 
-      result = hk_fs_sample_source_init(obj, nir, key, info, features);
+      result = hk_fs_sample_source_init(obj, nir, key, info, features,
+                                        static_set_mask);
       if (result == VK_SUCCESS)
          result = hk_compile_fs_sample_variant(dev, pAllocator, nir, obj, 1);
       else
@@ -3843,8 +4058,7 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       result = hk_compile_nir(dev, pAllocator, nir, info->flags,
                               info->robustness, key, features, shader, sw_stage,
                               true, NULL, info->set_layout_count,
-                              hk_static_set_mask(info->set_layout_count,
-                                                 info->set_layouts));
+                              static_set_mask);
       if (result != VK_SUCCESS) {
          hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
          return result;
@@ -3875,8 +4089,41 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const VkAllocationCallbacks *allocator,
                   struct hk_api_shader **shader_out)
 {
-   return hk_compile_shader_impl(dev, info, state, features, allocator,
-                                  shader_out);
+   return hk_compile_shader_impl(dev, info, state, features, allocator, NULL,
+                                 shader_out);
+}
+
+struct hk_api_shader *
+hk_border_twin(struct hk_device *dev, struct hk_api_shader *obj)
+{
+   struct hk_border_source *src = obj->border_source;
+   struct hk_api_shader *twin = p_atomic_read(&src->twin);
+   if (twin)
+      return twin;
+
+   simple_mtx_lock(&src->lock);
+   if (!src->twin) {
+      struct blob_reader reader;
+      blob_reader_init(&reader, src->nir, src->nir_size);
+      nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
+      if (nir) {
+         struct vk_shader_compile_info info = {
+            .stage = obj->vk.stage,
+            .flags = src->flags,
+            .next_stage_mask = src->next_stage_mask,
+            .nir = nir,
+            .robustness = &src->robustness,
+            .set_layout_count = src->set_layout_count,
+         };
+         struct hk_api_shader *built = NULL;
+         if (hk_compile_shader_impl(dev, &info, NULL, NULL, NULL, src,
+                                    &built) == VK_SUCCESS)
+            p_atomic_set(&src->twin, built);
+      }
+   }
+   twin = src->twin;
+   simple_mtx_unlock(&src->lock);
+   return twin;
 }
 
 static void
@@ -4079,7 +4326,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
          hk_compile_shader_impl(dev, &infos[i], state, features, pAllocator,
-                            (struct hk_api_shader **)&shaders_out[i]);
+                                NULL, (struct hk_api_shader **)&shaders_out[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
          for (uint32_t j = 0; j < i; j++)
@@ -4241,6 +4488,36 @@ hk_fs_sample_source_deserialize(struct hk_api_shader *obj,
 }
 
 static VkResult
+hk_border_source_deserialize(struct hk_api_shader *obj,
+                             struct blob_reader *blob)
+{
+   struct hk_border_source *src = calloc(1, sizeof(*src));
+   if (!src)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   src->has_key = blob_read_uint8(blob);
+   blob_copy_bytes(blob, &src->key, sizeof(src->key));
+   src->flags = blob_read_uint32(blob);
+   src->next_stage_mask = blob_read_uint32(blob);
+   blob_copy_bytes(blob, &src->robustness, sizeof(src->robustness));
+   src->features = blob_read_uint32(blob);
+   src->set_layout_count = blob_read_uint32(blob);
+   src->static_set_mask = blob_read_uint8(blob);
+   src->nir_size = blob_read_uint32(blob);
+   const void *nir = blob_read_bytes(blob, src->nir_size);
+   src->nir = blob->overrun ? NULL : malloc(src->nir_size);
+   if (!src->nir) {
+      free(src);
+      return blob->overrun ? VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT
+                           : VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+   memcpy(src->nir, nir, src->nir_size);
+   simple_mtx_init(&src->lock, mtx_plain);
+   obj->border_source = src;
+   return VK_SUCCESS;
+}
+
+static VkResult
 hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
                                struct blob_reader *blob,
                                uint32_t binary_version,
@@ -4258,11 +4535,20 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
    const bool sample_variants = variant_flags & 1;
    const bool has_source = variant_flags & 2;
    const bool has_mono = variant_flags & 4;
-   if (blob->overrun || stage >= MESA_SHADER_STAGES || variant_flags > 7 ||
+   const bool has_border_source = variant_flags & 8;
+   const bool border_emulating = variant_flags & 16;
+   if (blob->overrun || stage >= MESA_SHADER_STAGES || variant_flags > 31 ||
        (has_source && !sample_variants) ||
-       (variant_flags && (stage != MESA_SHADER_FRAGMENT ||
-                          dev->dev.chip != AGX_CHIP_G17P)))
+       ((variant_flags & 7) && (stage != MESA_SHADER_FRAGMENT ||
+                                dev->dev.chip != AGX_CHIP_G17P)))
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+
+   /* Compiled with a custom-border emulation that this GPU, with no sampler
+    * needing it, leaves out: refuse it, so the caller compiles the shader
+    * without it (a cache entry is replaced, not reused). */
+   if (border_emulating &&
+       !p_atomic_read(&hk_device_physical(dev)->border_emulation))
+      return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
 
    size_t size = hk_api_shader_size(stage, sample_variants);
 
@@ -4273,6 +4559,7 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    obj->g17p_sample_variants = sample_variants;
+   obj->border_emulating = border_emulating;
 
    hk_foreach_variant(obj, shader) {
       VkResult result;
@@ -4320,6 +4607,14 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
          shader->g17p_mono_nir_size = mono_size;
          memcpy(&shader->g17p_mono_key, mono_key,
                 sizeof(shader->g17p_mono_key));
+      }
+   }
+
+   if (has_border_source) {
+      VkResult result = hk_border_source_deserialize(obj, blob);
+      if (result != VK_SUCCESS) {
+         hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+         return vk_error(dev, result);
       }
    }
 
@@ -4386,6 +4681,7 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
 
    obj->is_passthrough = src_obj->is_passthrough;
    obj->g17p_sample_variants = src_obj->g17p_sample_variants;
+   obj->border_emulating = src_obj->border_emulating;
    obj->binary_cache_entry = entry;
 
    if (src_obj->sample_source) {
@@ -4409,6 +4705,25 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
             src->ready_mask |= BITFIELD_BIT(i);
       }
       obj->sample_source = src;
+   }
+
+   if (src_obj->border_source) {
+      const struct hk_border_source *from = src_obj->border_source;
+      struct hk_border_source *src = calloc(1, sizeof(*src));
+      void *nir = src ? malloc(from->nir_size) : NULL;
+      if (!nir) {
+         free(src);
+         hk_fs_sample_source_destroy(obj->sample_source);
+         vk_shader_free(&dev->vk, pAllocator, &obj->vk);
+         hk_shader_binary_cache_entry_unref(dev, entry);
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+      *src = *from;
+      memcpy(nir, from->nir, from->nir_size);
+      src->nir = nir;
+      src->twin = NULL;
+      simple_mtx_init(&src->lock, mtx_plain);
+      obj->border_source = src;
    }
 
    for (unsigned i = 0; i < hk_api_num_variants(src_obj); ++i) {
@@ -4596,9 +4911,11 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
    bool mono = false;
    hk_foreach_variant(obj, shader)
       mono |= shader->g17p_mono_nir != NULL;
+   const struct hk_border_source *border = obj->border_source;
    blob_write_uint8(blob, vk_shader->stage);
    blob_write_uint8(blob, obj->g17p_sample_variants | (src ? 2 : 0) |
-                             (mono ? 4 : 0));
+                             (mono ? 4 : 0) | (border ? 8 : 0) |
+                             (obj->border_emulating ? 16 : 0));
 
    hk_foreach_variant(obj, shader) {
       const unsigned i = shader - obj->variants;
@@ -4646,6 +4963,21 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
                              sizeof(shader->g17p_mono_key));
          }
       }
+   }
+
+   /* A shader compiled without custom-border emulation keeps what its
+    * emulating twin compiles from. */
+   if (border) {
+      blob_write_uint8(blob, border->has_key);
+      blob_write_bytes(blob, &border->key, sizeof(border->key));
+      blob_write_uint32(blob, border->flags);
+      blob_write_uint32(blob, border->next_stage_mask);
+      blob_write_bytes(blob, &border->robustness, sizeof(border->robustness));
+      blob_write_uint32(blob, border->features);
+      blob_write_uint32(blob, border->set_layout_count);
+      blob_write_uint8(blob, border->static_set_mask);
+      blob_write_uint32(blob, border->nir_size);
+      blob_write_bytes(blob, border->nir, border->nir_size);
    }
 
    return !blob->out_of_memory;

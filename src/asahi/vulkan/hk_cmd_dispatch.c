@@ -381,6 +381,24 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
    cmd->state.cs.shader = shader;
 }
 
+/* A compute shader compiled without custom-border emulation dispatches as
+ * its emulating twin once the device has created a sampler that needs it. */
+static void
+hk_cmd_resolve_compute_border(struct hk_cmd_buffer *cmd)
+{
+   struct hk_api_shader *shader = cmd->state.cs.shader;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   if (shader && unlikely(shader->border_source) &&
+       p_atomic_read(&hk_device_physical(dev)->border_emulation)) {
+      struct hk_api_shader *twin = hk_border_twin(dev, shader);
+      if (twin)
+         cmd->state.cs.shader = twin;
+      else
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+}
+
 void
 hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 {
@@ -1803,6 +1821,7 @@ hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 static void
 dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
 {
+   hk_cmd_resolve_compute_border(cmd);
    struct hk_shader *s = hk_only_variant(cmd->state.cs.shader);
    if (agx_is_shader_empty(&s->b))
       return;
@@ -1884,6 +1903,7 @@ hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer, uint32_t invocations_x,
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
+   hk_cmd_resolve_compute_border(cmd);
    struct hk_shader *s = hk_only_variant(cmd->state.cs.shader);
    if (!s || agx_is_shader_empty(&s->b))
       return;

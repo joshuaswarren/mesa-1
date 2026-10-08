@@ -425,6 +425,16 @@ agx_pressure_schedule(agx_context *ctx)
 #define AGX_ILP_SLACK 2
 /* Register pressure a G17P constant-program schedule may reach (of 192). */
 #define AGX_ILP_CPROG_HALVES 128
+/* A G17P fragment block with at least this many samples issues them ahead of
+ * their consumers; hoisting the samples of a three-sample fragment program
+ * was measured slower (Subnautica pass 74272). */
+#define AGX_ILP_FS_MIN_SAMPLES 4
+/* Register halves such a schedule may add to the block's pressure, and the
+ * forward cap on the halves its own definitions hold. */
+#define AGX_ILP_FS_SAMPLE_SLACK 16
+#define AGX_ILP_FS_SAMPLE_HALVES 88
+/* Samples a fragment block may issue ahead of the first unissued one. */
+#define AGX_ILP_FS_HOIST_SAMPLES 6
 
 static unsigned
 ilp_latency(const agx_instr *I, unsigned alu, unsigned load)
@@ -712,7 +722,7 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
                    bool native_uniforms, unsigned alu_latency,
                    unsigned load_latency, signed slack, signed cap,
                    bool place_exit_compare, bool order_edges_free,
-                   signed fwd_cap)
+                   signed fwd_cap, unsigned hoist_samples)
 {
    struct util_dynarray all;
    util_dynarray_init(&all, memctx);
@@ -759,6 +769,29 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
          h = MAX2(h, (data ? lat : 1) + height[*d]);
       }
       height[i] = h;
+   }
+
+   /* With hoist_samples, the order is the original one except that each
+    * sample, together with the instructions it depends on, moves up as far as
+    * its dependencies allow, at most hoist_samples samples ahead of the
+    * first unissued one. first_sample[i] is the ordinal of the first sample
+    * that node i feeds (itself for a sample). */
+   unsigned *first_sample = NULL;
+   unsigned issued_samples = 0;
+   if (hoist_samples) {
+      first_sample = rzalloc_array(memctx, unsigned, n);
+      if (!first_sample)
+         return false;
+      unsigned ordinal = 0;
+      for (unsigned i = 0; i < n; ++i) {
+         const enum agx_opcode op = nodes[i]->instr->op;
+         first_sample[i] = (op == AGX_OPCODE_TEXTURE_SAMPLE ||
+                            op == AGX_OPCODE_TEXTURE_LOAD) ? ordinal++ : ~0u;
+      }
+      for (unsigned i = n; i-- > 0;) {
+         util_dynarray_foreach(&dependents[i], unsigned, d)
+            first_sample[i] = MIN2(first_sample[i], first_sample[*d]);
+      }
    }
 
    /* With a register cap, track pressure forward: a value defined in this
@@ -818,7 +851,12 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
             better = fits;
          else if (!fits && grow != best_grow)
             better = grow < best_grow;
-         else
+         else if (hoist_samples) {
+            const unsigned window = issued_samples + hoist_samples;
+            const bool hoist_i = first_sample[i] < window;
+            const bool hoist_b = first_sample[best] < window;
+            better = hoist_i != hoist_b ? hoist_i : i < (unsigned)best;
+         } else
             better = t < best_t || (t == best_t && height[i] > height[best]);
          if (better) {
             best = i;
@@ -847,6 +885,8 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
 
       done[best] = true;
       order[step] = nodes[best];
+      issued_samples += nodes[best]->instr->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+                        nodes[best]->instr->op == AGX_OPCODE_TEXTURE_LOAD;
       changed |= (unsigned)best != step;
       cycle = best_t + 1;
       const unsigned lat = ilp_latency(nodes[best]->instr, alu_latency, load_latency);
@@ -942,6 +982,17 @@ ilp_block_has_memory(const agx_block *block)
       }
    }
    return false;
+}
+
+static unsigned
+ilp_block_samples(const agx_block *block)
+{
+   unsigned samples = 0;
+   agx_foreach_instr_in_block(block, I) {
+      samples += I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+                 I->op == AGX_OPCODE_TEXTURE_LOAD;
+   }
+   return samples;
 }
 
 /* Schedule only a small, explicit arithmetic/tile domain. Schedule-class
@@ -1042,11 +1093,23 @@ agx_ilp_schedule(agx_context *ctx)
          continue;
       if (in_loop[block->index] && !ilp_block_has_memory(block)) {
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
-                            4 * alu_latency, AGX_ILP_SLACK, 0, true, false, 0);
+                            4 * alu_latency, AGX_ILP_SLACK, 0, true, false, 0, 0);
       } else if (!in_loop[block->index] && ilp_single_tile_blend(ctx, block)) {
          /* Hardware-qualified color-only budget; leave loop pressure alone. */
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
-                            4 * alu_latency, 8, 0, true, false, 0);
+                            4 * alu_latency, 8, 0, true, false, 0, 0);
+      } else if (!in_loop[block->index] && !ctx->is_preamble &&
+                 ctx->stage == MESA_SHADER_FRAGMENT &&
+                 ilp_block_samples(block) >= AGX_ILP_FS_MIN_SAMPLES) {
+         /* The pressure schedule places each sample's consumers right after
+          * it, so the program waits for one sample before issuing the next.
+          * Apple's fragment programs issue independent samples back to back
+          * and consume the results afterwards: move each sample and what it
+          * depends on up, and keep the pressure order for everything else. */
+         ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
+                            16 * alu_latency, AGX_ILP_FS_SAMPLE_SLACK, 0, false,
+                            true, AGX_ILP_FS_SAMPLE_HALVES,
+                            AGX_ILP_FS_HOIST_SAMPLES);
       } else if (!in_loop[block->index] && ctx->is_preamble) {
          /* A constant program's device loads are mostly independent, but the
           * pressure schedule places each right before its uniform store, so
@@ -1059,7 +1122,7 @@ agx_ilp_schedule(agx_context *ctx)
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
                             16 * alu_latency, AGX_ILP_SLACK,
                             AGX_ILP_CPROG_HALVES, false, true,
-                            AGX_ILP_CPROG_HALVES - 16);
+                            AGX_ILP_CPROG_HALVES - 16, 0);
       }
    }
 

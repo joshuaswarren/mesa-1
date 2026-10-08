@@ -1,6 +1,8 @@
 /* agx3_compose.c -- generic AGX3 encoder over packgen.py tables.
  * Mirrors composer.py encode semantics; see agx3_compose.h. */
 #include "agx3_compose.h"
+#include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 struct direct_cmd {
@@ -136,8 +138,9 @@ static bool apply_node(ctx *c, uint32_t node_id)
    return true;
 }
 
-bool agx3_compose(const agx3_table *t, uint32_t form,
-                  const uint64_t fields[AGX3_MAX_FIELDS], uint8_t *out)
+bool agx3_compose_known(const agx3_table *t, uint32_t form,
+                        const uint64_t fields[AGX3_MAX_FIELDS],
+                        const uint64_t nonzero[3], uint8_t *out)
 {
    if (form >= t->num_forms) return false;
    const agx3_form *f = &t->forms[form];
@@ -161,20 +164,28 @@ bool agx3_compose(const agx3_table *t, uint32_t form,
    if (!preds_ok(cp, root->pred_off, root->pred_n)) return false;
    if (!apply_node(cp, f->node)) return false;
 
-   uint64_t srcmask[AGX3_MAX_FIELDS] = {0};
+   /* strict: every nonzero field must have been consumed */
+   for (unsigned w = 0; w < 3; w++) {
+      if (nonzero[w] & ~cp->consumed[w]) return false;
+   }
+
+   /* ... and a direct-deposited non-selector field must fit the union of its
+    * source slices.  Only fields with a direct command can fail this, so
+    * build the unions for those alone. */
+   uint64_t srcmask[AGX3_MAX_FIELDS];
+   for (uint16_t i = 0; i < cp->direct_count; ++i)
+      srcmask[cp->direct_cmds[i].field] = 0;
    for (uint16_t i = 0; i < cp->direct_count; ++i) {
       const struct direct_cmd *cmd = &cp->direct_cmds[i];
       srcmask[cmd->field] |= wmask(cmd->width) << cmd->src_shift;
    }
-
-   /* strict: every nonzero field must have been consumed; direct-deposited
-    * non-selector fields must fit their source slices. */
-   for (unsigned i = 0; i < AGX3_MAX_FIELDS; i++) {
-      if (fields[i] && !bget(cp->consumed, i)) return false;
-      if (bget(cp->consumed, i) && !bget(cp->is_lut, i) &&
-          !bget(cp->is_pred, i) && (fields[i] & ~srcmask[i]))
+   for (uint16_t i = 0; i < cp->direct_count; ++i) {
+      const unsigned field = cp->direct_cmds[i].field;
+      if (!bget(cp->is_lut, field) && !bget(cp->is_pred, field) &&
+          (fields[field] & ~srcmask[field]))
          return false;
    }
+
    for (unsigned w = 0; w < cp->nwords; w++) {
       out[2 * w] = (uint8_t)cp->words[w];
       out[2 * w + 1] = (uint8_t)(cp->words[w] >> 8);
@@ -182,8 +193,52 @@ bool agx3_compose(const agx3_table *t, uint32_t form,
    return true;
 }
 
+bool agx3_compose(const agx3_table *t, uint32_t form,
+                  const uint64_t fields[AGX3_MAX_FIELDS], uint8_t *out)
+{
+   uint64_t nonzero[3] = {0};
+   for (unsigned i = 0; i < AGX3_MAX_FIELDS; i++) {
+      if (fields[i])
+         bset(nonzero, i);
+   }
+   return agx3_compose_known(t, form, fields, nonzero, out);
+}
+
+/* The packer looks the same few forms up for every instruction it tries.
+ * Remember recent results in a small process-wide table of 64-bit words:
+ * the form index in the low 16 bits and the low 48 bits of the mnemonic
+ * string's address above it.  A slot is read and written whole with relaxed
+ * atomics, so concurrent compiles may overwrite each other's entries but
+ * never see a torn one.  The slot does not record the table, so every hit
+ * is confirmed against the form itself (index in range, same entry point,
+ * same mnemonic, and no earlier form of both): a stale or foreign entry only
+ * costs the search, and a hit is always the search's answer.
+ *
+ * Not thread-local: libgallium is loaded with initial-exec TLS, where every
+ * byte of .tbss counts against the static TLS block of the process that
+ * dlopens it. */
+#define AGX3_FORM_CACHE_SLOTS 256
+static _Atomic uint64_t agx3_form_cache[AGX3_FORM_CACHE_SLOTS];
+
 int32_t agx3_form_index(const agx3_table *t, const char *mnemonic, uint8_t ep)
 {
+   const uint64_t key = (uint64_t)(uintptr_t)mnemonic & ((UINT64_C(1) << 48) - 1);
+   const unsigned slot =
+      ((((uintptr_t)mnemonic >> 3) ^ ((uintptr_t)t >> 6)) * 4u + ep) %
+      AGX3_FORM_CACHE_SLOTS;
+   const uint64_t entry =
+      atomic_load_explicit(&agx3_form_cache[slot], memory_order_relaxed);
+   if (entry && (entry >> 16) == key) {
+      const uint32_t form = (uint32_t)(entry & 0xffff);
+      /* Only the first form of (mnemonic, entry point) in table order is
+       * what the search below returns. */
+      if (form < t->num_forms && t->forms[form].ep == ep &&
+          !strcmp(t->forms[form].mnemonic, mnemonic) &&
+          (form == 0 || t->forms[form - 1].ep != ep ||
+           strcmp(t->forms[form - 1].mnemonic, mnemonic)))
+         return (int32_t)form;
+   }
+
    uint32_t lo = 0, hi = t->num_forms;
 
    /* packgen emits forms in (mnemonic, entry-point) order.  This lookup is on
@@ -201,8 +256,12 @@ int32_t agx3_form_index(const agx3_table *t, const char *mnemonic, uint8_t ep)
    }
 
    if (lo < t->num_forms && t->forms[lo].ep == ep &&
-       !strcmp(t->forms[lo].mnemonic, mnemonic))
+       !strcmp(t->forms[lo].mnemonic, mnemonic)) {
+      if (lo <= 0xffff)
+         atomic_store_explicit(&agx3_form_cache[slot], (key << 16) | lo,
+                               memory_order_relaxed);
       return (int32_t)lo;
+   }
 
    return -1;
 }

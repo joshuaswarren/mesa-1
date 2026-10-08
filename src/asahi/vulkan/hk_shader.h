@@ -350,8 +350,23 @@ struct hk_api_shader {
     * compile from this source on first use (hk_fs_build_sample_variant). */
    struct hk_fs_sample_source *sample_source;
 
+   /* Non-NULL for a shader compiled without custom-border emulation because
+    * the device had created no sampler that needs it: what its emulating
+    * twin compiles from, and the twin once built (hk_border_twin). */
+   struct hk_border_source *border_source;
+
+   /* Compiled with a custom-border emulation that a device without a sampler
+    * needing it would have left out (serialized; such a binary is refused
+    * there, so a cache never hands it out unneeded). */
+   bool border_emulating;
+
    struct hk_shader variants[];
 };
+
+/* The custom-border-emulating twin of a shader with a border source, built
+ * on first use. Thread-safe; NULL if it cannot be built. */
+struct hk_api_shader *hk_border_twin(struct hk_device *dev,
+                                     struct hk_api_shader *obj);
 
 /* Make the `samples` variant of a dynamic-sample-count G17P fragment shader
  * available to hk_fs_variant(). Thread-safe; a no-op for other shaders. */

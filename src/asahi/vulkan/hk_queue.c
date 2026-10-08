@@ -1003,6 +1003,31 @@ hk_sparse_submission_updates_sstt(const struct vk_queue_submit *submission)
 }
 
 static VkResult
+hk_queue_ensure_drm(struct hk_device *dev, struct hk_queue *queue)
+{
+   if (queue->drm.id != UINT32_MAX)
+      return VK_SUCCESS;
+
+   /* The common queue submit path serializes submissions to this queue.
+    * A logical queue, including one used only for host synchronization, does
+    * not need a kernel scheduling context until it actually submits work. */
+   queue->drm.id = agx_create_command_queue(
+      &dev->dev, (enum drm_asahi_priority)(queue->drm.virt_ring_idx - 1));
+   if (queue->drm.id != UINT32_MAX)
+      return VK_SUCCESS;
+
+   const int error = errno;
+   const VkResult result =
+      error == ENOMEM ? VK_ERROR_OUT_OF_HOST_MEMORY :
+      (error == ENOSPC || error == EBUSY) ? VK_ERROR_OUT_OF_DEVICE_MEMORY :
+      (error == EPERM || error == EACCES) ? VK_ERROR_NOT_PERMITTED_EXT :
+      VK_ERROR_INITIALIZATION_FAILED;
+   return vk_errorf(dev, result, "DRM_IOCTL_ASAHI_QUEUE_CREATE failed: %s",
+                    strerror(error));
+}
+
+
+static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
 {
@@ -1044,6 +1069,10 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          return vk_device_set_lost(&dev->vk, "Asahi command ordinal overflow");
       return queue_submit_empty(dev, queue, submit);
    }
+
+   VkResult queue_result = hk_queue_ensure_drm(dev, queue);
+   if (queue_result != VK_SUCCESS)
+      return queue_result;
 
    const uint64_t prior_base[HK_SYNC_NUM_SQ] = {
       queue->sync.submitted[HK_SYNC_VDM], queue->sync.submitted[HK_SYNC_CDM],
@@ -1353,23 +1382,11 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
    queue->sync.exact_prior =
       (dev->dev.params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) != 0;
 
-   queue->drm.id = agx_create_command_queue(&dev->dev, drm_priority);
-   if (queue->drm.id == UINT32_MAX) {
-      const int error = errno;
-      vk_queue_finish(&queue->vk);
-      vk_free(&dev->vk.alloc, queue);
-      result = error == ENOMEM ? VK_ERROR_OUT_OF_HOST_MEMORY :
-               (error == ENOSPC || error == EBUSY) ? VK_ERROR_OUT_OF_DEVICE_MEMORY :
-               (error == EPERM || error == EACCES) ? VK_ERROR_NOT_PERMITTED_EXT :
-               VK_ERROR_INITIALIZATION_FAILED;
-      return vk_errorf(dev, result, "DRM_IOCTL_ASAHI_QUEUE_CREATE failed: %s",
-                       strerror(error));
-   }
+   queue->drm.id = UINT32_MAX;
    queue->drm.virt_ring_idx = drm_priority + 1;
 
    if (drmSyncobjCreate(dev->dev.fd, 0, &queue->drm.syncobj)) {
       mesa_loge("drmSyncobjCreate() failed %d\n", errno);
-      agx_destroy_command_queue(&dev->dev, queue->drm.id);
       vk_queue_finish(&queue->vk);
       vk_free(&dev->vk.alloc, queue);
 
@@ -1418,7 +1435,8 @@ void
 hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
-   agx_destroy_command_queue(&dev->dev, queue->drm.id);
+   if (queue->drm.id != UINT32_MAX)
+      agx_destroy_command_queue(&dev->dev, queue->drm.id);
    agx_bo_unreference(&dev->dev, queue->g17p_sstt_flush_bo);
    vk_queue_finish(&queue->vk);
    vk_free(&dev->vk.alloc, queue);

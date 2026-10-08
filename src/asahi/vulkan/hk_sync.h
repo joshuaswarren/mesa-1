@@ -115,13 +115,13 @@ struct agx_timestamp_req {
  * reload the tile before the earlier one stored it and then write the stale
  * pixels back -- and with per-command barriers nothing else orders them.
  *
- * hk therefore records a footprint for every attachment an instance writes
- * whose render area leaves some tile partly covered, and orders an instance
- * after the latest earlier one whose footprint shares a tile with its own.
- * An area that covers each of its tiles entirely is never recorded: a
- * pixel-disjoint instance cannot touch those tiles, and an instance that
- * overlaps it pixel-wise needs an application barrier anyway. Footprints use
- * 32x32-pixel cells, the largest tile (agx_select_tile_size); smaller tiles
+ * Sparse multiview masks have the same hazard in the layer dimension: BG/EOT
+ * reloads and stores every layer below the highest enabled view, preserving
+ * inactive layers. A full X/Y area does not make those writes independent.
+ * Record every attachment footprint, including complete writes that a later
+ * pass may preserve. Order overlapping footprints when either pass preserves
+ * pixels or layers. Complete independent writes retain no extra dependency.
+ * Footprints use 32x32-pixel cells, the largest tile (agx_select_tile_size); smaller tiles
  * nest inside them, so the test is conservative for every layout.
  *
  * The rule applies within a command buffer at recording, across the command
@@ -134,6 +134,8 @@ struct agx_timestamp_req {
 #define HK_SYNC_RECENT_FOOTPRINTS 256
 
 struct hk_sync_footprint {
+   /* The hardware preserves pixels or inactive layers outside the API writes. */
+   bool preserve;
    /* Identity of the written image; compared, never dereferenced. */
    const void *image;
    uint32_t level;
@@ -143,7 +145,7 @@ struct hk_sync_footprint {
    int32_t cx0, cx1, cy0, cy1;
 };
 
-/* A recorded pass instance footprint and its first and last render stream. */
+/* A pass footprint and its first and last attachment-producing streams. */
 struct hk_sync_pass_record {
    struct hk_sync_footprint fp;
    struct hk_cs *first, *last;
@@ -154,6 +156,7 @@ struct hk_sync_pass_record {
 struct hk_sync_recent {
    struct hk_sync_footprint fp;
    uint64_t point;
+   enum hk_sync_sq sq;
 };
 
 /* Per-stream state, embedded in hk_cs. */
@@ -230,12 +233,14 @@ struct hk_sync_state {
     * start timestamp. */
    struct agx_timestamp_req pending_start_ts;
 
-   /* Tile hazards: the partial-tile footprints of the open pass instance and
+   /* Tile hazards: attachment footprints of the open pass instance and
     * the latest earlier render stream it shares a tile with. The command
     * buffer keeps the recorded instances (hk_cmd_buffer::sync_pass_records). */
    struct hk_sync_footprint pass_fp[HK_SYNC_MAX_PASS_FOOTPRINTS];
    uint8_t pass_fp_count;
-   struct hk_cs *pass_tile_wait;
+   struct hk_cs *pass_tile_wait[HK_SYNC_NUM_SQ];
+   /* Attachment producers, including a compute replacement of a clear. */
+   struct hk_cs *pass_tile_first, *pass_tile_last;
 };
 
 /* Per-queue state: kinds of streams ever submitted on each subqueue. A
@@ -321,8 +326,10 @@ void hk_sync_heap_used(struct hk_cmd_buffer *cmd);
 void hk_sync_pass_footprint(struct hk_cmd_buffer *cmd, const void *image,
                             uint32_t level, uint32_t layer0, uint32_t layer1,
                             uint32_t level_width, uint32_t level_height,
-                            VkRect2D area);
+                            VkRect2D area, bool preserve_layers);
 void hk_sync_pass_footprints_done(struct hk_cmd_buffer *cmd);
+void hk_sync_replace_render(struct hk_cmd_buffer *cmd, struct hk_cs *from,
+                            struct hk_cs *into);
 /* Whether a submission records tile-hazard footprints, and whether the
  * queue may still be running one, so the caller fetches the completed
  * timeline point only when it can matter. */

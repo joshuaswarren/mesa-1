@@ -3450,7 +3450,13 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* Two reasons to keep the graphics representation on G17P/M5 rather than
+   /* An empty final stream of a pass with earlier draws is not an empty
+    * render. Replacing it with the load-op clears would erase those draws. */
+   const bool continuation = cmd->sync.pass_vdm != cs;
+   if (continuation && dev->dev.chip != AGX_CHIP_G17P)
+      return false;
+
+   /* Two reasons to keep the graphics representation on G17P/G17G rather than
     * replace it with the image clears below.
     *
     * The first is capability: G17P has native BG/EOT programs for the
@@ -3483,9 +3489,10 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
       return false;
 
    if ((dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) &&
-       cs->cr.process_empty_tiles &&
-       (g17p_output_only_through_eot ||
-        !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4))) {
+       (continuation ||
+        (cs->cr.process_empty_tiles &&
+         (g17p_output_only_through_eot ||
+          !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4))))) {
       /* Normally supplied by the first draw. A clear has no application
        * sample-location state; use the attachment sample count and leave
        * has_sample_locations uncommitted, just like other meta operations.
@@ -3522,6 +3529,9 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    /* The clears stand in for the render: they are graphics work for every
     * later dependency, and they were recorded under the same requirements
     * the render was created under. */
+   /* Give the replacement an owned stream: extending an older compute job
+    * could place its clear before a render it must wait for. */
+   hk_cmd_buffer_end_compute(cmd);
    cmd->sync.kind_override = HK_SYNC_GFX;
 
    for (unsigned i = 0; i < render->color_att_count; ++i) {
@@ -3535,6 +3545,10 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
                              VK_IMAGE_ASPECT_STENCIL_BIT);
 
    cmd->sync.kind_override = 0;
+   if (cmd->current_cs.cs) {
+      hk_sync_replace_render(cmd, cs, cmd->current_cs.cs);
+      hk_cmd_buffer_end_compute(cmd);
+   }
 
    /* Remove the VDM control stream from the command buffer, now that it is
     * replaced by equivalent other operations.

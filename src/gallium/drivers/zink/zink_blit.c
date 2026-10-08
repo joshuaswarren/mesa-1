@@ -569,7 +569,6 @@ zink_blit(struct pipe_context *pctx,
       ctx->gfx_pipeline_state.dirty |= (ctx->gfx_pipeline_state.rp_state != rp_state);
       ctx->gfx_pipeline_state.rp_state = rp_state;
       ctx->rp_changed = rp_changed;
-      ctx->rp_tc_info_updated |= rp_tc_info_updated;
       ctx->queries_disabled = queries_disabled;
       ctx->dynamic_fb.tc_info.data = tc_data;
       ctx->bs->cmdbuf = cmdbuf;
@@ -580,6 +579,10 @@ zink_blit(struct pipe_context *pctx,
       ctx->zsbuf_unused = zsbuf_unused;
       zink_select_draw_vbo(ctx);
    }
+   /* Restoring the blitter framebuffer must not suppress the next refresh of
+    * application renderpass metadata, even when this blit was ordered.
+    */
+   ctx->rp_tc_info_updated |= rp_tc_info_updated;
    ctx->unordered_blitting = false;
 end:
    if (needs_present_readback) {

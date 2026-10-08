@@ -90,6 +90,11 @@ struct agx_bo {
     * since the previous trim while releasing an older idle generation. */
    uint64_t cache_generation;
 
+   /* When the BO entered the cache, and whether the kernel was since told
+    * it is not needed (GEM_MADVISE). */
+   int64_t cached_ns;
+   bool purgeable;
+
    /* Creation attributes */
    enum agx_bo_flags flags;
    size_t size;

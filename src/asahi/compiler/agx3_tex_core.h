@@ -2,21 +2,14 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Strict AGX3 texel-fetch encoding.  This models the directly witnessed 2D,
- * 2D-array, 2D-MS, 2D-MS-array, and G17P 3D read forms. Unsupported texture
- * modes are represented by the absence of an API, rather than guessed
- * selector values.
+ * AGX3 texture encoding: texel fetches (2D, 2D-array, 2D-MS, 2D-MS-array,
+ * G17P 3D), filtered samples and the operand-staging instructions they read.
+ * Texture modes without an entry point here are refused, not guessed.
  *
- * Native G17P filtered array samples select f77=1 and name a dynamic layer
- * register with f37=3/f31=<half-register>. This is distinct from the older
- * staged f77=2 shape and is witnessed for implicit, level, bias and gradient
- * LOD as well as immediate and uniform texture/sampler operands.
- *
- * Native G17P 2D texture offsets are carried directly in SMP: f141 enables
- * the offset, f51 selects its packed field, and f43 contains signed four-bit
- * x/y offsets in its low/high nibbles. The bounded form exposed here is the
- * immediate texture/sampler, implicit-LOD sample witnessed by Apple's own
- * compiler across both result widths and result masks.
+ * G17P filtered array samples set f77=1 and name the layer register with
+ * f37=3/f31 (half-register). Immediate 2D offsets are carried in SMP itself:
+ * f141 enables them, f51 selects the packed field and f43 holds signed 4-bit
+ * x/y offsets in its low/high nibbles.
  */
 
 #pragma once
@@ -63,15 +56,10 @@ enum agx3_tex_operand_kind {
 };
 
 /*
- * SMP's f83/f112 pair is part of a larger sample ABI, not a shader-stage
- * selector.  The driver's descriptor heaps, coordinate staging, and
- * derivative protocol are hardware-qualified with f83=0/f112=4.  Apple's
- * fragment binaries use f83=4/f112=8 together with a different, not yet
- * modeled surrounding ABI.
- *
- * Keep the Apple pair available to byte-exact witness tests, but require an
- * explicit full-ABI choice.  Production compiler callers leave this zero and
- * therefore cannot infer the Apple form merely from MESA_SHADER_FRAGMENT.
+ * SMP's f83/f112 pair belongs to the whole sample ABI (descriptor heaps,
+ * coordinate staging, derivatives), not to the shader stage. The driver's ABI
+ * is f83=0/f112=4; Apple's fragment ABI (f83=4/f112=8) is only for byte-exact
+ * witness tests and must be chosen explicitly.
  */
 enum agx3_tex_sample_abi {
    AGX3_TEX_SAMPLE_ABI_DRIVER = 0,
@@ -79,13 +67,8 @@ enum agx3_tex_sample_abi {
 };
 
 /*
- * How the level operand staged into texture operand bank 6 is typed.
- *
- * PACK_SMPIR's f74 selects it, and it is the only field that moves between
- * two otherwise byte-identical fragment programs compiled by
- * `metal-nt -arch applegpu_g17p` from one source file: a filtered
- * `t.sample(s, uv, level(in.uv.z))` stages f74 = 2, while a
- * `t.read(uint2(in.uv.xy), uint(in.uv.z))` texel fetch stages f74 = 3.
+ * How the level staged into texture operand bank 6 is typed (PACK_SMPIR f74):
+ * a filtered sample's level is FLOAT (2), a texel fetch's level INTEGER (3).
  */
 enum agx3_tex_level_kind {
    AGX3_TEX_LEVEL_MINIMUM = 1,
@@ -134,64 +117,21 @@ struct agx3_tex_fetch_desc {
    uint16_t texture_value;
    uint16_t sampler_value;
    /*
-    * The level.
-    *
-    * By default the fetch is at level 0, which is what the immediate form
-    * encodes with an all-zero f29. A non-zero `lod_x64` is the level in the
-    * same 1/64 fixed-point field the sample family uses: compiling
-    * `t.read(gid, 0)` against `t.read(gid, 2)` moves f29 from 0 to 128 and
-    * nothing else.
-    *
-    * `register_lod` selects the per-lane form instead: f37 clears (there is
-    * no immediate operand) and f139 becomes 4, with the level published into
-    * operand bank 6 by an agx3_tex_stage_lod() carrying
-    * AGX3_TEX_LEVEL_INTEGER. Those two fields are the ONLY difference
-    * between the two witnessed fragment texel fetches. AGX3b only; AGX3c has
-    * no witness.
+    * The level: `lod_x64` is an immediate level in 1/64 steps in f29 (0 by
+    * default). `register_lod` reads a per-lane level instead (f37 clear,
+    * f139=4), published into operand bank 6 by agx3_tex_stage_typed_lod()
+    * with AGX3_TEX_LEVEL_INTEGER. AGX3b only.
     */
    uint16_t lod_x64;
    bool register_lod;
    /*
-    * Sparse residency (VK_KHR_sparse_*, OpImageSparse*).  The instruction
-    * writes its masked result channels as usual and then one extra 32-bit
-    * register holding the residency code, at the half immediately after the
-    * masked channels -- the same destination convention AGX2 uses.
-    *
-    * These fields were isolated by compiling matched pairs that differ
-    * only in `sparse_sample`/`sparse_read` vs `sample`/`read`, with
-    * `xcrun metal-nt -arch applegpu_g17p`
-    * (MetalToolchain v27.1.5194.15, -platform_version macos 27.0 27.0):
-    *
-    *   f142 = 1     the residency request itself
-    *   f120 = 1     set on every sparse access
-    *   f112 += 4    NOT ENCODED.  Apple's bytes do move the operand profile,
-    *                but f112 is a scattered bitmask rather than a counter, so
-    *                "+4" drops profile bit 2 and sets bit 3 -- and on G17P
-    *                that makes every sparse fetch and every explicit-LOD
-    *                sparse sample fail.  The profile stays at its dense
-    *                value; see the note in agx3_tex_encode_sample() for the
-    *                measurement.
-    *
-    * Matched compute pairs (dense vs sparse sample and read), argument-buffer
-    * descriptors on both arms, differ in exactly those three fields plus
-    * register allocation and the group terminator (the f112 move among them,
-    * which this encoder deliberately does not reproduce):
-    *
-    *   sample  dense  05800cb8b4000900920390010100802000800098
-    *           sparse 2dc00c38bc000900920392010200802028c00018
-    *   fetch   dense  05800cb8b0001701900280000100002000800098
-    *           sparse 2dc00c38b0001701900282000200002028c00018
-    *
-    * The residency register is read straight back by the `bit_andc` that
-    * follows: with a W32 result at half 10 and mask 15 it names half 18, with
-    * a W32 result at half 0 and mask 1 it names half 2, and with a W16 result
-    * at half 0 and mask 15 it names half 4 -- dest + channels * halves.
-    *
-    * f120 deposits instruction bit 142, past the 112-bit ep3 form, so the
-    * composer refuses a sparse ep3 instruction outright and a sparse
-    * operation is always the 20-byte ep4 form -- even when both descriptors
-    * are immediate, where the dense sibling stays 14 bytes.  (f142 itself
-    * deposits bit 81 and would fit either form.)  Only AGX3b is witnessed.
+    * Sparse residency: f142=1 requests it and f120=1 marks the access. The
+    * residency code is one more 32-bit register after the masked channels
+    * (dest + channels * halves), as on AGX2. f120 lies past the 112-bit ep3
+    * form, so a sparse operation is always the 20-byte ep4 form. Apple also
+    * changes the f112 operand profile, but that profile makes sparse fetches
+    * and explicit-LOD sparse samples fail on G17P, so the dense profile is
+    * kept. AGX3b only.
     */
    bool sparse;
 };
@@ -208,86 +148,37 @@ bool agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
                            struct agx3_tex_fetch_desc *out);
 
 /*
- * Filtered 2D sample (`texture_sample` -> smp with f78=2), immediate texture
- * and sampler state, in the LOD shapes Apple's corpus witnesses:
+ * Filtered sample (`texture_sample` -> smp with f78=2) LOD shapes:
  *
- *  - AGX3_TEX_LOD_AUTO: the implicit-LOD fragment form (no LOD operand).
- *    Witnessed in fragment render pipelines only; fragment shaders are the
- *    only place Mesa emits it, matching the hardware's quad-derivative
- *    requirement. f156 terminates the complete fragment sample group, not
- *    each individual implicit sample; see sample_group_end below.
- *  - AGX3_TEX_LOD_LEVEL: explicit immediate level (f37=1, f139=2), the
- *    `level(x)` kernel form; `lod_x64` is the level in 1/64 steps exactly as
- *    the corpus quantizes it (level(2.0) = 128, level(7.25) = 464).
- *  - AGX3_TEX_LOD_REGISTER: G17P fragment per-lane half-float level, packed
- *    by PACK_SMPIR and selected with f139=4. The fragment marker is also
- *    present for explicit LOD; it does not itself select implicit derivatives.
+ *  - AUTO: implicit LOD, fragment only (quad derivatives). f156 ends the
+ *    fragment sample group, not each sample; see sample_group_end.
+ *  - LEVEL: immediate level (f37=1, f139=2), `lod_x64` = level * 64.
+ *  - REGISTER: per-lane half-float level packed by PACK_SMPIR (f139=4). The
+ *    fragment marker is present here too; it does not select derivatives.
  *
- * G17P also supports directly witnessed 2D-array forms with a register-valued
- * layer for implicit, level, bias and gradient LOD, and cube samples with
- * implicit or explicit immediate/register LOD.
- * G17P 3D immediate-level samples use the same operand ABI, with f76=3
- * selecting the third contiguous coordinate.
- * Everything else about the sampler family -- remaining dimensions, min-LOD,
- * offset shapes beyond witnessed 2D sampling, 3D/cube shadow/gather/gradient,
- * and array combinations -- remains a deliberate refusal: those axes need
- * additional operand marshalling and qualification.
+ * G17P also has 2D-array (register layer) and cube forms, and 3D
+ * immediate-level samples (f76=3 selects the third coordinate). Other
+ * dimension/LOD/offset/shadow/gather combinations are refused.
  */
 enum agx3_tex_lod {
    AGX3_TEX_LOD_AUTO,
    AGX3_TEX_LOD_LEVEL,
    AGX3_TEX_LOD_REGISTER, /* PACK_SMPIR publishes the per-lane level. */
-   /*
-    * Implicit LOD plus a constant bias.  This is the ordinary automatic-LOD
-    * sample with f139 = 1 and the bias in the same 12-bit x64 immediate the
-    * explicit-level form uses, witnessed from `metal-nt -arch applegpu_g17p`
-    * on t.sample(s, uv, bias(k)) for k in {0.25, 0.5, 1, 1.5, 2, 4, 1/64, 31}:
-    * f29 came out 16, 32, 64, 96, 128, 256, 1, 1984 -- exactly k * 64, and
-    * 63.0 saturated the field at 2047.  A zero bias is folded away by Apple's
-    * own compiler into the plain implicit form.
-    */
+   /* Implicit LOD plus a constant bias: f139=1, bias * 64 in the 12-bit f29
+    * the level form uses (saturating at 2047). A zero bias is the plain
+    * implicit form. */
    AGX3_TEX_LOD_BIAS,
-   /*
-    * Implicit LOD plus a per-lane register bias.  Apple's fragment
-    * `t.sample(s, uv, bias(in.uv.x))` is byte-identical to its
-    * `t.sample(s, uv, level(in.uv.x))` apart from f139 (3 instead of 4): the
-    * same PACK_SMPIR scalar staging into operand bank 6, the same fragment
-    * marker f156 = 1.  Ground truth, `xcrun metal-nt -arch applegpu_g17p`:
-    *
-    *    level(in.uv.x)  05800cb8b0000001010010001200   f139 = 4
-    *    bias(in.uv.x)   05800cb8b0000400010010001200   f139 = 3
-    */
+   /* Implicit LOD plus a per-lane bias: the REGISTER form with f139=3. */
    AGX3_TEX_LOD_BIAS_REGISTER,
-   /*
-    * Explicit gradients.  f139 = 5, and unlike every other shape the
-    * fragment marker f156 is *not* set: the four gradient scalars replace
-    * the derivative the marker would request.  The scalars are published
-    * into staging banks 8/10/12/14, in half-register units, before the
-    * sample.  Apple's own compute kernel
-    * `t.sample(s, g[0], gradient2d(g[1], g[2]))` stages six consecutive
-    * source registers into banks 0, 2, 8, 10, 12, 14 on one shared slot and
-    * then samples:
-    *
-    *    copy 0b10210c  bank  0     copy 5b16210c  bank 10
-    *    copy 1b12210c  bank  2     copy 6b18210c  bank 12
-    *    copy 4b14210c  bank  8     copy 7b1a210c  bank 14
-    *    smp  05800cb8b0000401000010000100
-    *
-    * Which component lands in which bank is pinned by the fragment kernels
-    * that pass literal gradients, where the staged value is the constant
-    * itself: gradient2d((0.25, 0.5), (0.75, 1.0)) loads 0.25/0.75/0.5/1.0
-    * into banks 8/10/12/14, so the order is (ddx.x, ddy.x, ddx.y, ddy.y).
-    * The (1, 2)/(4, 8) and (16, 32)/(64, 128) pairs agree.  That is exactly
-    * the layout of the collect agx_emit_tex() builds for nir_tex_src_ddx.
-    */
+   /* Explicit gradients: f139=5 and no fragment marker f156. The gradient
+    * scalars are staged before the sample in the banks below, interleaved
+    * (ddx.x, ddy.x, ddx.y, ddy.y[, ddx.z, ddy.z]) as the collect
+    * agx_emit_tex() builds for nir_tex_src_ddx. */
    AGX3_TEX_LOD_GRADIENT,
 };
 
-/*
- * Staging banks for AGX3_TEX_LOD_GRADIENT, in half-register units, in the
- * order the four scalars are witnessed.  A gradient sample also names
- * coordinate bank 0, as every witness does.
- */
+/* Staging banks of AGX3_TEX_LOD_GRADIENT, in half-register units. A gradient
+ * sample also names coordinate bank 0. */
 #define AGX3_TEX_GRADIENT_BANK_DDX_X 8u
 #define AGX3_TEX_GRADIENT_BANK_DDY_X 10u
 #define AGX3_TEX_GRADIENT_BANK_DDX_Y 12u
@@ -295,32 +186,15 @@ enum agx3_tex_lod {
 /* G18 native 2D gradients use X/Y=16/0, derivatives=4/6/8/10 and, for
  * arrays, the existing layer word at 2. G17 staging stays unchanged. */
 #define AGX3_TEX_G18G_GRADIENT_X 16u
-/* A gradient3d continues the same interleave into two more banks. Read off
- * two literal-gradient kernels, where each staged value is the constant
- * itself: gradient3d((1,2,4),(8,16,32)) puts 1/8/2/16/4/32 into banks
- * 8/10/12/14/16/18, and gradient3d((64,128,0.25),(0.5,0.75,1.5)) puts
- * 64/0.5/128/0.75/0.25/1.5 into the same six. */
+/* gradient3d continues the interleave. */
 #define AGX3_TEX_GRADIENT_BANK_DDX_Z 16u
 #define AGX3_TEX_GRADIENT_BANK_DDY_Z 18u
 
 /*
- * textureGather.  f144 = 1 selects the gather and f145 carries the component
- * index -- absent for R, 1 for G, 2 for B, 3 for A.  A gather also *drops*
- * the f74 mask-group bit that every ordinary sample sets; nothing else about
- * the instruction changes, so a gather is a plain implicit sample with one
- * bit cleared and one or two set.  Ground truth,
- * `xcrun metal-nt -arch applegpu_g17p`, five fragment kernels differing only
- * in the gathered component:
- *
- *    t.gather(s, uv)                       05800ca490000000010000001200
- *    t.gather(s, uv, int2(0), component::x) 05800ca490000000010000001200  f145 -
- *    t.gather(s, uv, int2(0), component::y) 05800cac90000000010000001200  f145 1
- *    t.gather(s, uv, int2(0), component::z) 05800cb490000000010000001200  f145 2
- *    t.gather(s, uv, int2(0), component::w) 05800cbc90000000010000001200  f145 3
- *
- * 2D-array and cube gathers share the same component selector. Runtime
- * 2D offsets use f141=2 with the bank-6 publication declared below; immediate
- * offsets retain f43/f51/f141. Gathers take no explicit LOD argument.
+ * textureGather: an implicit sample with f144=1, the component in f145 (R
+ * absent, G 1, B 2, A 3) and the f74 mask-group bit cleared. 2D-array and
+ * cube gathers use the same selector; runtime 2D offsets use f141=2 with the
+ * bank-6 publication below, immediate offsets f43/f51/f141. No explicit LOD.
  */
 enum agx3_tex_gather {
    AGX3_TEX_GATHER_NONE = 0,
@@ -390,10 +264,7 @@ struct agx3_tex_sample_desc {
    uint16_t offset_xyz;         /* immediate signed x/y/z nibbles */
    bool offset_register;        /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
-   /* See agx3_tex_fetch_desc::sparse; the sample form uses the same fields,
-    * witnessed on 2D, 2D-array, 3D, cube, gather, immediate level and bias
-    * shapes and on both result widths, and likewise leaves the f112 operand
-    * profile alone. */
+   /* As agx3_tex_fetch_desc::sparse, on every sample shape and width. */
    bool sparse;
 };
 
@@ -746,15 +617,10 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
                             uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /*
- * The scoreboard-signalling coordinate-staging copy Apple issues before smp.
- *
- * Every witnessed smp reads its coordinates through registers that a
- * signalling producer published on the smp's wait slot. When the coordinates
- * do not come from an async op directly, Apple stages them with this `copy`
- * form -- one 32-bit register per instruction, dest == src when the values
- * are already in place (x_coordreg, fs_bufcoord) -- carrying the smp's slot
- * in f12 and any producer dependency as a wait bit (f30 + slot - 1). The smp
- * then waits on that slot.
+ * Coordinate-staging copy before smp: smp reads coordinates a signalling
+ * producer published on its wait slot. One 32-bit register per copy (dest ==
+ * src when already in place), the smp's slot in f12 and a producer dependency
+ * as wait bit f30 + slot - 1.
  */
 #define AGX3_TEX_COPY_MAX_LENGTH 10u
 

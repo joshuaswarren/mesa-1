@@ -425,6 +425,96 @@ TEST_F(Optimizer, G17PPreservesTiedConstantFmaxThatIsNotAMinifloat)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+/*
+ * A clamp against zero written as a compare and a select -- (0 < x) ? x : 0,
+ * (0 > x) ? x : 0, (x < 0) ? x : 0 or (x > 0) ? x : 0 -- is exactly the tied
+ * maximum (x GTN 0) ? x : 0 or minimum (x LTN 0) ? x : 0: a NaN or a zero of
+ * either sign compares false in both forms. Fusion leaves the comparator zero
+ * as a minifloat and the selected zero as a bit pattern; they are the same
+ * +0.0, so the select becomes the tied form.
+ */
+struct ZeroClamp {
+   bool zero_first;
+   enum agx_fcond cond;
+   enum agx_fcond tied;
+};
+
+static const ZeroClamp zero_clamps[] = {
+   {true, AGX_FCOND_LT, AGX_FCOND_GTN},
+   {true, AGX_FCOND_GT, AGX_FCOND_LTN},
+   {false, AGX_FCOND_LT, AGX_FCOND_LTN},
+   {false, AGX_FCOND_GT, AGX_FCOND_GTN},
+};
+
+static void
+build_zero_clamp(agx_builder *b, agx_index x, const ZeroClamp &c,
+                 uint32_t constant, bool abs_x)
+{
+   agx_index k = agx_mov_imm(b, 32, constant);
+   agx_index xs = abs_x ? agx_abs(x) : x;
+   agx_index cmp = c.zero_first ? agx_fcmp(b, k, xs, c.cond, false)
+                                : agx_fcmp(b, xs, k, c.cond, false);
+   agx_index out = agx_temp(b->shader, AGX_SIZE_32);
+   agx_icmpsel_to(b, out, cmp, agx_zero(), k, x, AGX_ICOND_UEQ);
+   agx_unit_test(b, out);
+}
+
+TEST_F(Optimizer, G17PTiesAClampAgainstZero)
+{
+   for (const ZeroClamp &c : zero_clamps) {
+      agx_builder *actual = agx_test_builder(mem_ctx);
+      agx_builder *expected = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      actual->shader->key = &key;
+      expected->shader->key = &key;
+
+      agx_index x = agx_fadd(actual, wx, wy);
+      build_zero_clamp(actual, x, c, 0, false);
+
+      x = agx_fadd(expected, wx, wy);
+      /* Burn the indices of the dead constant and compare. */
+      (void)agx_temp(expected->shader, AGX_SIZE_32);
+      (void)agx_temp(expected->shader, AGX_SIZE_16);
+      agx_index out = agx_temp(expected->shader, AGX_SIZE_32);
+      agx_fcmpsel_to(expected, out, x, agx_immediate(0), x, agx_immediate(0),
+                     c.tied);
+      agx_unit_test(expected, out);
+
+      agx_optimize_and_dce(actual->shader);
+      ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
+}
+
+/* Only a zero is the same value in both roles, and a modified x is a
+ * different value from the one selected; AGX2 has no tied form. */
+TEST_F(Optimizer, G17PKeepsOtherClampsGeneral)
+{
+   for (const ZeroClamp &c : zero_clamps) {
+      for (unsigned variant = 0; variant < 3; ++variant) {
+         agx_builder *b = agx_test_builder(mem_ctx);
+         struct agx_shader_key key = {};
+         key.dev.encoding =
+            variant == 2 ? AGX_ISA_ENCODING_AGX2 : AGX_ISA_ENCODING_AGX3B;
+         b->shader->key = &key;
+
+         agx_index x = agx_fadd(b, wx, wy);
+         build_zero_clamp(b, x, c, variant == 0 ? 0x3f800000 : 0,
+                          variant == 1);
+         agx_optimize_and_dce(b->shader);
+
+         unsigned selects = 0;
+         agx_foreach_instr_global(b->shader, I) {
+            if (I->op != AGX_OPCODE_FCMPSEL)
+               continue;
+            selects++;
+            EXPECT_EQ(I->fcond, c.cond);
+         }
+         EXPECT_EQ(selects, 1u);
+      }
+   }
+}
+
 /* A general select is not a minimum: its selected operands are not tied to the
  * compared ones, so the compare-slot fold must stay compare-only. */
 TEST_F(Optimizer, G17PDoesNotFoldTheSelectSlotOfAnUntiedFcmpsel)

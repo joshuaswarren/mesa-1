@@ -4829,7 +4829,11 @@ tc_invalidate_resource(struct pipe_context *_pipe,
    tc_set_resource_reference(&call->resource, resource);
 
    struct tc_renderpass_info *info = tc_get_renderpass_info(tc);
-   if (info) {
+   /* A non-inline framebuffer access already consumed the attachment.
+    * Invalidating it afterwards must not discard the earlier pass's stores.
+    * Inline resolves can still discard their multisample source.
+    */
+   if (info && (!info->ended || info->has_resolve)) {
       if (tc->fb_resources[PIPE_MAX_COLOR_BUFS] == resource) {
          info->zsbuf_invalidate = true;
          tc->seen_fb_state = true;

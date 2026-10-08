@@ -2373,7 +2373,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             cmd, iview->vk.image, level, iview->vk.base_array_layer,
             iview->vk.base_array_layer + MAX2(pass_layers, 1),
             u_minify(iview->vk.image->extent.width, level),
-            u_minify(iview->vk.image->extent.height, level), render->area);
+            u_minify(iview->vk.image->extent.height, level), render->area,
+            render->view_mask &&
+               render->view_mask != BITFIELD64_MASK(pass_layers));
       }
       hk_sync_pass_footprints_done(cmd);
    }
@@ -2840,7 +2842,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       }
       clear_count = selected;
    }
-   cs->cr.process_empty_tiles = resolved_clear;
+   /* Resolves of loaded samples write the destination even without geometry. */
+   const bool process_empty_tiles = resolved_clear ||
+      (render->g17p_direct_color_resolve &&
+       pRenderingInfo->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD);
+   cs->cr.process_empty_tiles = process_empty_tiles;
    if (clear_count > 0 &&
        (incomplete_render_area || clear_spills || clear_wide_multisample)) {
       const VkClearRect clear_rect = {
@@ -2859,7 +2865,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
        * effect. This is the case exactly when there is an attachment we are
        * fast clearing and then storing.
        */
-      cs->cr.process_empty_tiles = resolved_clear;
+      cs->cr.process_empty_tiles = process_empty_tiles;
    }
 }
 
@@ -3747,9 +3753,25 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
       shader = dev->null_fs;
    }
 
+   /* A shader compiled without custom-border emulation is replaced by its
+    * emulating twin once the device has created a sampler that needs it. */
+   if (shader && unlikely(shader->border_source) &&
+       p_atomic_read(&hk_device_physical(dev)->border_emulation)) {
+      struct hk_api_shader *twin = hk_border_twin(dev, shader);
+      if (twin)
+         shader = twin;
+      else
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
    assert(stage < ARRAY_SIZE(cmd->state.gfx.shaders));
    if (cmd->state.gfx.shaders[stage] == shader)
       return;
+
+   if (shader && shader->border_source)
+      cmd->state.gfx.border_free_stages |= BITFIELD_BIT(stage);
+   else
+      cmd->state.gfx.border_free_stages &= ~BITFIELD_BIT(stage);
 
    /* Any direct stage replacement (shader objects, meta restore, or an
     * internal passthrough GS) invalidates the common runtime's redundant
@@ -8096,6 +8118,14 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     */
    if (gfx->shaders[MESA_SHADER_FRAGMENT] == NULL)
       hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_FRAGMENT, NULL);
+
+   /* The device may have created its first sampler that needs custom-border
+    * emulation since these shaders were bound. */
+   if (unlikely(gfx->border_free_stages) &&
+       p_atomic_read(&hk_device_physical(dev)->border_emulation)) {
+      u_foreach_bit(stage, gfx->border_free_stages)
+         hk_cmd_bind_graphics_shader(cmd, stage, gfx->shaders[stage]);
+   }
 
    if (gfx->shaders[MESA_SHADER_VERTEX] == NULL) {
       mesa_loge("draw with no vertex shader bound; dropping it");
