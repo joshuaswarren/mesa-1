@@ -13,11 +13,6 @@
 
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
 
-/* Special register 2: the per-invocation target-sample nibble, pre-shifted
- * into bits 4..7. Read by every 1x fragment shader that writes a coverage word
- * or a depth, and by no colour-only shader. */
-#define AGX3_SR_TARGET_SAMPLES 2
-
 bool
 agx3_shift_add16_encode(enum agx_isa_encoding enc,
                         const struct agx3_shift_add_desc *d,

@@ -50,7 +50,6 @@ extern "C" {
 
 /* Byte offsets of the two halves within the block, so a writer names the field
  * it means instead of deriving it from the total size. */
-#define AGX3_G17P_INDIRECT_GEOMETRY_GLOBAL_OFFSET 0u
 #define AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET  12u
 
 /* agx3_g17p_native_indirect_compute_dispatch_append() splits the geometry
@@ -98,11 +97,6 @@ extern "C" {
 
 /* The exact MSL the image was compiled from, as a NUL-terminated string. */
 const char *agx3_g17p_grid_helper_source(void);
-
-struct agx3_g17p_indirect_geometry {
-   uint32_t global_size[3];
-   uint32_t local_size[3];
-};
 
 #ifdef __cplusplus
 }

@@ -201,9 +201,6 @@ struct agx_ioto_load_absolute {
    uint16_t cprog_input_tps_half;
 };
 
-#define AGX_IOTO_LOAD_SCS_BASE_HALF 8u
-#define AGX_IOTO_LOAD_SCS_BASE      UINT32_C(0x6000)
-
 /* The only ABI-buffer base selectors admitted by Apple's AGX3
  * EslBuilder::loadFromABIBuffer switch.  Values are native dword registers;
  * device loads consume the corresponding value * 2 half-register. */
@@ -215,14 +212,6 @@ enum agx_ioto_abi_buffer_slot {
    AGX_IOTO_ABI_BUFFER_SLOT_50 = 50,
    AGX_IOTO_ABI_BUFFER_SLOT_52 = 52,
    AGX_IOTO_ABI_BUFFER_SLOT_54 = 54,
-};
-
-struct agx_ioto_load_from_fixed {
-   uint32_t native_slot;
-   uint8_t count_dwords;
-   int16_t byte_offset;
-   uint8_t lane_mask;
-   uint16_t cprog_dest_half;
 };
 
 struct agx_ioto_load_allocation {

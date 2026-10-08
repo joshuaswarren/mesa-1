@@ -43,7 +43,6 @@ extern "C" {
 #define AGX3_IMUL_U32_REG_REG_MAX_LENGTH 14
 #define AGX3_IMADD_U32_REG_REG_REG_MAX_LENGTH 14
 #define AGX3_YIELD_I16_REG_LENGTH 6
-#define AGX3_NOP_LENGTH 2
 #define AGX3_THREADGROUP_BARRIER_LENGTH 6
 #define AGX3_SCOPED_BARRIER_MAX_LENGTH 12
 #define AGX3_SIMD_BROADCAST_F32_IMM_LENGTH 10
@@ -53,7 +52,6 @@ extern "C" {
 #define AGX3_INC_STK_FIXED_WITNESS_LENGTH 8
 #define AGX3_UPDATE_BVH_FIXED_WITNESS_LENGTH 14
 #define AGX3_END_LENGTH 4
-#define AGX3_ENABLE_ALL_THREADS_MAX_LENGTH 8
 #define AGX3_UPDATE_NODE_MAX_LENGTH 14
 
 struct agx3_encoded_ldimm {
@@ -201,11 +199,6 @@ struct agx3_encoded_yield_i16_reg {
    uint8_t length;
 };
 
-struct agx3_encoded_nop {
-   uint8_t bytes[AGX3_NOP_LENGTH];
-   uint8_t length;
-};
-
 struct agx3_encoded_threadgroup_barrier {
    uint8_t bytes[AGX3_THREADGROUP_BARRIER_LENGTH];
    uint8_t length;
@@ -258,11 +251,6 @@ struct agx3_encoded_update_bvh_fixed_witness {
 
 struct agx3_encoded_end {
    uint8_t bytes[AGX3_END_LENGTH];
-   uint8_t length;
-};
-
-struct agx3_encoded_enable_all_threads {
-   uint8_t bytes[AGX3_ENABLE_ALL_THREADS_MAX_LENGTH];
    uint8_t length;
 };
 

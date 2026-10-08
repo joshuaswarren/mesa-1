@@ -37,9 +37,6 @@ extern "C" {
 /* Complete native G17P colour-partition class corpus. */
 #define AGX3_G17P_MAX_COLOUR_PARTITIONS 3u
 
-/* Eight colour targets share the three native synchronization partitions. */
-#define AGX3_G17P_MAX_COLOUR_TARGETS 8u
-
 /*
  * Open G17P's colour-tile protocol. This is the f14=512, f15=1 pixwait form
  * that precedes the ordinary class-12 colour wait. It is byte-exactly

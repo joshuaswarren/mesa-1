@@ -7,16 +7,6 @@
 #include "util/bitscan.h"
 #include "vulkan/vulkan_core.h"
 
-/* Geometry, tessellation, task and mesh stages are not exposed on G17P. */
-#define HK_G17P_PIPELINE_STATISTICS_MASK                                      \
-   (VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |                 \
-    VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |               \
-    VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |               \
-    VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |                    \
-    VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |                     \
-    VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |             \
-    VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT)
-
 struct hk_pipeline_statistics_layout {
    uint32_t query_count;
    uint32_t reports_per_query;

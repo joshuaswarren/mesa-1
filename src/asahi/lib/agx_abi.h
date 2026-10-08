@@ -60,7 +60,6 @@
  * nothing.  Precompiled AGX3 kernels therefore place their arguments above
  * both the texture-pointer prefix and this half.  Four-half aligned so 64-bit
  * arguments keep their uniform-pair alignment. */
-#define AGX_ABI_AGX3_THREADGROUP_BASE_HALF 8
 #define AGX_ABI_AGX3_PRECOMP_ARG_HALFS 12
 
 #define AGX_ABI_FUNI_EMRT_HEAP (0)

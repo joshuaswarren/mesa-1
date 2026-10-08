@@ -32,18 +32,6 @@ bool hk_agx3_g17p_constant_program_from_binary(
    uint64_t allocation_va, size_t allocation_size,
    struct agx_ioto_constant_program *output);
 
-/* Native uniform loads address 512 half-registers in complete dwords. */
-#define HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE 1024u
-
-struct hk_agx3_ioto_program_desc {
-   uint64_t program_va;
-   const void *body;
-   size_t body_size;
-   struct agx_ioto_state_tail tail;
-   uint16_t profile_payload0;
-   uint16_t profile_payload1;
-};
-
 struct hk_agx3_g17p_graphics_program_desc {
    uint64_t program_va;
    uint64_t shader_va;
@@ -88,9 +76,6 @@ struct hk_agx3_g17p_graphics_program_desc {
 /* Honeykrisp has a fixed seven-range collector and a matching cache key.
  * Gallium needs a larger budget in the shared program composer. */
 #define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 7u
-#define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
-#define HK_AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \
-   AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE
 
 struct hk_agx3_g17p_graphics_program {
    uint8_t bytes[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
@@ -189,55 +174,6 @@ enum hk_agx3_g17p_rt0_bg_op {
    HK_AGX3_G17P_RT0_BG_NONE,
 };
 
-#define HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
-#define HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
-#define HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
-#define HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
-
-struct hk_agx3_g17p_rt0_bg_program_desc {
-   uint64_t program_va;
-   uint64_t shader_va;
-   uint64_t clear_value_va;
-   uint64_t texture_pointer_va;
-   uint64_t sampler_pointer_va;
-   uint32_t shader_binary_size;
-   uint32_t scratch_size;
-   uint16_t nr_gprs;
-   uint16_t staging_halfs;
-   uint16_t clear_push_halfs;
-   bool staging_known;
-   enum hk_agx3_g17p_rt0_bg_op op;
-   struct agx_ioto_g17p_imageblock imageblock;
-};
-
-struct hk_agx3_g17p_rt0_bg_program {
-   uint8_t bytes[AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE];
-   uint16_t length;
-};
-
-struct hk_agx3_g17p_rt0_eot_program_desc {
-   uint64_t program_va;
-   uint64_t shader_va;
-   /* Raw 32-byte-aligned GPU VA to the owned RT0 PBE32 descriptor. The
-    * CProg publishes this pointer in uniform halves 0..3, not its pointee. */
-   uint64_t pbe_argument_va;
-   /* RT0 byte offset inside one imageblock sample (native kind5 argument).
-    * Published as a zero-extended32-bit value in uniform halves4..5. */
-   uint8_t imageblock_offset_B;
-   uint8_t attachment_count;
-   uint8_t imageblock_offset1_B;
-   uint32_t shader_binary_size;
-   uint32_t scratch_size;
-   uint16_t nr_gprs;
-   uint16_t staging_halfs;
-   struct agx_ioto_g17p_imageblock imageblock;
-};
-
-struct hk_agx3_g17p_rt0_eot_program {
-   uint8_t bytes[AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE];
-   uint16_t length;
-};
-
 /* Classify the ordinary non-multiview, one-layer fast path. */
 bool hk_agx3_g17p_single_layer_rendering(uint32_t view_mask,
                                         uint32_t layer_count);
@@ -261,7 +197,6 @@ bool hk_agx3_g17p_direct_color_resolve_supported(
    bool has_resolve_target, bool average_resolve, bool store_source);
 
 #define HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE 6144u
-#define HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS  128u
 #define HK_AGX3_G17P_MAX_ROOT_SETS            8u
 
 /* Resolve a packed precompiled-kernel argument block to the dword-granular

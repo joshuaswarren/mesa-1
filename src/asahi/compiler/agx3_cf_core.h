@@ -59,7 +59,6 @@ enum agx3_cf_fcond {
 /* `b`/`bn`, whose displacement agx3_cf_patch_branch() fills in later. This is
  * the size a caller must RESERVE for a forward branch, which is not the same
  * number as the buffer bound above. */
-#define AGX3_CF_BRANCH_LENGTH 10u
 #define AGX3_CF_MAX_FLAG_SLOT 5u /* slots 0..5 are witnessed */
 
 struct agx3_cf_source_hints {

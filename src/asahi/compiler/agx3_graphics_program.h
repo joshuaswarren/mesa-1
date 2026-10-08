@@ -35,10 +35,6 @@
  * the real limits and are still enforced per program. */
 #define AGX3_G17P_GRAPHICS_MAX_RANGES 32u
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
-#define AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE \
-   (2u * AGX_IOTO_LOAD_LDIMM_MAX_SIZE)
-#define AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \
-   AGX_IOTO_G17P_EXTERNAL_LAUNCHER_MAX_SIZE
 #define AGX3_G17P_GRAPHICS_ROOT_BASE_HALF 0u
 #define AGX3_G17P_GRAPHICS_ROOT_GPR_DWORDS 2u
 /* The launcher carries its 64-bit root through LDSHDR in the final four
@@ -93,20 +89,6 @@ struct agx3_g17p_graphics_program_template {
       relocations[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
    uint16_t relocation_count;
    uint16_t constant_suffix_offset;
-};
-
-struct agx3_g17p_graphics_root_prefix {
-   uint8_t bytes[AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE];
-   uint8_t length;
-};
-
-/* Linked-shader-owned launcher bytes.  Only the root LDIMMs at the front and
- * the PC-relative branch at the end vary per recorded draw. */
-struct agx3_g17p_graphics_external_launcher_template {
-   uint8_t bytes[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
-   uint8_t length;
-   uint8_t root_prefix_length;
-   uint8_t branch_offset;
 };
 
 enum agx3_g17p_rt0_bg_op {

@@ -74,9 +74,6 @@ struct agx_ioto_g17p_imageblock {
    uint16_t tile_size_px;
 };
 
-#define AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32                                \
-   { .sample_size_B = 8, .nr_samples = 1, .tile_size_px = 32 * 32 }
-
 /* Build the exact fragment SPECLM record emitted by HAL200's
  * LdShdrTransformFragment for the supplied physical imageblock.  Unlike the
  * generic anonymous-field packer, this retains the recovered dimension bits

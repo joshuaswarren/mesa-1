@@ -19,35 +19,6 @@
 extern "C" {
 #endif
 
-/*
- * Apple derives the two launch-template fields from the same LoadShader
- * object whose instruction stream is addressed by program_va: the constant
- * program's thread-invariant spill and IPR bytes (ShaderInfo fields 31 and
- * 37). Keep the objects joined so a frontend cannot accidentally launch one
- * Ioto program with another program's template or with an AGX2
- * shader-base-relative USC pointer.
- */
-struct agx3_compute_program_desc {
-   enum agx_chip chip;
-   uint64_t program_va;
-
-   const void *body;
-   size_t body_size;
-   struct agx_ioto_state_tail tail;
-   struct agx_ioto_profile_control profile;
-   struct agx_ioto_preshader_desc preshader;
-
-   struct agx3_cdm_direct_template_sources launch_sources;
-};
-
-/* Bounded A18 Pro bring-up program: the exact output-positive direct-add3
- * Ioto witness joined to its native direct-launch template. */
-struct agx3_g17p_direct_add3_program_desc {
-   uint64_t program_va;
-   uint64_t shader_va;
-   struct agx3_cdm_direct_template_sources launch_sources;
-};
-
 /* Runtime-built G17P Ioto program joined to the native A18 Pro CDM pointer
  * form.  The Ioto bytes remain frontend-owned; this object binds their exact
  * allocation to the launch metadata used below. */

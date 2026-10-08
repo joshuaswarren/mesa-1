@@ -27,9 +27,6 @@
 #define AGX_SUBMIT_FENCE_WAIT           UINT32_C(0x00000001)
 #define AGX_SUBMIT_FENCE_SIGNAL         UINT32_C(0x00000002)
 #define AGX_SUBMIT_FENCE_BOTTOM_OF_PIPE UINT32_C(0x00000004)
-#define AGX_SUBMIT_FENCE_FLAGS_ALL                                         \
-   (AGX_SUBMIT_FENCE_WAIT | AGX_SUBMIT_FENCE_SIGNAL |                     \
-    AGX_SUBMIT_FENCE_BOTTOM_OF_PIPE)
 
 struct agx_submit_read_range {
    uint64_t gpu_va;
