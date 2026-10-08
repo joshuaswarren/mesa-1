@@ -66,7 +66,6 @@ libasahi_agx_files = files(
   'agx3_fltnorm_core.c',
   'agx3_writeout_core.c',
   'agx3_zs_core.c',
-  'agx3_rt_core.c',
   'agx3_slot_core.c',
   'agx3_resource_ir.c',
   'agx3_lower_texture_publications.c',

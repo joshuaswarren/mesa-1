@@ -14,9 +14,7 @@
  *    engine (the loop, the stack and commit are software either way), so a
  *    software traversal gives up far less than it sounds like.
  *  - The SCS slot layout that `intersect_ray` reads and writes is only
- *    partially mapped, and the canonical `intersect_ray` context encoded in
- *    agx3_rt_core.c matches no witnessed G17P ray-query site, so it is not a
- *    lowering template.
+ *    partially mapped, so there is no lowering template for it.
  *  - agx_rt_bvh.h's Gen5 layout carries a "validated over 64,000,000
  *    randomized headers" claim with no harness anywhere in the tree; it must
  *    not be adopted on that strength.
