@@ -6,7 +6,9 @@
 #include "agx_native_descriptor.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/compiler/agx_nir.h"
 #include "asahi/lib/agx_pbe_agx3_core.h"
+#include "asahi/vulkan/hk_native_descriptor.h"
 #include "util/macros.h"
 
 #include <stdio.h>
@@ -379,7 +381,7 @@ test_agx3_pbe(void)
     */
    static const char *const names[] = {
       "software sideband (image atomics)", "MSAA sideband", "layer stride",
-      "compressed", "sRGB on store", "extended word", "multisampled", "1D",
+      "compressed", "extended word", "multisampled", "1D",
       "sparse image mode",
    };
    struct AGX_PBE bad[ARRAY_SIZE(names)];
@@ -390,11 +392,18 @@ test_agx3_pbe(void)
    bad[1].aligned_width_msaa_sw = 64;
    bad[2].layer_stride_sw = 0x4000;
    bad[3].compressed = true;
-   bad[4].srgb = true;
-   bad[5].extended = true;
-   bad[6].samples = AGX_SAMPLE_COUNT_4;
-   bad[7].dimension = AGX_TEXTURE_DIMENSION_1D;
-   bad[8].mode = AGX_IMAGE_MODE_SPARSE;
+   bad[4].extended = true;
+   bad[5].samples = AGX_SAMPLE_COUNT_4;
+   bad[6].dimension = AGX_TEXTURE_DIMENSION_1D;
+   bad[7].mode = AGX_IMAGE_MODE_SPARSE;
+
+   /* sRGB on store is Gen9-only, as in hk_pack_native_pbe(). */
+   struct AGX_PBE srgb = rt;
+   srgb.srgb = true;
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &srgb));
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10, &native,
+                                      &srgb));
 
    for (unsigned i = 0; i < ARRAY_SIZE(bad); ++i) {
       memset(&native, 0xff, sizeof(native));
@@ -441,10 +450,65 @@ test_agx3_pbe(void)
    array.layers = 2;
    CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10, &native,
                                       &array));
+   /* A mipmapped array level and a 3D level take the Gen9 mip packets
+    * Honeykrisp stores storage images with. */
    array.level = 1;
    array.levels = 2;
-   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &array));
+   CHECK(agx_pbe_agx3_2d_array_mip_pack(AGX_PBE_AGX3_GENERATION_9, &fields,
+                                        2, 1, 2, &expected_array));
+   CHECK(memcmp(native.opaque, expected_array.bytes,
+                sizeof(expected_array.bytes)) == 0);
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10, &native,
                                       &array));
+
+   struct AGX_PBE volume = rt;
+   volume.dimension = AGX_TEXTURE_DIMENSION_3D;
+   volume.layers = 4;
+   volume.levels = 3;
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &volume));
+   CHECK(agx_pbe_agx3_3d_mip_pack(AGX_PBE_AGX3_GENERATION_9, &fields, 4, 0,
+                                  3, &expected_array));
+   CHECK(memcmp(native.opaque, expected_array.bytes,
+                sizeof(expected_array.bytes)) == 0);
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10, &native,
+                                      &volume));
+}
+
+/* Image atomics decode one packed addressing word from the G17P storage
+ * tail; Gallium and Honeykrisp must write it identically. */
+static void
+test_g17p_image_atomic_sw(void)
+{
+   static const struct {
+      uint64_t level_offset_B, layer_stride_B;
+      unsigned tile_w, tile_h, samples;
+   } cases[] = {
+      {0, 0, 1, 1, 1},           {0x180, 0x4000, 64, 32, 4},
+      {0x80, 0x80, 16, 16, 1},   {0x7fff80, 0x123480, 128, 64, 8},
+      {1, 0, 64, 64, 1},         {0, 0, 48, 64, 1},
+      {0, 0, 64, 64, 3},         {(uint64_t)1 << 34, 0, 1, 1, 1},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      uint64_t a = ~0ull, b = ~0ull;
+      const bool ok_a = agx_g17p_pack_image_atomic_sw(
+         cases[i].level_offset_B, cases[i].tile_w, cases[i].tile_h,
+         cases[i].layer_stride_B, cases[i].samples, &a);
+      const bool ok_b = hk_pack_g17p_image_atomic_sw(
+         cases[i].level_offset_B, cases[i].tile_w, cases[i].tile_h,
+         cases[i].layer_stride_B, cases[i].samples, &b);
+      CHECK(ok_a == ok_b);
+      CHECK(!ok_a || a == b);
+   }
+
+   /* The tail sits where libagx_image_texel_address_gen9() looks for it:
+    * 40 bytes past the PBE, the second of three 32-byte records. */
+   CHECK(AGX_G17P_IMAGE_ATOMIC_SW_OFFSET ==
+         AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE + AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE);
+   CHECK(AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET + 4 <=
+         3 * AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE);
 }
 
 static void
@@ -876,6 +940,7 @@ main(void)
    test_gen9_uncompressed_dimensions();
    test_native_packers();
    test_agx3_pbe();
+   test_g17p_image_atomic_sw();
    printf("Gallium AGX native descriptors: %u checks passed\n", checks);
    return 0;
 }
