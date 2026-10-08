@@ -194,10 +194,9 @@ agx_chip_codegen_supported(enum agx_chip chip)
     *   AGX2         -> agx_pack.c            (AGX2.xml)
     *   AGX3b/AGX3c  -> agx3_pack_binary.c    (agx3_compose/, AGX3{b,c}.xml)
     *
-    * The AGX3 side is a real encoder, not a decoder: agx3_compose replays
-    * 1,494 corpus instructions byte-exactly (test-agx3-compose-corpus.c), and
-    * agx3_pack_binary emits compute, vertex and fragment shaders end to end
-    * (the AGX3 compile-negative and graphics-compile tests).
+    * The AGX3 side is a real encoder, not a decoder: agx3_compose
+    * reproduces Apple's instructions byte-exactly, and agx3_pack_binary
+    * emits compute, vertex and fragment shaders end to end.
     *
     * "Has a code generator" is all this predicate claims. Instruction
     * coverage is explicit: an AGX3 shader outside the grounded domain makes

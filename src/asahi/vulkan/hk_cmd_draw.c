@@ -3715,10 +3715,10 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
 static void build_g17p_fs_epilog(nir_builder *b, const void *key_);
 static void build_fs_prolog(nir_builder *b, const void *key);
 
-/* v96: prolog/epilog parts persist in the device's disk cache. The in-memory
- * table above is per process, so every launch used to compile each part again
- * on the render thread at the first bind or draw that needed it (the whole
- * MC corpus: ~87 compiles even with a warm pipeline cache). The disk key
+/* Prolog/epilog parts persist in the device's disk cache. The in-memory
+ * table above is per process, so without it every launch would compile each
+ * part again on the render thread at the first bind or draw that needed it
+ * (~87 compiles for Minecraft even with a warm pipeline cache). The disk key
  * names the builder by a stable id and covers every input of the compile
  * below; the cache identity already carries the build, the GPU and the
  * codegen flags/environment. */
@@ -4535,10 +4535,6 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
     * footer that the fast linker will insert to stop.
     */
    bool epilog_stop = (key->nr_samples_shaded == 0);
-
-   /* The G17P epilog selects each written target's pixel classes from its
-    * position among all of the framebuffer's colour targets; computed below
-    * (v54: before the inline-blend attempt, which needs it too). */
 
    /* A G17P epilog selects each written target's pixel classes from its
     * position among all of the framebuffer's colour targets. */
@@ -5646,7 +5642,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
        * plane equations, so an implicit-LOD sample on that quad derives its
        * mip level across the seam.
        *
-       * Measured on G17P, 2026-09-18: without this term all 30
+       * Measured on G17P: without this term all 30
        * dEQP-VK.texture.mipmap.{2d,3d,cubemap}.projected.* cases fail and
        * every invalid pixel lies exactly on the shared diagonal of the test's
        * two triangles (31/31 in the decoded error mask of
@@ -5930,7 +5926,7 @@ hk_g17p_publish_native_bind_tail(
       return false;
    }
 
-   /* v56g/v57e: the draw-state selector names the LAST viewport_count
+   /* The draw-state selector names the LAST viewport_count
     * scissor and depth-bias records of this stream. When those already equal
     * this tail's records (a draw that republishes only because its vertex
     * shader reads per-draw base parameters), selecting them again is
@@ -7924,7 +7920,7 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * and a split has to happen before the record it protects. */
    const bool republishes = hk_gfx_republishes_render_state(cmd);
 
-   /* v56g/v57e: the HAL200 draw-state selector holds 16-bit scissor and
+   /* The HAL200 draw-state selector holds 16-bit scissor and
     * depth-bias indices. A stream whose arrays are about to exceed that
     * (only reachable with >65k distinct scissor/depth-bias states) is ended
     * before the republication instead of failing the draw. */

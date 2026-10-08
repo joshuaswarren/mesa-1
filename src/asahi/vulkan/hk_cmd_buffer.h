@@ -365,7 +365,7 @@ struct hk_rendering_state {
    struct agx_tilebuffer_layout tilebuffer;
    struct hk_render_registers cr;
 
-   /* HK_ZLS_PRECISE_DEPTH_STORE (v50, default on for G17P): the ZLS words for the
+   /* G17P precise depth store: the ZLS words for the
     * stream that ends the pass, when it is also the first stream (only) or
     * a later one (last). Depth honours storeOp there; stencil keeps the
     * forced store. zls_first_cs is the stream BeginRendering created. */

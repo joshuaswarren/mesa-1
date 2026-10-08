@@ -21,8 +21,8 @@
  * prefix encoding therefore loses nothing against the barrier model on one
  * queue; what it cannot express is stage granularity (a barrier from vertex
  * work into fragment work still waits on and gates whole commands), and it
- * cannot distinguish two commands in the same prefix. Both are proposed UAPI
- * extensions, see README.md in the audit directory.
+ * cannot distinguish two commands in the same prefix. Both would need UAPI
+ * extensions.
  *
  * This module records, per stream, the latest earlier stream on each
  * subqueue that a recorded dependency orders it after ("cut"), plus which

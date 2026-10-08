@@ -874,8 +874,8 @@ static inline VkFormat hk_meta_bitwise_copy_format(VkFormat format);
  * (R32_UINT for any 4-byte format, R16_UINT for any 2-byte format, ...) are
  * not: an RGBA8 image written through an R32_UINT PBE is compressed as one
  * 32-bit channel and decodes as garbage through the application's RGBA8
- * view, and vice versa. That mismatch was the 2026-09-24 magenta (sampled
- * source) / white (readback of a normalized store) failure.
+ * view, and vice versa (magenta sampled sources, white readbacks of
+ * normalized stores).
  *
  * Use the canonical view of the image's own channel class, and prefer its
  * integer member where one exists so the copy stays bitwise: R16 and

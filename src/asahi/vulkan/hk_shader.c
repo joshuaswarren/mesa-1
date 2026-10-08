@@ -1499,7 +1499,7 @@ lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *data)
    b->cursor = nir_after_instr(&tex->instr);
    nir_def *value = &tex->def;
 
-   /* HK_G17P_SCALED_SAMPLE_GUARD (v50, default off): kind is zero for every
+   /* Scaled-format sample guard: kind is zero for every
     * view that is not USCALED/SSCALED, and the conversion below is then the
     * identity. Without the guard, every float sample in every shader pays
     * ~50 unconditional ALU instructions (4x i2f/u2f, the per-channel factor
@@ -2035,9 +2035,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis);
 }
 
-/* v56h/v57f: a failed executable-preamble upload used to be logged and then
- * reported as a successfully created shader with preamble_addr 0.  Report it,
- * so the caller's existing error path destroys the half-built shader. */
+/* Report a failed executable-preamble upload, so the caller's error path
+ * destroys the half-built shader instead of keeping one with preamble_addr
+ * 0. */
 static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
@@ -2557,7 +2557,7 @@ hk_g17p_compile_vs_cprog(struct hk_device *dev, nir_shader **nir,
 }
 
 /*
- * The fragment constant program (v56c: formed when a fragment reads
+ * The fragment constant program (formed when a fragment reads
  * descriptor-backed memory it can hoist) is launched by the same bounded
  * native protocol as the vertex one, and hk_g17p_basic_graphics_program_
  * supported() refuses every draw of a fragment whose preamble falls outside
@@ -2565,8 +2565,8 @@ hk_g17p_compile_vs_cprog(struct hk_device *dev, nir_shader **nir,
  * Decide that once, here, exactly as hk_g17p_compile_vs_cprog() does for the
  * vertex stage: compile a clone with the constant program and keep it only
  * when it is launchable; otherwise build the fragment the way a
- * push-constant-only fragment is built (no preamble), which is the v56b
- * default path. A shader whose constant program does not compile at all (an
+ * push-constant-only fragment is built (no preamble). A shader whose
+ * constant program does not compile at all (an
  * unencodable preamble instruction) takes the same route.
  *
  * On success the clone replaces `*nir`. Otherwise `shader->b` is cleared,
@@ -3074,9 +3074,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
             nir->info.num_textures || nir->info.num_images)),
    };
 
-   /* v56d: the native constant-program lowering applies exactly when G17P
-    * lets this compile form a preamble (the fragment CProg default, the v57
-    * vertex CProg); carried in the key, never in the global debug word. */
+   /* The native constant-program lowering applies exactly when G17P lets
+    * this compile form a preamble (fragment and vertex constant programs);
+    * carried in the key, never in the global debug word. */
    backend_key.g17p_native_uniforms =
       dev->dev.chip == AGX_CHIP_G17P && !backend_key.no_preamble;
 
@@ -3108,7 +3108,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    if (nir->info.stage == MESA_SHADER_FRAGMENT && key)
       backend_key.fs.nr_samples = key->fs.g17p_samples;
 
-   /* v56f/v57d: serialize compiles only while they print, so debug output
+   /* Serialize compiles only while they print, so debug output
     * stays readable. Behaviour flags (native_uniforms, nopreamble, ...)
     * change no shared state; locking on them serialized every pipeline
     * compile across the application's threads (4 threads: 268 -> 973 ms
@@ -3124,7 +3124,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    assert(nir->info.io_lowered);
 
-   /* v54 AGX_G17P_INLINE_BLEND: keep what fast-link needs to rebuild this
+   /* Inline blend: keep what fast-link needs to rebuild this
     * fragment program with its colour epilog inlined. Per-sample shading and
     * internal shaders keep the split parts. */
    if (dev->dev.chip == AGX_CHIP_G17P &&
@@ -3176,8 +3176,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        *      [d16:reg1 s0=16:reg1 s1=16:imm7 s2=16:imm3]
        *
        * The reproduction needs no hardware -- it runs under the G17P
-       * drm-shim.  src/asahi/isa/probes/game/ plus g17p-vulkan-feature-probe
-       * cover the encodings that translation layers depend on. */
+       * drm-shim. */
       /* vk_errorf alone is invisible unless the application enabled debug
        * logging, so a refused shader reaches the application as a bare
        * VkResult and it typically crashes binding the pipeline that was never
@@ -4114,7 +4113,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    if (blob->overrun)
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
-   /* v56f/v57d: a variant that was never compiled (for instance the software
+   /* A variant that was never compiled (for instance the software
     * vertex variant of a hardware-only vertex shader) has no code. The
     * compile leaves it without link table, upload or packed counts; restore
     * exactly that, so a deserialized object equals the compiled one field
@@ -4394,7 +4393,7 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
       memset(&dst->linked, 0, sizeof(dst->linked));
       dst->only_linked = NULL;
       dst->bo = NULL;
-      /* v54: the clone owns its own copy of the inline-blend NIR. */
+      /* The clone owns its own copy of the inline-blend NIR. */
       dst->g17p_mono_nir = NULL;
       dst->g17p_mono_nir_size = 0;
       if (src->g17p_mono_nir) {

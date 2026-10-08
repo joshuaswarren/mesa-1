@@ -117,7 +117,7 @@ extern "C" {
 #define AGX_RT_SCS_RAY_SEGMENT_SIZE 36u
 
 /*
- * SCS addressing and the rest of the map, measured 2026-09-10 against
+ * SCS addressing and the rest of the map, measured against
  * `metal-nt -arch applegpu_g17p` over 27 purpose-written MSL kernels.
  *
  * stscs/ldscs address the SCS as (bank, byte offset), not as one flat space:

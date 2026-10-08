@@ -1332,8 +1332,7 @@ hk_get_device_properties(const struct agx_device *dev,
    };
 
    if (dev->chip == AGX_CHIP_G17P) {
-      /* Measured per operation under the G17P drm-shim with
-       * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):
+      /* Measured per operation under the G17P drm-shim:
        *
        *   BASIC             g22_subgroup_basic          encodes
        *   VOTE              g21_subgroup_vote           encodes
