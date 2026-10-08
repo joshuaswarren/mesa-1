@@ -9336,7 +9336,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool vertex_fetch_stages_coordinates =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_VERTEX &&
-               I->op == AGX_OPCODE_TEXTURE_LOAD;
+               (I->op == AGX_OPCODE_TEXTURE_LOAD ||
+                I->op == AGX_OPCODE_IMAGE_LOAD);
             const bool staged =
                (enc == AGX_ISA_ENCODING_AGX3B &&
                 I->dim == AGX_DIM_2D_MS_ARRAY) ||
