@@ -16,7 +16,7 @@ encoding_ok(enum agx_isa_encoding enc)
           enc == AGX_ISA_ENCODING_AGX3C;
 }
 /* Scoreboard slots are machine behaviour: eight on every G17-class part.
- * The encoders here still accept only agx3b/agx3c (encoding_ok). */
+ * Device atomics retain the agx3b/agx3c encoding_ok boundary. */
 static unsigned
 slot_count(enum agx_isa_encoding enc)
 {
@@ -53,6 +53,10 @@ compose_first(enum agx_isa_encoding enc, const char *mnemonic,
               const struct agx3_field_kv *fields, unsigned nfields,
               uint8_t out[AGX3_ATOMIC_MAX_LENGTH], uint8_t *len)
 {
+   if (enc == AGX_ISA_ENCODING_AGX3D)
+      return agx3_bind_compose(enc, mnemonic, AGX3_BIND_APPLE_ORDER,
+                              fields, nfields, NULL, 0, out, len);
+
    /* The encoding points to try are a per-table layout: twelve agx3c
     * atomicdev/atomictg forms, one agx3b form, none elsewhere. */
    const unsigned count = enc == AGX_ISA_ENCODING_AGX3C   ? 12
@@ -201,7 +205,8 @@ agx3_atomic_encode_local(enum agx_isa_encoding enc,
                          const struct agx3_local_atomic_desc *d,
                          uint8_t out[AGX3_ATOMIC_MAX_LENGTH], uint8_t *len)
 {
-   if (!encoding_ok(enc) || d == NULL || out == NULL || len == NULL ||
+   if ((!encoding_ok(enc) && enc != AGX_ISA_ENCODING_AGX3D) ||
+       d == NULL || out == NULL || len == NULL ||
        !op_ok(d->op) || d->value > 191 ||
        (d->wait_mask & ~((1u << slot_count(enc)) - 1u)))
       return false;
@@ -213,20 +218,17 @@ agx3_atomic_encode_local(enum agx_isa_encoding enc,
           (d->address_kind == AGX3_ATOMIC_INDEX_IMMEDIATE &&
            (d->address & 3) != 0) ||
           (d->address_kind == AGX3_ATOMIC_INDEX_REGISTER &&
-           (enc != AGX_ISA_ENCODING_AGX3B || d->address > 191)) ||
-          d->address_kill)
+           d->address > 191) ||
+          (d->address_kill &&
+           (enc == AGX_ISA_ENCODING_AGX3B ||
+            d->address_kind != AGX3_ATOMIC_INDEX_REGISTER)))
          return false;
    } else {
-      /* The no-result and addressed forms are isolated on AGX3b. AGX3c has
-       * the no-result form at an immediate address: metal-nt applegpu_g17g
-       * and applegpu_g18g compile a threadgroup atomic_fetch_add whose
-       * result is unused to atomictg with the return form's fields less
-       * f2/f9/f12/f85 and f11/f75 (m6-libagx-forms lk_local_atomic_noret
-       * against lk_local_atomic_ret). */
-      if (d->slot != 0 ||
-          (enc != AGX_ISA_ENCODING_AGX3B &&
-           (enc != AGX_ISA_ENCODING_AGX3C ||
-            d->address_kind != AGX3_ATOMIC_INDEX_IMMEDIATE)))
+      /* G17G/G18G programs selecting between two threadgroup pointers
+       * establish the register byte-base form for all eleven operations,
+       * with and without a result. Returning forms can kill that pointer;
+       * resultless forms omit the result registers and producer slot. */
+      if (d->slot != 0)
          return false;
 
       if (d->address_kind == AGX3_ATOMIC_INDEX_IMMEDIATE) {
@@ -271,11 +273,12 @@ agx3_atomic_encode_local(enum agx_isa_encoding enc,
       f[n++] = (struct agx3_field_kv)KV(85, 1);
    }
 
-   if (d->op == AGX3_ATOMIC_XCHG || d->op == AGX3_ATOMIC_CMPXCHG)
+   if ((d->op == AGX3_ATOMIC_XCHG || d->op == AGX3_ATOMIC_CMPXCHG) &&
+       enc != AGX_ISA_ENCODING_AGX3D)
       f[n++] = (struct agx3_field_kv)KV(
          enc == AGX_ISA_ENCODING_AGX3C ? 83 : 81, 1);
 
-   if (enc == AGX_ISA_ENCODING_AGX3C) {
+   if (agx_encoding_is_g17_class(enc)) {
       if (d->returns_value)
          f[n++] = (struct agx3_field_kv)KV(11, 1);
       f[n++] = (struct agx3_field_kv)KV(59, 15);

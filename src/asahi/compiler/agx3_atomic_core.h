@@ -7,8 +7,8 @@
  * The 32-bit operation selector and every operand below were isolated in
  * Apple's G15G/G16G/G17S compiler output.  AGX3b device atomics are in-place;
  * AGX3c device atomics split value and return registers.  Threadgroup atomics
- * split them on both encodings.  G17P additionally grounds no-result
- * threadgroup atomics with immediate and register byte addresses.  No 64-bit
+ * split them on both encodings. G17P/G17G/G18G ground returned and no-result
+ * threadgroup atomics with immediate and register byte addresses. No 64-bit
  * encoding has been witnessed, so the interface deliberately has no width
  * selector.
  */
