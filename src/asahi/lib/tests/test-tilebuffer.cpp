@@ -489,8 +489,8 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
       EXPECT_EQ(agx_g17p_mrt_eot_selector(format.logical), 0x15);
 
       /* Multisample admission follows the physical tilebuffer format, and
-       * R16_FLOAT is one of the families the four-sample hardware sweep in
-       * test-g17p-gl-msaa-resolve.c covers. R16_UINT is not. */
+       * R16_FLOAT is one of the families the four-sample hardware sweep
+       * covers. R16_UINT is not. */
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
       EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    }

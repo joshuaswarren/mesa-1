@@ -340,13 +340,11 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
 
    /* Multisample tiles repeat one sample's allocation, so what matters is the
     * physical tilebuffer format rather than the API format in front of it.
-    * A hardware sweep at four samples
-    * (src/asahi/gl-tests/test-g17p-gl-msaa-resolve.c, which reads every sample
-    * back individually before resolving) covers each physical family below:
+    * A hardware sweep at four samples, reading every sample back
+    * individually before resolving, covers each physical family below:
     * rgba8, rgb565, rgba4, rgb5_a1, rgb10_a2, r8, rg8, r16f and rgba16f all
     * reach every sample and resolve to the drawn colour. Naming the physical
-    * format also admits the BGRA and RGBX spellings of the same tiles, which
-    * the previous logical-format list had to enumerate one at a time.
+    * format also admits the BGRA and RGBX spellings of the same tiles.
     */
    if (tib->nr_samples > 1 && tib->logical_format[0] != PIPE_FORMAT_NONE) {
       switch (agx_tilebuffer_physical_format(tib, 0)) {
