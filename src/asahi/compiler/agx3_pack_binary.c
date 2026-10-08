@@ -13422,8 +13422,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool g18_msaa4_coverage =
                enc == AGX_ISA_ENCODING_AGX3C && sample_coverage &&
                agx3_g18_msaa4_tile_shader(ctx);
+            /* Native ballot-read643 compute, vertex and fragment programs
+             * read SR34 as W16 on both G17G and G18G. The C encoder and
+             * G18 field-vector translation reproduce all twelve reads;
+             * keep SR36 and the other coverage gates unchanged. */
             if ((enc != AGX_ISA_ENCODING_AGX3B &&
-                 !(enc == AGX_ISA_ENCODING_AGX3C && active_thread) &&
+                 !(enc == AGX_ISA_ENCODING_AGX3C &&
+                   (active_thread || active_index)) &&
                  !g18_msaa4_coverage) ||
                 !(active_thread || sample_coverage || active_index || active_count) ||
                 I->nr_dests != 1 ||
