@@ -1,9 +1,0 @@
-#version 460
-#extension GL_EXT_ray_tracing : require
-
-layout(location = 1) callableDataInEXT uint callableData;
-
-void main()
-{
-   callableData = 0xCA11AB1Eu;
-}

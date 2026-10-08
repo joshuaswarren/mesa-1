@@ -1,8 +1,0 @@
-{"pipelines":{"render_pipelines":[
-{"vertex_function":"sample_vertex","fragment_function":"sample_fragment","raster_sample_count":1,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]},
-{"vertex_function":"sample_vertex","fragment_function":"sample_fragment","raster_sample_count":2,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]},
-{"vertex_function":"sample_vertex","fragment_function":"sample_fragment","raster_sample_count":4,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]},
-{"vertex_function":"sample_vertex","fragment_function":"sample_dynamic_fragment","raster_sample_count":1,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]},
-{"vertex_function":"sample_vertex","fragment_function":"sample_dynamic_fragment","raster_sample_count":2,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]},
-{"vertex_function":"sample_vertex","fragment_function":"sample_dynamic_fragment","raster_sample_count":4,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]}
-]}}

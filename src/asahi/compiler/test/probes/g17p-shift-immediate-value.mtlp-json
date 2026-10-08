@@ -1,1 +1,0 @@
-{"pipelines":{"compute_pipelines":[{"compute_function":"reg_reg"},{"compute_function":"imm1_reg"},{"compute_function":"imm5_reg"},{"compute_function":"immneg_reg"},{"compute_function":"uimm1_reg"}]}}

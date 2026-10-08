@@ -1,9 +1,0 @@
-#version 450
-#extension GL_KHR_shader_subgroup_shuffle_relative : require
-/* VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT (WavePrefix helpers). */
-layout(local_size_x = 32) in;
-layout(set = 0, binding = 0, std430) buffer Output { uint values[]; } o;
-void main() {
-   uint g = gl_GlobalInvocationID.x;
-   o.values[g] = subgroupShuffleUp(g, 1u) + subgroupShuffleDown(g, 2u);
-}

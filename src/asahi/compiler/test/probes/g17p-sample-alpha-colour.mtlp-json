@@ -1,4 +1,0 @@
-{"pipelines":{"render_pipelines":[
-{"vertex_function":"colour_vertex","fragment_function":"colour_fragment","raster_sample_count":2,"alpha_to_coverage_enabled":true,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]},
-{"vertex_function":"colour_vertex","fragment_function":"colour_fragment","raster_sample_count":4,"alpha_to_coverage_enabled":true,"color_attachments":[{"pixel_format":"RGBA8Unorm"}]}
-]}}

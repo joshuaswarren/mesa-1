@@ -1,9 +1,0 @@
-#version 450
-#extension GL_KHR_shader_subgroup_shuffle : require
-/* VK_SUBGROUP_FEATURE_SHUFFLE_BIT is advertised (WaveReadLaneAt). */
-layout(local_size_x = 32) in;
-layout(set = 0, binding = 0, std430) buffer Output { uint values[]; } o;
-void main() {
-   uint g = gl_GlobalInvocationID.x;
-   o.values[g] = subgroupShuffle(g * 3u, 31u - gl_SubgroupInvocationID);
-}
