@@ -422,9 +422,7 @@ agx_gallium_pack_native_pbe_impl(
        (legacy->compressed && !gen10_multisample) ||
        legacy->mode != AGX_IMAGE_MODE_NORMAL ||
        (!array && !g18_layered && legacy->layers != 1) ||
-       (g18_layered && (legacy->layout == AGX_LAYOUT_LINEAR ||
-                        legacy->level != 0 || legacy->levels != 1 ||
-                        legacy->unk_mipmapped)) ||
+       (g18_layered && legacy->layout == AGX_LAYOUT_LINEAR) ||
        (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
                         legacy->level != 0 || legacy->levels != 1 ||
                         legacy->unk_mipmapped)) ||
@@ -463,8 +461,8 @@ agx_gallium_pack_native_pbe_impl(
 
    struct agx_pbe_agx3_descriptor packed;
    const bool valid = g18_layered
-      ? agx_pbe_g18_layered_pack(&fields, legacy->dimension, legacy->layers,
-                                &packed)
+      ? agx_pbe_g18_layered_mip_pack(&fields, legacy->dimension, legacy->layers,
+                                    legacy->level, legacy->levels, &packed)
       : multisample
       ? (array
             ? agx_pbe_agx3_2d_array_multisample_pack(

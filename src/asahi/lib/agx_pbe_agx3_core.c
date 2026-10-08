@@ -227,6 +227,15 @@ agx_pbe_g18_layered_pack(const struct agx_pbe_agx3_2d_fields *fields,
                          uint32_t dimension, uint32_t layers,
                          struct agx_pbe_agx3_descriptor *out)
 {
+   return agx_pbe_g18_layered_mip_pack(fields, dimension, layers, 0, 1, out);
+}
+
+bool
+agx_pbe_g18_layered_mip_pack(const struct agx_pbe_agx3_2d_fields *fields,
+                             uint32_t dimension, uint32_t layers,
+                             uint32_t level, uint32_t levels,
+                             struct agx_pbe_agx3_descriptor *out)
+{
    if (out)
       memset(out, 0, sizeof(*out));
 
@@ -235,13 +244,15 @@ agx_pbe_g18_layered_pack(const struct agx_pbe_agx3_2d_fields *fields,
         dimension != AGX_PBE_DIMENSION_3D) ||
        fields->layout == AGX_PBE_LAYOUT_LINEAR || fields->compressed ||
        layers < 1 || layers > UINT16_MAX + 1u ||
-       !agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_10, fields, out))
+       !agx_pbe_g18_2d_mip_pack(fields, level, levels, out))
       return false;
 
    /* Original G18 storage producer: dimension at 0x219546a60..a64,
     * layer/depth count at 0x219546da4..e10/f28..f38. Native replay528
     * covers both tiled layouts, one-layer arrays and nonzero depth planes.
-    * Gen10's base codec preserves the independently supplied layer flag. */
+    * Native612 adds selected levels in mip chains: the dimension/count and
+    * page flag compose with the ordinary 2D mip fields without rebasing the
+    * address or dimensions. The base codec preserves the layer flag. */
    uint64_t word0 = load_le64(&out->bytes[0]);
    uint64_t word1 = load_le64(&out->bytes[8]);
    word0 = (word0 & ~UINT64_C(0xf)) | dimension;

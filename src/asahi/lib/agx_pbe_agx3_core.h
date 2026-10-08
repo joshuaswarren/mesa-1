@@ -140,6 +140,13 @@ bool agx_pbe_g18_layered_pack(
    const struct agx_pbe_agx3_2d_fields *fields, uint32_t dimension,
    uint32_t layers, struct agx_pbe_agx3_descriptor *out);
 
+/* The same storage-write profile with native mip selection. Base allocation
+ * dimensions/address and the independently supplied page flag are preserved. */
+bool agx_pbe_g18_layered_mip_pack(
+   const struct agx_pbe_agx3_2d_fields *fields, uint32_t dimension,
+   uint32_t layers, uint32_t level, uint32_t levels,
+   struct agx_pbe_agx3_descriptor *out);
+
 bool agx_pbe_agx3_2d_unpack(
    uint32_t generation, const void *bytes, size_t size,
    struct agx_pbe_agx3_2d_fields *fields);

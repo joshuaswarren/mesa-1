@@ -412,10 +412,11 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    /* Native607 compiles float4 3D/cube samples independently for G17G and
     * G18G in all three execution stages. Explicit zero and register levels
     * use the existing f139=2/4 selectors and f76=3/4 dimensions. Native610
-    * adds implicit and register-bias fragment shapes (f139=0/3). Operand
+    * adds implicit and register-bias fragment shapes (f139=0/3). Native615
+    * grounds the same colour profiles for cube arrays (f77=2). Operand
     * publication remains the stream packer's architecture-specific job. */
    const bool gpu1_colour_level = enc == AGX_ISA_ENCODING_AGX3C &&
-      (d->three_d != d->cube) && !d->array && !d->shadow &&
+      (d->three_d != d->cube) && (!d->array || d->cube) && !d->shadow &&
       d->width == AGX3_TEX_W32 && d->mask == 15 && d->coord == 0 &&
       !d->offset && !d->offset_register && !d->offset_staged &&
       !d->query_lod && !d->min_lod && !d->sparse &&
