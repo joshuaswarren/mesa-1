@@ -250,8 +250,6 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_add_ext_bo(dev, mem->bo);
 
-   agx_g17p_va_lifetime_trace(&dev->dev, "hk-allocate", mem->bo);
-
    uint64_t heap_used = p_atomic_add_return(&heap->used, mem->bo->size);
    if (heap_used > heap->size) {
       hk_FreeMemory(device, hk_device_memory_to_handle(mem), pAllocator);
@@ -296,8 +294,6 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    const VkMemoryType *type = &pdev->mem_types[mem->vk.memory_type_index];
    struct hk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
    p_atomic_add(&heap->used, -((int64_t)mem->bo->size));
-
-   agx_g17p_va_lifetime_trace(&dev->dev, "hk-free-request", mem->bo);
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);

@@ -177,7 +177,6 @@ static const struct debug_named_value agx_debug_options[] = {
    {"1queue",    AGX_DBG_1QUEUE,   "Force usage of a single queue for multiple contexts"},
    {"nosoft",    AGX_DBG_NOSOFT,   "Disable soft fault optimizations"},
    {"nomerge",   AGX_DBG_NOMERGE,  "Disable control stream merging"},
-   {"faulttrace",AGX_DBG_FAULTTRACE,"Decode only a failed command stream"},
    {"asynctrace",AGX_DBG_ASYNCTRACE,"Trace command streams without waiting"},
    {"bodumpverbose", AGX_DBG_BODUMPVERBOSE,   "Include extra info with dumps"},
    DEBUG_NAMED_VALUE_END
@@ -188,8 +187,6 @@ void
 agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    const uint64_t handle = bo->handle;
-
-   agx_g17p_va_lifetime_trace(dev, "bo-free", bo);
 
    if (bo->_map)
       dev->ops.bo_munmap(dev, bo);
@@ -225,34 +222,6 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
    __sync_synchronize();
 
    dev->ops.bo_free(dev, handle);
-}
-
-void
-agx_g17p_va_lifetime_trace(struct agx_device *dev, const char *phase,
-                           const struct agx_bo *bo)
-{
-   static int enabled = -1;
-
-   if (!dev || !bo || dev->chip != AGX_CHIP_G17P)
-      return;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("AGX_G17P_VA_LIFETIME_TRACE", false);
-   if (!enabled)
-      return;
-
-   const uint64_t rw = bo->va ? bo->va->addr : 0;
-   const uint64_t rw_end = rw + bo->size;
-   const bool has_ro = bo->va && !(bo->va->flags & AGX_VA_USC);
-   const uint64_t ro = has_ro ? agx_rw_addr_to_ro(dev, rw) : 0;
-   const uint64_t ro_end = has_ro ? ro + bo->size : 0;
-
-   fprintf(stderr,
-           "G17P VA-LIFETIME phase=%s handle=%u flags=%#x size=%#llx "
-           "rw=[%#llx,%#llx) ro=[%#llx,%#llx) label=%s\n",
-           phase ? phase : "unknown", bo->handle, bo->flags,
-           (unsigned long long)bo->size, (unsigned long long)rw,
-           (unsigned long long)rw_end, (unsigned long long)ro,
-           (unsigned long long)ro_end, bo->label ? bo->label : "(null)");
 }
 
 #ifdef HAVE_LIBDRM
@@ -672,7 +641,7 @@ agx_bo_import(struct agx_device *dev, int fd)
    assert(bo->dev != NULL && "post-condition");
 
    if (dev->debug &
-       (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE)) {
+       (AGX_DBG_TRACE | AGX_DBG_ASYNCTRACE)) {
       agx_bo_map(bo);
       agxdecode_track_alloc(dev->agxdecode, bo);
    }
@@ -977,14 +946,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
    dev->debug =
       debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
 
-   /* Chromium may sanitize the driver's aggregate debug variable when it
-    * respawns its sandboxed GPU process, while the narrowly scoped HK_G17P_*
-    * controls survive (the draw/submit traces use the same route).  Preserve
-    * a dedicated opt-in for the failure-only decoder so a reproduced device
-    * loss cannot silently discard the payload we armed it to capture. */
-   if (debug_get_bool_option("HK_G17P_FAULTTRACE", false))
-      dev->debug |= AGX_DBG_FAULTTRACE;
-
    ssize_t params_size = -1;
 
    /*
@@ -1141,19 +1102,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    dev->guard_size = AIL_PAGESIZE;
 
-   /* Diagnostic: native Metal exposes each render write-resource group to
-    * MCache as one contiguous aperture. Mesa normally reserves an unmapped
-    * guard page after every BO, so a broad range spanning the live heap has
-    * holes and is correctly rejected by the kernel's write-range validator.
-    * Remove those holes only for the explicit G17P native-range experiment;
-    * this is set before either VMA heap is initialized or any BO is created.
-    */
-   if (dev->chip == AGX_CHIP_G17P &&
-       getenv("ASAHI_G17P_NO_GUARD") != NULL) {
-      dev->guard_size = 0;
-      fprintf(stderr,
-              "asahi: G17P diagnostic disabled per-BO VA guard pages\n");
-   }
    // Put the USC heap at the bottom of the user address space, 4GiB aligned
    dev->shader_base =
       ALIGN_POT(MAX2(dev->params.vm_start, reservation), 0x100000000ull);
@@ -1203,60 +1151,9 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * sparse alias has to fit below the kernel range and the window must stay
     * a power of two.  Shrinking the kernel reservation buys nothing -- the
     * power-of-two step dominates.  32GiB of VA against <=16GB of RAM is not
-    * a practical limit.
-    *
-    * ASAHI_G17P_USC_BASE below overrides this for further experiments only. */
+    * a practical limit. */
    if (dev->chip == AGX_CHIP_G17P)
       dev->shader_base = AGX_G17P_USC_WINDOW_BASE;
-
-   /* G17P launch-level bring-up controls.
-    *
-    * Two properties of the USC exec window have never been varied on this
-    * chip, and both differ by orders of magnitude from the only configuration
-    * that has ever executed a kick on it (the m1n1 add3 witness):
-    *
-    *   - the window BASE.  add3 uses 0x10000000000; Honeykrisp derives
-    *     0x1100000000 from the kernel-reported vm_start.
-    *   - the OFFSET of code within the window.  add3 places its Ioto program
-    *     at base+0xa8000 and its shader container at base+0x3c0, i.e. inside
-    *     the first megabyte.  util_vma_heap_init() defaults to alloc_high, so
-    *     Honeykrisp places both within ~21KB of the TOP of a 4GiB window
-    *     (base+0xfffac000), four orders of magnitude further out.
-    *
-    * The offset is the one with a documented narrow field behind it.  m1n1's
-    * build_add3_preamble() (agx_g17p_native_add3.py) relocates the launch
-    * header's code pointer through a 16-bit halfword counted in 0x2000-byte
-    * chunks measured from usc_exec_base, and raises if the result will not fit
-    * -- a reach of exactly 512MiB.  Our allocations sit 4GiB out, eight times
-    * beyond it.
-    *
-    * Both are selected at runtime rather than compiled in so that one frozen
-    * artifact covers the baseline and each experiment, and so a run's own
-    * stderr records which layout produced it.  Bad values are fatal rather
-    * than clamped: a silently adjusted layout would produce a result that
-    * looks like an answer but is not.
-    */
-   const char *usc_base_env = getenv("ASAHI_G17P_USC_BASE");
-   if (usc_base_env != NULL && usc_base_env[0] != '\0') {
-      char *end = NULL;
-      errno = 0;
-      unsigned long long requested = strtoull(usc_base_env, &end, 0);
-
-      if (errno != 0 || end == usc_base_env || *end != '\0') {
-         fprintf(stderr, "ASAHI_G17P_USC_BASE=\"%s\" is not a number\n",
-                 usc_base_env);
-         goto fail;
-      }
-
-      if ((requested & 0xffffffffull) != 0) {
-         fprintf(stderr,
-                 "ASAHI_G17P_USC_BASE 0x%llx is not 4GiB aligned\n",
-                 requested);
-         goto fail;
-      }
-
-      dev->shader_base = requested;
-   }
 
    if (dev->shader_base < reservation) {
       /* Our robustness implementation requires the bottom unmapped */
@@ -1435,28 +1332,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
    if (dev->chip == AGX_CHIP_G17P)
       initialized |= AGX_INIT_ALIAS_HEAP;
 
-   /* util_vma_heap_init() defaults to alloc_high, which puts every shader and
-    * Ioto program within a few pages of the TOP of the 4GiB USC window.  The
-    * only G17P configuration ever observed to execute keeps its code inside
-    * the first megabyte of the window; see the note on the base above.  This
-    * makes the direction selectable so that difference can be tested on its
-    * own.  It only reverses a search order -- no address is computed from it
-    * -- so an unrecognised value simply keeps the upstream default. */
-   const char *usc_low_env = getenv("ASAHI_G17P_USC_LOW");
-   const bool usc_low = usc_low_env != NULL && usc_low_env[0] == '1' &&
-                        usc_low_env[1] == '\0';
-   if (usc_low)
-      dev->usc_heap.alloc_high = false;
-
-   if (dev->chip == AGX_CHIP_G17P) {
-      fprintf(stderr,
-              "asahi: G17P USC window base %#llx size %#llx alloc=%s; "
-              "user heap %#llx size %#llx\n",
-              (unsigned long long)dev->shader_base,
-              (unsigned long long)shader_size, usc_low ? "low" : "high",
-              (unsigned long long)user_start, (unsigned long long)user_size);
-   }
-
    if (!agx_va_reserve_runtime_graph_hole(
           dev->chip, &dev->main_heap, user_start, user_size,
           dev->sparse_ro_offset, &dev->usc_heap, dev->shader_base,
@@ -1546,25 +1421,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
       if (context == NULL) {
          fprintf(stderr, "Failed to bind G17P native render context");
          goto fail;
-      }
-
-      if (getenv("ASAHI_G17P_CONTEXT_TRACE")) {
-         const uint32_t gem_flags =
-            DRM_ASAHI_GEM_WRITEBACK |
-            ((context->flags & (AGX_BO_SHARED | AGX_BO_SHAREABLE))
-                ? 0
-                : DRM_ASAHI_GEM_VM_PRIVATE);
-         fprintf(stderr,
-                 "asahi: G17P context GEM_CREATE size=%#llx gem_flags=%#x "
-                 "vm_id=%u handle=%u bo_flags=%#x; VM_BIND vm_id=%u "
-                 "addr=%#llx range=%#llx offset=0 handle=%u flags=%#x\n",
-                 (unsigned long long)context->size, gem_flags,
-                 gem_flags & DRM_ASAHI_GEM_VM_PRIVATE ? dev->vm_id : 0,
-                 context->uapi_handle, context->flags, dev->vm_id,
-                 (unsigned long long)AGX_G17P_RENDER_CONTEXT_BASE,
-                 (unsigned long long)AGX_G17P_RENDER_CONTEXT_SIZE,
-                 context->uapi_handle,
-                 DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
       }
 
       dev->g17p_render_context_bo = context;

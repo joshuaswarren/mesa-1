@@ -162,10 +162,6 @@ struct agx_bo *agx_bo_create(struct agx_device *dev, size_t size,
 void agx_bo_reference(struct agx_bo *bo);
 void agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo);
 
-/* Opt-in G17P VA lifecycle trace used to correlate a GPU fault address with
- * VkDeviceMemory release, BO-cache reuse, and the eventual GEM close. */
-void agx_g17p_va_lifetime_trace(struct agx_device *dev, const char *phase,
-                                const struct agx_bo *bo);
 struct agx_bo *agx_bo_import(struct agx_device *dev, int fd);
 int agx_bo_export(struct agx_device *dev, struct agx_bo *bo);
 bool agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo);

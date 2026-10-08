@@ -111,7 +111,6 @@ agx_bo_cache_evict_stale_bos(struct agx_device *dev, int64_t now_sec)
          break;
 
       agx_bo_cache_remove_locked(dev, entry);
-      agx_g17p_va_lifetime_trace(dev, "cache-evict-stale", entry);
       agx_bo_free(dev, entry);
    }
 }
@@ -226,7 +225,6 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
              p_atomic_read(&dev->bo_cache.misses));
    }
 
-   agx_g17p_va_lifetime_trace(dev, "cache-put", bo);
 
    /* Update label for debug */
    bo->label = "Unused (BO cache)";
@@ -267,7 +265,6 @@ agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
          struct agx_bo *entry =
             list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
          agx_bo_cache_remove_locked(dev, entry);
-         agx_g17p_va_lifetime_trace(dev, "cache-evict-capacity", entry);
          agx_bo_free(dev, entry);
       }
 
@@ -287,7 +284,6 @@ agx_bo_cache_evict_all(struct agx_device *dev)
 
       list_for_each_entry_safe(struct agx_bo, entry, bucket, bucket_link) {
          agx_bo_cache_remove_locked(dev, entry);
-         agx_g17p_va_lifetime_trace(dev, "cache-evict-all", entry);
          agx_bo_free(dev, entry);
       }
    }
@@ -334,7 +330,6 @@ agx_bo_cache_trim(struct agx_device *dev, bool periodic,
             break;
          const size_t size = entry->size;
          agx_bo_cache_remove_locked(dev, entry);
-         agx_g17p_va_lifetime_trace(dev, "cache-evict-periodic", entry);
          agx_bo_free(dev, entry);
          trimmed += size;
       }
@@ -352,7 +347,6 @@ agx_bo_cache_trim(struct agx_device *dev, bool periodic,
          list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
       const size_t size = entry->size;
       agx_bo_cache_remove_locked(dev, entry);
-      agx_g17p_va_lifetime_trace(dev, "cache-evict-trim", entry);
       agx_bo_free(dev, entry);
       trimmed += size;
    }
@@ -548,7 +542,7 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
       assert(!p_atomic_read_relaxed(&bo->writer));
 
       if (dev->debug &
-          (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE))
+          (AGX_DBG_TRACE | AGX_DBG_ASYNCTRACE))
          agxdecode_track_free(dev->agxdecode, bo);
 
       if (!agx_bo_cache_put(dev, bo))
@@ -641,13 +635,11 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    }
 
    bo->label = label;
-   if (reused)
-      agx_g17p_va_lifetime_trace(dev, "cache-reuse", bo);
    p_atomic_set(&bo->refcnt, 1);
    agx_bo_read_set_changed(dev);
 
    if (dev->debug &
-       (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE)) {
+       (AGX_DBG_TRACE | AGX_DBG_ASYNCTRACE)) {
       agx_bo_map(bo);
       agxdecode_track_alloc(dev->agxdecode, bo);
    }
