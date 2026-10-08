@@ -2404,7 +2404,7 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
       /* Native Ioto uploads must start and end on uniform dwords. */
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
                &key.reserved_preamble, uniform_base,
-               dev->chip == AGX_CHIP_G17P);
+               dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G18G);
       if (dev->chip == AGX_CHIP_G17P)
          NIR_PASS(_, nir, agx_nir_lower_g17p_storage_records,
                   texture_descriptor_size);
@@ -11657,6 +11657,12 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
          if (!table || (push->uniform & 1) || (push->length & 1) ||
              !push->length || range_count == ARRAY_SIZE(ranges))
             {
+               mesa_loge("asahi: compute uniform range fields: index=%u "
+                         "table=%u address=0x%llx uniform=%u length=%u "
+                         "offset=%u ranges=%zu capacity=%zu",
+                         i, push->table, (unsigned long long)table,
+                         push->uniform, push->length, push->offset,
+                         range_count, ARRAY_SIZE(ranges));
                agx_native_descriptor_rejected(batch, "compute uniform range");
                return;
             }
