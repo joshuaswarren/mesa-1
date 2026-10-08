@@ -8131,12 +8131,16 @@ agx3_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 /* Apple's genuine builtin EOT factory, configured for a 2D-array attachment,
  * computes the tile origin from threadgroup position and dispatched group
  * size before publishing the layer and XY image wires. Match the complete
- * allocated Mesa EOT graph and its registers before substituting that exact
- * 84-byte program; no general array block-store shape is implied. */
+ * allocated Mesa EOT graph and its registers before substituting the complete
+ * native program (84 bytes on G17P, 96 on G17G); no general array block-store
+ * shape is implied. */
 static enum agx3_g17p_rt0_eot_kind
 agx3_g17p_layered_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
+   const bool g17g = enc == AGX_ISA_ENCODING_AGX3C &&
+                     ctx->key->g17g_rt0_eot;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !g17g) ||
+       ctx->stage != MESA_SHADER_COMPUTE ||
        ctx->is_preamble || ctx->key->no_stop)
       return AGX3_G17P_RT0_EOT_NONE;
 
@@ -10600,6 +10604,46 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    const enum agx3_g17p_rt0_eot_kind layered_eot =
       agx3_g17p_layered_eot_kind(ctx, enc);
+   if (enc == AGX_ISA_ENCODING_AGX3C &&
+       layered_eot != AGX3_G17P_RT0_EOT_NONE) {
+      /* Original BTNF kind5 array and multisample-array builtins, swept
+       * across eight formats and 1..4 components on G17G and G18G. Layer
+       * comes from SR12; PACK_IMGWIR publishes layer followed by the XY
+       * tile origin. The ordinary G18 reencoder converts this whole G17G
+       * program to the independently witnessed 88-byte G18G program.
+       * Only IMGWBLK lane class and dimension vary across the sweep. */
+      uint8_t program[] = {
+         0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,
+         0x0c,0x9d,0x10,0x26,0x24,0xa9,0x14,0x26,
+         0x24,0x82,0x01,0x10,0x28,0x02,0xa0,0x0a,
+         0x27,0x06,0x04,0x0a,0x21,0x00,0xa1,0x02,
+         0xa8,0x01,0x20,0x00,0x01,0x02,0x37,0x08,
+         0x04,0x0a,0x21,0x00,0xa1,0x02,0x68,0x01,
+         0x20,0x00,0x01,0x02,0x27,0x10,0x00,0x3a,
+         0x2d,0x00,0xab,0x02,0x00,0x00,0x40,0x30,
+         0x28,0x00,0x27,0x00,0x20,0x2a,0x21,0x00,
+         0xab,0x0a,0x00,0x00,0x4a,0x40,0x18,0x00,
+         0x25,0x04,0x15,0x00,0x24,0x00,0xa0,0x22,
+         0x00,0xe0,0x00,0x45,0x0e,0x00,0x00,0x00,
+      };
+      static_assert(sizeof(program) == 96, "G17G layered EOT native length");
+      static const uint8_t lane_class[] = {
+         [AGX3_G17P_RT0_EOT_SELECTOR_75] = 0xe0,
+         [AGX3_G17P_RT0_EOT_SELECTOR_15] = 0x20,
+         [AGX3_G17P_RT0_EOT_SELECTOR_35] = 0x60,
+         [AGX3_G17P_RT0_EOT_SELECTOR_55] = 0xa0,
+         [AGX3_G17P_RT0_EOT_NORM16] = 0x20,
+      };
+      program[89] = lane_class[layered_eot];
+      if (layered_eot == AGX3_G17P_RT0_EOT_NORM16)
+         program[87] = 0x2a;
+      if (ctx->key->g17p_rt0_eot_multisample)
+         program[91] = 0x85;
+      /* Native metadata: four GPR dwords, 16 staging bytes. */
+      ctx->max_reg = 7;
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
+      return agx3_append(emission, program, sizeof(program));
+   }
    if (layered_eot != AGX3_G17P_RT0_EOT_NONE) {
       /* Apple's builtin end-of-tile factory emits one 84-byte program for a
        * 2D-array attachment of every format (metal-nt -arch applegpu_g17p,
