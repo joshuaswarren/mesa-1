@@ -338,12 +338,21 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       debug_get_num_option("HK_CDM_BARRIER_MASK", 0) & 0x07ffffff;
 
    /* The dependency-tracked CDM barrier holds token-digest parity with the
-    * reference driver on G13 (M1 family) only. Other chips keep the
-    * per-launch barrier until they pass the same gate;
-    * HK_PERFTEST=trackcdmbarrier opts them in for that run.
+    * reference driver on G13 (M1 family) and on G14X of generation 14 (M2
+    * Pro/Max/Ultra class; tested on M2 Max: Qwen3-4B, Qwen3.5-2B and
+    * Qwen3.5-9B greedy digests, 2048-token runs, CTS compute groups and the
+    * floating-point gates equal to the per-launch barrier). Other chips,
+    * including multi-cluster generation 15 and later parts that also map to
+    * G14X, keep the per-launch barrier until they pass the same gate;
+    * HK_PERFTEST=trackcdmbarrier opts them in for that run and
+    * HK_PERFTEST=alwayscdmbarrier forces the per-launch barrier everywhere.
     */
-   if (pdev->dev.chip != AGX_CHIP_G13G && pdev->dev.chip != AGX_CHIP_G13X &&
-       !HK_PERF(dev, TRACKCDMBARRIER))
+   bool tracked_by_default =
+      pdev->dev.chip == AGX_CHIP_G13G || pdev->dev.chip == AGX_CHIP_G13X ||
+      (pdev->dev.chip == AGX_CHIP_G14X &&
+       pdev->dev.params.gpu_generation == 14);
+
+   if (!tracked_by_default && !HK_PERF(dev, TRACKCDMBARRIER))
       dev->perftest |= HK_PERF_ALWAYSCDMBARRIER;
 
    /* Deferred CDM flush: one barrier at the end of each compute batch
