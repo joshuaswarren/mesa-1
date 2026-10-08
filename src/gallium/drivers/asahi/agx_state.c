@@ -2362,6 +2362,9 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
        nir->info.fs.uses_sample_shading)
       key.fs.inside_sample_loop = true;
 
+   const bool g18_shared_uniform_base = dev->chip == AGX_CHIP_G18G &&
+      nir->info.stage == MESA_SHADER_COMPUTE && nir->info.shared_size;
+
    if (internal_kernel) {
       key.reserved_preamble = 8;
    } else if (!secondary) {
@@ -2397,13 +2400,19 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
           stage == MESA_SHADER_TESS_EVAL) &&
          (BITSET_LAST_BIT(nir->info.textures_used) != 0 ||
           BITSET_LAST_BIT(nir->info.images_used) != 0);
-      const unsigned uniform_base =
+      unsigned uniform_base =
          compiled->g17p_storage_write
             ? (dev->chip == AGX_CHIP_G18G ? AGX_G18G_STORAGE_ROOT_HALFS
                                           : AGX_G17P_STORAGE_ROOT_HALFS)
             : compiled->g17p_texture_resources
                  ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
                  : 0;
+      /* The shared-memory base is hardware-preloaded at half 8. A pushed
+       * constant-data pointer after the eight-half texture prefix otherwise
+       * overwrites it, making local stores disappear and loads return zero. */
+      if (g18_shared_uniform_base)
+         uniform_base = MAX2(uniform_base, AGX_ABI_G18_SHARED_UNIFORM_HALFS);
+
       /* Native Ioto uploads must start and end on uniform dwords. */
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
                &key.reserved_preamble, uniform_base,
@@ -2412,6 +2421,11 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
          NIR_PASS(_, nir, agx_nir_lower_g17p_storage_records,
                   texture_descriptor_size);
    }
+
+   /* Internal programs also need to keep preamble exports above the base. */
+   if (g18_shared_uniform_base)
+      key.reserved_preamble =
+         MAX2(key.reserved_preamble, AGX_ABI_G18_SHARED_UNIFORM_HALFS);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       key.fs.cf_base = cf_base;
@@ -11713,6 +11727,18 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
             .size_halfs = rodata->size_16,
             .address = cs->bo->va->addr + rodata->offset,
          };
+      }
+
+      if (dev->chip == AGX_CHIP_G18G && cs->b.info.local_size) {
+         for (unsigned i = 0; i < range_count; ++i) {
+            if (ranges[i].start_halfs <= AGX_ABI_G18_SHARED_BASE_HALF &&
+                ranges[i].start_halfs + ranges[i].size_halfs >
+                   AGX_ABI_G18_SHARED_BASE_HALF) {
+               agx_native_descriptor_rejected(batch,
+                                              "compute shared-base overlap");
+               return;
+            }
+         }
       }
 
       if (!agx_g17p_append_compute(batch, &cs->b.info, cs->b.binary, cs->bo,

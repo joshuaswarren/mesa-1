@@ -48,18 +48,19 @@
  * using texture state place the ordinary vertex ABI after this prefix. */
 #define AGX_ABI_G17P_TEXTURE_POINTER_HALFS 8
 
-/* AGX3 threadgroup accesses take their base from uniform half 8, which
- * agx_emit_local_store/load hard-code and which the hardware preloads -- no
- * driver path ever writes it.  A shader that places its own uniforms over
- * that half therefore destroys its shared-memory base, silently: the stores
- * land nowhere and the loads read zero.
+/* G18 threadgroup accesses take their base from uniform half 8, which the
+ * hardware preloads. Ordinary pushed pointers or preamble exports must not
+ * overwrite it: stores then land nowhere and loads read zero. Keep API
+ * compute uniforms above this slot, aligned for 64-bit pointers. The native
+ * texture/storage prefix remains in halves 0..7. */
+#define AGX_ABI_G18_SHARED_BASE_HALF 8u
+#define AGX_ABI_G18_SHARED_UNIFORM_HALFS 12u
+
+/* Precompiled AGX3 kernel arguments also avoid the reserved prefix.
  *
- * API shaders are unaffected because their pushes are small, but precompiled
- * kernel arguments start at half 0 and run past it (libagx_unroll_restart's
- * are 26 halves), which is why a geometry shader plus primitive restart drew
- * nothing.  Precompiled AGX3 kernels therefore place their arguments above
- * both the texture-pointer prefix and this half.  Four-half aligned so 64-bit
- * arguments keep their uniform-pair alignment. */
+ * libagx_unroll_restart has 26 argument halves; placing them at half 0
+ * overwrote the shared base and broke geometry plus primitive restart.
+ * Preserve the existing four-half alignment and precompiled ABI. */
 #define AGX_ABI_AGX3_PRECOMP_ARG_HALFS 12
 
 #define AGX_ABI_FUNI_EMRT_HEAP (0)
