@@ -196,10 +196,6 @@ bool agx3_g17s_minimal_compute_program_live_upload_prepare(
    const struct agx3_compute_program_upload *upload, size_t *written,
    struct agx3_compute_program *program);
 
-/* Narrow production condition for the independently witnessed G17S minimal
- * root-uniform program.  This does not imply chip-wide Ioto load readiness. */
-bool agx3_g17s_minimal_compute_dispatch_ready(enum agx_chip chip);
-
 /* Append the live-admitted program's canonical 40-byte direct launch and the
  * exact four-byte strong post-dispatch barrier.  sink and sink->length are
  * unchanged on every failure; sibling chips and non-live program provenance

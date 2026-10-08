@@ -972,7 +972,9 @@ agx3_alu_fmul_mixed_half(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
-bool
+/* Ops that alu_compose can carry a wait on (fmin/fmax's tied-operand fsel form
+ * is not modeled here; the backend keeps those on the compact packer). */
+static bool
 agx3_alu_wait_supported(enum agx3_alu_op op)
 {
    /* fmin/fmax use a tied-operand fsel form whose duplicated compare fields
@@ -1485,7 +1487,7 @@ agx3_alu_bit_orc(enum agx_isa_encoding enc, uint16_t dest,
  * Apple stops emitting this form at N = 5, so the shift is capped at the four
  * witnessed non-zero amounts rather than extrapolated.
  */
-bool
+static bool
 agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
                  uint16_t dest, const uint16_t src[2],
                  const enum agx3_alu_hint hints[2], uint8_t shift,

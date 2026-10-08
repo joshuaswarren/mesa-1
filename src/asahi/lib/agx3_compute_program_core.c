@@ -344,7 +344,9 @@ agx3_g17s_minimal_compute_program_prepare(
    return true;
 }
 
-bool
+/* Narrow production condition for the independently witnessed G17S minimal
+ * root-uniform program.  This does not imply chip-wide Ioto load readiness. */
+static bool
 agx3_g17s_minimal_compute_dispatch_ready(enum agx_chip chip)
 {
    return chip == AGX_CHIP_G17S;

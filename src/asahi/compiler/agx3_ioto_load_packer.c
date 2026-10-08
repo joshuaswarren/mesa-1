@@ -289,7 +289,7 @@ pack_cprog_copy(void *context, enum agx_chip chip,
    return true;
 }
 
-bool
+static bool
 agx3_ioto_load_packer_init(struct agx3_ioto_load_packer *packer,
                            enum agx_chip chip)
 {
@@ -307,7 +307,7 @@ agx3_ioto_load_packer_init(struct agx3_ioto_load_packer *packer,
    return true;
 }
 
-void
+static void
 agx3_ioto_load_packer_ops(struct agx3_ioto_load_packer *packer,
                           struct agx_ioto_load_emit_ops *ops)
 {

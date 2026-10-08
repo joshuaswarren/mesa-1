@@ -1323,8 +1323,6 @@ hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
    return hk_pool_alloc_from_slow(cmd, uploader, size, alignment, type);
 }
 
-struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
-                                      uint32_t alignment, bool usc);
 struct agx_ptr hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
                                 uint32_t alignment);
 struct agx_ptr hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd,
@@ -1568,8 +1566,6 @@ void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
 
-void *hk_cmd_buffer_emit_cdm_terminate(struct hk_cmd_buffer *cmd,
-                                       void *current);
 void *hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd,
                                        void *current);
 

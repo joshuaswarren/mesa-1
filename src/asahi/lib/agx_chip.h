@@ -270,9 +270,6 @@ agx_chip_sampler_heap_element_size(enum agx_chip chip)
    }
 }
 
-enum agx_submission_model
-agx_chip_submission_model(enum agx_chip chip);
-
 /*
  * Whether this driver can generate code for a chip.
  *
@@ -308,21 +305,6 @@ const char *agx_chip_exact_product_name(enum agx_chip chip);
  * selected for an AGX3 device, even when no current draw is expected to call a
  * precompiled helper. */
 bool agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip);
-
-/*
- * Whether the compiler must insert explicit scheduling stalls.
- *
- * The M3 base part needs them and nothing else does: stripping its stall words
- * leaves an instruction stream 99.5% identical in count and 85.1%
- * byte-identical to M4's, with a further 7.4% differing only by branch
- * displacements shifted by exactly the removed padding.
- *
- * This is a property of one chip's scheduler, not of its encoding -- G15G
- * shares the agx3b encoder table with every other variant-0 part. It is a
- * codegen obligation, so it is only meaningful for a chip this driver can
- * generate code for.
- */
-bool agx_chip_needs_scheduling_stalls(enum agx_chip chip);
 
 /* Stable name for diagnostics, e.g. "G15X". Never NULL. */
 const char *agx_chip_name(enum agx_chip chip);

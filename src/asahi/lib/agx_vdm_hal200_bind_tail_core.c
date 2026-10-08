@@ -25,7 +25,8 @@ agx_vdm_hal200_bind_viewport_control(size_t viewport_bytes)
    return (uint32_t)(viewport_bytes / 4) << 8;
 }
 
-bool
+/* Whether a pair's control is one the native tail can carry. */
+static bool
 agx_vdm_hal200_bind_control_valid(unsigned pair, uint32_t control)
 {
    if (pair >= AGX_VDM_HAL200_BIND_COUNT)

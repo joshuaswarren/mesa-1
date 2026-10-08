@@ -329,7 +329,10 @@ hk_agx3_g17p_native_indirect_compute_dispatch_append(
                                                              sink);
 }
 
-bool
+/* Build a dispatch-local Ioto program from dword-aligned root, descriptor and
+ * constant ranges, then bind that exact allocation to the native A18 Pro CDM
+ * launch state.  Spilling and indirect dispatch have separate contracts. */
+static bool
 hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program)

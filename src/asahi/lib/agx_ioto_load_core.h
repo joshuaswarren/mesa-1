@@ -289,22 +289,6 @@ bool agx_ioto_load_pack_ldimm(enum agx_chip chip, uint16_t dest_half,
 void agx_ioto_load_pack_nop(uint8_t hazard_mask,
                             uint8_t out[AGX_IOTO_LOAD_NOP_SIZE]);
 
-/* Pure allocator step.  NEEDS_ROUND and INVALID leave core unchanged. */
-enum agx_ioto_load_alloc_result
-agx_ioto_load_allocator_reserve(struct agx_ioto_load_core *core,
-                                uint8_t requested_dwords,
-                                uint16_t cprog_dest_half, uint32_t lane_mask,
-                                struct agx_ioto_load_allocation *allocation);
-
-/* Exact Apple comparator: {key(base), key(data)}. */
-int agx_ioto_load_compare(const struct agx_ioto_inflight_load *a,
-                          const struct agx_ioto_inflight_load *b);
-
-/* Maximum bytes a finish call may append for the current pending set. */
-bool agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
-                                          bool complete_round,
-                                          size_t *required);
-
 /* false emits/marks only loads; true also resets allocation, emits the GPU0
  * four-NOP pad when configured, emits copies, and consumes pending loads. */
 bool agx_ioto_load_finish_round(struct agx_ioto_load_core *core,

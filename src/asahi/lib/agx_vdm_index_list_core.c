@@ -20,7 +20,22 @@ agx_vdm_index_list_primitive_supported(uint8_t primitive)
    return agx_vdm_index_list_direct_primitive_supported_inline(primitive);
 }
 
-bool
+/*
+ * These helpers cover only the exact direct Index List records recovered from
+ * Apple's G15, HAL200, and HAL300 VDM encoders.  HAL300 has header bit 27 set
+ * and carries an additional opaque word whose only witnessed value is 7.
+ * Indexed AGX3 records split a 48-bit index-buffer address across header[7:0],
+ * buffer-lo, and an additional zero-extended VA[47:40] word.
+ *
+ * The primitive values accepted here are exactly the ten entries present in
+ * all inspected direct-draw tables.  Only U16 and U32 indexed forms are
+ * represented because those are the two forms selected by the inspected
+ * public Metal paths.
+ *
+ * This is a host representation/validation surface.  It does not emit into a
+ * live VDM stream or enable scheduling, submission, or device admission.
+ */
+static bool
 agx_vdm_index_list_direct_target_supported(enum agx_chip chip)
 {
    return agx_vdm_index_list_direct_target_supported_inline(chip);

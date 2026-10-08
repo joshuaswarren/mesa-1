@@ -613,10 +613,6 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      UNUSED mesa_shader_stage stage,
                      const struct vk_pipeline_robustness_state *rs);
 
-struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
-                                     hk_internal_builder_t builder, void *data,
-                                     size_t data_size);
-
 struct hk_passthrough_gs_key {
    /* Bit mask of outputs written by the VS/TES, to be passed through */
    uint64_t outputs;

@@ -284,7 +284,7 @@ hk_sync_kinds_src(VkPipelineStageFlags2 stages)
    return stage_kinds(stages & ~VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, false);
 }
 
-uint8_t
+static uint8_t
 hk_sync_kinds_dst(VkPipelineStageFlags2 stages)
 {
    /* And in the second scope TOP_OF_PIPE is ALL_COMMANDS, BOTTOM_OF_PIPE is
@@ -373,7 +373,8 @@ stream_wait(struct hk_cs *cs, const struct hk_sync_dep dep[HK_SYNC_NUM_SQ],
    }
 }
 
-void
+/* Raise a stream's dependencies. */
+static void
 hk_sync_stream_wait(struct hk_cs *cs,
                     const struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
 {
@@ -401,7 +402,7 @@ latest_before(struct hk_cmd_buffer *cmd, unsigned sq, const struct hk_cs *cs)
    return best;
 }
 
-void
+static void
 hk_sync_stream_wait_all(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    struct hk_sync_dep dep[HK_SYNC_NUM_SQ];

@@ -8,7 +8,20 @@
 
 #include <string.h>
 
-bool
+/*
+ * Pack/unpack only the exact four-byte type-1 VDM memory barrier emitted by
+ * the inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X Apple Metal
+ * plugins.  The target allowlist contains only identities directly served by
+ * those plugins; G16P and G17A remain closed.
+ *
+ * The inspected aggregate G15X path can set word bits 2..4 when the separate
+ * DeviceConstants::hasMultipleAGCs property is true.  No per-identity value
+ * for that property is pinned, so this helper deliberately rejects that
+ * alternate form on every target.  This is a representation/validation
+ * helper only and does not emit a live command, submit work, or admit a
+ * device.
+ */
+static bool
 agx_vdm_barrier_core_supported(enum agx_chip chip)
 {
    switch (chip) {

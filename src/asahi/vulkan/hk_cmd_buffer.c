@@ -433,7 +433,7 @@ hk_pool_alloc_from_slow(struct hk_cmd_buffer *cmd,
    };
 }
 
-__attribute__((hot)) struct agx_ptr
+static __attribute__((hot)) struct agx_ptr
 hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
                        uint32_t alignment, bool usc)
 {
@@ -601,7 +601,7 @@ hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
    return current;
 }
 
-void *
+static void *
 hk_cmd_buffer_emit_cdm_terminate(struct hk_cmd_buffer *cmd, void *current)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);

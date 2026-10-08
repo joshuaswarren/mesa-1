@@ -346,7 +346,8 @@ agx_ioto_state_pack_record(enum agx_chip chip,
    return true;
 }
 
-bool
+/* Each packer is transactional: output is unchanged on every failure. */
+static bool
 agx_ioto_state_pack_speclm(enum agx_chip chip,
                            const struct agx_ioto_state *state, void *output,
                            size_t capacity)
@@ -356,7 +357,7 @@ agx_ioto_state_pack_speclm(enum agx_chip chip,
       AGX_IOTO_SPECLM_SIZE, agx_ioto_state_encode_speclm);
 }
 
-bool
+static bool
 agx_ioto_state_pack_ldshdr(enum agx_chip chip,
                            const struct agx_ioto_state *state, void *output,
                            size_t capacity)

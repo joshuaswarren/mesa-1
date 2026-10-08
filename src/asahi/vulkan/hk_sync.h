@@ -258,9 +258,8 @@ struct hk_sync_queue {
 
 void hk_sync_reset(struct hk_cmd_buffer *cmd);
 
-/* Stage masks to stream kinds, for the first and second scopes. */
+/* Stage masks to stream kinds, for a first synchronization scope. */
 uint8_t hk_sync_kinds_src(VkPipelineStageFlags2 stages);
-uint8_t hk_sync_kinds_dst(VkPipelineStageFlags2 stages);
 
 /* Union of the scopes of every barrier in a dependency. */
 void hk_sync_dependency_kinds(const VkDependencyInfo *info, uint8_t *src,
@@ -276,11 +275,6 @@ void hk_sync_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
  * then every stream before self), or for a stream still to be created. */
 void hk_sync_src_dep(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
                      struct hk_cs *self, struct hk_sync_dep dep[HK_SYNC_NUM_SQ]);
-
-/* Raise a stream's dependencies. */
-void hk_sync_stream_wait(struct hk_cs *cs,
-                         const struct hk_sync_dep dep[HK_SYNC_NUM_SQ]);
-void hk_sync_stream_wait_all(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 /* Every later stream of the given kinds waits on cs. */
 void hk_sync_after_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs,

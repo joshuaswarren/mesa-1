@@ -57,7 +57,7 @@
  * feeding a derivative or a quad reduction, or inside a helper-invocation
  * guard, leaves it clear (agx3_sr_desc::fragment_active_index).
  */
-bool
+static bool
 agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)
 {
    if (width == AGX3_SR_W16) {

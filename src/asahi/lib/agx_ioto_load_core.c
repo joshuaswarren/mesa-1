@@ -166,7 +166,8 @@ full_fast_mask(uint8_t dwords, uint32_t *mask)
    return true;
 }
 
-enum agx_ioto_load_alloc_result
+/* Pure allocator step.  NEEDS_ROUND and INVALID leave core unchanged. */
+static enum agx_ioto_load_alloc_result
 agx_ioto_load_allocator_reserve(struct agx_ioto_load_core *core,
                                 uint8_t requested_dwords,
                                 uint16_t cprog_dest_half, uint32_t lane_mask,
@@ -244,7 +245,8 @@ compare_register(const struct agx_ioto_load_register *a,
    return compare_i32(a->value, b->value);
 }
 
-int
+/* Exact Apple comparator: {key(base), key(data)}. */
+static int
 agx_ioto_load_compare(const struct agx_ioto_inflight_load *a,
                       const struct agx_ioto_inflight_load *b)
 {
@@ -275,7 +277,8 @@ add_size(size_t *total, size_t add)
    return true;
 }
 
-bool
+/* Maximum bytes a finish call may append for the current pending set. */
+static bool
 agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
                                      bool complete_round, size_t *required)
 {

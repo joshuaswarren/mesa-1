@@ -26,12 +26,6 @@ struct agx3_ioto_load_packer {
    bool copy_wait_emitted;
 };
 
-bool agx3_ioto_load_packer_init(struct agx3_ioto_load_packer *packer,
-                                enum agx_chip chip);
-
-void agx3_ioto_load_packer_ops(struct agx3_ioto_load_packer *packer,
-                               struct agx_ioto_load_emit_ops *ops);
-
 bool
 agx3_ioto_load_finish_round_native(struct agx_ioto_load_core *core,
                                    bool complete_round,

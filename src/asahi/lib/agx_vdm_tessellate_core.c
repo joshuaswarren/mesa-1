@@ -11,7 +11,18 @@
 #define AGX_VDM_TESSELLATE_DIRECT_FIXED UINT32_C(0xb2f00c00)
 #define AGX_VDM_TESSELLATE_INSTANCE_STRIDE_MAX UINT32_C(0x7ffff)
 
-bool
+/*
+ * This covers only the exact nine-dword direct Tessellate record constructed
+ * by the pinned G15, HAL200, and HAL300 render plugins.  The factor-buffer VA
+ * is 48-bit and split across header[7:0], word 1, and word 8[7:0].  All three
+ * inspected encoder families use byte-identical records, so the bytes cannot
+ * classify the originating generation.
+ *
+ * This is a host representation/validation surface.  It does not emit into a
+ * live VDM stream or enable tessellation lowering, scheduling, submission,
+ * device admission, or an API capability.
+ */
+static bool
 agx_vdm_tessellate_direct_target_supported(enum agx_chip chip)
 {
    switch (chip) {

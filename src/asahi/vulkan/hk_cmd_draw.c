@@ -3255,7 +3255,7 @@ hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
    return s;
 }
 
-struct hk_api_shader *
+static struct hk_api_shader *
 hk_meta_shader(struct hk_device *dev, hk_internal_builder_t builder, void *data,
                size_t data_size)
 {

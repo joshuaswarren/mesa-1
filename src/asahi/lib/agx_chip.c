@@ -150,7 +150,7 @@ agx_chip_isa_encoding(enum agx_chip chip)
    }
 }
 
-enum agx_submission_model
+static enum agx_submission_model
 agx_chip_submission_model(enum agx_chip chip)
 {
    switch (chip) {
@@ -282,7 +282,20 @@ agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip)
           agx_chip_command_stream_generation(chip) == AGX_CS_GENERATION_AGX2;
 }
 
-bool
+/*
+ * Whether the compiler must insert explicit scheduling stalls.
+ *
+ * The M3 base part needs them and nothing else does: stripping its stall words
+ * leaves an instruction stream 99.5% identical in count and 85.1%
+ * byte-identical to M4's, with a further 7.4% differing only by branch
+ * displacements shifted by exactly the removed padding.
+ *
+ * This is a property of one chip's scheduler, not of its encoding -- G15G
+ * shares the agx3b encoder table with every other variant-0 part. It is a
+ * codegen obligation, so it is only meaningful for a chip this driver can
+ * generate code for.
+ */
+static bool
 agx_chip_needs_scheduling_stalls(enum agx_chip chip)
 {
    /* The M3 base part alone. Not a property of its encoding: G15G shares the

@@ -110,14 +110,6 @@ extern "C" {
 #define AGX3_RT_CORE_MAX_LENGTH 14u
 
 /*
- * Encode intersect_ray with the canonical anonymous-field context.
- * `state_register` is Apple's varying f5 field; accepted values are exactly
- * the corpus differential pairs: {0, 4} on AGX3b, {0, 8} on AGX3c.
- */
-bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
-                           uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
-
-/*
  * Replay one witnessed intersect_ray corpus site, including the sites whose
  * anonymous scheduling-context fields differ from the canonical tuple
  * (AGX3b site 2 carries f92=130 instead of 134; AGX3c sites 2 and 3 carry
@@ -126,65 +118,6 @@ bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
  * state registers.  No claim is made about what selects one context over
  * another -- that witness is missing, so the tuples are only enumerable.
  */
-/*
- * Encode one AGX3b inline-ray-query intersect_ray from the three fields that
- * actually vary across Apple's ray-query lowering.
- *
- * `per_query` is Apple's f77.  It tracks the ray query rather than anything
- * else: two and three separately named queries give two and three distinct
- * values, while the SCS ray staging offsets stay 0 and 16 for every query and
- * a six-point register-pressure ladder leaves the whole encoding
- * byte-identical, so it is neither the ray's address nor an allocator-assigned
- * register.
- *
- * It is NOT a dense per-query index, and an earlier revision of this comment
- * overstated it as one.  Extending the sweep to four and five named queries
- * gives only three and four distinct values: these kernels traverse their
- * queries one after another, so the compiler reuses a value once a traversal
- * has finished.  Read it as a per-query allocated resource id whose lifetime
- * is the traversal, not as a query number.  Written as an array traversed in a
- * loop the queries share one code path and this whole field is absent, the
- * encoding taking a different form.
- *
- * Its encodable range is exactly 0..191, the same bound agx3_scs_core applies
- * to an AGX3b scalar register index, which is consistent with a half-register
- * index but is not proof of one, so no register name is given here.
- *
- * `site` is Apple's f5, a full 13-bit field (0..8191 all encode).  It is NOT
- * the per-query discriminator: it stays within {0, 4} whether one, two or
- * three queries are live, taking one value at each of the two intersect_ray
- * sites a single query's traversal contains.
- *
- * `context` is Apple's f92.  It varies between kernels (124 in the two-query
- * corpus, 122 in the three-query one) and no differential explains it, so it
- * is carried verbatim and deliberately unnamed.
- *
- * f77 and f78 are the SAME PHYSICAL BITS, and f84 chooses which identity
- * applies.  With f84=2 (and f88 set) the composer takes f77 and refuses f78;
- * with f84=3 (and f88 clear) it takes f78 and refuses f77; it never accepts
- * both.  Both deposit identically -- byte 6 high nibble and byte 7 -- and they
- * differ only in range: f77 stops at 191, while every f78 value tested up to
- * 256 encodes.
- *
- * Which form Apple emits is NOT simply a function of how many queries are
- * live.  A single-query kernel against a primitive acceleration structure
- * uses the f84=3/f78 form and two or more queries use the f84=2/f77 form,
- * but a SINGLE-query kernel against an instance acceleration structure also
- * uses f77.  Instancing selects it too, so what f84 keys on is unmapped.
- * The per-query differential above is expressed in f77 because that is the
- * form those kernels emit.
- *
- * This entry point emits the f84=2/f77 variant, the one witnessed whenever
- * more than one query is live.  The single-query f78 variant is reachable
- * through the enumerated witnessed-site replay, not here.
- *
- * Values outside the composer's tables are refused by the composer itself.
- * AGX3c is refused: this differential is an AGX3b/G17P corpus.
- */
-bool agx3_rt_intersect_ray_query(enum agx_isa_encoding enc, uint16_t site,
-                                 uint16_t per_query, uint16_t context,
-                                 uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
-                                 uint8_t *len);
 
 #ifdef __cplusplus
 }

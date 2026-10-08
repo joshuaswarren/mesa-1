@@ -36,7 +36,8 @@ agx_texture_side_entry_align_up(uint64_t value, uint64_t alignment,
    return true;
 }
 
-bool
+/* Raw, lossless normal-form low-payload/high-auxiliary composition/decode. */
+static bool
 agx_texture_side_entry_compose(uint32_t payload, uint32_t auxiliary_heap_index,
                                uint64_t *packed)
 {
@@ -76,7 +77,12 @@ agx_texture_side_entry_gen9_atomic_class_complex(
           layout_class == AGX_TEXTURE_SIDE_ENTRY_GEN9_ATOMIC_CLASS_2D_ARRAY;
 }
 
-bool
+/*
+ * Partial Gen9 atomic-image payload packer.  This is kept separate so callers
+ * cannot mistake recovered descriptor representation for execution support.
+ * On failure, payload is cleared.
+ */
+static bool
 agx_texture_side_entry_pack_gen9_atomic_payload(
    const struct agx_texture_side_entry_gen9_atomic_info *info,
    uint32_t *payload)

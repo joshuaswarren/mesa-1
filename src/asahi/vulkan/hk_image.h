@@ -248,9 +248,6 @@ bool hk_can_compress_format(const struct agx_device *dev, VkFormat format);
  * single-layer, single-sample 2D colour images of the 32-bit RGBA formats
  * the display coprocessor scans out.  pNext may be NULL (format queries). */
 bool hk_interchange_format(const struct agx_device *dev, VkFormat format);
-bool hk_interchange_supported(const struct agx_device *dev, VkFormat format,
-                              VkImageType type, VkImageCreateFlags flags,
-                              VkImageUsageFlags usage, const void *pNext);
 
 struct hk_cmd_buffer;
 void hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,

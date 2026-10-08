@@ -504,7 +504,7 @@ hk_interchange_format(const struct agx_device *dev, VkFormat format)
    }
 }
 
-bool
+static bool
 hk_interchange_supported(const struct agx_device *dev, VkFormat format,
                          VkImageType type, VkImageCreateFlags flags,
                          VkImageUsageFlags usage, const void *pNext)

@@ -2039,7 +2039,10 @@ agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
    }
 }
 
-bool
+/* AGX3b device atomics return through their value register.  Legalize the
+ * SSA three-address form before RA so the allocator can enforce that physical
+ * two-address ABI without clobbering the independently evaluated index. */
+static bool
 agx_lower_agx3_device_atomic_sources(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
@@ -3543,7 +3546,7 @@ agx_fminmax_to(agx_builder *b, agx_index dst, agx_index s0, agx_index s1,
    return agx_fcmpsel_to(b, dst, s0, s1, s0, s1, fcond);
 }
 
-void
+static void
 agx_lower_agx3_half_converts(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
@@ -3879,7 +3882,7 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
 /* The native half-width branch encoder supports register/register and
  * register/zero comparisons. Materialize other constants while SSA temporaries
  * can still be allocated; never invent a scratch register in the packer. */
-bool
+static bool
 agx_lower_agx3_cf_constants(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
@@ -4005,7 +4008,7 @@ agx_lower_agx3_cf_constants(agx_context *ctx)
 /* Half-width shift-add has register operands. Fold an immediate's integer
  * negation modulo 2^16 and allocate it normally before RA. This also covers
  * decrementing 16-bit loop counters without guessing a half subtract opcode. */
-bool
+static bool
 agx_lower_agx3_half_iadd_constants(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
@@ -7532,7 +7535,7 @@ agx_should_dump(nir_shader *nir, unsigned agx_dbg_bit)
  * results can use the existing COPY encoding. Only SSA/immediate values may
  * be delayed; all observable uniform reads, unknown writes and barriers end
  * the candidate range. Nothing moves across a basic-block boundary. */
-bool
+static bool
 agx3_coalesce_uniform_half_stores(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
@@ -7757,7 +7760,7 @@ agx3_order_fragment_device_loads(agx_context *ctx)
 /* Keep scalar UVS values live until a native-shaped terminal writeout.
  * Run after pressure scheduling but before RA: moving physical-register stores
  * would lose values when later instructions reuse their sources. */
-bool
+static bool
 agx3_sink_vertex_outputs(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
@@ -7885,7 +7888,7 @@ agx3_vertex_alu_operand(agx_index x, bool allow_uniform)
  * native forms take: scalar 32-bit registers without modifiers, and for FFMA
  * a uniform first multiplicand (the multiplicands commute). Run after
  * agx3_sink_vertex_outputs, which recognizes plain stores only. */
-bool
+static bool
 agx3_fuse_vertex_output_alu(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||

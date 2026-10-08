@@ -1208,9 +1208,7 @@ bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
  * the shader writes gl_Position. A vertex program that writes no position
  * therefore starts its outputs here, and nowhere else. */
 #define AGX3_UVS_POSITION_ENTRIES 4u
-bool agx3_sink_vertex_outputs(agx_context *ctx);
-bool agx3_fuse_vertex_output_alu(agx_context *ctx);
-bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
+
 /* Number of 16-bit registers RA keeps reserved at the bottom of the register
  * file for the whole shader.
  */
@@ -1233,10 +1231,6 @@ void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
 unsigned agx3_tile_store_bank(agx_context *ctx);
 
-/* AGX3b device atomics return through their value register.  Legalize the
- * SSA three-address form before RA so the allocator can enforce that physical
- * two-address ABI without clobbering the independently evaluated index. */
-bool agx_lower_agx3_device_atomic_sources(agx_context *ctx);
 void agx_lower_64bit_postra(agx_context *ctx);
 void agx_insert_waits(agx_context *ctx);
 void agx_opt_empty_else(agx_context *ctx);
@@ -1320,9 +1314,6 @@ bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
 bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
 void agx_lower_agx3_fma_sources(agx_context *ctx);
 void agx_lower_agx3_mixed_width_unary(agx_context *ctx);
-void agx_lower_agx3_half_converts(agx_context *ctx);
-bool agx_lower_agx3_cf_constants(agx_context *ctx);
-bool agx_lower_agx3_half_iadd_constants(agx_context *ctx);
 
 struct agx_cycle_estimate {
    /* ALU throughput */
