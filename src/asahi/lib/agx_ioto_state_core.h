@@ -86,18 +86,6 @@ bool agx_ioto_g17p_fragment_speclm_build(
    const struct agx_ioto_g17p_imageblock *imageblock, void *output,
    size_t capacity);
 
-/* v51y diagnostics (default off, read once from the environment).
- *
- * HK_G17P_NATIVE_SPECLM=1: every fragment-class launch (FS, background,
- * end-of-tile) emits the no-imageblock SPECLM 77002a41 00000000 that all 45
- * native ESL programs of the light/heavy captures carry, instead of the
- * LdShdrTransformFragment imageblock record.  The imageblock geometry is
- * still validated; the render pass's tile-buffer allocation (kernel
- * register 0x10051) is unchanged.
- *
- * HK_G17P_NATIVE_ESL_WAIT is declared in agx_ioto_load_core.h. */
-bool agx_ioto_g17p_native_speclm_enabled(void);
-
 /*
  * Type 0 packs SPECLM, LDSHDR, SPECTPR in that order.  Type 1 packs only
  * LDSHDR and SPECTPR and requires every SPECLM field to be zero.  Other type

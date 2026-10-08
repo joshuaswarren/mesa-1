@@ -24,9 +24,6 @@ struct agx3_ioto_load_packer {
    enum agx_chip chip;
    enum agx_ioto_load_encoding encoding;
    bool copy_wait_emitted;
-   /* HK_G17P_NATIVE_ESL_WAIT (v51y, default off): GPU0 carries the slot
-    * wait on the first COPY of a round instead of the four-NOP drain. */
-   bool gpu0_copy_wait;
 };
 
 bool agx3_ioto_load_packer_init(struct agx3_ioto_load_packer *packer,
@@ -75,33 +72,6 @@ bool agx3_ioto_load_indirect_uniform_range_from_uniform_root(
    enum agx_chip chip, uint16_t root_base_half, int16_t pointer_offset,
    uint16_t uniform_half, uint16_t size_halfs, void *output, size_t capacity,
    size_t *written);
-
-/* v51y HK_G17P_NATIVE_ESL_WAIT: the native-shape schedule for several
- * root-relative ranges at once.  All pointer LDDEVs issue back to back, one
- * witnessed drain retires them before the dependent payload LDDEVs, and the
- * payload loads are retired by the slot-2 wait carried on the first COPY
- * (native 2b240944) instead of a second drain per load.  Returns false,
- * writing nothing, when the GPR window would exceed the native-witnessed
- * r25 (half 51) or any input is out of range; the caller then keeps the
- * per-range schedule.  CProg-input ranges are not handled here. */
-struct agx3_ioto_indirect_range {
-   int16_t pointer_offset;
-   uint16_t uniform_half;
-   uint16_t size_halfs;
-};
-
-bool agx3_ioto_load_indirect_uniform_ranges_native(
-   enum agx_chip chip, uint16_t root_base_half, bool root_is_uniform,
-   const struct agx3_ioto_indirect_range *ranges, unsigned count,
-   void *output, size_t capacity, size_t *written);
-
-/* Exposed for the offline encoding check: the AGX3B 32-bit register-to-
- * uniform COPY, optionally carrying scoreboard wait index `wait_slot`
- * (f30 + wait_slot; -1 for none). */
-bool agx3_ioto_load_pack_copy_for_test(uint16_t destination_half,
-                                       uint16_t source_half, int wait_slot,
-                                       bool source_kill, uint8_t out[10],
-                                       uint8_t *length);
 
 bool agx3_ioto_load_indirect_uniform_range_cprog(
    enum agx_chip chip, uint16_t root_base_half, bool root_is_uniform,

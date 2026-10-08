@@ -59,18 +59,6 @@ allocator_limit(const struct agx_ioto_load_core *core)
 }
 
 bool
-agx_ioto_g17p_native_esl_wait_enabled(void)
-{
-   static int cached = -1;
-   if (cached < 0) {
-      const char *value = getenv("HK_G17P_NATIVE_ESL_WAIT");
-      cached = value && *value && strcmp(value, "0") &&
-               strcmp(value, "false");
-   }
-   return cached;
-}
-
-bool
 agx_ioto_load_core_init(struct agx_ioto_load_core *core, enum agx_chip chip,
                         struct agx_ioto_load_sink sink,
                         struct agx_ioto_inflight_load *loads,
@@ -331,7 +319,7 @@ agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
       }
    }
 
-   if (complete_round && (core->gpu0_round_nops || core->gpu0_copy_wait) &&
+   if (complete_round && core->gpu0_round_nops &&
        !add_size(&total, AGX_IOTO_LOAD_GPU0_ROUND_NOP_SIZE))
       return false;
    *required = total;
@@ -544,28 +532,6 @@ agx_ioto_load_finish_round(struct agx_ioto_load_core *core, bool complete_round,
                      goto fail;
                }
             }
-         }
-      }
-
-      /* Copy-wait mode: a round whose loads feed no COPY (pure base
-       * pointers) has nothing to carry the wait, so drain explicitly. */
-      if (core->gpu0_copy_wait && !core->gpu0_round_nops &&
-          core->load_count != 0 && core->sink.length == copies_start) {
-         static const uint8_t hazard_for_value[6] = {1, 2, 4, 8, 16, 32};
-         uint8_t hazard = 0;
-         for (size_t i = 0; i < core->load_count; ++i) {
-            const int32_t value = workspace.loads[i].data.value;
-            if (value >= 0 && value < 6)
-               hazard |= hazard_for_value[value];
-         }
-         uint8_t nop[AGX_IOTO_LOAD_NOP_SIZE];
-         agx_ioto_load_pack_nop(hazard, nop);
-         if (!append_bytes(core, nop, sizeof(nop)))
-            goto fail;
-         agx_ioto_load_pack_nop(0, nop);
-         for (unsigned i = 0; i < 3; ++i) {
-            if (!append_bytes(core, nop, sizeof(nop)))
-               goto fail;
          }
       }
 

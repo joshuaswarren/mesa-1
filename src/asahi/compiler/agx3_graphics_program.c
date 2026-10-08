@@ -244,40 +244,6 @@ graphics_root_body_generate(
       return false;
 
    size_t offset = 0;
-   /* v51y HK_G17P_NATIVE_ESL_WAIT: one drain for all pointer loads and a
-    * COPY-carried wait for all payload loads, instead of a four-NOP drain
-    * after every LDDEV.  Falls back to the per-range schedule below. */
-   if (agx_ioto_g17p_native_esl_wait_enabled() && !desc->cprog_inputs &&
-       desc->uniform_range_count != 0 &&
-       desc->uniform_range_count <= AGX3_G17P_GRAPHICS_MAX_RANGES) {
-      struct agx3_ioto_indirect_range batched[AGX3_G17P_GRAPHICS_MAX_RANGES];
-      bool ok = true;
-      for (size_t i = 0; i < desc->uniform_range_count; ++i) {
-         const struct agx3_ioto_uniform_range *range =
-            &desc->uniform_ranges[i];
-         if (range->address > INT16_MAX) {
-            ok = false;
-            break;
-         }
-         batched[i] = (struct agx3_ioto_indirect_range){
-            .pointer_offset = (int16_t)range->address,
-            .uniform_half = range->start_halfs,
-            .size_halfs = range->size_halfs,
-         };
-      }
-      const uint16_t root_half =
-         root_is_uniform ? AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF
-                         : AGX3_G17P_GRAPHICS_ROOT_BASE_HALF;
-      size_t batched_size = 0;
-      if (ok && agx3_ioto_load_indirect_uniform_ranges_native(
-                   AGX_CHIP_G17P, root_half, root_is_uniform, batched,
-                   (unsigned)desc->uniform_range_count, output, capacity,
-                   &batched_size)) {
-         *written = batched_size;
-         return true;
-      }
-   }
-
    for (size_t i = 0; i < desc->uniform_range_count; ++i) {
       const struct agx3_ioto_uniform_range *range = &desc->uniform_ranges[i];
       if (range->address > INT16_MAX)

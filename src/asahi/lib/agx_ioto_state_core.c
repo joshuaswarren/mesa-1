@@ -10,22 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool
-agx_ioto_env_flag(const char *name)
-{
-   const char *value = getenv(name);
-   return value && *value && strcmp(value, "0") && strcmp(value, "false");
-}
-
-bool
-agx_ioto_g17p_native_speclm_enabled(void)
-{
-   static int cached = -1;
-   if (cached < 0)
-      cached = agx_ioto_env_flag("HK_G17P_NATIVE_SPECLM");
-   return cached;
-}
-
 enum agx_ioto_state_encoding {
    AGX_IOTO_STATE_ENCODING_GPU0,
    AGX_IOTO_STATE_ENCODING_GPU1,
@@ -460,7 +444,7 @@ agx_ioto_g17p_fragment_speclm_build(
    };
 
    uint8_t staged[AGX_IOTO_SPECLM_SIZE];
-   if (!sample_size_B || agx_ioto_g17p_native_speclm_enabled()) {
+   if (!sample_size_B) {
       memcpy(staged, no_imageblock, sizeof(staged));
    } else {
       const uint8_t *seed =

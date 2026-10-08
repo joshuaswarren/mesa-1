@@ -237,16 +237,8 @@ pack_absolute_copy(void *context, enum agx_chip chip,
    int wait_slot = -1;
    enum agx_isa_encoding enc;
    if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0) {
-      /* The first of Apple's four NOPs drains slot 2 before any GPU0 COPY.
-       * With HK_G17P_NATIVE_ESL_WAIT the drain is absent and the first COPY
-       * waits instead: f30 + slot - 1, so one-based slot 2 is f31, exactly
-       * native's 2b240944 after its two slot-2 LDDEVs. */
+      /* The first of Apple's four NOPs drains slot 2 before any GPU0 COPY. */
       enc = AGX_ISA_ENCODING_AGX3B;
-      if (packer->gpu0_copy_wait && !packer->copy_wait_emitted) {
-         if (load->signal_slot == 0 || load->signal_slot > 6)
-            return false;
-         wait_slot = load->signal_slot - 1;
-      }
    } else if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1) {
       enc = AGX_ISA_ENCODING_AGX3C;
       if (!packer->copy_wait_emitted) {
@@ -264,8 +256,7 @@ pack_absolute_copy(void *context, enum agx_chip chip,
                          source_kill, record))
       return false;
 
-   if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1 ||
-       packer->gpu0_copy_wait)
+   if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1)
       packer->copy_wait_emitted = true;
    return true;
 }
@@ -313,8 +304,6 @@ agx3_ioto_load_packer_init(struct agx3_ioto_load_packer *packer,
    *packer = (struct agx3_ioto_load_packer){
       .chip = chip,
       .encoding = encoding,
-      .gpu0_copy_wait = chip == AGX_CHIP_G17P &&
-                        agx_ioto_g17p_native_esl_wait_enabled(),
    };
    return true;
 }
@@ -347,8 +336,7 @@ agx3_ioto_load_finish_round_native(struct agx_ioto_load_core *core,
                                    struct agx_ioto_load_workspace workspace)
 {
    if (core == NULL || (core->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-                        complete_round && !core->gpu0_round_nops &&
-                        !core->gpu0_copy_wait))
+                        complete_round && !core->gpu0_round_nops))
       return false;
 
    struct agx3_ioto_load_packer packer;
@@ -366,7 +354,7 @@ agx3_ioto_load_absolute_native(struct agx_ioto_load_core *core,
                                struct agx_ioto_load_allocation *allocation)
 {
    if (core == NULL || (core->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-                        !core->gpu0_round_nops && !core->gpu0_copy_wait))
+                        !core->gpu0_round_nops))
       return false;
 
    struct agx3_ioto_load_packer packer;
@@ -385,7 +373,7 @@ agx3_ioto_load_from_abi_buffer_native(
    struct agx_ioto_load_allocation *allocation)
 {
    if (core == NULL || (core->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-                        !core->gpu0_round_nops && !core->gpu0_copy_wait))
+                        !core->gpu0_round_nops))
       return false;
 
    struct agx3_ioto_load_packer packer;
@@ -556,129 +544,3 @@ agx3_ioto_load_indirect_uniform_range_cprog(
       pointer_offset, uniform_half, size_halfs, inputs, output, capacity, written);
 }
 
-bool
-agx3_ioto_load_pack_copy_for_test(uint16_t destination_half,
-                                  uint16_t source_half, int wait_slot,
-                                  bool source_kill, uint8_t out[10],
-                                  uint8_t *length)
-{
-   struct agx_ioto_load_raw_record record;
-   memset(&record, 0, sizeof(record));
-   if (!out || !length ||
-       !pack_copy_fields(AGX_ISA_ENCODING_AGX3B, destination_half, source_half,
-                         wait_slot, source_kill, &record) ||
-       record.length > 10)
-      return false;
-   memcpy(out, record.bytes, record.length);
-   *length = record.length;
-   return true;
-}
-
-/* Highest GPR half any native G17P ESL program was seen to use (r25 in the
- * light/heavy FS and BG captures).  The batched schedule stays inside it. */
-#define AGX3_IOTO_NATIVE_GPR_HALF_LIMIT 52u
-
-bool
-agx3_ioto_load_indirect_uniform_ranges_native(
-   enum agx_chip chip, uint16_t root_base_half, bool root_is_uniform,
-   const struct agx3_ioto_indirect_range *ranges, unsigned count,
-   void *output, size_t capacity, size_t *written)
-{
-   if (chip != AGX_CHIP_G17P || !output || !written || !ranges ||
-       count == 0 || (root_base_half & 1) ||
-       root_base_half + 4 > (root_is_uniform ? 512 : 256))
-      return false;
-
-   /* Pointer pairs at halves 4, 8, ...; payload staging follows. */
-   const unsigned pointer_first = 4;
-   unsigned staging = pointer_first + 4 * count;
-   unsigned end = staging;
-   for (unsigned i = 0; i < count; ++i) {
-      const struct agx3_ioto_indirect_range *r = &ranges[i];
-      if ((r->uniform_half & 1) || (r->size_halfs & 1) || !r->size_halfs ||
-          r->uniform_half + r->size_halfs > 512)
-         return false;
-      end += r->size_halfs;
-   }
-   if (end > AGX3_IOTO_NATIVE_GPR_HALF_LIMIT)
-      return false;
-   /* Root-relative pointer loads must not overwrite a GPR root. */
-   if (!root_is_uniform && root_base_half < end &&
-       root_base_half + 4 > pointer_first)
-      return false;
-
-   uint8_t staged[AGX3_IOTO_NATIVE_GPR_HALF_LIMIT * 16 + 64];
-   size_t offset = 0;
-   uint8_t record[AGX3_MEM_MAX_LENGTH];
-   uint8_t length = 0;
-
-   for (unsigned i = 0; i < count; ++i) {
-      const struct agx3_mem_desc pointer = {
-         .data = (uint16_t)(pointer_first + 4 * i),
-         .width = AGX3_MEM_W32,
-         .mask = 3,
-         .base_is_uniform = root_is_uniform,
-         .base = root_base_half,
-         .idx_kind = AGX3_MEM_IDX_IMM,
-         .byte_off = ranges[i].pointer_offset,
-         .slot = 2,
-      };
-      if (!agx3_mem_encode_load_form(AGX_ISA_ENCODING_AGX3B, &pointer, 0,
-                                     record, &length) ||
-          !append_record(staged, sizeof(staged), &offset, record, length))
-         return false;
-   }
-
-   /* The payload bases are the just-loaded pointers: keep the witnessed
-    * drain for this true dependency. */
-   if (!append_g17p_load_drain(staged, sizeof(staged), &offset))
-      return false;
-
-   unsigned stage = staging;
-   for (unsigned i = 0; i < count; ++i) {
-      const unsigned dwords = ranges[i].size_halfs / 2;
-      for (unsigned first = 0; first < dwords; first += 4) {
-         const unsigned n = dwords - first < 4 ? dwords - first : 4;
-         const struct agx3_mem_desc payload = {
-            .data = (uint16_t)(stage + 2 * first),
-            .width = AGX3_MEM_W32,
-            .mask = (uint8_t)((1u << n) - 1u),
-            .base_is_uniform = false,
-            .base = (uint16_t)(pointer_first + 4 * i),
-            .idx_kind = AGX3_MEM_IDX_IMM,
-            .byte_off = (int32_t)(first * sizeof(uint32_t)),
-            .slot = 2,
-         };
-         if (!agx3_mem_encode_load_form(AGX_ISA_ENCODING_AGX3B, &payload, 0,
-                                        record, &length) ||
-             !append_record(staged, sizeof(staged), &offset, record, length))
-            return false;
-      }
-      stage += ranges[i].size_halfs;
-   }
-
-   bool waited = false;
-   stage = staging;
-   for (unsigned i = 0; i < count; ++i) {
-      const unsigned dwords = ranges[i].size_halfs / 2;
-      for (unsigned d = 0; d < dwords; ++d) {
-         struct agx_ioto_load_raw_record copy;
-         memset(&copy, 0, sizeof(copy));
-         /* f31 = one-based slot 2, carried once as native does. */
-         if (!pack_copy_fields(AGX_ISA_ENCODING_AGX3B,
-                               ranges[i].uniform_half + 2 * d,
-                               stage + 2 * d, waited ? -1 : 1, true, &copy) ||
-             !append_record(staged, sizeof(staged), &offset, copy.bytes,
-                            copy.length))
-            return false;
-         waited = true;
-      }
-      stage += ranges[i].size_halfs;
-   }
-
-   if (offset > capacity)
-      return false;
-   memcpy(output, staged, offset);
-   *written = offset;
-   return true;
-}

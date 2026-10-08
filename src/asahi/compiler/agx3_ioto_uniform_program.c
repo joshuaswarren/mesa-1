@@ -197,13 +197,8 @@ agx3_ioto_uniform_program_body_generate(
           workspace.loads, workspace.load_capacity, workspace.cache,
           workspace.cache_capacity, desc->initial_gpr_dwords,
           desc->fast_path_enabled,
-          agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-             !(chip == AGX_CHIP_G17P &&
-               agx_ioto_g17p_native_esl_wait_enabled())))
+          agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0))
       return false;
-   /* v51y: only G17P has the native copy-carried wait witness. */
-   core.gpu0_copy_wait =
-      chip == AGX_CHIP_G17P && agx_ioto_g17p_native_esl_wait_enabled();
 
    core.relocations = workspace.relocations;
    core.relocation_capacity = workspace.relocation_capacity;
