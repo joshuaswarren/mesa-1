@@ -27,9 +27,8 @@ direct_load_registers_ok(const struct agx_ioto_inflight_load *load)
 }
 
 /* Specializations of the AGX3b tables for the fixed Ioto absolute-load
- * operands below. Keep the general composer for every other form. These are
- * compared byte-for-byte against it over every offset and register encoding
- * by test-agx3-ioto-load-packer.c.
+ * operands below. Keep the general composer for every other form. These must
+ * produce the composer's bytes for every offset and register encoding.
  */
 static bool
 pack_gpu0_absolute_load(const struct agx_ioto_inflight_load *load,

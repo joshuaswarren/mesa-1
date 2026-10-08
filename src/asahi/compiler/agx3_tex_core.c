@@ -28,7 +28,7 @@ one_or_zero(uint16_t value)
  * things this encoder leaves zero, and every ep4 texture operation it emits
  * -- dense and sparse alike -- differs from Apple's own bytes in exactly
  * those places.  Matched `xcrun metal-nt -arch applegpu_g17p` compute kernels
- * (test/probes/g17p-sparse-residency.metal) show:
+ * show:
  *
  *   f19 upper byte  a copy of the destination half-register; dest 0 encodes
  *                   f19 = 0, dest 2 encodes 512, dest 10 encodes 2560, and

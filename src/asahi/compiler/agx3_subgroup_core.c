@@ -58,9 +58,8 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
    /*
     * 16-bit data narrows the width pair, and the quad selector is a different
     * field of the same immediate-lane encoding point, so the two compose.
-    * metal-nt -arch applegpu_g17p, one kernel per operation on `ushort`
-    * (src/asahi/compiler/test/probes/g17p-vertex-quad.metal), lane immediate,
-    * same registers, nothing else moving:
+    * metal-nt -arch applegpu_g17p, one kernel per operation on `ushort`,
+    * lane immediate, same registers, nothing else moving:
     *
     *   quad_broadcast(a, 3)      47005602020406200400   quadshfl
     *   simd_broadcast(a, 3)      47045602020406200400   simdbcast
@@ -159,8 +158,7 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
        * own radix sort included -- had no encoding at all and the shader had
        * to pay a materialising `mov` to reach the register-lane form instead.
        *
-       * Apple's applegpu_g17p output, one kernel per lane
-       * (`.tmp/g17p-rtgaps-evidence/bcast.metal`, `shuf.metal`), is a single
+       * Apple's applegpu_g17p output, one kernel per lane, is a single
        * field sweep with nothing else moving:
        *
        *   simd_broadcast(a, 0)      470456000200002c0400   f29 = 0

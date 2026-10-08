@@ -54,7 +54,7 @@ enum agx3_tex_width {
  * UNIFORM carry a zero-extended native heap index in a 64-bit value, located by half-register or
  * uniform-half index; Apple's own shaders load a 16-byte argument-buffer
  * entry and name the texture at +0 and the sampler at +8. All three kinds are
- * witnessed byte-exactly in test/test-agx3-smp-witness.c.
+ * witnessed in Apple's output.
  */
 enum agx3_tex_operand_kind {
    AGX3_TEX_OPERAND_IMMEDIATE = 1,
@@ -86,7 +86,6 @@ enum agx3_tex_sample_abi {
  * `metal-nt -arch applegpu_g17p` from one source file: a filtered
  * `t.sample(s, uv, level(in.uv.z))` stages f74 = 2, while a
  * `t.read(uint2(in.uv.xy), uint(in.uv.z))` texel fetch stages f74 = 3.
- * Evidence: .tmp/g17p-gallium2-evidence/texlodtype.{metal,nat}.
  */
 enum agx3_tex_level_kind {
    AGX3_TEX_LEVEL_MINIMUM = 1,
@@ -131,8 +130,7 @@ struct agx3_tex_fetch_desc {
     * no immediate operand) and f139 becomes 4, with the level published into
     * operand bank 6 by an agx3_tex_stage_lod() carrying
     * AGX3_TEX_LEVEL_INTEGER. Those two fields are the ONLY difference
-    * between the two fragment texel fetches in
-    * .tmp/g17p-gallium2-evidence/texlodfs.{metal,nat}. AGX3b only; AGX3c has
+    * between the two witnessed fragment texel fetches. AGX3b only; AGX3c has
     * no witness.
     */
    uint16_t lod_x64;
@@ -158,9 +156,8 @@ struct agx3_tex_fetch_desc {
     *                value; see the note in agx3_tex_encode_sample() for the
     *                measurement.
     *
-    * Matched compute pairs, argument-buffer descriptors on both arms
-    * (test/probes/g17p-sparse-residency.metal, k_ab_dense vs k_ab_sparse and
-    * k_ab_dread vs k_ab_sread), differ in exactly those three fields plus
+    * Matched compute pairs (dense vs sparse sample and read), argument-buffer
+    * descriptors on both arms, differ in exactly those three fields plus
     * register allocation and the group terminator (the f112 move among them,
     * which this encoder deliberately does not reproduce):
     *

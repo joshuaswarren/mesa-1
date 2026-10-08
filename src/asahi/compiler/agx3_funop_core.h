@@ -18,11 +18,8 @@
  * checked-out tree, and its row shape (dest/src0/src1/src2/imm) cannot carry
  * the f43 mode or the abs/neg/saturate modifier bits anyway.
  *
- * Grounding: research/gpu/GPU_AGX3_TRANSCENDENTAL_INT_OPS_2026-08-24.md and
- * its baselines JSON (funop section, grade A both encodings); dfdx/dfdy from
- * the fragment corpus transcendental-int-re/corpus_frag. Every encoding this
- * core can produce is replayed byte-for-byte against Apple's own compiler
- * output in test/test-agx3-funop-core.c.
+ * Every encoding this core produces matches Apple's own compiler output
+ * byte for byte on both encodings; dfdx/dfdy come from its fragment programs.
  */
 
 #pragma once

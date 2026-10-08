@@ -17,8 +17,7 @@
  *
  * Composer-driven; reproduces Apple's witnessed bytes exactly. Center and
  * centroid locations are explicit; the scheduling/hazard marker fields are
- * emitted zero, which is table-valid but remains unproven on hardware. Evidence:
- * research/gpu/GPU_AGX3_VARYING_OPS_2026-08-24.md.
+ * emitted zero, which is table-valid but remains unproven on hardware.
  */
 
 #pragma once

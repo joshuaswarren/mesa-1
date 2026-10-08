@@ -13,8 +13,7 @@
  * Every encoder here is grade A: it reproduces Apple's witnessed instruction
  * bytes exactly via the generated composer. What is NOT here is the lowering --
  * turning IR structured control flow into these sequences with flag-slot
- * allocation and branch fixups -- which lives in the backend. See
- * research/gpu/GPU_AGX3_CONTROL_FLOW_2026-08-24.md.
+ * allocation and branch fixups -- which lives in the backend.
  */
 
 #pragma once
@@ -113,10 +112,9 @@ bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond c
  * arrives here rather than at agx3_cf_icmp_imm().
  *
  * Witnessed with `metal-nt -arch applegpu_g17p` against the zero form as the
- * control, one kernel per immediate and nothing else changed
- * (.tmp/g17p-hyprland-cf-evidence/icmp16imm.metal).  Every witness is the same
- * ten-byte instruction with only f16 different, which is the field
- * agx3_cf_icmp_imm() already uses for the 32-bit source form:
+ * control, one kernel per immediate and nothing else changed.  Every witness
+ * is the same ten-byte instruction with only f16 different, which is the
+ * field agx3_cf_icmp_imm() already uses for the 32-bit source form:
  *
  *   short x;  if (x < 0)    0a 04 23 80 02 00 07 c2 02 00   (== the zero form)
  *   short x;  if (x < 2)    0a 04 23 82 02 00 07 c2 02 00
@@ -207,10 +205,10 @@ bool agx3_cf_cndef(enum agx_isa_encoding enc, uint8_t out[AGX3_CF_MAX_LENGTH],
  * when lowering the same BREAK_IF. A loop owns two levels; deeper breaks use
  * CNDCF's sixteen-bit level count.
  *
- * Witnessed with `metal-nt -arch applegpu_g17p` (.tmp/g17p-deep-break-evidence)
- * from MSL that breaks out of a loop from inside 2..7 nested ifs, each
- * condition reading a distinct `device const uint *` element so the Metal
- * compiler cannot flatten them.  Apple's bytes, and ours, byte for byte:
+ * Witnessed with `metal-nt -arch applegpu_g17p` from MSL that breaks out of
+ * a loop from inside 2..7 nested ifs, each condition reading a distinct
+ * `device const uint *` element so the Metal compiler cannot flatten them.
+ * Apple's bytes, and ours, byte for byte:
  *
  *   ifs=2  cndcf slot1 count3   8f 05 54 03 00 01
  *   ifs=3  cndcf slot1 count4   8f 05 54 04 00 01

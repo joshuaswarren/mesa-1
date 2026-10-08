@@ -82,7 +82,7 @@ instrs_equal(const void *_i1, const void *_i2)
       return false;
    /* Two samples that differ only in their coordinate offset are different
     * samples. This field is not in the union `imm` covers, so it needs its
-    * own line here; test-agx3-pack-binary.cpp asserts it. */
+    * own line here. */
    if (i1->offset_xyz != i2->offset_xyz)
       return false;
    if (i1->pixel_offset != i2->pixel_offset)

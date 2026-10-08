@@ -7,7 +7,7 @@
  * These descriptors cover the role-complete ldtg/sttg and ldtps/sttps
  * families recovered from Apple G15G/G16G/G17S compiler output.  SCS is
  * deliberately absent: ldscs/stscs are RT-only and their operands are not
- * grounded.  Evidence: GPU_AGX3_LOCAL_STACK_WAIT_2026-08-24.md.
+ * grounded.
  */
 
 #pragma once

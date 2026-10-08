@@ -6,8 +6,7 @@
  * and ld_tile -> lldcol (framebuffer fetch).  This core intentionally exposes
  * the directly witnessed single-sample and 2x/4x color forms. Composer-driven;
  * reproduces Apple's witnessed bytes. Blend and depth-compare are render
- * state, not ISA. Evidence:
- * research/gpu/GPU_AGX3_TILE_OPS_2026-08-24.md.
+ * state, not ISA.
  */
 
 #pragma once
@@ -38,8 +37,8 @@ enum agx3_tile_width {
  * consistent with a last-use hint, so it is driven from the IR's kill flag
  * rather than pinned to a constant).
  *
- * Grounded against Apple's own applegpu_g17p output (.tmp/g17p-msaa-grounding,
- * metal-nt MetalToolchain v27.1.5194.15):
+ * Grounded against Apple's own applegpu_g17p output (MetalToolchain
+ * 27.1.5194.15):
  *
  *   1x, any format          lstcol ... f51=1 f43=1
  *   2x/4x per-pixel         rld h10 <- SR39 ; lstcol ... f51=2 f44=10 f55=1

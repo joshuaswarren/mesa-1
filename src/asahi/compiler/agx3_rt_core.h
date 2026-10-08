@@ -19,12 +19,9 @@
  * wrong baseline cannot silently produce a valid-looking instruction.  The
  * witnesses are the same ones the byte-level codecs in agx3_pack.c pin:
  *
- *  - intersect_ray / continue_ray: the decoded G16G/G17S corpus vectors in
- *    test/agx3_compose_corpus_vectors.c (intersect cases 263/470/561/651 and
- *    1006/1252/1351/1453; continue cases 275/482/573/663 and
- *    1017/1263/1361/1463) plus the pinned five-kernel RT corpus ladders that
- *    agx3_pack_{intersect,continue}_ray accept.  The test replays every
- *    accepted value byte-for-byte against those codecs' deposit scheme.
+ *  - intersect_ray / continue_ray: decoded G16G/G17S Apple instructions plus
+ *    the pinned five-kernel RT ladders that agx3_pack_{intersect,continue}_ray
+ *    accept.
  *  - incStk, barrier, update_node, update_bvh: the exact fixed witnesses in
  *    agx3_pack.c (agx3_pack_inc_stk_fixed_witness, agx3_pack_update_node,
  *    agx3_pack_update_bvh_fixed_witness), decoded to composer fields and
@@ -65,7 +62,7 @@
  *    FALSE -- the geometry-cull and opacity-cull variants give -2.  f63 and
  *    f92 shift when the ray-setup allocation shifts; nothing further is
  *    established.
- *  - CORRECTION (2026-09-10): f63, f77/f78 and f92 are REGISTER OPERANDS of
+ *  - f63, f77/f78 and f92 are REGISTER OPERANDS of
  *    intersect_ray, not payload or per-query descriptors, and f84/f85 are
  *    their operand-class selectors.  Two independent measurements against
  *    `metal-nt -arch applegpu_g17p`:

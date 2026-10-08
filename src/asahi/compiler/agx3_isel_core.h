@@ -37,7 +37,7 @@
  * The mixed register fields f65/f82 were pinned by a kernel containing two
  * such selects over different registers: only those fields tracked the two
  * register numbers. Every shape below reproduces its witnessed instruction
- * byte-for-byte (see test-agx3-isel-core.c). Both widths support all four selected-operand shapes.
+ * byte-for-byte. Both widths support all four selected-operand shapes.
  *
  * Scoreboard waits ride on fields f98..f103, one per slot 1..6. That is
  * probe-derived at both ends: a select consuming a load that signalled slot 6

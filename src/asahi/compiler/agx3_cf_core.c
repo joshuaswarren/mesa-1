@@ -79,9 +79,8 @@ agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
  * the usable 32-bit register file in half for any shader that branches, and
  * nothing about the encoding asked for that.
  *
- * Apple's own applegpu_g17p output, from a kernel with ninety simultaneously
- * live loaded values (`.tmp/g17p-rtgaps-evidence/hireg2.metal`,
- * `hifcmp.metal`, `hiimm.metal`), compares high halves in every shape:
+ * Apple's own applegpu_g17p output, from kernels with ninety simultaneously
+ * live loaded values, compares high halves in every shape:
  *
  *   if (x88 >  x89)          0a9722950485                    icmp ep0  f2=150 f17=148
  *   if (x88 <  17u)          0a9922901583                    icmp ep0  f2=152 f16=17

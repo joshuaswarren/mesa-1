@@ -32,9 +32,8 @@ pack_assert_internal(const agx_instr *I, bool condition, const char *msg)
 #ifdef _WIN32
    /* A D3D12 UMD -- like a Vulkan ICD -- is loaded INTO its host process, so
     * abort() here kills whatever is rendering, and when that host is dwm.exe
-    * it kills the desktop.  Measured on J414s 2026-08-18 through Honeykrisp:
-    * dwm.exe crash-looping every ~19s, every captured stack identical and
-    * ending in ucrtbase!abort+0x3c out of this function.
+    * it kills the desktop: dwm.exe crash-looped with every stack ending in
+    * ucrtbase!abort out of this function.
     *
     * Two things made that near-impossible to attribute:
     *   - the diagnostic goes to stderr, and a compositor has no stderr, so

@@ -76,7 +76,7 @@ struct agx3_branch_fixup {
    bool is_bn;
 };
 
-/* AGX_G17P_EARLY_COMPARE (v52b) bookkeeping: where each instruction's bytes
+/* Early-compare bookkeeping: where each instruction's bytes
  * start, and every emitted control-flow compare. */
 struct agx3_instr_span {
    const agx_instr *I;
@@ -868,8 +868,7 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       /* Apple's uniform-address atomic election reads the active-thread
        * index (SR 34) and count (SR 36) of the SIMD-group, and quad_is_first
        * reads SR 33, all into half registers in the short form, also after
-       * discard_fragment (build/claude-fix/witness-sr59/REPORT.md, 15/15
-       * byte-exact re-encodes). */
+       * discard_fragment. */
       SR(AGX_SR_ACTIVE_THREAD_INDEX_IN_QUAD, 33, AGX3_SR_W16);
       SR(AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP, 34, AGX3_SR_W16);
       SR(AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP, 36, AGX3_SR_W16);
@@ -2839,8 +2838,6 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
  *   bracket -- and never `cmsk` (cmsk appears only in alpha-to-coverage
  *   shaders). movmsk's operand roles (f13/f17) are not isolated and the
  *   staged-register ABI below applies equally, so both spellings stay closed.
- *
- * See research/gpu/GPU_AGX3_TILE_OPS_2026-08-24.md sections 4 and 6.
  */
 
 /*
@@ -3285,10 +3282,9 @@ agx3_translate_mem(const agx_instr *I, bool is_store, uint8_t slot,
       if ((index.value & 1) != 0 || index.value > 191)
          return false;
       d->idx_reg = index.value;
-      /* Tested on hardware 2026-08-31 and REFUTED: forcing this bit to 1 (so
-       * the store's index operand cannot decode as "operand absent") did not
-       * change the result -- the Vulkan dispatch still wrote nothing. Keep the
-       * IR's own liveness. */
+      /* Keep the IR's own liveness: forcing this bit to 1 (so the store's
+       * index operand cannot decode as "operand absent") made no difference
+       * on hardware. */
       d->idx_kill = index.kill;
       d->idx_signed = false;
 
@@ -3819,8 +3815,7 @@ agx3_dynamic_stack_store(const agx_instr *I)
           I->src[1].type == AGX_INDEX_REGISTER;
 }
 
-/* G16G private-array witnesses (compiler/test/probes/README-g16g-dynamic-
- * stack-store.md): a dynamically indexed store is STTPS frame 1 with the
+/* G16G private arrays: a dynamically indexed store is STTPS frame 1 with the
  * data mask and a register index, like the dynamic load; a float4 store uses
  * W32 mask 15 with a byte index. STTPS signals no scoreboard slot. Apple
  * issues static RLD reads and dynamic LDTPS reads of the same array right
@@ -5519,13 +5514,10 @@ agx3_try_control_flow(struct util_dynarray *emission,
        * There are only six flag slots, so a per-depth assignment runs out at
        * the seventh nested loop and used to refuse the shader. It does not
        * have to: a flag slot is an ordinary allocatable resource, not a
-       * per-depth one, and Apple reuses them freely on G17P too. Compiling
-       * test/probes/g16g-nested-loops.metal -- the seven- and eight-deep
-       * probe already in the tree -- with `metal-nt -arch applegpu_g17p`
-       * gives eight CNDLT loop tests in slots 1,1,1,1,1,1,1,0: slot 1 carries
-       * seven different loops' exit predicates in one program. See
-       * test/probes/README-g17p-deep-loops-and-shift-immediates.md for the
-       * decoded bytes.
+       * per-depth one, and Apple reuses them freely on G17P too. Eight
+       * nested loops compiled with `metal-nt -arch applegpu_g17p` give eight
+       * CNDLT loop tests in slots 1,1,1,1,1,1,1,0: slot 1 carries seven
+       * different loops' exit predicates in one program.
        *
        * Our own emission is stricter still: every compare is immediately
        * followed by the CND that consumes it (see agx3_emit_cf_compare and
@@ -6510,9 +6502,9 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
  * and 1 acquire their write class if loaded or both of their classes if not.
  * Loads go in descending partition order, as in Apple's RGBA8 fragments; its
  * RGBA16Float fragments order them differently under the same held classes.
- * See the metal-nt applegpu_g17p witnesses in test-agx-g17p-mrt-mixed.c:
- * two to eight RGBA8 and three, four, five and eight RGBA16Float targets all
- * blended, and 17 blended subsets of four, five and eight RGBA8 targets.
+ * The metal-nt applegpu_g17p witnesses cover two to eight RGBA8 and three,
+ * four, five and eight RGBA16Float targets all blended, and 17 blended subsets
+ * of four, five and eight RGBA8 targets.
  *
  * Those fragments also set lstcol f13 on their leading stores when they store
  * more than five targets including targets 1 and 2: on all but the last five
@@ -6917,8 +6909,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
    }
    /* A lone attachment that is not attachment zero is still a multi-target
-    * layout: it owns its own class, not class pair zero.
-    * g17p-sparse-mrt.h's fragment-8-active-mask04 is exactly that shape. */
+    * layout: it owns its own class, not class pair zero, as in Apple's
+    * eight-slot fragment with only target 2 active. */
    /* Native id_blend_2x/4x uses the same class-12 lifetime for a single
     * target's unrolled sample loads/stores, acquiring read class 8 once
     * and write class 4 once. Keep the ordinary one-store path unchanged. */
@@ -7004,8 +6996,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       const int partition = agx3_g17p_mrt_partition(&p, I->pixel_offset);
-      /* Four to eight targets of any formats share the class-12 lifetime;
-       * see the witnesses in test-agx-g17p-mrt-mixed.c. */
+      /* Four to eight targets of any formats share the class-12 lifetime. */
       const bool load = I->op == AGX_OPCODE_LD_TILE;
       if (p.count >= 4 &&
           (I->nr_srcs != (load ? 2 : 3) || I->nr_dests != (load ? 1 : 0) ||
@@ -7096,8 +7087,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       p.multisample_combined &= p.stores[i] != 0;
       /* `partitions` already enumerates every framebuffer attachment, so its
        * ordinal is the identity; otherwise the attachment names itself.
-       * g17p-sparse-mrt.h's six native oracles all disagree with the ordinal:
-       * an eight-slot fragment writing only targets 1 and 3 uses classes
+       * Apple's sparse-target fragments all disagree with the ordinal: an
+       * eight-slot fragment writing only targets 1 and 3 uses classes
        * {1, 3}, not {0, 1}. */
       const unsigned pair = agx3_g17p_mrt_class_pair(p.targets[i]);
       uint32_t read_class, write_class, combined_class;
@@ -7614,7 +7605,7 @@ agx3_post_ra_hint(agx_index index)
 }
 
 
-/* AGX_G17P_LOOP_HEAD_HINT (v52a, default off).
+/* Loop-head hint.
  *
  * Every integer, conversion and control form of AGX3b carries three 2-bit
  * fields at instruction bits 18..23, each passed through the encoder LUT
@@ -7674,7 +7665,7 @@ agx3_apply_loop_head_hints(agx_context *ctx, struct util_dynarray *emission)
 }
 
 
-/* AGX_G17P_EARLY_COMPARE (v52b, default off).
+/* Early compares.
  *
  * Apple's G17P loops test the counter as soon as it is final: in
  * fs-apple.bin the `icmp` sits right after `i++` (+0xbc) and its `cndlt`
@@ -8565,7 +8556,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       tile_stores_left == 1;
    if (g17p_blend_protocol) {
       unsigned blocks = 0, phase = 0;
-      /* v54 AGX_G17P_INLINE_BLEND: an inline-blend program has the main's
+      /* An inline-blend program has the main's
        * control flow before its blend. Apple's throughput fragment is that
        * shape (a loop, then LLDCOL..LSTCOL in the exit block), so admit
        * several blocks when every pixel and tile instruction is in the
@@ -9682,10 +9673,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * for the whole vec4 or for .z alone, everything past y reads
              * back as zero, while the identical fetch in a fragment shader
              * (always staged) and a vertex textureLod are both correct.
-             * src/asahi/gl-tests/test-g17p-gl-vertex-flat-varying.c is that
-             * measurement, and KHR-GL33.texture_swizzle's 363 failures are
-             * all this one shape: the CTS samples in the vertex stage and
-             * passes the texel through a flat varying. */
+             * KHR-GL33.texture_swizzle hits exactly this shape: the CTS
+             * samples in the vertex stage and passes the texel through a flat
+             * varying. */
             const bool vertex_fetch_stages_coordinates =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_VERTEX &&
@@ -9852,7 +9842,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* A fragment SMP whose f156 group is still open (nonterminal)
              * keeps the quad's helper lanes for what follows; the terminating
              * member, or a lone member carrying neither flag, does not
-             * (measured on G17P, 2026-10-05: in
+             * (measured on G17P: in
              * dEQP-VK.glsl.helper_invocations.load_from_texture,
              * fwidth(texture(...)) after a lone SMP read the helper lanes'
              * results wrong -- Fail 4/4 -- and passes 2/2 with the lone SMP
@@ -11452,10 +11442,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * modifier: agx_pack.c gives it a dedicated bit and permits it on
              * src[2] alone.  AGX3 spells the negated form as its own
              * instruction, `imsub`, so admit the modifier here and let
-             * agx3_imad_encode() select the opcode.  Without this every
-             * `a*b - imm` was refused outright -- 2,692 of 6,486 refused
-             * instructions in the 2026-09-11 CTS census, the single largest
-             * shape.
+             * agx3_imad_encode() select the opcode, so `a*b - imm` encodes.
              */
             const bool addend_imm =
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
@@ -12976,7 +12963,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * shifted-imad split in agx_emit_imadshl_agx(): AGX3 has no
              * shifted imad, so the product is added here with the shift on
              * the addend. Apple emits exactly this, and f54 carries the
-             * shift (witnessed at 1..4 in test-agx3-iadd-core.c).
+             * shift (witnessed at 1..4).
              */
             const agx_index original_a = I->src[0];
             const agx_index original_b = I->src[1];
@@ -13667,10 +13654,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /* A saturating half multiply is the same instruction with G17P's
-          * f14 set, which moves it to the two-byte-longer ep2 point. This is
-          * the shape probes/f16_saturate_texture.frag reaches the packer as
-          * (clamp(texture(tex, uv) * vcolor, 0.0, 1.0) -> fmul.sat on halves)
-          * and it was refused outright before the encoder existed. */
+          * f14 set, which moves it to the two-byte-longer ep2 point, e.g.
+          * clamp(texture(tex, uv) * vcolor, 0.0, 1.0) -> fmul.sat on halves. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2) {
             uint16_t src[2]; enum agx3_alu_hint hints[2];

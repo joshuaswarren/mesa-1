@@ -3487,8 +3487,8 @@ agx_emit_imadshl_agx(agx_builder *b, nir_alu_instr *alu, agx_index dst,
        *
        * imad(a, b, c, s) is a*b + (c << s), and integer wraparound makes the
        * split exact: the product is computed unshifted, then added with the
-       * shift on the addend. Both halves are witnessed byte-exactly -- the
-       * pure-multiply imadd and the shifted iadd -- in test-agx3-iadd-core.c.
+       * shift on the addend. Both halves are witnessed byte-exactly: the
+       * pure-multiply imadd and the shifted iadd.
        */
       const enum agx_isa_encoding enc = b->shader->key->dev.encoding;
       const bool agx3 = enc != AGX_ISA_ENCODING_AGX2;
@@ -8185,11 +8185,10 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
     * multi-target BG programs have no transactions either and store in no
     * required partition order.
     *
-    * The wide-MRT class protocol is a FRAGMENT witness
-    * (test/probes/g17p-wide-mrt/), and extending it to clears is not
-    * supported by anything: a background compiled with the transaction no
-    * longer matches agx3_g17p_rt0_bg_program_generate()'s loader
-    * descriptor, and KHR-GL30.draw_buffers.draw_buffers_1 aborts the
+    * The wide-MRT class protocol is a FRAGMENT witness, and extending it to
+    * clears is not supported by anything: a background compiled with the
+    * transaction no longer matches agx3_g17p_rt0_bg_program_generate()'s
+    * loader descriptor, and KHR-GL30.draw_buffers.draw_buffers_1 aborts the
     * process at "background Ioto program" on real hardware. */
    if (ctx->key->fs.ignore_tib_dependencies) {
       bool rgba32 = !load_count;
@@ -8558,9 +8557,8 @@ agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
    bool progress = false;
    agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));
    agx_foreach_instr_global(ctx, store) {
-      /* v94 memory safety: test the opcode before reading src[0]; an
-       * instruction with no sources (e.g. stop) has no src[0] (ASan
-       * heap-buffer-overflow READ in agx3_bank_scalar_tile_store_inputs). */
+      /* Test the opcode before reading src[0]: an instruction with no
+       * sources (e.g. stop) has no src[0]. */
       if (store->op != AGX_OPCODE_ST_TILE)
          continue;
       agx_index source = store->src[0];
@@ -10856,7 +10854,7 @@ agx3_nir_lower_uniform_dma(nir_shader *nir, const struct agx_shader_key *key,
    return true;
 }
 
-/* AGX_G17P_DISCARD_WORD (frg-codegen v3, codegen bit 25, C2 default).
+/* AGX_G17P_DISCARD_WORD.
  *
  * At one sample the AGX3B coverage update reads only bit 0 of TARGET and LIVE
  * (the sample_mask_agx case builds target = T & 1 and keep = L & 1). The NIR
@@ -11088,7 +11086,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    }
    agx_compiler_debug = agx_get_compiler_debug();
    agx_refusal[0] = 0;
-   /* v56d: the native constant-program decision is per compile
+   /* The native constant-program decision is per compile
     * (agx_shader_key::g17p_native_uniforms, read through ctx); the global
     * agx_compiler_debug is never modified here. */
    struct agx_shader_info *info = &out->info;
@@ -11211,8 +11209,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
     *
     * AGX3C shares the convention (agx_emit_local_load/store put the address in
     * the index for every AGX3 encoding) but is deliberately left out: applying
-    * it there turns test-agx3-compile-fail-closed.c's shared read-modify-write
-    * into a refusal, because the resulting 16-bit index reaches the AGX3C
+    * it there turns a shared read-modify-write into a refusal, because the
+    * resulting 16-bit index reaches the AGX3C
     * zero-extend path -- `bitop [d32:reg0 s0=16:reg0 s1=16:imm#0]`,
     * agx3_pack_binary.c:11641, the copy16 + clr pair -- which has no AGX3C
     * form.  That gap is unrelated to threadgroup memory and no frontend in
@@ -11336,7 +11334,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (is_g17p)
       nir->options = original_options;
 
-   /* AGX_G17P_UNIFORM_DMA (v51a): only when no preamble is formed. */
+   /* AGX_G17P_UNIFORM_DMA: only when no preamble is formed. */
    if (is_g17p && key->g17p_uniform_dma && !form_preamble &&
        agx3_nir_lower_uniform_dma(nir, key, info))
       NIR_PASS(_, nir, nir_opt_dce);

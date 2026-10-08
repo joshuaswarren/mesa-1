@@ -8,10 +8,9 @@
  * uniform, with the operand value deposited in a different field per kind
  * (slot A: f15 immediate / f16 register / f17 uniform; slot B: f31 register /
  * f32 uniform).  That mapping is not a guess: it is read straight off Apple's
- * own corpus vectors in test/agx3_compose_corpus_vectors.c, where `lddev`
- * selects a uniform base with f38 = 3 + f32, `iadd` adds a uniform with
- * f38 = 3 + f32, and 49 of the 100 G16G `copy` instructions move a uniform
- * into a register with f23 = 3 + f17.
+ * own instructions, where `lddev` selects a uniform base with f38 = 3 + f32,
+ * `iadd` adds a uniform with f38 = 3 + f32, and 49 of the 100 G16G `copy`
+ * instructions move a uniform into a register with f23 = 3 + f17.
  *
  * A uniform therefore reaches a GPR on AGX3 exactly the way Apple's compiler
  * puts it there: one 4-byte `copy` (ep0), 32-bit, no wait bits.  Mesa's
@@ -116,10 +115,9 @@ bool agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
  * This is a distinct AGX3b form, not the 32-bit one narrowed: it combines the
  * uniform source selector f23 = 3 + f17 that the 32-bit uniform copy uses
  * with the 16-bit widths f10 = f24 = 1 that agx3_copy_encode_reg16() uses,
- * and Apple sets f11. Both halves are witnessed together in the corpus --
- * test/agx3_compose_corpus_vectors.c carries two agx3b copy.ep0 instructions
- * with exactly f9 = 2, f10 = 1, f23 = 3, f24 = 1, and
- * test/test-agx3-copy-core.c pins their bytes.
+ * and Apple sets f11. Both halves are witnessed together: Apple's output
+ * has two agx3b copy.ep0 instructions with exactly f9 = 2, f10 = 1, f23 = 3,
+ * f24 = 1.
  *
  * Like the 32-bit uniform form, the witnesses carry no wait bits, so the
  * caller retires a pending producer through the grounded band no-op rather

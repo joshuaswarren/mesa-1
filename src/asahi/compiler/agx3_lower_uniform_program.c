@@ -6,8 +6,7 @@
 /* AGCCodeGenerator.ShaderPhase.cprog_uniform_inputs controls the native
  * external-program prelude. Count live-ins, not every uniform source: a
  * previous export may already define the value. Backward liveness also
- * handles conditional exports and a read on the first loop iteration.
- * Native schema/renderer evidence: test/probes/agx3-uniform-inputs.md. */
+ * handles conditional exports and a read on the first loop iteration. */
 bool
 agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs)
 {

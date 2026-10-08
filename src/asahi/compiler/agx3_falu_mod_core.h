@@ -13,8 +13,8 @@
  * the equivalent commuted order, moving both modifiers and lifetime hints,
  * to keep subtraction in the shortest native form.
  *
- * Evidence: research/gpu/GPU_AGX3_FLOAT_MODIFIERS_2026-08-24.md (96/96 byte
- * exact from baseline + operands + modifiers).
+ * All 96 witnessed Apple encodings are reproduced byte-exactly from the
+ * baseline, the operands and the modifiers.
  */
 
 #pragma once

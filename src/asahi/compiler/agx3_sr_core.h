@@ -13,7 +13,6 @@
  * own emissions. Only (SR, width) pairs witnessed in the corpus encode; the
  * rest fail closed. Grade A: reproduces all 306 clean Apple SR-read witnesses
  * byte-exactly via the composer.
- * Evidence: research/gpu/GPU_AGX3_SR_OPS_2026-08-25.md.
  */
 
 #pragma once

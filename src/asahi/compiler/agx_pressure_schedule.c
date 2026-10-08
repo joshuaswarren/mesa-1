@@ -403,7 +403,7 @@ agx_pressure_schedule(agx_context *ctx)
 }
 
 /*
- * v47 execution-efficiency candidate (AGX_G17P_ILP_SCHEDULE, default off).
+ * Latency list scheduling for G17P.
  *
  * Measured on Neo, Mesa's ALU-bound loops (compute128, heavy fragment) retire
  * exactly one instruction per lane per clock on 5 cores x 128 lanes, while
@@ -461,9 +461,9 @@ ilp_max_pressure(struct sched_node **order, unsigned n,
 }
 
 /*
- * AGX_G17P_EXIT_COMPARE (v53-c3): loop-exit compare placement.
+ * Loop-exit compare placement.
  *
- * Lab ladder (v92d): on Apple's own loop, moving the `icmp` next to its
+ * On Apple's own loop, moving the `icmp` next to its
  * `cndlt` keeps only 38% of Apple's advantage over Mesa, and Mesa's order
  * (counter work at the end) keeps 8%; Apple's order puts the counter's
  * update and compare `sll, xor, srl, c+i, i++, icmp, xor, iadd, iadd, xor,
@@ -480,7 +480,7 @@ ilp_max_pressure(struct sched_node **order, unsigned n,
  *    value end together;
  *  - everything else keeps its relative order, and the group [readers, cone]
  *    goes where `distance` of those instructions still follow it, or earlier
- *    if one of them uses a group result. The packer's EARLY_COMPARE then
+ *    if one of them uses a group result. The packer's early compare then
  *    emits T's compare right after the cone.
  * This is placement by dependency and distance, not a pattern: nothing
  * depends on the shift/xor opcodes. Pressure is checked by the caller. */
@@ -660,7 +660,7 @@ ilp_place_exit_compare(agx_block *block, struct sched_node **nodes,
 }
 
 /*
- * AGX_G17P_TILE_WAIT_SINK (default on; =0 restores the plain ILP order).
+ * Pixel-wait placement.
  *
  * WAIT_PIX has no SSA result; the list scheduler above gives it an ALU
  * latency and ranks it by the critical path to the tile access it guards, so
@@ -912,7 +912,7 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
    return true;
 }
 
-/* v52b: only pure-ALU loop bodies are interleaved. Offline, scheduling the
+/* Only pure-ALU loop bodies are interleaved. Offline, scheduling the
  * crossos bw_copy grid-stride loops (vector device loads and stores) grew
  * that kernel from 23 to 39 GPR halves; the xorshift loops the issue-rate gap
  * was measured on contain no memory access. */
@@ -1014,9 +1014,10 @@ agx_ilp_schedule(agx_context *ctx)
       native_uniforms |= native_uniform_write(I);
    }
 
-   /* Only loop bodies: that is where Apple's interleaving pays and where the
-    * issue-rate gap was measured. Straight-line code keeps the pressure
-    * schedule (offline, scheduling it grew some meta shaders' registers).
+   /* Loop bodies, single-tile blend blocks and constant programs: that is
+    * where Apple's interleaving was measured to pay. Other straight-line code
+    * keeps the pressure schedule (offline, scheduling it grew some meta
+    * shaders' registers).
     * In structured AGX control flow a loop spans the source-order interval
     * from its header to the block holding the back edge. */
    unsigned nr_blocks = 0;

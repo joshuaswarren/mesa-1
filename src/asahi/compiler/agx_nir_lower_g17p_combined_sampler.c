@@ -125,8 +125,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
         *   05800cb8b0000003000010000100
         *
         * which is the instruction agx3_tex_encode_sample() already emits for
-        * AGX3_TEX_LOD_REGISTER on a cube (test-agx3-tex-core.c, "native cube
-        * register level"), field for field. Admitting only the array form
+        * AGX3_TEX_LOD_REGISTER on a cube, field for field. Admitting only the
+        * array form
         * here was what refused textureLod(samplerCube, dir, lod) -- the
         * roughness-indexed probe lookup every image-based lighting shader
         * does, SuperTuxKart's IBL.frag included. */

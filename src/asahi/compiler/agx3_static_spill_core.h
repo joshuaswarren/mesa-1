@@ -9,8 +9,7 @@
  * counterpart of the separately modeled register-indexed ldtps/sttps family.
  * No SCS or ray-tracing scratch operands are represented here.
  *
- * Evidence: GPU_AGX3_LOCAL_STACK_WAIT_2026-08-24.md and the pinned
- * G15G/G16G/G17S compiler-vector corpus.
+ * Derived from Apple's G15G/G16G/G17S compiler output.
  */
 
 #pragma once

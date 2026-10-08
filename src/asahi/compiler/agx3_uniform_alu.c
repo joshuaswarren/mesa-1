@@ -62,7 +62,7 @@ uniform_float_encode(enum agx_isa_encoding encoding,
 
    /* Apple G17P/G16G uniform_repeat: 09010e0d210e02c2. Domain 3 selects
     * uniform f36/f53 instead of register f35/f52. ADD and MUL use the same
-    * first two operand records. See probes/agx3-optimization-corpus. */
+    * first two operand records. */
    const char *mnemonic = half ? (op == AGX3_UNIFORM_FADD   ? "f16add"
                                   : op == AGX3_UNIFORM_FMUL ? "f16mul"
                                                             : "f16fma")

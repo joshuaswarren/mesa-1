@@ -122,15 +122,10 @@ agx3_select_encode(enum agx_isa_encoding encoding,
 
       /*
        * Adding a small constant. Apple's iadd/imm8 form is witnessed across
-       * the immediate boundary set (1, 63, 64, 128, 255) and every operand
-       * fragment in test-agx3-pack.c, and the move lowering below already
-       * relies on it with a zero immediate.
-       *
-       * Without this, `x + 1` was encodable only when the instruction also
-       * carried a scoreboard wait -- and that path pushed the constant
-       * through a register field, so it was wrong when it did fire. Any
-       * shader doing constant address arithmetic (which is to say, any
-       * shader with more than one store) landed on one side or the other.
+       * the immediate boundary set (1, 63, 64, 128, 255), and the move
+       * lowering below already relies on it with a zero immediate. Constant
+       * address arithmetic, which every shader with more than one store
+       * does, needs this form without a scoreboard wait.
        */
       if (!I->src[1].is_reg && !I->src[1].abs && !I->src[1].neg) {
          if (I->src[1].reg > 0xff)

@@ -18,8 +18,7 @@
  * plus the two nullary terminators. It fails closed on everything else --
  * modifiers, non-32-bit sizes, immediate/uniform sources, shifts, and every
  * unmapped opcode -- because emitting a plausible-but-wrong AGX3 stream is a
- * silent mis-execution, not a fault. Mapping details and grades are in
- * research/gpu/GPU_AGX3_BACKEND_INSTRUCTION_SELECTION_2026-08-24.md.
+ * silent mis-execution, not a fault.
  */
 
 #pragma once

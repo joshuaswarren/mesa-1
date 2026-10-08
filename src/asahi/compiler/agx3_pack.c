@@ -2540,7 +2540,7 @@ agx3_unpack_update_node(enum agx_isa_encoding encoding, const uint8_t *bytes,
    return true;
 }
 
-/* Direct differential pairs from agx3_compose_corpus_vectors.c:
+/* Direct differential pairs from Apple's instructions:
  *
  * AGX3b cases 561/470 differ only in f5=0/4.
  * AGX3c cases 1351/1252 differ only in f5=0/8.

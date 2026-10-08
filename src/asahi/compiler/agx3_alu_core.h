@@ -293,11 +293,9 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
  * an independent (kind, width, value) triple. Selected values use kind 1 for
  * an immediate, kind 2 for a GPR, and kind 3 for a uniform. Fresh G17P
  * select-kind.metal probes change only GPR versus constant-buffer alternatives
- * in fabs(f32) < f16 ? a : b. Kind 3 was previously mislabeled as a register,
- * causing the trig small-input guard to read pointer words from uniforms.
+ * in fabs(f32) < f16 ? a : b.
  *
- * Field map, recovered from the 84 real Apple `fsel` instructions in
- * test/agx3_compose_corpus_vectors.c:
+ * Field map, recovered from 84 Apple `fsel` instructions:
  *
  *   dest          f3    width f11   cache f12
  *   compare 0     f35   kind  f42   width f43   cache f44  last-use f46  ABS f47
@@ -875,7 +873,7 @@ bool agx3_alu_htrunc(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                      uint8_t *len);
 
-/* Apple metal32023.850, applegpu_g17p, fresh 2026-10-05 kernels:
+/* Apple metal32023.850, applegpu_g17p:
  * sqrt(x)        2f015604030092400000
  * sqrt(-x)       2f015604030092400100 (f31)
  * sqrt(-fabs(x)) 2f015604030092c00100 (f30 and f31)

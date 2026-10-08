@@ -2369,8 +2369,8 @@ agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *
     * The two are complementary -- dead sets f29 and clears f27, live the
     * reverse -- which is the one-hot {none, discard, cache} the enum already
-    * describes.  400 of the 2,455 remaining refusals in the 2026-09-11 census
-    * were this one shape, an i32-to-f16 convert whose source stays live. */
+    * describes. The typical user is an i32-to-f16 convert whose source stays
+    * live. */
    struct agx3_field_kv fields[12] = {
       {2, dest}, {11, dest_cache}, {18, src},
       {27, hint == AGX3_ALU_HINT_CACHE},
@@ -2963,20 +2963,17 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
    const bool abs_immediate_select =
       abs_compare && (immediate[0] || immediate[1]) &&
       (!immediate[0] || src[2] == 0) && (!immediate[1] || src[3] == 0);
-   /* A 16-bit result used to be refused alongside a comparison against an
-    * immediate zero. Only the second belongs here. The destination width is
-    * an independent field on the long endpoint, exactly as it is on the short
-    * one, and Apple's own corpus carries the combination: eight of the 84
-    * real `fsel` instructions in test/agx3_compose_corpus_vectors.c set both
-    * f11 = 1 and f47/f64, on ep33 and ep34 --
+   /* Only a comparison against an immediate zero is refused here. The
+    * destination width is an independent field on the long endpoint, exactly
+    * as it is on the short one, and Apple's own output carries the
+    * combination: eight of 84 Apple `fsel` instructions set both f11 = 1 and
+    * f47/f64, on ep33 and ep34 --
     *
     *   42d725d923810300208000000300   ep33 f11=1 f47=1 f64=1 f76=1 f93=1
     *   3a8525db23820300800800000300   ep34 f11=1 f47=1 f64=1 f76=1 f93=2
     *
-    * What actually broke was below, not here: the absolute immediate-select
-    * branch deposited a fixed 32-bit width into f25 instead of the requested
-    * one, so admitting a half result would have encoded a full one. Both are
-    * fixed together; the width now follows dest_16 on either branch.
+    * The absolute immediate-select branch below takes its f25 width from
+    * dest_16 as well.
     *
     * `mediump` code reaches this every time it writes a comparison on an
     * absolute value -- the shape is fcmpsel [d16 s0=32:reg.abs s1=32:reg
