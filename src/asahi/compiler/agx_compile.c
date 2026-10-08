@@ -2003,6 +2003,30 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       return;
    }
 
+   if (is_g18 && fmt == AGX_FORMAT_I16 && dest.size == AGX_SIZE_32 &&
+       packed_count == 0) {
+      /* Raw W16 loads write adjacent halves, even when NIR requests
+       * zero-extended 32-bit integer lanes. Load the physical halfword
+       * vector first, then extend each component independently. */
+      const unsigned nr = instr->def.num_components;
+      assert(nr >= 1 && nr <= 4);
+      agx_index payload = agx_vec_temp(b->shader, AGX_SIZE_16, nr);
+      agx_instr *load = agx_device_load_to(b, payload, addr, offset, fmt,
+                                           BITFIELD_MASK(nr), shift,
+                                           nir_is_coherent(instr));
+      load->memory_index_is_bytes = index_bytes;
+
+      agx_index halves[4] = {agx_null()};
+      agx_index channels[4] = {agx_null()};
+      agx_emit_split(b, halves, payload, nr);
+      for (unsigned i = 0; i < nr; ++i) {
+         channels[i] = agx_temp(b->shader, AGX_SIZE_32);
+         agx_mov_to(b, channels[i], halves[i]);
+      }
+      agx_emit_collect_to(b, dest, nr, channels);
+      return;
+   }
+
    agx_instr *load = agx_device_load_to(b, dest, addr, offset, fmt,
                       BITFIELD_MASK(packed_count ? packed_count : instr->def.num_components), shift,
                       nir_is_coherent(instr));
