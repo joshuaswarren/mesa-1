@@ -30,10 +30,14 @@ agx_ppp_hal300_graphics_core_pack(
       /* Apple's widths (hv/G18-VARYINGS.md): a 7-bit binding count
        * (0x2195dd31c), 8-bit class counts (0x21954bbfc..c5c) and a 4-byte
        * VIT alignment (0x219f69c20). OUTPUT_SELECT is held to what Gallium
-       * emits: clip planes 0..7, varyings, point size and fragcoord Z. */
+       * emits: clip planes 0..7, varyings, point size and fragcoord Z.
+       * Native597 executes the same G18 constructor with viewport/layer
+       * outputs: viewport is bit 19; layer requires both bits 19 and 20. */
       if (chip != AGX_CHIP_G18G || fields->cf_binding_count > 0x7f ||
           ((fields->varying_counts_32 | fields->varying_counts_16) >> 24) ||
-          (fields->output_select & ~UINT32_C(0x002500ff)) ||
+          (fields->output_select & ~UINT32_C(0x003d00ff)) ||
+          ((fields->output_select & UINT32_C(0x00180000)) ==
+             UINT32_C(0x00100000)) ||
           fields->uvs_words < 4 || fields->uvs_words > 0xff ||
           !fields->cf_binding_count != !fields->varying_table ||
           (fields->varying_table & 3) ||

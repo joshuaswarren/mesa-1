@@ -8467,26 +8467,87 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
  * HAL200 bind-tail layouts are not compatible with this command processor.
  */
 static bool
+agx_g18_viewports_overlap(const struct pipe_viewport_state *viewports,
+                          unsigned count)
+{
+   /* Native597 RasterToken::setViewports (0x219547508..0x2195475e4)
+    * sets control bit 0 when any two viewport rectangles overlap. Use
+    * double precision for their endpoints, as the native comparison does.
+    * Negative scales reverse the transform without changing its bounds. */
+   for (unsigned i = 1; i < count; ++i) {
+      const double ix = viewports[i].translate[0];
+      const double iy = viewports[i].translate[1];
+      const double iw = fabs((double)viewports[i].scale[0]);
+      const double ih = fabs((double)viewports[i].scale[1]);
+      for (unsigned j = 0; j < i; ++j) {
+         const double jx = viewports[j].translate[0];
+         const double jy = viewports[j].translate[1];
+         const double jw = fabs((double)viewports[j].scale[0]);
+         const double jh = fabs((double)viewports[j].scale[1]);
+         if (ix + iw > jx - jw && ix - iw < jx + jw &&
+             iy + ih > jy - jh && iy - ih < jy + jh)
+            return true;
+      }
+   }
+   return false;
+}
+
+static bool
 agx_g17g_viewport_scissor_records(struct agx_batch *batch,
+                                 const struct agx_compiled_shader *vs,
                                  struct agx_vdm_ppp_state_core records[2])
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
    const struct agx_rasterizer *rast = ctx->rast;
-   unsigned minx, miny, maxx, maxy;
-   const struct pipe_viewport_state *vp = &ctx->viewport[0];
-   agx_get_scissor_extents(vp, rast->base.scissor ? &ctx->scissor[0] : NULL,
-                           &batch->key, &minx, &miny, &maxx, &maxy);
-   float minz, maxz;
-   util_viewport_zmin_zmax(vp, rast->base.clip_halfz, &minz, &maxz);
-   const struct agx_ppp_hal300_scissor_record_fields scissor_fields = {
-      .min_x = minx, .max_x = maxx, .min_y = miny, .max_y = maxy,
-      .min_z_raw = fui(minz), .max_z_raw = fui(maxz),
+   /* Gallium keeps the API-visible array, without a highest-initialized
+    * index. Match the ordinary AGX path: an indexed shader binds all 16
+    * records, while shaders that only address viewport zero bind one. */
+   const unsigned viewport_count =
+      vs->b.info.nonzero_viewport ? AGX_MAX_VIEWPORTS : 1;
+   static_assert(AGX_MAX_VIEWPORTS == AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS);
+   uint8_t scissors[AGX_MAX_VIEWPORTS * AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH];
+   struct agx_ppp_viewport_payload_fields viewport_fields = {
+      .viewport_count = viewport_count,
    };
-   struct agx_ppp_hal300_scissor_record scissor;
-   if (maxx > UINT16_MAX || maxy > UINT16_MAX ||
-       !agx_ppp_hal300_scissor_record_pack(dev->chip, &scissor_fields, &scissor))
-      return false;
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      const struct pipe_viewport_state *vp = &ctx->viewport[i];
+      unsigned minx, miny, maxx, maxy;
+      agx_get_scissor_extents(vp, rast->base.scissor ? &ctx->scissor[i] : NULL,
+                             &batch->key, &minx, &miny, &maxx, &maxy);
+      float minz, maxz;
+      util_viewport_zmin_zmax(vp, rast->base.clip_halfz, &minz, &maxz);
+      const struct agx_ppp_hal300_scissor_record_fields scissor_fields = {
+         .min_x = minx, .max_x = maxx, .min_y = miny, .max_y = maxy,
+         .min_z_raw = fui(minz), .max_z_raw = fui(maxz),
+      };
+      struct agx_ppp_hal300_scissor_record scissor;
+      if (maxx > UINT16_MAX || maxy > UINT16_MAX ||
+          !agx_ppp_hal300_scissor_record_pack(dev->chip, &scissor_fields, &scissor))
+         return false;
+      /* Native597 handleScissorUpdates uploads consecutive 16-byte records
+       * at 0x21963ace8..0x21963ad48, including each viewport's depth range. */
+      memcpy(scissors + i * AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH,
+             scissor.bytes, AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH);
+      uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+      agx_pack(region_clip, REGION_CLIP, cfg) {
+         cfg.enable = true;
+         cfg.min_x = minx / 32; cfg.min_y = miny / 32;
+         cfg.max_x = DIV_ROUND_UP(MAX2(maxx, 1), 32);
+         cfg.max_y = DIV_ROUND_UP(MAX2(maxy, 1), 32);
+      }
+      memcpy(&viewport_fields.region_clip_raw[i], region_clip, sizeof(region_clip));
+      viewport_fields.viewports[i] = (struct agx_ppp_viewport_transform_raw){
+         .translate_x = fui(vp->translate[0]), .scale_x = fui(vp->scale[0]),
+         .translate_y = fui(vp->translate[1]), .scale_y = fui(vp->scale[1]),
+         .translate_z = fui(rast->base.clip_halfz ? vp->translate[2]
+                                : vp->translate[2] - vp->scale[2]),
+         .scale_z = fui(rast->base.clip_halfz ? vp->scale[2] : vp->scale[2] * 2.0f),
+      };
+   }
+   viewport_fields.viewport_control_raw =
+      dev->chip == AGX_CHIP_G18G &&
+      agx_g18_viewports_overlap(ctx->viewport, viewport_count);
    /* HAL300 binds a complete bias record, not the legacy array index. Keep
     * it current on raster state changes even for a non-triangle draw: a
     * later triangle may reuse it, while its ISP enable is per primitive.
@@ -8511,8 +8572,9 @@ agx_g17g_viewport_scissor_records(struct agx_batch *batch,
    if (!agx_ppp_hal300_depth_bias_record_pack(dev->chip, &bias_fields, &bias_record))
       return false;
    const struct agx_ppp_hal300_depth_bias_scissor_bases_fields base_fields = {
-      .scissor_base = agx_pool_upload_aligned(&batch->pool, scissor.bytes,
-                                               scissor.length, 64),
+      .scissor_base = agx_pool_upload_aligned(
+         &batch->pool, scissors,
+         viewport_count * AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH, 64),
       .depth_bias_base = agx_pool_upload_aligned(&batch->pool, bias_record.bytes,
                                                   bias_record.length, 64),
    };
@@ -8521,27 +8583,6 @@ agx_g17g_viewport_scissor_records(struct agx_batch *batch,
        !agx_ppp_hal300_depth_bias_scissor_bases_pack(dev->chip, &base_fields, &bases))
       return false;
 
-   uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
-   agx_pack(region_clip, REGION_CLIP, cfg) {
-      cfg.enable = true;
-      cfg.min_x = minx / 32; cfg.min_y = miny / 32;
-      cfg.max_x = DIV_ROUND_UP(MAX2(maxx, 1), 32);
-      cfg.max_y = DIV_ROUND_UP(MAX2(maxy, 1), 32);
-   }
-   struct agx_ppp_viewport_payload_fields viewport_fields = {
-      .viewport_count = 1,
-      .viewports[0] = {
-         .translate_x = fui(vp->translate[0]), .scale_x = fui(vp->scale[0]),
-         .translate_y = fui(vp->translate[1]), .scale_y = fui(vp->scale[1]),
-         .translate_z = fui(rast->base.clip_halfz ? vp->translate[2]
-                                : vp->translate[2] - vp->scale[2]),
-         .scale_z = fui(rast->base.clip_halfz ? vp->scale[2] : vp->scale[2] * 2.0f),
-      },
-   };
-   memcpy(&viewport_fields.region_clip_raw[0], region_clip, sizeof(region_clip));
-   uint8_t control[AGX_VIEWPORT_CONTROL_LENGTH];
-   agx_pack(control, VIEWPORT_CONTROL, cfg) ;
-   memcpy(&viewport_fields.viewport_control_raw, control, sizeof(control));
    struct agx_ppp_viewport_payload_core viewport;
    if (!agx_ppp_viewport_payload_core_pack(dev->chip, &viewport_fields, &viewport))
       return false;
@@ -8688,17 +8729,22 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
          ? &cf->bindings[cf->nr_bindings - 1] : NULL;
    /* The UVS groups are laid out in enum order: position, varyings, point
     * size, layer/viewport, clip distance. The profile admits a point-size
-    * group and a clip-distance group and keeps layer/viewport empty, so the
-    * clip-distance group is whatever runs from its offset to the end. */
+    * group, a packed layer/viewport word on G18, and a clip-distance group.
+    * Clip distances run from their group offset to the end. Native597
+    * vertex references preserve the combined system-output word. */
    const bool psiz = vs && vs->uvs.group_offs[UVS_LAYER_VIEWPORT] ==
                               vs->uvs.group_offs[UVS_PSIZ] + 1;
+   const bool layer_viewport =
+      vs && vs->uvs.group_offs[UVS_CLIP_DIST] ==
+               vs->uvs.group_offs[UVS_LAYER_VIEWPORT] + 1;
    const unsigned clip_dist_words =
       vs && vs->uvs.size > vs->uvs.group_offs[UVS_CLIP_DIST]
          ? vs->uvs.size - vs->uvs.group_offs[UVS_CLIP_DIST]
          : 0;
    const bool vertex_color_output =
       vs && vs->uvs.user_size >= 1 && vs->uvs.user_size <= 8 &&
-      vs->uvs.size == 4 + vs->uvs.user_size + psiz + clip_dist_words;
+      vs->uvs.size ==
+         4 + vs->uvs.user_size + psiz + layer_viewport + clip_dist_words;
    bool color_varying = vertex_color_output && color;
    unsigned coefficient_count = 0;
    if (color_varying) {
@@ -8851,22 +8897,25 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
                          4 + vs->uvs.user_size + psiz,
                       "UVS layer/viewport group");
       M5_DRAW_OUTSIDE(vs->uvs.group_offs[UVS_CLIP_DIST] !=
-                         vs->uvs.group_offs[UVS_LAYER_VIEWPORT],
+                         vs->uvs.group_offs[UVS_LAYER_VIEWPORT] + layer_viewport ||
+                         (layer_viewport && dev->chip != AGX_CHIP_G18G),
                       "UVS clip-distance group");
       /* The output selector's low sixteen bits are the sixteen named
        * clip-distance planes; bit 18 is point size. Each enabled plane
        * contributes one UVS word, which is the same count the graphics
-       * record carries, so the two have to agree. Everything above the
-       * plane bits must still be exactly the point-size bit -- notably the
-       * varyings bit stays clear, as it does on every shape measured so
-       * far. */
+       * record carries, so the two have to agree. Native597's UVS constructor
+       * also emits bits 19/20 for the shared layer/viewport word. Gallium
+       * packs both halves together, including a zero for an absent output.
+       * The vertex varying bit remains clear; the fragment contributes it. */
       M5_DRAW_OUTSIDE((vs->uvs.osel.opaque[0] & ~UINT32_C(0xffff)) !=
-                         (psiz ? 0x40000 : 0),
+                         ((psiz ? 0x40000 : 0) |
+                          (layer_viewport ? 0x180000 : 0)),
                       "UVS output selector");
       M5_DRAW_OUTSIDE(util_bitcount(vs->uvs.osel.opaque[0] & 0xffff) !=
                          clip_dist_words,
                       "UVS clip-distance planes");
-      M5_DRAW_OUTSIDE(vs->b.info.nonzero_viewport, "nonzero viewport index");
+      M5_DRAW_OUTSIDE(vs->b.info.nonzero_viewport && !layer_viewport,
+                      "viewport index without UVS system output");
       M5_DRAW_OUTSIDE(fragment_pass != AGX_PASS_TYPE_OPAQUE &&
                          fragment_pass != AGX_PASS_TYPE_TRANSLUCENT &&
                          fragment_pass != AGX_PASS_TYPE_PUNCH_THROUGH &&
@@ -9147,13 +9196,14 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
 
    struct agx_vdm_ppp_state_core records[2 + AGX_PPP_HAL300_GRAPHICS_RECORDS];
    unsigned record_count = 0;
-   /* These records depend only on rasterizer, viewport and scissor state.
-    * The admitted HAL300 path has one viewport, so shader rebinding cannot
-    * change the viewport count. As on AGX2, the pool and encoded state live
-    * for the whole batch; switching batches dirties all state.
+   /* Shader rebinding can change the viewport count, including when a GS
+    * copy program becomes the hardware vertex shader. As on AGX2, keep the
+    * full VS dirty dependency as well as rasterizer/viewport/scissor state.
+    * The pool and encoded state live for the batch; batch switches dirty all.
     */
-   if (ctx->dirty & (AGX_DIRTY_VIEWPORT | AGX_DIRTY_SCISSOR_ZBIAS | AGX_DIRTY_RS)) {
-      if (!agx_g17g_viewport_scissor_records(batch, records))
+   if (ctx->dirty & (AGX_DIRTY_VIEWPORT | AGX_DIRTY_SCISSOR_ZBIAS |
+                     AGX_DIRTY_RS | AGX_DIRTY_VS)) {
+      if (!agx_g17g_viewport_scissor_records(batch, vs, records))
          return NULL;
       record_count = 2;
    }
