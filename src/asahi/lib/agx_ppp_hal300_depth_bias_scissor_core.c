@@ -4,37 +4,9 @@
  */
 
 #include "agx_ppp_hal300_depth_bias_scissor_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
-
-static void
-store_le16(uint8_t *dst, uint16_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-}
-
-static uint16_t
-load_le16(const uint8_t *src)
-{
-   return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
-}
-
-static void
-store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
 
 static bool
 base_is_representable(uint64_t base)
@@ -45,15 +17,15 @@ base_is_representable(uint64_t base)
 static void
 pack_base(uint8_t *dst, uint64_t base)
 {
-   store_le32(&dst[0], (uint32_t)((base >> 16) & UINT64_C(0xffff0000)));
-   store_le32(&dst[4], (uint32_t)base & UINT32_C(0xfffffffc));
+   agx_store_le32(&dst[0], (uint32_t)((base >> 16) & UINT64_C(0xffff0000)));
+   agx_store_le32(&dst[4], (uint32_t)base & UINT32_C(0xfffffffc));
 }
 
 static bool
 unpack_base(const uint8_t *src, uint64_t *base)
 {
-   const uint32_t high = load_le32(&src[0]);
-   const uint32_t low = load_le32(&src[4]);
+   const uint32_t high = agx_load_le32(&src[0]);
+   const uint32_t low = agx_load_le32(&src[4]);
 
    if ((high & UINT32_C(0x0000ffff)) != 0 || (low & UINT32_C(3)) != 0)
       return false;
@@ -89,9 +61,9 @@ agx_ppp_hal300_depth_bias_record_pack(
        !agx_ppp_hal300_depth_bias_scissor_core_supported(chip))
       return false;
 
-   store_le32(&out->bytes[0], fields->depth_bias_raw);
-   store_le32(&out->bytes[4], fields->slope_scale_raw);
-   store_le32(&out->bytes[8], fields->clamp_raw);
+   agx_store_le32(&out->bytes[0], fields->depth_bias_raw);
+   agx_store_le32(&out->bytes[4], fields->slope_scale_raw);
+   agx_store_le32(&out->bytes[8], fields->clamp_raw);
    out->length = AGX_PPP_HAL300_DEPTH_BIAS_RECORD_LENGTH;
    return true;
 }
@@ -109,9 +81,9 @@ agx_ppp_hal300_depth_bias_record_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   fields->depth_bias_raw = load_le32(&raw[0]);
-   fields->slope_scale_raw = load_le32(&raw[4]);
-   fields->clamp_raw = load_le32(&raw[8]);
+   fields->depth_bias_raw = agx_load_le32(&raw[0]);
+   fields->slope_scale_raw = agx_load_le32(&raw[4]);
+   fields->clamp_raw = agx_load_le32(&raw[8]);
    return true;
 }
 
@@ -128,12 +100,12 @@ agx_ppp_hal300_scissor_record_pack(
        !agx_ppp_hal300_depth_bias_scissor_core_supported(chip))
       return false;
 
-   store_le16(&out->bytes[0], fields->max_x);
-   store_le16(&out->bytes[2], fields->min_x);
-   store_le16(&out->bytes[4], fields->max_y);
-   store_le16(&out->bytes[6], fields->min_y);
-   store_le32(&out->bytes[8], fields->min_z_raw);
-   store_le32(&out->bytes[12], fields->max_z_raw);
+   agx_store_le16(&out->bytes[0], fields->max_x);
+   agx_store_le16(&out->bytes[2], fields->min_x);
+   agx_store_le16(&out->bytes[4], fields->max_y);
+   agx_store_le16(&out->bytes[6], fields->min_y);
+   agx_store_le32(&out->bytes[8], fields->min_z_raw);
+   agx_store_le32(&out->bytes[12], fields->max_z_raw);
    out->length = AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH;
    return true;
 }
@@ -151,12 +123,12 @@ agx_ppp_hal300_scissor_record_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   fields->max_x = load_le16(&raw[0]);
-   fields->min_x = load_le16(&raw[2]);
-   fields->max_y = load_le16(&raw[4]);
-   fields->min_y = load_le16(&raw[6]);
-   fields->min_z_raw = load_le32(&raw[8]);
-   fields->max_z_raw = load_le32(&raw[12]);
+   fields->max_x = agx_load_le16(&raw[0]);
+   fields->min_x = agx_load_le16(&raw[2]);
+   fields->max_y = agx_load_le16(&raw[4]);
+   fields->min_y = agx_load_le16(&raw[6]);
+   fields->min_z_raw = agx_load_le32(&raw[8]);
+   fields->max_z_raw = agx_load_le32(&raw[12]);
    return true;
 }
 
@@ -175,7 +147,7 @@ agx_ppp_hal300_depth_bias_scissor_bases_pack(
        !base_is_representable(fields->scissor_base))
       return false;
 
-   store_le32(&out->bytes[0], AGX_PPP_HAL300_DEPTH_BIAS_SCISSOR_BASES_HEADER);
+   agx_store_le32(&out->bytes[0], AGX_PPP_HAL300_DEPTH_BIAS_SCISSOR_BASES_HEADER);
    pack_base(&out->bytes[4], fields->depth_bias_base);
    pack_base(&out->bytes[12], fields->scissor_base);
    out->length = AGX_PPP_HAL300_DEPTH_BIAS_SCISSOR_BASES_LENGTH;
@@ -196,7 +168,7 @@ agx_ppp_hal300_depth_bias_scissor_bases_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   if (load_le32(&raw[0]) != AGX_PPP_HAL300_DEPTH_BIAS_SCISSOR_BASES_HEADER)
+   if (agx_load_le32(&raw[0]) != AGX_PPP_HAL300_DEPTH_BIAS_SCISSOR_BASES_HEADER)
       return false;
 
    uint64_t depth_bias_base;

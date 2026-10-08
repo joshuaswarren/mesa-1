@@ -4,6 +4,7 @@
  */
 
 #include "agx_ioto_profile_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
 
@@ -24,19 +25,6 @@ static const uint8_t g17s_minimal_profile_loader
       0x1c, 0x80, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00,
       0x27, 0x04, 0x04, 0x00, 0x30, 0x00, 0xa4, 0x12,
    };
-
-static uint16_t
-load_le16(const uint8_t *bytes)
-{
-   return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
-}
-
-static void
-store_le16(uint8_t *bytes, uint16_t value)
-{
-   bytes[0] = value;
-   bytes[1] = value >> 8;
-}
 
 static bool
 is_hal300(enum agx_chip chip)
@@ -96,16 +84,16 @@ agx_ioto_profile_control_pack(const struct agx_ioto_profile_control *profile,
       return false;
    }
 
-   store_le16(out, is_hal300(profile->chip)
+   agx_store_le16(out, is_hal300(profile->chip)
                       ? AGX_IOTO_PROFILE_CONTROL_HAL300_OPCODE
                       : AGX_IOTO_PROFILE_CONTROL_CLASSIC_OPCODE);
-   store_le16(out + 2,
+   agx_store_le16(out + 2,
               profile->payload0 |
                  (is_hal300(profile->chip)
                      ? AGX_IOTO_PROFILE_CONTROL_HAL300_WORD1_FIXED
                      : 0));
    if (is_hal300(profile->chip))
-      store_le16(out + 4, profile->payload1);
+      agx_store_le16(out + 4, profile->payload1);
 
    return true;
 }
@@ -140,11 +128,11 @@ agx_ioto_profile_control_unpack(enum agx_chip chip, const void *stream,
    const uint16_t opcode = is_hal300(chip)
                               ? AGX_IOTO_PROFILE_CONTROL_HAL300_OPCODE
                               : AGX_IOTO_PROFILE_CONTROL_CLASSIC_OPCODE;
-   if (load_le16(bytes) != opcode)
+   if (agx_load_le16(bytes) != opcode)
       return false;
 
-   const uint16_t word1 = load_le16(bytes + 2);
-   const uint16_t word2 = is_hal300(chip) ? load_le16(bytes + 4) : 0;
+   const uint16_t word1 = agx_load_le16(bytes + 2);
+   const uint16_t word2 = is_hal300(chip) ? agx_load_le16(bytes + 4) : 0;
    if (is_hal300(chip)) {
       if ((word1 & ~AGX_IOTO_PROFILE_CONTROL_HAL300_PAYLOAD0) !=
              AGX_IOTO_PROFILE_CONTROL_HAL300_WORD1_FIXED ||

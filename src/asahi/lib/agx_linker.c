@@ -4,6 +4,7 @@
  */
 
 #include "agx_linker.h"
+#include "agx_bytes.h"
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -164,15 +165,6 @@ agx3_fill_helper_table(uint8_t *image, size_t base)
    memcpy(image + base + 0x70, terminal, sizeof(terminal));
 }
 
-static void
-agx3_put_le32(uint8_t *where, uint32_t value)
-{
-   where[0] = value;
-   where[1] = value >> 8;
-   where[2] = value >> 16;
-   where[3] = value >> 24;
-}
-
 /* Total container bytes for `code_size` bytes of executable. */
 static size_t
 agx3_container_size(size_t code_size)
@@ -188,7 +180,7 @@ void
 agx3_build_container_lead(uint8_t *image)
 {
    memset(image, 0, AGX3_CONTAINER_LEAD);
-   agx3_put_le32(image, AGX3_CONTAINER_LEAD);
+   agx_store_le32(image, AGX3_CONTAINER_LEAD);
    for (size_t offset = 0x40; offset < AGX3_CONTAINER_LEAD; offset += 2) {
       image[offset] = 0x06;
       image[offset + 1] = 0x00;
@@ -204,7 +196,7 @@ agx3_build_container(uint8_t *image, size_t code_size, bool fragment,
    memset(image, 0, agx3_container_size(code_size));
    agx3_build_container_lead(image);
 
-   agx3_put_le32(image + AGX3_CONTAINER_LEAD,
+   agx_store_le32(image + AGX3_CONTAINER_LEAD,
                  AGX3_CONTAINER_BLOCK_HDR + AGX3_CONTAINER_CONST_PROG +
                     ALIGN_POT(code_size, 64));
 

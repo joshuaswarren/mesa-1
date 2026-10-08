@@ -38,6 +38,7 @@
 #define AGX_RT_BVH_H
 
 #include <stdbool.h>
+#include "agx_bytes.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -100,28 +101,6 @@ _Static_assert(sizeof(float) == sizeof(uint32_t),
                "RIA triangle leaves require 32-bit float");
 #endif
 
-static inline uint32_t
-agx_rt_bvh_load_le32(const uint8_t *src)
-{
-   uint32_t value = 0;
-
-   for (unsigned i = 0; i < 4; ++i)
-      value |= (uint32_t)src[i] << (i * 8);
-
-   return value;
-}
-
-static inline uint64_t
-agx_rt_bvh_load_le64(const uint8_t *src)
-{
-   uint64_t value = 0;
-
-   for (unsigned i = 0; i < 8; ++i)
-      value |= (uint64_t)src[i] << (i * 8);
-
-   return value;
-}
-
 /* Decode the exact 48-byte hardware AABB leaf emitted by the public Metal
  * Gen1 builder.  `available` is the remaining mapped-buffer span, so a larger
  * value is valid; this helper consumes only the first fixed-size record. */
@@ -139,22 +118,22 @@ agx_rt_bvh_gen1_hw_aabb_leaf_unpack(
       return false;
 
    const uint8_t *bytes = (const uint8_t *)packed;
-   leaf->header = agx_rt_bvh_load_le32(bytes);
+   leaf->header = agx_load_le32(bytes);
    if ((leaf->header & 0xffu) != AGX_RT_BVH_GEN1_HW_AABB_LEAF_MARKER) {
       memset(leaf, 0, sizeof(*leaf));
       return false;
    }
 
    for (unsigned axis = 0; axis < 3; ++axis) {
-      uint32_t bits = agx_rt_bvh_load_le32(bytes + 4 + axis * 4);
+      uint32_t bits = agx_load_le32(bytes + 4 + axis * 4);
       memcpy(&leaf->minimum[axis], &bits, sizeof(bits));
-      bits = agx_rt_bvh_load_le32(bytes + 16 + axis * 4);
+      bits = agx_load_le32(bytes + 16 + axis * 4);
       memcpy(&leaf->maximum[axis], &bits, sizeof(bits));
    }
 
-   leaf->packed_ids_and_flags = agx_rt_bvh_load_le64(bytes + 28);
-   leaf->word36 = agx_rt_bvh_load_le32(bytes + 36);
-   leaf->primitive_data_relative_word = agx_rt_bvh_load_le64(bytes + 40);
+   leaf->packed_ids_and_flags = agx_load_le64(bytes + 28);
+   leaf->word36 = agx_load_le32(bytes + 36);
+   leaf->primitive_data_relative_word = agx_load_le64(bytes + 40);
    if (leaf->packed_ids_and_flags & (UINT64_C(1) << 62)) {
       memcpy(&leaf->primitive_data_relative,
              &leaf->primitive_data_relative_word,
@@ -220,21 +199,21 @@ agx_rt_bvh_gen1_hw_triangle_leaf_unpack(
       return false;
 
    const uint8_t *bytes = (const uint8_t *)packed;
-   if (agx_rt_bvh_load_le32(bytes) !=
+   if (agx_load_le32(bytes) !=
        AGX_RT_BVH_GEN1_HW_TRIANGLE_LEAF_MARKER)
       return false;
 
    for (unsigned axis = 0; axis < 3; ++axis) {
       for (unsigned lane = 0; lane < 4; ++lane) {
          const uint32_t bits =
-            agx_rt_bvh_load_le32(bytes + 4 + 4 * (axis * 4 + lane));
+            agx_load_le32(bytes + 4 + 4 * (axis * 4 + lane));
          memcpy(&leaf->coordinate[axis][lane], &bits, sizeof(bits));
       }
    }
 
-   leaf->geometry_word = agx_rt_bvh_load_le32(bytes + 52);
-   leaf->primitive_word[0] = agx_rt_bvh_load_le32(bytes + 56);
-   leaf->primitive_word[1] = agx_rt_bvh_load_le32(bytes + 60);
+   leaf->geometry_word = agx_load_le32(bytes + 52);
+   leaf->primitive_word[0] = agx_load_le32(bytes + 56);
+   leaf->primitive_word[1] = agx_load_le32(bytes + 60);
    return true;
 }
 
@@ -265,7 +244,7 @@ agx_rt_bvh_gen1_header_unpack(const void *packed,
 
    const uint8_t *bytes = (const uint8_t *)packed;
    for (unsigned i = 0; i < 8; ++i)
-      header->words[i] = agx_rt_bvh_load_le64(bytes + (i * 8));
+      header->words[i] = agx_load_le64(bytes + (i * 8));
 
    return true;
 }
@@ -646,7 +625,7 @@ agx_rt_bvh_gen5_header_unpack(const void *packed,
 
    const uint8_t *bytes = (const uint8_t *)packed;
    for (unsigned i = 0; i < 8; ++i)
-      header->words[i] = agx_rt_bvh_load_le64(bytes + (i * 8));
+      header->words[i] = agx_load_le64(bytes + (i * 8));
 
    return true;
 }

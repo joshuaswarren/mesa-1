@@ -34,6 +34,7 @@ libasahi_lib_files = files(
   'agx_border.c',
   'agx_chip.c',
   'agx_device.c',
+  'agx_bytes.h',
   'agx_linker.c',
   'agx_bg_eot.c',
   'agx_bg_eot_key.c',

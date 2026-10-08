@@ -4,6 +4,7 @@
  */
 
 #include "agx_ppp_hal200_graphics_core.h"
+#include "agx_bytes.h"
 #include "agx_vdm_state_core.h"
 
 #include <string.h>
@@ -165,22 +166,6 @@ agx_ppp_hal200_occlusion_pack(enum agx_chip chip, unsigned mode,
    return true;
 }
 
-static void
-store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
 static bool
 bundle_layout(enum agx_ppp_hal200_graphics_bundle bundle, uint32_t *header,
               unsigned *payload_words)
@@ -260,9 +245,9 @@ agx_ppp_hal200_graphics_core_pack(
        !bundle_layout(bundle, &header, &payload_words))
       return false;
 
-   store_le32(out->bytes, header);
+   agx_store_le32(out->bytes, header);
    for (unsigned i = 0; i < payload_words; ++i)
-      store_le32(&out->bytes[4 + (4 * i)], fields->words[i]);
+      agx_store_le32(&out->bytes[4 + (4 * i)], fields->words[i]);
 
    out->length = (uint8_t)(4 + (4 * payload_words));
    return true;
@@ -287,11 +272,11 @@ agx_ppp_hal200_graphics_core_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   if (load_le32(raw) != header)
+   if (agx_load_le32(raw) != header)
       return false;
 
    for (unsigned i = 0; i < payload_words; ++i)
-      fields->words[i] = load_le32(&raw[4 + (4 * i)]);
+      fields->words[i] = agx_load_le32(&raw[4 + (4 * i)]);
 
    return true;
 }
@@ -344,8 +329,8 @@ agx_ppp_hal200_fragment_core_pack(
          fields->resource_counts | (uint32_t)(fields->varying_table >> 32),
          (uint32_t)fields->varying_table,
          fields->unknown_0c,
-         load_le32(&stage_program.bytes[0]),
-         load_le32(&stage_program.bytes[4]),
+         agx_load_le32(&stage_program.bytes[0]),
+         agx_load_le32(&stage_program.bytes[4]),
          fields->flags,
       },
    };

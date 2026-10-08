@@ -4,6 +4,7 @@
  */
 
 #include "agx_ioto_program_core.h"
+#include "agx_bytes.h"
 
 #include "agx_ioto_core.h"
 #include "agx_ioto_load_core.h"
@@ -129,19 +130,13 @@ _Static_assert(AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
                   AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE,
                "G17P fragment no-resource Ioto size must remain 86 bytes");
 
-static uint16_t
-g17p_load_le16(const uint8_t *bytes)
-{
-   return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
-}
-
 static bool
 g17p_ldshdr_has_shader_va(const uint8_t *ldshdr)
 {
-   const uint16_t word1 = g17p_load_le16(ldshdr + 2);
-   const uint16_t word2 = g17p_load_le16(ldshdr + 4);
-   const uint16_t word3 = g17p_load_le16(ldshdr + 6);
-   const uint16_t word4 = g17p_load_le16(ldshdr + 8);
+   const uint16_t word1 = agx_load_le16(ldshdr + 2);
+   const uint16_t word2 = agx_load_le16(ldshdr + 4);
+   const uint16_t word3 = agx_load_le16(ldshdr + 6);
+   const uint16_t word4 = agx_load_le16(ldshdr + 8);
    return (word1 & UINT16_C(0xff80)) != 0 || word2 != 0 || word3 != 0 ||
           (word4 & UINT16_C(1)) != 0;
 }

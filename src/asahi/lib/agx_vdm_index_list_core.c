@@ -4,24 +4,9 @@
  */
 
 #include "agx_vdm_index_list_core.h"
+#include "agx_bytes.h"
 
 #include <string.h>
-
-static void
-agx_vdm_index_list_store_le32(uint8_t *dst, uint32_t value)
-{
-   dst[0] = (uint8_t)value;
-   dst[1] = (uint8_t)(value >> 8);
-   dst[2] = (uint8_t)(value >> 16);
-   dst[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t
-agx_vdm_index_list_load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
 
 static bool
 agx_vdm_index_list_direct_is_hal300(enum agx_chip chip)
@@ -60,7 +45,7 @@ agx_vdm_index_list_direct_nonindexed_pack(
       return false;
 
    for (unsigned i = 0; i < words.count; ++i)
-      agx_vdm_index_list_store_le32(&out->bytes[i * 4], words.words[i]);
+      agx_store_le32(&out->bytes[i * 4], words.words[i]);
    out->length = words.count * 4;
 
    return true;
@@ -83,21 +68,21 @@ agx_vdm_index_list_direct_nonindexed_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t header = agx_vdm_index_list_load_le32(&raw[0]);
+   const uint32_t header = agx_load_le32(&raw[0]);
    const uint32_t expected_header =
       hal300 ? UINT32_C(0x69c40000) : UINT32_C(0x61c40000);
    const uint8_t primitive = (uint8_t)(header >> 8);
 
    if ((header & UINT32_C(0xffff00ff)) != expected_header ||
        !agx_vdm_index_list_primitive_supported(primitive) ||
-       agx_vdm_index_list_load_le32(&raw[8]) == 0 ||
-       (hal300 && agx_vdm_index_list_load_le32(&raw[16]) != UINT32_C(7)))
+       agx_load_le32(&raw[8]) == 0 ||
+       (hal300 && agx_load_le32(&raw[16]) != UINT32_C(7)))
       return false;
 
    info->primitive = primitive;
-   info->count = agx_vdm_index_list_load_le32(&raw[4]);
-   info->instances = agx_vdm_index_list_load_le32(&raw[8]);
-   info->start = agx_vdm_index_list_load_le32(&raw[12]);
+   info->count = agx_load_le32(&raw[4]);
+   info->instances = agx_load_le32(&raw[8]);
+   info->start = agx_load_le32(&raw[12]);
    return true;
 }
 
@@ -121,7 +106,7 @@ agx_vdm_index_list_direct_indexed_pack(
       return false;
 
    for (unsigned i = 0; i < words.count; ++i)
-      agx_vdm_index_list_store_le32(&out->bytes[i * 4], words.words[i]);
+      agx_store_le32(&out->bytes[i * 4], words.words[i]);
    out->length = words.count * 4;
    return true;
 }
@@ -143,7 +128,7 @@ agx_vdm_index_list_direct_indexed_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t header = agx_vdm_index_list_load_le32(&raw[0]);
+   const uint32_t header = agx_load_le32(&raw[0]);
    const uint32_t expected_fixed =
       hal300 ? UINT32_C(0x69f00000) : UINT32_C(0x61f00000);
    const uint8_t primitive = (uint8_t)(header >> 8);
@@ -152,27 +137,27 @@ agx_vdm_index_list_direct_indexed_unpack(
    const unsigned opaque_offset = 20;
    const unsigned size_offset = hal300 ? 24 : 20;
    const unsigned high_offset = hal300 ? 28 : 24;
-   const uint32_t high_word = agx_vdm_index_list_load_le32(&raw[high_offset]);
+   const uint32_t high_word = agx_load_le32(&raw[high_offset]);
 
    if ((header & UINT32_C(0xfff00000)) != expected_fixed ||
        !agx_vdm_index_list_primitive_supported(primitive) ||
        !agx_vdm_index_list_index_size_supported_inline(chip, index_size) ||
-       agx_vdm_index_list_load_le32(&raw[12]) == 0 || high_word > 0xff ||
+       agx_load_le32(&raw[12]) == 0 || high_word > 0xff ||
        (hal300 &&
-        agx_vdm_index_list_load_le32(&raw[opaque_offset]) != UINT32_C(7)))
+        agx_load_le32(&raw[opaque_offset]) != UINT32_C(7)))
       return false;
 
    info->primitive = primitive;
    info->restart_enable = (header & (UINT32_C(1) << 16)) != 0;
    info->index_size = index_size;
    info->index_buffer =
-      (uint64_t)agx_vdm_index_list_load_le32(&raw[4]) |
+      (uint64_t)agx_load_le32(&raw[4]) |
       ((uint64_t)(header & 0xff) << 32) | ((uint64_t)high_word << 40);
-   info->count = agx_vdm_index_list_load_le32(&raw[8]);
-   info->instances = agx_vdm_index_list_load_le32(&raw[12]);
-   info->start = agx_vdm_index_list_load_le32(&raw[16]);
+   info->count = agx_load_le32(&raw[8]);
+   info->instances = agx_load_le32(&raw[12]);
+   info->start = agx_load_le32(&raw[16]);
    info->index_buffer_size_word =
-      agx_vdm_index_list_load_le32(&raw[size_offset]);
+      agx_load_le32(&raw[size_offset]);
    return true;
 }
 
@@ -195,7 +180,7 @@ agx_vdm_index_list_indirect_nonindexed_pack(
       return false;
 
    for (unsigned i = 0; i < words.count; ++i)
-      agx_vdm_index_list_store_le32(&out->bytes[i * 4], words.words[i]);
+      agx_store_le32(&out->bytes[i * 4], words.words[i]);
    out->length = words.count * 4;
    return true;
 }
@@ -217,18 +202,18 @@ agx_vdm_index_list_indirect_nonindexed_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   const uint32_t header = agx_vdm_index_list_load_le32(&raw[0]);
+   const uint32_t header = agx_load_le32(&raw[0]);
    const uint32_t expected_header =
       hal300 ? UINT32_C(0x6c040000) : UINT32_C(0x64040000);
    const uint8_t primitive = (uint8_t)(header >> 8);
-   const uint32_t addr_hi = agx_vdm_index_list_load_le32(&raw[4]);
-   const uint32_t addr_lo = agx_vdm_index_list_load_le32(&raw[8]);
+   const uint32_t addr_hi = agx_load_le32(&raw[4]);
+   const uint32_t addr_lo = agx_load_le32(&raw[8]);
 
    if ((header & UINT32_C(0xffff00ff)) != expected_header ||
        !agx_vdm_index_list_primitive_supported(primitive) ||
        addr_hi > 0xffff || (addr_lo & 3u) != 0 ||
        (hal300 &&
-        agx_vdm_index_list_load_le32(&raw[12]) != UINT32_C(7)))
+        agx_load_le32(&raw[12]) != UINT32_C(7)))
       return false;
 
    info->primitive = primitive;
@@ -257,7 +242,7 @@ agx_vdm_index_list_indirect_indexed_pack(
       return false;
 
    for (unsigned i = 0; i < words.count; ++i)
-      agx_vdm_index_list_store_le32(&out->bytes[i * 4], words.words[i]);
+      agx_store_le32(&out->bytes[i * 4], words.words[i]);
    out->length = words.count * 4;
    return true;
 }
@@ -279,11 +264,11 @@ agx_vdm_index_list_indirect_indexed_unpack(
       return false;
 
    const uint8_t *raw = bytes;
-   if (agx_vdm_index_list_load_le32(&raw[0]) != UINT32_C(0x40000001))
+   if (agx_load_le32(&raw[0]) != UINT32_C(0x40000001))
       return false;
 
-   const uint32_t restart_index = agx_vdm_index_list_load_le32(&raw[4]);
-   const uint32_t header = agx_vdm_index_list_load_le32(&raw[8]);
+   const uint32_t restart_index = agx_load_le32(&raw[4]);
+   const uint32_t header = agx_load_le32(&raw[8]);
    const uint8_t primitive = (uint8_t)(header >> 8);
    const enum agx_vdm_index_list_index_size index_size =
       (enum agx_vdm_index_list_index_size)((header >> 17) & 0x7);
@@ -293,14 +278,14 @@ agx_vdm_index_list_indirect_indexed_unpack(
        !agx_vdm_index_list_index_size_supported_inline(chip, index_size))
       return false;
 
-   const uint32_t index_buffer_lo = agx_vdm_index_list_load_le32(&raw[12]);
-   const uint32_t addr_hi = agx_vdm_index_list_load_le32(&raw[16]);
-   const uint32_t addr_lo = agx_vdm_index_list_load_le32(&raw[20]);
+   const uint32_t index_buffer_lo = agx_load_le32(&raw[12]);
+   const uint32_t addr_hi = agx_load_le32(&raw[16]);
+   const uint32_t addr_lo = agx_load_le32(&raw[20]);
    const unsigned unk2_offset = 24;
    const unsigned size_offset = hal300 ? 28 : 24;
    const unsigned high_offset = hal300 ? 32 : 28;
    const uint32_t index_buffer_hi =
-      agx_vdm_index_list_load_le32(&raw[high_offset]);
+      agx_load_le32(&raw[high_offset]);
    const uint64_t index_buffer =
       (uint64_t)index_buffer_lo | ((uint64_t)(header & 0xff) << 32) |
       ((uint64_t)index_buffer_hi << 40);
@@ -316,7 +301,7 @@ agx_vdm_index_list_indirect_indexed_unpack(
    if (header != rebuilt_header || addr_hi > 0xffff || (addr_lo & 3u) != 0 ||
        index_buffer_hi > 0xff ||
        (hal300 &&
-        agx_vdm_index_list_load_le32(&raw[unk2_offset]) != UINT32_C(7)))
+        agx_load_le32(&raw[unk2_offset]) != UINT32_C(7)))
       return false;
 
    info->primitive = primitive;
@@ -326,6 +311,6 @@ agx_vdm_index_list_indirect_indexed_unpack(
    info->indirect_buffer = (uint64_t)addr_lo | ((uint64_t)addr_hi << 32);
    info->restart_index = restart_index;
    info->index_buffer_size_word =
-      agx_vdm_index_list_load_le32(&raw[size_offset]);
+      agx_load_le32(&raw[size_offset]);
    return true;
 }
