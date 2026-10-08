@@ -391,6 +391,15 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
          fields[58] = fields[77] == 2 ? 6 : 4;
          fields[59] = 1;
       }
+      /* Native607 explicit levels and native610 fragment implicit/bias
+       * colour cubes use CEM X/Y=4/0 and the face/level word at 2. */
+      if (fields[76] == 4 && fields[78] == 2 && fields[77] == 0 &&
+          !fields[143] && !fields[144] &&
+          (fields[139] == 0 || fields[139] == 2 ||
+           fields[139] == 3 || fields[139] == 4)) {
+         fields[19] = 4;
+         fields[56] = 0;
+      }
       /* Native413: cube-gather banks depend on the actual stage, not the
        * final-fragment marker, which may be absent on earlier samples. */
       if (fields[144] && fields[76] == 4) {

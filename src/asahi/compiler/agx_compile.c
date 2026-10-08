@@ -6879,6 +6879,18 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       lod = agx_immediate(0);
    }
 
+   /* Rectangle textures have one level. Their sampler-bias lowering may
+    * still produce txb outside a fragment shader, where no derivative quad
+    * exists. Native G18 pixel-coordinate vertex/compute samples use an
+    * explicit zero level; keep the unnormalized coordinates unchanged. */
+   if (b->shader->key->dev.emit_agx3d &&
+       b->shader->stage != MESA_SHADER_FRAGMENT &&
+       instr->sampler_dim == GLSL_SAMPLER_DIM_RECT &&
+       (instr->op == nir_texop_tex || instr->op == nir_texop_txb)) {
+      lod_mode = AGX_LOD_MODE_LOD_MIN;
+      lod = agx_immediate(0);
+   }
+
    if (lod_mode == AGX_LOD_MODE_AUTO_LOD) {
       /* Ignored logically but asserted 0 */
       lod = agx_immediate(0);

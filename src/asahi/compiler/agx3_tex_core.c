@@ -409,6 +409,25 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       !d->compute_stage && !d->offset_register && !d->offset_staged &&
       d->lod == AGX3_TEX_LOD_GRADIENT;
 
+   /* Native607 compiles float4 3D/cube samples independently for G17G and
+    * G18G in all three execution stages. Explicit zero and register levels
+    * use the existing f139=2/4 selectors and f76=3/4 dimensions. Native610
+    * adds implicit and register-bias fragment shapes (f139=0/3). Operand
+    * publication remains the stream packer's architecture-specific job. */
+   const bool gpu1_colour_level = enc == AGX_ISA_ENCODING_AGX3C &&
+      (d->three_d != d->cube) && !d->array && !d->shadow &&
+      d->width == AGX3_TEX_W32 && d->mask == 15 && d->coord == 0 &&
+      !d->offset && !d->offset_register && !d->offset_staged &&
+      !d->query_lod && !d->min_lod && !d->sparse &&
+      d->gather == AGX3_TEX_GATHER_NONE &&
+      (d->lod == AGX3_TEX_LOD_REGISTER ||
+       (d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0) ||
+       (!d->vertex_stage && !d->compute_stage &&
+        (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS_REGISTER))) &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
+      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
+
    /* G17G's own cube witnesses, `gpu/m5-shadow-array-cube-reference.metal`
     * compiled with `metal-nt -arch applegpu_g17g`: depthcube and
     * depthcube_array comparisons with the implicit LOD, a per-lane bias and
@@ -485,7 +504,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * f150 = 2, and the vertex ones clear both. */
    if ((d->sample_group_nonterminal || d->sample_group_end) &&
        ((enc != AGX_ISA_ENCODING_AGX3B &&
-         !((gpu1_plain_2d || gpu1_cube) &&
+         !((gpu1_plain_2d || gpu1_cube || gpu1_colour_level) &&
            !(d->sample_group_nonterminal && d->array))) ||
         d->lod == AGX3_TEX_LOD_GRADIENT ||
         (d->sample_group_nonterminal && d->sample_group_end)))
@@ -519,7 +538,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        * and bias are grounded above; gradients require the narrower profile
        * established by the independent 2D/array reference. */
       if ((enc != AGX_ISA_ENCODING_AGX3B &&
-           !(((gpu1_plain_2d || gpu1_cube) &&
+           !(((gpu1_plain_2d || gpu1_cube || gpu1_colour_level) &&
               d->lod != AGX3_TEX_LOD_GRADIENT) || gpu1_gradient)) ||
           d->lod_x64 != 0)
          return false;
@@ -555,7 +574,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * literal-gradient kernels (see AGX3_TEX_GRADIENT_BANK_DDX_Z). Array,
     * gather and comparison combinations remain closed. */
    if (d->three_d &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_colour_level) || d->array || d->cube ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 
@@ -571,7 +590,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * Cube and cube-array comparisons reuse that CEM path with their own
     * packed face / layer operands. */
    if (d->cube &&
-       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_cube) || d->three_d ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_cube && !gpu1_colour_level) || d->three_d ||
         d->coord != 0 ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
          d->lod != AGX3_TEX_LOD_REGISTER && d->lod != AGX3_TEX_LOD_BIAS &&

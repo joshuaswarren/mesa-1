@@ -2815,6 +2815,28 @@ agx3_g17g_register_lod(const agx_instr *I)
 }
 
 static bool
+agx3_g18g_colour_sample(const agx_instr *I)
+{
+   /* Native607 grounds explicit levels in all stages; native610 adds
+    * implicit/register-bias fragment sampling. The caller gates stages. */
+   return I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+          (I->dim == AGX_DIM_3D || I->dim == AGX_DIM_CUBE) &&
+          I->nr_srcs == 6 && I->nr_dests == 1 &&
+          I->src[3].type == AGX_INDEX_IMMEDIATE &&
+          I->src[4].type == AGX_INDEX_IMMEDIATE &&
+          (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+          (agx3_tex_imm(I->src[1], 0) ||
+           (agx3_tex_plain_reg(I->src[1]) &&
+            I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1)) &&
+          I->dest[0].size == AGX_SIZE_32 && I->mask == 15 &&
+          !I->shadow && !I->offset && !I->sparse && !I->query_lod &&
+          I->gather == AGX_GATHER_NONE && !I->agx3_tex_coords_staged &&
+          !agx_texture_resource(I);
+}
+
+static bool
 agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
                          uint8_t slot, uint16_t wait_mask, bool final,
@@ -2945,8 +2967,12 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
     * shapes retain their existing gates. */
    const bool g18g_gradient = g18g && gpu1_plain_2d && gradient_lod &&
                              !shadow && !min_lod && !native_coord_slot;
+   const bool g18g_colour_level = g18g &&
+      enc == AGX_ISA_ENCODING_AGX3C && agx3_g18g_colour_sample(I) &&
+      ((!vertex_stage && !compute_stage) || explicit_lod);
    const bool lod_enc_ok =
-      enc == AGX_ISA_ENCODING_AGX3B || gpu1_plain_2d || gpu1_cube;
+      enc == AGX_ISA_ENCODING_AGX3B || gpu1_plain_2d || gpu1_cube ||
+      g18g_colour_level;
    const bool valid_lod = bias_min ?
       (enc == AGX_ISA_ENCODING_AGX3B && bias_min_operand) : explicit_lod ?
       ((lod_enc_ok && (valid_immediate_lod || scalar_lod_reg)) ||
@@ -3068,12 +3094,14 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
    /* f76 = 3 is orthogonal to f139; only the gradient is held back,
     * because gradient3d stages six scalars and that layout has no
     * witness. See agx3_tex_core.c for the five-row table. */
-   M5_SMP_OUTSIDE(three_d && (enc != AGX_ISA_ENCODING_AGX3B ||
+   M5_SMP_OUTSIDE(three_d && ((enc != AGX_ISA_ENCODING_AGX3B &&
+                               !g18g_colour_level) ||
                               (!valid_immediate_lod && !implicit_lod &&
                                !biased_lod && !register_bias &&
                                !explicit_lod && !gradient_lod && !bias_min)),
                   "3D on this encoding");
-   M5_SMP_OUTSIDE(cube && ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_cube) ||
+   M5_SMP_OUTSIDE(cube && ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_cube &&
+                            !g18g_colour_level) ||
                            (!implicit_lod && !explicit_lod && !register_bias)),
                   "cube on this encoding");
    M5_SMP_OUTSIDE(I->mask == 0 || (I->mask & ~15u), "result mask");
@@ -3205,7 +3233,7 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
     * use X4, with reference6 when comparing. Y is always0 on G18. */
    const bool cube_x4 = gpu1_gather && cube
                           ? (!shadow || vertex_stage || compute_stage)
-                          : cube_array;
+                          : cube_array || (g18g_colour_level && cube);
    if (g18g && array && !cube && !g18g_array && !g18g_gradient &&
        !g18g_fixed_gather) {
       if (why)
@@ -3229,7 +3257,7 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
    /* Native382 reuses one staged pair across gathers. Our repeated
     * publication must retain source registers until their actual last use;
     * otherwise later copies overwrite the shared pair with discarded data. */
-   const bool preserve_coords = g17g_block || gpu1_gather;
+   const bool preserve_coords = g17g_block || gpu1_gather || g18g_colour_level;
    const bool coord_discard = enc == AGX_ISA_ENCODING_AGX3B
                                  ? I->src[0].discard
                                  : !preserve_coords || I->src[0].discard;
@@ -3381,7 +3409,8 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
        (!agx3_tex_stage_copy_hints(
            enc, coord + (g18g ? AGX3_TEX_G18G_Z_WORD : AGX3_TEX_G17G_Z_WORD),
            I->src[0].value + 4, stage_slot, 0,
-           I->src[0].cache, I->src[0].discard, bytes, &len) ||
+           g18g_colour_level ? coord_cache : I->src[0].cache,
+           g18g_colour_level ? coord_discard : I->src[0].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
       return false;
 
@@ -3597,8 +3626,9 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
       .sample_group_nonterminal = sample_group_nonterminal,
       .sample_group_end = sample_group_end,
       .vertex_stage = vertex_stage,
-      /* Native373 compute gathers have no fragment helper-group terminator. */
-      .compute_stage = compute_stage && gpu1_gather,
+      /* Native373 gathers and native607 explicit colour samples have no
+       * fragment helper-group terminator in compute execution stages. */
+      .compute_stage = compute_stage && (gpu1_gather || g18g_colour_level),
       .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
    };
    return agx3_tex_encode_sample(enc, &d, bytes, &len) &&
@@ -12791,10 +12821,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool gpu1_fixed_gather = enc == AGX_ISA_ENCODING_AGX3C &&
                (agx3_g17g_runtime_gather(I) || agx3_g17g_array_gather(I) ||
                 agx3_g17g_cube_gather(I));
+            const bool g18g_colour_level_sample = ctx->key->dev.emit_agx3d &&
+               agx3_g18g_colour_sample(I);
             if (g18g_gradient_sample && ctx->stage != MESA_SHADER_VERTEX &&
                 ctx->stage != MESA_SHADER_FRAGMENT)
                AGX3_REFUSE(I);
-            if (g18g_gradient_sample || gpu1_fixed_gather) {
+            if (g18g_gradient_sample || gpu1_fixed_gather ||
+                g18g_colour_level_sample) {
                const uint16_t live = outstanding_here;
                if (live && !agx3_retire_slots_noop(emission, enc, live))
                   AGX3_REFUSE(I);
@@ -13120,7 +13153,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Keep this fixed sampler block owned until its consumer has
              * retired, so later samples, fetches or image writes cannot
              * republish any of its operands. */
-            if (g18g_gradient_sample || gpu1_fixed_gather) {
+            if (g18g_gradient_sample || gpu1_fixed_gather ||
+                g18g_colour_level_sample) {
                const uint16_t live = (uint16_t)(1u << (slot - 1));
                if (!agx3_retire_slots_noop(emission, enc, live))
                   AGX3_REFUSE(I);
