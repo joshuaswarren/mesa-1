@@ -25,13 +25,6 @@
 #include "util/u_debug.h"
 #include "util/log.h"
 
-static inline unsigned
-kind_index(enum hk_sync_kind kind)
-{
-   assert(util_bitcount(kind) == 1);
-   return ffs(kind) - 1;
-}
-
 static inline void
 dep_max(struct hk_sync_dep *a, const struct hk_sync_dep *b)
 {

@@ -12,12 +12,6 @@
 #define hk_g17p_bind_state_upload agx_g17p_bind_state_upload
 
 static inline bool
-hk_g17p_draw_state_range_valid(uint64_t compact, size_t size)
-{
-   return agx_g17p_draw_state_range_valid(compact, size);
-}
-
-static inline bool
 hk_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,
                           const uint8_t *bind_group, const uint8_t *viewport,
                           size_t viewport_size, uint32_t counts_32,

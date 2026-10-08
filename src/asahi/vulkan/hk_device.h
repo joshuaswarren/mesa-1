@@ -12,33 +12,6 @@
 #include "asahi/lib/agx_device.h"
 #include "util/rwlock.h"
 
-/* v56f/v57d: environment knobs read on command-recording paths are read once
- * per call site. getenv() is a linear scan of the environment block and
- * showed up on Minecraft's render thread (getenv 0.93%, strncmp 0.50%). */
-#define HK_ENV_BOOL_ONCE(name, def)                                        \
-   ({                                                                      \
-      static int hk_env_once_ = -1;                                        \
-      if (unlikely(hk_env_once_ < 0))                                      \
-         hk_env_once_ = debug_get_bool_option(name, def);                  \
-      (bool)hk_env_once_;                                                  \
-   })
-#define HK_ENV_NUM_ONCE(name, def)                                         \
-   ({                                                                      \
-      static int64_t hk_env_num_once_;                                     \
-      static int hk_env_num_init_;                                         \
-      if (unlikely(!p_atomic_read(&hk_env_num_init_))) {                   \
-         hk_env_num_once_ = debug_get_num_option(name, def);               \
-         p_atomic_set(&hk_env_num_init_, 1);                               \
-      }                                                                    \
-      hk_env_num_once_;                                                    \
-   })
-#define HK_ENV_PRESENT_ONCE(name)                                          \
-   ({                                                                      \
-      static int hk_env_present_ = -1;                                     \
-      if (unlikely(hk_env_present_ < 0))                                   \
-         hk_env_present_ = getenv(name) != NULL;                           \
-      (bool)hk_env_present_;                                               \
-   })
 #include "util/simple_mtx.h"
 #include "util/u_dynarray.h"
 #include "agx_bg_eot.h"

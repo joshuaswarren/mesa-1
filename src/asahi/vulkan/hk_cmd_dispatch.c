@@ -516,22 +516,6 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
    hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 }
 
-/* A kernel that samples (indexed sampler, texel fetch or storage image) takes
- * a texture pointer table built from the draw's descriptors at dispatch time
- * (hk_dispatch_g17p_native()). Bind-time preparation cannot know that table,
- * so it must not build launch programs or dispatch templates for such a
- * kernel: with no table the uniform-range builder refuses the kernel, and a
- * template without the table would be wrong if it were ever consumed. */
-static bool
-hk_g17p_compute_uses_texture_pointers(const struct hk_shader *s)
-{
-   return s && (s->info.agx3_txf_texture_valid ||
-                s->info.agx3_storage_image_valid ||
-                s->info.agx3_sampled_storage_valid ||
-                s->info.agx3_indexed_storage_valid ||
-                s->info.agx3_indexed_sampler_valid);
-}
-
 static bool
 hk_g17p_compute_shader_supported(struct hk_shader *s,
                                  struct hk_linked_shader *linked)

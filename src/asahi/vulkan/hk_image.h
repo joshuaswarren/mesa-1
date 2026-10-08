@@ -199,12 +199,6 @@ hk_padded_image_format(enum pipe_format format)
 }
 
 static inline bool
-hk_depth24_format(VkFormat format)
-{
-   return format == VK_FORMAT_D24_UNORM_S8_UINT ||
-          format == VK_FORMAT_X8_D24_UNORM_PACK32;
-}
-static inline bool
 hk_split_depth_stencil(VkFormat format)
 {
    return format == VK_FORMAT_D32_SFLOAT_S8_UINT ||

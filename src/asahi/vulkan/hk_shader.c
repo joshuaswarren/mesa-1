@@ -1689,47 +1689,6 @@ hk_native_robust_oob_alpha(nir_builder *b, nir_intrinsic_instr *load,
    return nir_bcsel(b, nir_ieq_imm(b, swizzle_a, AGX_CHANNEL_1), one, zero);
 }
 
-/* G16's qualified native offset forms cover immediate XYZ offsets and
- * non-array explicit/bias LOD. Lower other shapes with NIR's coordinate
- * arithmetic, preserving their LOD and array-layer semantics. */
-static bool
-hk_lower_native_texture_offset(const nir_instr *instr, UNUSED const void *data)
-{
-   const nir_tex_instr *tex = nir_instr_as_tex(instr);
-   const int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
-   if (offset < 0)
-      return false;
-   return tex->op == nir_texop_txf ||
-          (tex->is_array && tex->op == nir_texop_txd) ||
-          (tex->op == nir_texop_tg4 &&
-           (tex->is_shadow || !nir_src_is_const(tex->src[offset].src)));
-}
-
-/* Use the existing coefficient interpolation at the selected sample's
- * programmable location. Locations come from this draw's root descriptor. */
-static bool
-hk_lower_native_sample_barycentric(nir_builder *b, nir_intrinsic_instr *intr,
-                                  UNUSED void *data)
-{
-   if (intr->intrinsic != nir_intrinsic_load_barycentric_at_sample)
-      return false;
-
-   b->cursor = nir_before_instr(&intr->instr);
-   nir_def *packed = nir_load_sample_positions_agx(b);
-   nir_def *sample = nir_u2u32(b, intr->src[0].ssa);
-   nir_def *position = nir_ushr(b, packed, nir_imul_imm(b, sample, 8));
-   nir_def *offset[2];
-   for (unsigned c = 0; c < 2; ++c) {
-      nir_def *nibble = nir_iand_imm(b, nir_ushr_imm(b, position, c * 4), 15);
-      offset[c] = nir_fadd_imm(b, nir_fmul_imm(b, nir_u2f32(b, nibble),
-                                             1.0 / 16.0), -0.5);
-   }
-   nir_def_replace(&intr->def, nir_load_barycentric_at_offset(
-      b, intr->def.bit_size, nir_vec2(b, offset[0], offset[1]),
-      .interp_mode = nir_intrinsic_interp_mode(intr)));
-   return true;
-}
-
 /*
  * ViewIndex reaches the rasterizer as the layer ID, so the ViewIndex -> Layer
  * store belongs in the last pre-rasterization stage and nowhere else: a store

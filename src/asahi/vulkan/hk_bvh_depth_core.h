@@ -69,20 +69,6 @@ void hk_bvh_compute_subtree_info(const struct hk_bvh_box_node *nodes,
                                  uint32_t *leaves);
 
 /*
- * Stack slots the traversal needs for a tree of this maximum depth.
- *
- * The traversal defers one far child per internal node on the path it is
- * descending, so the peak is the number of internal nodes on the longest
- * root-to-leaf path: max_depth + 1.  hk_build_push_stack() refuses to exceed
- * the array, so a tree needing more than the array holds returns missed hits.
- */
-static inline uint32_t
-hk_bvh_stack_slots_required(uint32_t max_depth)
-{
-   return max_depth + 1;
-}
-
-/*
  * Choose the subtree roots to rebuild so the tree fits `stack_slots`.
  *
  * Walks down from the root and, for each subtree that does not fit, marks the
