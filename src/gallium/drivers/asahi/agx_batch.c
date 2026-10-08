@@ -186,8 +186,6 @@ agx_batch_init(struct agx_context *ctx,
    util_dynarray_init(&batch->depth_bias, ctx);
    util_dynarray_init(&batch->timestamps, ctx);
    util_dynarray_init(&batch->g17p_vdm_aliases, ctx);
-   util_dynarray_init(&batch->faulttrace_cmdbuf, ctx);
-   batch->faulttrace_seqid = 0;
 
    batch->clear = 0;
    batch->draw = 0;
@@ -364,7 +362,6 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    util_dynarray_fini(&batch->depth_bias);
    util_dynarray_fini(&batch->timestamps);
    util_dynarray_fini(&batch->g17p_vdm_aliases);
-   util_dynarray_fini(&batch->faulttrace_cmdbuf);
 
    if (!(dev->debug & (AGX_DBG_TRACE | AGX_DBG_SYNC))) {
       agx_batch_print_stats(dev, batch);
@@ -1219,12 +1216,6 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       .cmdbuf_size = cmdbuf.size,
    };
 
-   if (dev->debug & AGX_DBG_FAULTTRACE) {
-      util_dynarray_append_array(&batch->faulttrace_cmdbuf, uint8_t,
-                                 cmdbuf.data, cmdbuf.size);
-      batch->faulttrace_seqid = seqid;
-   }
-
    int ret = dev->ops.submit(dev, &submit, &virt);
    const int submit_errno =
       ret < -1 ? -ret : (ret ? (errno ? errno : EIO) : 0);
@@ -1255,24 +1246,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
             c->layers, c->samples);
       }
 
-      /* Unlike `trace`, faulttrace does not wait after or decode successful
-       * submissions, so it preserves the compositor's queue chronology. BO
-       * tracking was armed at device open and each submitted batch retained
-       * its small DRM command wrapper. A wait-queue-timeline failure is
-       * observed by the current (rejected) submit but was caused by an earlier
-       * in-flight submit, so decode those candidates before the observer. */
-      if (dev->debug & AGX_DBG_FAULTTRACE) {
-         unsigned i;
-         foreach_submitted(ctx, i) {
-            struct agx_batch *candidate = &ctx->batches.slots[i];
-            agx_cmdtrace_dump_cmdbuf(
-               dev, candidate, &candidate->faulttrace_cmdbuf,
-               "in-flight-prior", candidate->faulttrace_seqid, submit_errno);
-         }
-
-         agx_cmdtrace_dump_cmdbuf(dev, batch, &batch->faulttrace_cmdbuf,
-                                  "rejected-current", seqid, submit_errno);
-      } else if (dev->debug & AGX_DBG_ASYNCTRACE) {
+      if (dev->debug & AGX_DBG_ASYNCTRACE) {
          agx_cmdtrace_dump_cmdbuf(dev, batch, &cmdbuf, "rejected-current",
                                   seqid, submit_errno);
       }

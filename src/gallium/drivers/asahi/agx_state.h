@@ -487,13 +487,6 @@ struct agx_batch {
    struct agx_pool pool, pipeline_pool;
    struct util_dynarray g17p_vdm_aliases;
 
-   /* With AGX_DBG_FAULTTRACE, retain the small DRM command wrapper while this
-    * batch is in flight. Its referenced BOs and encoders already remain live
-    * until batch cleanup, allowing an asynchronous queue fault to be decoded
-    * when a later submit observes it. */
-   struct util_dynarray faulttrace_cmdbuf;
-   uint64_t faulttrace_seqid;
-
    /* We may enqueue both CDM and VDM work, possibly to the same batch for
     * geometry/tessellation.
     */
