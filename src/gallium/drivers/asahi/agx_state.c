@@ -2734,6 +2734,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       }
 
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
+      if (dev->chip == AGX_CHIP_G18G && agx_g18_msaa4_enabled() &&
+          (key->nr_samples == 2 || key->nr_samples == 4) &&
+          !nir->info.fs.early_fragment_tests) {
+         NIR_PASS(_, nir, agx_nir_mark_g18_sample_mask_tests);
+      }
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
    }
 
@@ -8691,6 +8696,15 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
       fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
       !fs->epilog_key.write_s && !fs->so->info.writes_memory;
    const bool unrolled_memory = agx_g18_msaa_memory_shader(ctx, batch);
+   /* Native G18 dynamic coverage uses the same late SR39/MOVMSK transaction
+    * at 2x and 4x. The compiler proves full-testing versus non-testing words;
+    * this per-pixel profile adds no sample loop, memory or Z/S export. */
+   const bool per_pixel_mask =
+      fs && fs->so && fs->b.info.writes_sample_mask &&
+      !fs->b.info.early_fragment_tests && !fs->so->info.uses_sample_shading &&
+      !fs->so->info.writes_memory && !fs->so->info.uses_fbfetch &&
+      !fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
+      !fs->epilog_key.write_s && !fs->b.info.reads_tib;
    /* Masked-off resident MRTs are preserved by the epilog's tile loads,
     * making the linked program translucent even when the API main reads no
     * TIB. Native454 grounds this per-sample read/modify/write transaction;
@@ -8722,7 +8736,8 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
            unrolled_colour || unrolled_memory) &&
           (!fs->epilog_key.sample_shading || unrolled_colour) &&
           !fs->epilog_key.write_s &&
-          (!fs->b.info.writes_sample_mask || unrolled_depth || unrolled_memory) &&
+          (!fs->b.info.writes_sample_mask || per_pixel_mask ||
+           unrolled_depth || unrolled_memory) &&
           !fs->b.info.reads_tib;
    if (!admitted && (dev->debug & AGX_DBG_FAULTTRACE)) {
       fprintf(stderr,

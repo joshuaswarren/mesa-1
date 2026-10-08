@@ -640,6 +640,10 @@ void agx_preprocess_nir_g17p(nir_shader *nir);
 void agx_preprocess_nir_g18g(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
+/* TARGET/LIVE retain their normal semantics. This flag records the proof that
+ * the update is either whole-sample testing or a disjoint non-testing kill. */
+#define AGX_SAMPLE_MASK_FULL_OR_KILL (1u << 2)
+bool agx_nir_mark_g18_sample_mask_tests(nir_shader *s);
 bool agx_nir_lower_sample_mask_deferred(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying);
 bool agx_nir_fix_g17g_constant_interpolation(nir_shader *s);

@@ -3251,26 +3251,53 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
              agx_g18_sample_mask_word(b, affected, agx_immediate(0), true), 0);
        }
 
-       /* Native G18 constant sample-mask writes at 2x/4x stage SR39 in the
+       /* Native G18 sample-mask writes at 2x/4x stage SR39 in the
        * low half and keep<<8 in the high half, then update under class1.
        * Its fields are bytes, unlike G17P's nibble-based coverage word.
-       * Only the witnessed all-target, nonzero constant late update is
-        * handled here; early tests and testing updates with partial targets
-        * or dynamic masks retain their separate admission requirements. */
+       * Native dynamic-mask fragments use the same word and transaction.
+       * Admit all-target late updates and the structurally proven choice
+       * between full testing and a non-testing kill. Select the coverage
+       * word without changing EXEC around the pixel transaction entry.
+       * Early tests and partial-target testing keep their own requirements. */
       if (b->shader->key->dev.emit_agx3d &&
           (g18_samples == 2 || g18_samples == 4) &&
           !b->shader->key->fs.inside_sample_loop &&
           !b->shader->force_early_tests_pending && !no_tests &&
-          nir_src_is_const(instr->src[0]) &&
-          nir_src_as_uint(instr->src[0]) == 0xff &&
-          nir_src_is_const(instr->src[1]) &&
-          nir_src_as_uint(instr->src[1]) <= 0xff) {
+          ((nir_src_is_const(instr->src[0]) &&
+            nir_src_as_uint(instr->src[0]) == 0xff) ||
+           nir_intrinsic_flags(instr) == AGX_SAMPLE_MASK_FULL_OR_KILL) &&
+          (!nir_src_is_const(instr->src[1]) ||
+           nir_src_as_uint(instr->src[1]) <= 0xff)) {
          agx_index coverage = agx_temp(b->shader, AGX_SIZE_16);
          agx_get_sr_coverage_to(b, coverage, AGX_SR_INPUT_SAMPLE_MASK);
-         agx_index keep = agx_mov_imm(
-            b, 16, nir_src_as_uint(instr->src[1]) << 8);
+         agx_index keep;
+         if (nir_src_is_const(instr->src[1])) {
+            keep = agx_mov_imm(b, 16, nir_src_as_uint(instr->src[1]) << 8);
+         } else {
+            keep = agx_and(b, agx_src_index(&instr->src[1]),
+                           agx_immediate(0xff));
+            keep = agx_iadd(b, agx_immediate(0), keep, 4);
+            keep = agx_iadd(b, agx_immediate(0), keep, 4);
+         }
          agx_index word = agx_temp(b->shader, AGX_SIZE_32);
          agx_emit_collect_to(b, word, 2, (agx_index[]){coverage, keep});
+         if (nir_intrinsic_flags(instr) == AGX_SAMPLE_MASK_FULL_OR_KILL) {
+            agx_index target = agx_and(b, agx_src_index(&instr->src[0]),
+                                       agx_immediate(0xff));
+            agx_index tested = agx_and(b, target,
+                                       agx_src_index(&instr->src[1]));
+            agx_index kill =
+               agx_g18_sample_mask_word(b, target, agx_immediate(0), true);
+            /* With testing disabled TARGET/LIVE are disjoint. If testing
+             * is enabled but LIVE is empty, killing all targets is also
+             * equivalent. Zero TARGET produces the native no-op word.
+             * Class1 remains balanced for either selected word, as on the
+             * existing dynamic one-sample coverage path. */
+            agx_index selected = agx_temp(b->shader, AGX_SIZE_32);
+            agx_icmpsel_to(b, selected, tested, agx_immediate(0), kill, word,
+                           AGX_ICOND_UEQ);
+            word = selected;
+         }
          return agx_sample_mask_agx3(b, agx_mov_imm(b, 16, 1), word, 2);
       }
 
@@ -5863,7 +5890,16 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                  (I->dest[0].size == AGX_SIZE_32 ||
                   (I->dest[0].size == AGX_SIZE_16 &&
                    (I->truth_table == 0x8 || I->truth_table == 0xe ||
-                    I->truth_table == 0x6)))) {
+                    I->truth_table == 0x6 ||
+                    (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                     (I->truth_table == 0x1 || I->truth_table == 0x2 ||
+                      I->truth_table == 0x4 || I->truth_table == 0x7 ||
+                      I->truth_table == 0x9 || I->truth_table == 0xb ||
+                      I->truth_table == 0xd)))))) {
+         /* G17G/G18G's seven complemented halfword tables are grounded for
+          * register operands. Sample-mask lowering retains constants in
+          * XNOR and ANDC; materialize them before RA without changing the
+          * truth table or the operand order (including swapped ANDC/ORC). */
          /* The packer encodes AND/OR/XOR against an 8-bit immediate directly
           * (agx3_alu_bit_imm: f37=1 selects the immediate operand kind, f29
           * holds the constant; witnessed Apple bytes in agx3_alu_core.h, e.g.

@@ -225,6 +225,64 @@ agx_nir_lower_sample_mask(nir_shader *shader)
    return true;
 }
 
+/* The split shader's testing flag is a whole-sample boolean (~0/0), not an
+ * arbitrary sample set. Preserve that provenance before sysval lowering and
+ * preamble promotion. G18 has witnessed full testing updates and non-testing
+ * kills, so mark the fused update for selection between those exact words:
+ *
+ *   sample_mask(testing | killed, killed ^ 0xff)
+ *     testing: sample_mask(0xff, killed ^ 0xff)
+ *     otherwise: sample_mask(killed, 0)
+ *
+ * The latter has disjoint TARGET/LIVE in the original and therefore performs
+ * no tests. Keep TARGET/LIVE and control flow unchanged: branching around a
+ * coverage operation could skip the pixel transaction entry on one path.
+ * Do not apply this to an arbitrary partial-target testing update.
+ */
+static bool
+mark_g18_sample_mask_tests(UNUSED nir_builder *b, nir_intrinsic_instr *intr,
+                            UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_sample_mask_agx ||
+       nir_intrinsic_flags(intr) || intr->src[0].ssa->bit_size != 16 ||
+       intr->src[1].ssa->bit_size != 16)
+      return false;
+
+   nir_alu_instr *target = nir_src_as_alu(intr->src[0]);
+   nir_alu_instr *live = nir_src_as_alu(intr->src[1]);
+   if (!target || target->op != nir_op_ior || !live ||
+       live->op != nir_op_ixor)
+      return false;
+
+   for (unsigned t = 0; t < 2; ++t) {
+      nir_intrinsic_instr *testing =
+         nir_src_as_intrinsic(target->src[t].src);
+      if (!testing || testing->intrinsic !=
+                         nir_intrinsic_load_shader_part_tests_zs_agx)
+         continue;
+
+      nir_src killed = target->src[1 - t].src;
+      for (unsigned k = 0; k < 2; ++k) {
+         if (!nir_srcs_equal(live->src[k].src, killed) ||
+             !nir_src_is_const(live->src[1 - k].src) ||
+             nir_src_as_uint(live->src[1 - k].src) != ALL_SAMPLES)
+            continue;
+
+         nir_intrinsic_set_flags(intr, AGX_SAMPLE_MASK_FULL_OR_KILL);
+         return true;
+      }
+   }
+
+   return false;
+}
+
+bool
+agx_nir_mark_g18_sample_mask_tests(nir_shader *shader)
+{
+   return nir_shader_intrinsics_pass(shader, mark_g18_sample_mask_tests,
+                                     nir_metadata_all, NULL);
+}
+
 struct deferred_ctx {
    nir_variable *killed;
 };
