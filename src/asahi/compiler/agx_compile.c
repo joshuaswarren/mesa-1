@@ -5207,6 +5207,25 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          }
       }
 
+      /* G18G uses the G17G encoding before transcoding, so it does not run
+       * the AGX3B-only control-flow source legalizer. Its native register
+       * equality has no negate operand. Materialize floating-CF modifiers
+       * with exact sign-bit operations before RA, keeping the comparison
+       * and execution-mask semantics unchanged. */
+      if (ctx->key->dev.emit_agx3d && I->nr_srcs == 2 &&
+          (I->op == AGX_OPCODE_IF_FCMP ||
+           I->op == AGX_OPCODE_WHILE_FCMP ||
+           I->op == AGX_OPCODE_BREAK_IF_FCMP)) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
+                I->src[s].size != AGX_SIZE_32 ||
+                agx_channels(I->src[s]) != 1 ||
+                (!I->src[s].abs && !I->src[s].neg))
+               continue;
+            I->src[s] = agx3_materialize_f32_source(&b, I->src[s]);
+         }
+      }
+
       /* The G17G full-register select compares f32 operands. Retain a
        * mediump comparator's value by widening it before that comparison;
        * leave the selected values and ordered comparison condition intact. */
