@@ -1776,9 +1776,12 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
+      /* TES keeps its API stage for sysvals, but its normalized NIR runs as
+       * a vertex shader and needs the same native texture-pointer prefix. */
       compiled->g17p_texture_resources =
          dev->chip == AGX_CHIP_G17P &&
-         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_COMPUTE) &&
+         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL ||
+          stage == MESA_SHADER_COMPUTE) &&
          (BITSET_LAST_BIT(nir->info.textures_used) != 0 ||
           BITSET_LAST_BIT(nir->info.images_used) != 0);
       const unsigned uniform_base =
@@ -3988,7 +3991,7 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
    const bool resource_pair =
       batch->texture_count[stage] != 0 &&
       (stage == MESA_SHADER_FRAGMENT ||
-       (stage == MESA_SHADER_VERTEX &&
+       ((stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL) &&
         cs->g17p_texture_resources));
 
    if (batch->texture_count[stage] && !resource_pair)
@@ -4019,9 +4022,10 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       const uint64_t table = batch->uniforms.tables[push->table];
 
       /* Fragment uniform zero is deliberately replaced by the resource pair.
-       * A textured VS instead shifts its complete fixed ABI; trimming a VBO
-       * or draw-parameter range here would corrupt vertex fetches. */
-      if (resource_pair && stage == MESA_SHADER_VERTEX &&
+       * A textured vertex/TES program instead shifts its complete fixed ABI;
+       * trimming a VBO or draw-parameter range would corrupt vertex fetches. */
+      if (resource_pair &&
+          (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL) &&
           push->uniform < AGX_ABI_G17P_TEXTURE_POINTER_HALFS)
          return 0;
 
