@@ -3148,7 +3148,9 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
       agx_gallium_descriptor_generation(dev->chip);
    NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
             descriptor_generation);
-   if (dev->chip == AGX_CHIP_G17P)
+   /* G18 indexed fetches also consume the native texture-table index, not
+    * the base-plus-byte-offset handle retained for descriptor crawls. */
+   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G18G)
       NIR_PASS(_, nir, agx_nir_rebind_g17p_texture_crawls);
    NIR_PASS(_, nir, nir_lower_ssbo, NULL);
 

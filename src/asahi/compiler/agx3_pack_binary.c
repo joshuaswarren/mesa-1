@@ -1487,10 +1487,17 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
       I->src[3].value <= 252 &&
       !(I->src[3].cache && (I->src[3].discard || I->src[3].kill)) &&
       agx3_tex_plain_uniform64(I->src[2]);
-   /* Native G18 indexed 2D reads select a scalar with the same f75=1 mask
-    * in compute and fragment programs (native549). Keep this admission
-    * separate from the G17G full-vector indexed profile. */
-   const bool g18g_indexed_scalar = g18g && bindless_image &&
+   /* Native G18 texture arrays use the same scalar f75=1 profile as indexed
+    * image reads (native549/633). Gallium rebinding supplies the zero-extended
+    * native table index and sampler zero; the old descriptor byte offset
+    * with a uniform base is deliberately not admitted here. */
+   const bool native_indexed_fetch = I->op == AGX_OPCODE_TEXTURE_LOAD &&
+      !immediate && I->src[3].size == AGX_SIZE_64 &&
+      (agx3_tex_plain_reg(I->src[3]) ||
+       agx3_tex_plain_uniform64(I->src[3])) &&
+      agx3_tex_imm(I->src[2], 0);
+   const bool g18g_indexed_scalar = g18g &&
+      (bindless_image || native_indexed_fetch) &&
       I->dim == AGX_DIM_2D && I->mask == 1 &&
       (I->lod_mode == AGX_LOD_MODE_AUTO_LOD || immediate_lod) &&
       agx3_tex_imm(I->src[1], 0);
