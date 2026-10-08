@@ -1565,7 +1565,7 @@ agx_g18_msaa4_color_format(enum pipe_format format)
 }
 
 /* Apply the same storage contract to writers, reloads and later blits.
- * Compression and layered render bindings need separate integration. */
+ * Compression remains separate; layered bindings are checked below. */
 bool
 agx_g18_msaa4_storage(const struct agx_device *dev,
                       const struct agx_resource *rsrc, enum pipe_format format)
@@ -1589,8 +1589,9 @@ agx_g18_msaa4_storage(const struct agx_device *dev,
    /* A non-layered attachment to an array selects one layer through the
     * existing 2D load/store views. Both descriptors use the selected layer's
     * base address; the tile program does not consume an array-layer register.
-    * Native AIL comparison312 covers the allocation and layer stride, while
-    * layered draws remain excluded by the tile-layout and draw predicates.
+    * Native AIL comparison312 covers the allocation and layer stride.
+    * Layered bindings use the array BG/EOT programs under the tile-layout
+    * and draw predicates below.
     */
    const bool target_ok =
       (rsrc->base.target == PIPE_TEXTURE_2D && rsrc->base.array_size == 1) ||
@@ -1629,7 +1630,8 @@ agx_g18_msaa4_zs_surface(const struct agx_device *dev,
  * Native331 adds sixteen-byte samples with the same geometry and bounded
  * single-target protocol, occupying the full 32-KiB imageblock.
  * Native315 also binds D32/S8 planes; colour-free renders retain this tile
- * geometry with empty colour programs. Layers and spills remain separate. */
+ * geometry with empty colour programs. Native598/618 add layered four-sample
+ * colour at eight bytes per sample; spills remain separate. */
 static bool
 agx_g18_msaa4_tile_layout(const struct agx_device *dev,
                           const struct agx_tilebuffer_layout *tib)
@@ -1641,7 +1643,8 @@ agx_g18_msaa4_tile_layout(const struct agx_device *dev,
        (tib->nr_samples != 2 && tib->nr_samples != 4) ||
        (tib->sample_size_B != 8 && tib->sample_size_B != 16) ||
        tib->tile_size != (tib->nr_samples == 2 ? 32 * 32 : 32 * 16) ||
-       tib->layered || agx_tilebuffer_spills(tib) ||
+       (tib->layered && (tib->nr_samples != 4 || tib->sample_size_B != 8)) ||
+       agx_tilebuffer_spills(tib) ||
        agx_tilebuffer_offset_B(tib, 0) != 0)
       return false;
 
@@ -6762,7 +6765,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
                              : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD))) ||
        (key->tib.layered &&
         (dev->chip != AGX_CHIP_G18G || targets != 1 ||
-         key->tib.nr_samples != 1 || batch->key.resolve)) ||
+         (key->tib.nr_samples != 1 && !msaa4) || batch->key.resolve)) ||
        (key->tib.nr_samples != 1 && !msaa4) ||
        key->tib.tile_size != (msaa4 && key->tib.nr_samples == 4 ? 32 * 16 : 32 * 32) ||
        agx_tilebuffer_spills(&key->tib) ||
@@ -8987,9 +8990,10 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    M5_DRAW_OUTSIDE(!color_attachment_ok, "colour attachment shape");
    M5_DRAW_OUTSIDE(!depth_attachment_ok, "depth attachment shape");
    M5_DRAW_OUTSIDE(batch->key.layers > 1 &&
-                      (dev->chip != AGX_CHIP_G18G || batch->key.nr_cbufs != 1 ||
-                       batch->key.zsbuf.texture ||
-                       batch->tilebuffer_layout.nr_samples != 1),
+                       (dev->chip != AGX_CHIP_G18G || batch->key.nr_cbufs != 1 ||
+                        batch->key.zsbuf.texture ||
+                        (batch->tilebuffer_layout.nr_samples != 1 &&
+                         !agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout))),
                    "layered render");
    M5_DRAW_OUTSIDE(batch->tilebuffer_layout.nr_samples != 1 &&
                       !agx_g18_msaa4_draw_admitted(ctx, batch, fragment_pass),
