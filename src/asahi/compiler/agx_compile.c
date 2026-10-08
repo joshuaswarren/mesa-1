@@ -9137,9 +9137,14 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    /* Native G18 RGBA8 fragments with two through eight attachments, including
     * sparse writes and blending, load and store in descending target order.
     * Each class's read acquisition remains held through its final store.
-    * Sample masks, depth exports and backgrounds are separate protocols. */
+    * Native596 R32Uint/RGBA8 witnesses also finish a leading class-1 depth
+    * transaction before the first store-only colour transaction. The scan
+    * above requires its wait/export/signal to finish before colour starts.
+    * Keep depth plus framebuffer fetch separate: native loads can precede
+    * depth, which needs a different ordering proof. Sample masks and
+    * backgrounds likewise remain separate protocols. */
    if (g18 && (!store_count || store_count > AGX_MAX_RTS ||
-                sample_masks || depth_ops ||
+                sample_masks || (depth_ops && load_count) ||
                 ctx->key->fs.ignore_tib_dependencies))
        AGX3_ORDER_REFUSE();
 
