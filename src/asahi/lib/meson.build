@@ -30,8 +30,6 @@ libasahi_lib_files = files(
   'agx_ioto_state_core.h',
   'agx_g17p_draw_state_upload.h',
   'agx_rt_result.h',
-  'agx_scs_layout.c',
-  'agx_scs_layout.h',
   'agx_bo.c',
   'agx_border.c',
   'agx_chip.c',
