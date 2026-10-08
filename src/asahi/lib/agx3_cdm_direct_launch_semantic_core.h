@@ -2,11 +2,8 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Exact semantic construction of the directly emitted AGX3 CDM launch form.
- *
- * This is a research/validation surface.  It does not allocate a pipeline,
- * construct USC state, emit a live command stream, submit work, or admit an
- * AGX3 device.
+ * Construction and decoding of the directly emitted AGX3 CDM compute launch:
+ * the 40-byte launch record and its template words.
  */
 
 #pragma once

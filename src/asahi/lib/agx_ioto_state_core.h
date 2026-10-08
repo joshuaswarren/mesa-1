@@ -2,12 +2,8 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Exact anonymous-field packing for the directly recovered AGX3 Ioto
- * SPECLM/LDSHDR/SPECTPR state tail.
- *
- * This is a research/validation surface.  It deliberately assigns no
- * graphics meaning to the recovered fields, changes no production state
- * path, and does not admit an AGX3 device.
+ * Packing of the AGX3 Ioto SPECLM/LDSHDR/SPECTPR state tail of G17P compute
+ * and graphics programs, by Apple's anonymous field ids.
  */
 
 #pragma once

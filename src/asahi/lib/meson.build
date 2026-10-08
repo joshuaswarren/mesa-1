@@ -16,8 +16,6 @@ libasahi_lib_files = files(
   'agx3_code_container_core.h',
   'agx_ioto_core.c',
   'agx_ioto_core.h',
-  'agx_ioto_imageblock_core.c',
-  'agx_ioto_imageblock_core.h',
   'agx_ioto_load_core.c',
   'agx_ioto_load_core.h',
   'agx_ioto_preshader_core.c',
