@@ -158,7 +158,7 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
       }
 
       ctx->stage[shader].image_mask &=
-         ~BITFIELD64_MASK(count + unbind_num_trailing_slots) << start_slot;
+         ~(BITFIELD64_MASK(count + unbind_num_trailing_slots) << start_slot);
       return;
    }
 
@@ -198,17 +198,17 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
 
       if (!image->resource) {
          util_copy_image_view(&ctx->stage[shader].images[start_slot + i], NULL);
-         ctx->stage[shader].image_mask &= ~BITFIELD_BIT(start_slot + i);
+         ctx->stage[shader].image_mask &= ~BITFIELD64_BIT(start_slot + i);
       } else {
          util_copy_image_view(&ctx->stage[shader].images[start_slot + i],
                               image);
-         ctx->stage[shader].image_mask |= BITFIELD_BIT(start_slot + i);
+         ctx->stage[shader].image_mask |= BITFIELD64_BIT(start_slot + i);
       }
    }
 
    /* Unbind start_slot+count...start_slot+count+unbind_num_trailing_slots */
    for (int i = 0; i < unbind_num_trailing_slots; i++) {
-      ctx->stage[shader].image_mask &= ~BITFIELD_BIT(start_slot + count + i);
+      ctx->stage[shader].image_mask &= ~BITFIELD64_BIT(start_slot + count + i);
       util_copy_image_view(&ctx->stage[shader].images[start_slot + count + i],
                            NULL);
    }
@@ -3615,7 +3615,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
       if (tail)
          memset(tail, 0, descriptor_size);
 
-      if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i))) {
+      if (!(ctx->stage[stage].image_mask & BITFIELD64_BIT(i))) {
          if (!agx_gallium_set_null_native_texture(descriptor_generation,
                                                    texture))
             agx_native_descriptor_rejected(dev, "null storage texture");

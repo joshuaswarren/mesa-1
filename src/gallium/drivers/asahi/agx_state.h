@@ -382,7 +382,7 @@ struct agx_stage {
    uint32_t ssbo_mask;
 
    struct pipe_image_view images[PIPE_MAX_SHADER_IMAGES];
-   uint32_t image_mask;
+   uint64_t image_mask;
 
    /* Need full CSOs for u_blitter */
    struct agx_sampler_state *samplers[PIPE_MAX_SAMPLERS];
