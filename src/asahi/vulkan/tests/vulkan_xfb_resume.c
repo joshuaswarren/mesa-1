@@ -151,29 +151,20 @@ main(int argc, char **argv)
            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
        .pNext = &provoking,
    };
-   VkPhysicalDeviceVulkan13Features f13 = {
-       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-       .pNext = &xfb,
-   };
    VkPhysicalDeviceFeatures2 features = {
        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-       .pNext = &f13,
+       .pNext = &xfb,
    };
    vkGetPhysicalDeviceFeatures2(physical, &features);
-   if (!f13.dynamicRendering || !xfb.transformFeedback ||
+   if (!xfb.transformFeedback ||
        !provoking.provokingVertexLast ||
        !provoking.transformFeedbackPreservesProvokingVertex) {
-      puts("SKIP: dynamic rendering or provoking-vertex XFB unavailable");
+      puts("SKIP: provoking-vertex XFB unavailable");
       vkDestroyInstance(instance, NULL);
       return 77;
    }
    features.features = (VkPhysicalDeviceFeatures){
        .geometryShader = features.features.geometryShader};
-   f13 = (VkPhysicalDeviceVulkan13Features){
-       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-       .pNext = &xfb,
-       .dynamicRendering = VK_TRUE,
-   };
    xfb.geometryStreams = VK_FALSE;
    unsigned families = 0, family = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, NULL);
@@ -268,7 +259,7 @@ main(int argc, char **argv)
    VkPipelineRasterizationStateCreateInfo rs = {
        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
        .pNext = &pv,
-       .rasterizerDiscardEnable = VK_TRUE,
+       .rasterizerDiscardEnable = VK_FALSE,
        .polygonMode = VK_POLYGON_MODE_FILL,
        .lineWidth = 1};
    VkPipelineMultisampleStateCreateInfo ms = {
@@ -276,11 +267,27 @@ main(int argc, char **argv)
        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
    VkPipelineColorBlendStateCreateInfo cb = {
        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-   VkPipelineRenderingCreateInfo rendering = {
-       .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+   VkSubpassDescription subpass = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS};
+   VkSubpassDependency dependency = {
+       .srcSubpass = 0, .dstSubpass = 0,
+       .srcStageMask = VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT,
+       .dstStageMask = VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT,
+       .srcAccessMask = VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT,
+       .dstAccessMask = VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT};
+   VkRenderPassCreateInfo render_pass_info = {
+       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+       .subpassCount = 1, .pSubpasses = &subpass,
+       .dependencyCount = 1, .pDependencies = &dependency};
+   VkRenderPass render_pass;
+   CHECK(vkCreateRenderPass(device, &render_pass_info, NULL, &render_pass));
+   VkFramebufferCreateInfo framebuffer_info = {
+       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+       .renderPass = render_pass, .width = 1, .height = 1, .layers = 1};
+   VkFramebuffer framebuffer;
+   CHECK(vkCreateFramebuffer(device, &framebuffer_info, NULL, &framebuffer));
    VkGraphicsPipelineCreateInfo pci = {
        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-       .pNext = &rendering,
+       .renderPass = render_pass,
        .stageCount = 2,
        .pStages = stages,
        .pVertexInputState = &vi,
@@ -351,10 +358,11 @@ main(int argc, char **argv)
          VkCommandBufferBeginInfo bi = {
              .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
          CHECK(vkBeginCommandBuffer(cmd, &bi));
-         VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-                               .renderArea = {{0, 0}, {1, 1}},
-                               .layerCount = 1};
-         vkCmdBeginRendering(cmd, &ri);
+         VkRenderPassBeginInfo ri = {
+             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+             .renderPass = render_pass, .framebuffer = framebuffer,
+             .renderArea = {{0, 0}, {1, 1}}};
+         vkCmdBeginRenderPass(cmd, &ri, VK_SUBPASS_CONTENTS_INLINE);
          VkDeviceSize offset = 0, size = output_size;
          vkCmdBindVertexBuffers(cmd, 0, 1, &input.buffer, &offset);
          bind_xfb(cmd, 0, 1, &output.buffer, &offset, &size);
@@ -382,7 +390,7 @@ main(int argc, char **argv)
                                  VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT,
                                  0, 1, &barrier, 0, NULL, 0, NULL);
          }
-         vkCmdEndRendering(cmd);
+         vkCmdEndRenderPass(cmd);
          VkMemoryBarrier host = {
              .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
              .srcAccessMask =
@@ -428,6 +436,8 @@ main(int argc, char **argv)
       for (unsigned d = 0; d < 2; ++d)
          vkDestroyPipeline(device, pipelines[t][d], NULL);
    vkDestroyPipelineLayout(device, layout, NULL);
+   vkDestroyFramebuffer(device, framebuffer, NULL);
+   vkDestroyRenderPass(device, render_pass, NULL);
    for (unsigned j = 0; j < 2; ++j)
       vkDestroyShaderModule(device, shaders[j], NULL);
    vkDestroyDevice(device, NULL);
