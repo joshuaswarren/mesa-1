@@ -255,8 +255,7 @@ buffer_texel_resident(nir_builder *b, nir_def *desc, nir_def *element,
     * uniform_texel_buffer_sparse_fetch_size_2_24_r32ui, and masking to 0..31,
     * which it does remove, fails it -- the 16 MB buffer spans 1024 pages, so
     * every page past 31 read back non-resident.  A variable mask keeps the
-    * count on an ishl, which lower_sm5_shift does mask.  See
-    * src/asahi/isa/README-agx3-packer-limits.md.
+    * count on an ishl, which lower_sm5_shift does mask.
     */
    nir_def *bit = nir_iand(
       b, word,
@@ -284,8 +283,7 @@ buffer_texel_resident(nir_builder *b, nir_def *desc, nir_def *element,
  * So take the residency from the same per-page bitmap the sparse SSBO path
  * reads (lower_sparse_buffer_deref() in hk_nir_lower_descriptors.c) and drop
  * the hardware residency request.  That also keeps this shape away from the
- * AGX3 sparse fetch encoder, whose refusal is recorded in
- * src/asahi/isa/README-agx3-packer-limits.md.
+ * AGX3 sparse fetch encoder, which refuses it.
  */
 static bool
 lower_sparse_buffer_texture(nir_builder *b, nir_instr *instr, void *data)

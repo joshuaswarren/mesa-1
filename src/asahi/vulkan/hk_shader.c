@@ -3164,10 +3164,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    if (!compiled) {
       /* On G17P a refusal here is a missing AGX3 *instruction encoding*, and
-       * it fails the whole shader closed.  The per-shader SSBO access limit
-       * and the atomic limit that this comment used to describe are GONE --
-       * src/asahi/isa/README-agx3-packer-limits.md retracts them, and its
-       * current matrix records what is actually left.
+       * it fails the whole shader closed.
        *
        * `AGX_MESA_DEBUG=shaders` makes the packer name the instruction it
        * refused, which is the only practical way to attribute one of these:
