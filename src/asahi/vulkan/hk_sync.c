@@ -49,8 +49,11 @@ req_for_kinds(const struct hk_cmd_buffer *cmd, uint8_t kinds,
 {
    for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
       dep[sq] = (struct hk_sync_dep){0};
-      u_foreach_bit(k, full_kinds(kinds))
+      u_foreach_bit(k, full_kinds(kinds)) {
          dep_max(&dep[sq], &cmd->sync.req[k][sq]);
+         if (cmd->sync.in_pass)
+            dep_max(&dep[sq], &cmd->sync.pass_req[k][sq]);
+      }
    }
 }
 
@@ -62,8 +65,11 @@ req_for_kinds_ta(const struct hk_cmd_buffer *cmd, uint8_t kinds,
 {
    for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
       dep[sq] = (struct hk_sync_dep){0};
-      u_foreach_bit(k, kinds)
+      u_foreach_bit(k, kinds) {
          dep_max(&dep[sq], &cmd->sync.req[k][sq]);
+         if (cmd->sync.in_pass)
+            dep_max(&dep[sq], &cmd->sync.pass_req[k][sq]);
+      }
    }
 }
 
@@ -362,6 +368,28 @@ hk_sync_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
    cmd->sync.cs_check_pending = true;
 }
 
+void
+hk_sync_pass_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
+                     uint8_t dst_kinds)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   assert(st->in_pass);
+
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   hk_sync_src_dep(cmd, src_kinds, NULL, dep);
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      /* Neither scope includes work before the pass instance. */
+      dep[sq].prior = 0;
+      if (dep[sq].cut && dep[sq].cut->sync.seq <= st->pass_start_seq)
+         dep[sq].cut = NULL;
+   }
+
+   u_foreach_bit(d, dst_kinds) {
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq)
+         dep_max(&st->pass_req[d][sq], &dep[sq]);
+   }
+}
+
 static void
 stream_wait(struct hk_cs *cs, const struct hk_sync_dep dep[HK_SYNC_NUM_SQ],
             bool ta)
@@ -504,6 +532,14 @@ hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_sync_stream_wait(cs, st->internal);
 
    if (!compute) {
+      /* Counter initialization/resumption can open the pre-graphics stream
+       * before the draw creates its render stream. It is still a producer
+       * for this render, just like a pre-graphics stream created afterwards. */
+      if (cmd->current_cs.pre_gfx) {
+         const struct hk_sync_dep pre[HK_SYNC_NUM_SQ] = {
+            {0}, {.cut = cmd->current_cs.pre_gfx}};
+         hk_sync_stream_wait(cs, pre);
+      }
       /* Tile hazard: the pass instance shares a partly covered tile with an
        * earlier render that nothing else orders it after. */
       if (st->in_pass) {
@@ -698,6 +734,7 @@ hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
       replace_pointer(&st->last[k][sq], cs, prev);
       replace_pointer(&st->req[k][sq].cut, cs, prev);
+      replace_pointer(&st->pass_req[k][sq].cut, cs, prev);
    }
    replace_pointer(&st->last_any[sq], cs, prev);
    replace_pointer(&st->internal[sq].cut, cs, prev);
@@ -770,6 +807,7 @@ hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
    for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
       replace_pointer(&st->last[k][sq], from, into);
       replace_pointer(&st->req[k][sq].cut, from, into);
+      replace_pointer(&st->pass_req[k][sq].cut, from, into);
    }
    replace_pointer(&st->last_any[sq], from, into);
    replace_pointer(&st->internal[sq].cut, from, into);
@@ -935,6 +973,8 @@ hk_sync_begin_rendering(struct hk_cmd_buffer *cmd, bool resuming)
 {
    struct hk_sync_state *st = &cmd->sync;
    st->in_pass = true;
+   st->pass_start_seq = st->next_seq;
+   memset(st->pass_req, 0, sizeof(st->pass_req));
    st->pass_vdm = NULL;
    st->resume_pending = resuming;
    st->heap_pass = false;
@@ -960,6 +1000,7 @@ hk_sync_end_rendering(struct hk_cmd_buffer *cmd)
    struct hk_sync_state *st = &cmd->sync;
    pass_footprints_commit(cmd);
    st->in_pass = false;
+   memset(st->pass_req, 0, sizeof(st->pass_req));
    st->pass_vdm = NULL;
    st->resume_pending = false;
    st->heap_pass = false;

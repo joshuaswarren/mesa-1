@@ -254,6 +254,74 @@ test_compute_clear_layer_preservation(void)
    hk_sync_end_rendering(cmd);
 }
 
+/* XFB counter copies can precede creation of their consuming render stream.
+ * A self-dependency between captures must order both physical engines, and
+ * must end with the pass rather than turn into a queue-wide requirement. */
+static struct hk_cs *
+add_slot(struct hk_cmd_buffer *cmd, struct hk_cs **slot, bool compute)
+{
+   struct hk_cs *cs = test_alloc(sizeof(*cs));
+   cs->type = compute ? HK_CS_CDM : HK_CS_VDM;
+   list_addtail(&cs->node, &cmd->control_streams);
+   *slot = cs;
+   hk_sync_stream_created(cmd, cs, slot, compute);
+   return cs;
+}
+
+static void
+test_pass_software_graphics_dependencies(void)
+{
+   struct hk_cmd_buffer *cmd = new_cmd();
+   hk_sync_begin_rendering(cmd, false);
+   struct hk_cs *first_pre =
+      add_slot(cmd, &cmd->current_cs.pre_gfx, true);
+   struct hk_cs *first = add_slot(cmd, &cmd->current_cs.gfx, false);
+   T("render consumes pre-graphics stream opened by counter copy",
+     first->sync.dep[HK_SYNC_CDM].cut == first_pre &&
+     first->sync.dep_ta[HK_SYNC_CDM].cut == first_pre);
+
+   hk_sync_pass_barrier(cmd, HK_SYNC_GFX, HK_SYNC_GFX);
+   /* The API entry point ends both open streams at a memory dependency. */
+   cmd->current_cs.gfx = cmd->current_cs.pre_gfx = NULL;
+   struct hk_cs *resume = add_slot(cmd, &cmd->current_cs.pre_gfx, true);
+   T("resumed software graphics waits for earlier capture on CDM",
+     resume->sync.dep[HK_SYNC_CDM].cut == first_pre);
+   T("resumed software graphics waits for earlier render on VDM",
+     resume->sync.dep[HK_SYNC_VDM].cut == first);
+   struct hk_cs *second = add_slot(cmd, &cmd->current_cs.gfx, false);
+   T("second render consumes already-open resumed capture",
+     second->sync.dep[HK_SYNC_CDM].cut == resume &&
+     second->sync.dep_ta[HK_SYNC_CDM].cut == resume);
+   hk_sync_end_rendering(cmd);
+   cmd->current_cs.gfx = cmd->current_cs.pre_gfx = NULL;
+   struct hk_cs *outside = add(cmd, false);
+   T("self-dependency has no scope after the pass",
+     !outside->sync.dep[HK_SYNC_CDM].cut &&
+     !outside->sync.dep[HK_SYNC_VDM].cut &&
+     !outside->sync.dep[HK_SYNC_CDM].prior &&
+     !outside->sync.dep[HK_SYNC_VDM].prior);
+
+   struct hk_queue *queue = new_queue(true);
+   T("submit software graphics self-dependency", submit(queue, cmd));
+   T("resumed capture resolves exact earlier CDM prefix",
+     resume->sync.barrier[HK_SYNC_CDM] == first_pre->sync.index);
+   T("render resolves exact resumed CDM prefix",
+     second->sync.barrier[HK_SYNC_CDM] == resume->sync.index);
+
+   cmd = new_cmd();
+   add(cmd, true);
+   add(cmd, false);
+   hk_sync_begin_rendering(cmd, false);
+   hk_sync_pass_barrier(cmd, HK_SYNC_ALL, HK_SYNC_GFX);
+   struct hk_cs *unrelated = add(cmd, false);
+   T("self-dependency has no source before the pass",
+     !unrelated->sync.dep[HK_SYNC_CDM].cut &&
+     !unrelated->sync.dep[HK_SYNC_VDM].cut &&
+     !unrelated->sync.dep[HK_SYNC_CDM].prior &&
+     !unrelated->sync.dep[HK_SYNC_VDM].prior);
+   hk_sync_end_rendering(cmd);
+}
+
 int
 main(void)
 {
@@ -262,6 +330,7 @@ main(void)
       return EXIT_FAILURE;
    test_multiview_layer_preservation();
    test_compute_clear_layer_preservation();
+   test_pass_software_graphics_dependencies();
    /* Each matching destination retains the exact old source prefix, including
     * reuse of a recording and independent physical destinations on the queue. */
    struct hk_queue *q = new_queue(true);
