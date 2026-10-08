@@ -1515,6 +1515,29 @@ hk_image_plane_add_req(struct hk_image_plane *plane, bool sparse,
    *size_B = MAX2(*size_B, plane->offset_B + plane->layout.size_B);
 }
 
+/* All of G17P's memory is one unified heap, and DXVK suballocates every
+ * resource the driver does not prefer to have dedicated into chunks of up to
+ * 256 MiB, packing even large render targets one to three per chunk; the
+ * Subnautica menu leaves at least 31% of those chunks unused. Prefer (never
+ * require) a dedicated allocation for attachments and for large images so
+ * they get exactly their size. Sparse and disjoint images cannot take one,
+ * and images that may be exported or imported keep their answer. */
+#define HK_DEDICATED_IMAGE_MIN_B (4ull << 20)
+
+static bool
+hk_image_prefers_dedicated(const struct hk_image *image, bool sparse,
+                           uint64_t size_B)
+{
+   if (sparse || image->disjoint || image->vk.external_handle_types ||
+       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+      return false;
+
+   const VkImageUsageFlags attachment =
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+   return (image->vk.usage & attachment) || size_B >= HK_DEDICATED_IMAGE_MIN_B;
+}
+
 static void
 hk_get_image_memory_requirements(struct hk_device *dev, struct hk_image *image,
                                  VkImageAspectFlags aspects,
@@ -1552,7 +1575,8 @@ hk_get_image_memory_requirements(struct hk_device *dev, struct hk_image *image,
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *dedicated = (void *)ext;
-         dedicated->prefersDedicatedAllocation = false;
+         dedicated->prefersDedicatedAllocation =
+            hk_image_prefers_dedicated(image, sparse, size_B);
          dedicated->requiresDedicatedAllocation = false;
          break;
       }
