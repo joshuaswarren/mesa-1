@@ -4869,7 +4869,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
    batch->texture_count[stage] = nr_tex_descriptors;
    batch->stage_uniforms[stage].texture_base = T_tex.gpu;
 
-   if (dev->chip == AGX_CHIP_G17P) {
+   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G18G) {
       for (unsigned i = 0; i < PIPE_MAX_SAMPLERS; ++i)
          batch->stage_uniforms[stage].texture_handle[i] = i;
    }
