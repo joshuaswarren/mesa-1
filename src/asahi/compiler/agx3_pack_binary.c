@@ -4768,8 +4768,6 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return false;
    uint8_t bytes[14], length = 0;
    if (unpack) {
-      if (enc != AGX_ISA_ENCODING_AGX3B)
-         return false;
       const agx_index src = I->src[0];
       if (!agx3_src_is_register(src) || src.memory || src.abs || src.neg ||
           src.size != AGX_SIZE_32 || agx_channels(src) != 1)
@@ -4777,8 +4775,9 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, enum agx_isa_encoding enc,
       const struct agx3_rgb10a2_unpack_desc d = {
          .dest = dest.value, .source = src.value,
          .wait_mask = wait, .discard = src.discard, .layout = layout,
+         .dest_hint = agx_encoding_is_g17_class(enc),
       };
-      if (!agx3_rgb10a2_unpack_encode(&d, bytes, &length))
+      if (!agx3_rgb10a2_unpack_encode_for_encoding(enc, &d, bytes, &length))
          return false;
    } else {
       struct agx3_rgb10a2_desc d = {.dest = dest.value, .layout = layout,

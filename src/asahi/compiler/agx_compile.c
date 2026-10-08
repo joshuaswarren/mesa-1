@@ -1900,8 +1900,9 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
 
    const bool norm8 = fmt == AGX_FORMAT_U8NORM || fmt == AGX_FORMAT_S8NORM;
    const bool norm16 = fmt == AGX_FORMAT_U16NORM || fmt == AGX_FORMAT_S16NORM;
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       (norm8 || norm16)) {
+   if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+        (norm8 || norm16)) ||
+       (b->shader->key->dev.emit_agx3d && norm16)) {
       const unsigned nr = instr->def.num_components;
       assert(nr >= 1 && nr <= 4 && packed_count == 0);
       assert(dest.size == AGX_SIZE_16 || dest.size == AGX_SIZE_32);
@@ -1910,8 +1911,10 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
        * agx3_fmt_to_width() has no normalized device witness, so a load left
        * carrying one is refused at the packer and the draw is dropped. Keep
        * the element width and index scaling intact and reuse the grounded
-       * normalized unpack the tile load already uses. Byte loads reserve an
-       * aligned 32-bit payload even for a single channel. */
+       * normalized unpack the tile load already uses. G18's native UNORM16
+       * and SNORM16 unpack uses the same scalar/pair operand footprint.
+       * Byte loads reserve an aligned 32-bit payload even for a single
+       * channel. */
       agx_index packed = norm8 ? agx_temp(b->shader, AGX_SIZE_32)
                               : agx_vec_temp(b->shader, AGX_SIZE_16, nr);
       agx_instr *load = agx_device_load_to(
@@ -1942,7 +1945,8 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
 
    /* AGX3 memory traffic is raw. Convert a normalized packed texel with
     * the same native instruction used by tile loads, after its real load. */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+        b->shader->key->dev.emit_agx3d) &&
        fmt == AGX_FORMAT_RGB10A2) {
       assert(dest.size == AGX_SIZE_32 && instr->def.num_components == 4);
       assert(packed_count == 0);

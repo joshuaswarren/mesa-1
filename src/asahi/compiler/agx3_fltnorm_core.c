@@ -435,8 +435,6 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
 
    if (!enc_ok(enc) || (d->dest & 1) || d->dest >= 256 || d->src >= 256)
       return false;
-   if (d->is_16bit && enc != AGX_ISA_ENCODING_AGX3B)
-      return false;
    if ((d->wait_mask & ~wait_limit(enc)) != 0)
       return false;
 
@@ -444,7 +442,10 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
     * width: one 16-bit register for packed 8-bit lanes and a single 16-bit
     * lane, and two for a pair of 16-bit lanes (applegpu_g17p RG16Unorm,
     * RGBA16Unorm and RGBA16Snorm blending reads `1c` where R16 and RGBA8
-    * read `14`). AGX3c adds this form's sub-opcode pair. */
+    * read `14`). Fresh G17G/G18G R16/RG16 UNORM/SNORM tile reads and
+    * unpack_unorm2x16_to_float/unpack_snorm2x16_to_float programs establish
+    * the same scalar/pair widths and normalized modes 2/3. AGX3c adds this
+    * form's sub-opcode pair. */
    struct agx3_field_kv base[7];
    unsigned nbase = 0;
    base[nbase++] = (struct agx3_field_kv)KV(9, 2);
@@ -581,4 +582,42 @@ agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *d,
          fields[n++] = (struct agx3_field_kv)KV(32 + i, 1);
    return agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "unpack", 0,
                            base, 4, fields, n, out, length);
+}
+
+bool
+agx3_rgb10a2_unpack_encode_for_encoding(
+   enum agx_isa_encoding enc, const struct agx3_rgb10a2_unpack_desc *d,
+   uint8_t out[10], uint8_t *length)
+{
+   if (enc == AGX_ISA_ENCODING_AGX3B)
+      return agx3_rgb10a2_unpack_encode(d, out, length);
+
+   if (!out || !length)
+      return false;
+   memset(out, 0, 10);
+   *length = 0;
+   if (!d || !agx_encoding_is_g17_class(enc) || d->dest > 248 ||
+       d->source > 254 || ((d->dest | d->source) & 1) ||
+       (d->wait_mask & ~0xff) || d->layout != AGX3_PACKED_RGB10A2)
+      return false;
+
+   /* Native G17G/G18G RGB10A2 framebuffer reads and
+    * unpack_unorm10a2_to_float use a ten-byte instruction, with f30/f31
+    * selecting the unpack sub-opcode. A retained raw source uses f27;
+    * a discarded one uses f29. Both forms are witnessed with compute
+    * consumers, and framebuffer reads also establish the destination hint.
+    * Packed-float layouts remain outside this G17/G18 contract. */
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(30, 3), KV(31, 191),
+   };
+   struct agx3_field_kv fields[13] = {
+      KV(2, d->dest), KV(11, d->dest_hint), KV(18, d->source),
+      KV(27, !d->discard), KV(29, d->discard),
+   };
+   unsigned n = 5;
+   for (unsigned i = 0; i < 8; ++i)
+      if (d->wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv)KV(32 + i, 1);
+   return agx3_bind_compose(enc, "unpack", agx3_bind_ep(enc, 0),
+                           base, 6, fields, n, out, length);
 }

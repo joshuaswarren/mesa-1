@@ -211,9 +211,13 @@ struct agx3_rgb10a2_unpack_desc {
    uint16_t wait_mask;
    bool discard;
    uint8_t layout; /* enum agx3_packed_layout */
+   bool dest_hint; /* G17G/G18G destination lifetime hint */
 };
 bool agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *desc,
                                uint8_t out[8], uint8_t *length);
+bool agx3_rgb10a2_unpack_encode_for_encoding(
+   enum agx_isa_encoding enc, const struct agx3_rgb10a2_unpack_desc *desc,
+   uint8_t out[10], uint8_t *length);
 
 struct agx3_fltnorm_desc {
    uint16_t dest;                 /* 16-bit (half) register index */
@@ -321,7 +325,7 @@ struct agx3_normflt_desc {
    uint16_t src;       /* 16-bit register holding the packed lanes */
    bool two_lanes;     /* unpack both bytes; false = one lane */
    bool snorm;         /* signed-normalized source */
-   bool is_16bit;      /* 16-bit normalized lane, G17P only */
+    bool is_16bit;      /* 16-bit normalized lane */
    uint8_t srgb;       /* enum agx3_fltnorm_srgb */
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
 };
