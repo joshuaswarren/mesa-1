@@ -4,10 +4,7 @@
  */
 
 #include "agx_nir_lower_vbo.h"
-#include "util/u_debug.h"
 
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vbo_common_index,
-                          "AGX_G17P_VBO_COMMON_INDEX", false)
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/layout/layout.h"
 #include "compiler/nir/nir_builder.h"
@@ -344,22 +341,6 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
       shift = util_logbase2(stride_el);
       stride_el = 1;
-   }
-
-   /* A static, word-aligned interleaved buffer can share one word index
-    * across its byte, half and word loads. G17P's explicit byte-index flag
-    * makes the hardware scale independent of the access width. Keep the
-    * multiply in words rather than bytes so full-width attributes retain
-    * their existing 34-bit byte-address span. Narrow accesses then use that
-    * same span instead of wrapping their scaled multiply at 32/33 bits.
-    * This does not fix the existing word-index overflow beyond that span.
-    */
-   if (ctx->native_raw && !ctx->dynamic_strides && !(stride & 3) &&
-       !util_is_power_of_two_or_zero(stride) &&
-       ctx->rs.level == AGX_ROBUSTNESS_DISABLED && ctx->rs.soft_fault &&
-       debug_get_option_agx_g17p_vbo_common_index()) {
-      stride_el = stride / 4;
-      shift = 2 | AGX_NIR_MEMORY_INDEX_BYTES;
    }
 
    nir_def *stride_el_def = nir_imm_int(b, stride_el);
