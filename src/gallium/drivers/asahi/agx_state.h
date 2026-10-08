@@ -353,6 +353,10 @@ struct agx_uncompiled_shader {
       /* Bound images whose global atomics/stores use software view metadata. */
       uint64_t image_address_mask;
 
+      /* Bound image descriptors actually consumed as PBEs after lowering
+       * global stores/atomics. Dynamic consumers conservatively mark all. */
+      uint64_t image_pbe_mask;
+
       /* Number of bindful textures, images used */
       unsigned nr_bindful_textures, nr_bindful_images;
 
@@ -1192,6 +1196,7 @@ struct agx_lower_bindings_options {
    bool table_index_crawls;
    bool native_buffer_metadata;
    uint64_t *image_address_mask;
+   uint64_t *image_pbe_mask;
    bool g17p_bindless_storage;
    unsigned image_records;
    unsigned bindful_sampler_count;

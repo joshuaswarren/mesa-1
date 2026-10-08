@@ -3043,6 +3043,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
     * operations. Each lowering supplies the required image robustness. */
    unsigned nr_images = BITSET_LAST_BIT(nir->info.images_used);
    so->info.image_address_mask = 0;
+   so->info.image_pbe_mask = 0;
    if (dev->chip == AGX_CHIP_G18G) {
       NIR_PASS(_, nir, agx_nir_lower_bound_image_atomics);
       NIR_PASS(_, nir, agx_nir_lower_bound_ms_image_stores);
@@ -3055,6 +3056,8 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
       .uses_bindless_samplers = &so->uses_bindless_samplers,
       .image_address_mask = dev->chip == AGX_CHIP_G18G
                               ? &so->info.image_address_mask : NULL,
+      .image_pbe_mask = dev->chip == AGX_CHIP_G18G
+                          ? &so->info.image_pbe_mask : NULL,
       .g17p_plain_txf_crawl = dev->chip == AGX_CHIP_G17P,
       .table_index_crawls = agx_chip_m5_paths(dev->chip),
       .native_buffer_metadata =
@@ -4757,6 +4760,12 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
       struct pipe_image_view *view = &ctx->stage[stage].images[i];
       agx_batch_track_image(batch, view);
 
+      /* A store to another binding does not consume this image's PBE.
+       * Shader/API access flags can conservatively include writes even for
+       * a size query; use the actual descriptor consumers recorded by NIR. */
+      const bool needs_pbe =
+         cs->so->info.image_pbe_mask & BITFIELD64_BIT(i);
+
       if (cs->so->info.image_address_mask & BITFIELD64_BIT(i)) {
          uint32_t metadata[9];
          if (!agx_image_address_metadata(metadata, view) ||
@@ -4773,9 +4782,20 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
        * require their own native encoding proof. */
       if (agx_g18_msaa4(dev) && view->resource &&
           view->resource->nr_samples > 1 &&
-          (cs->so->info.writes_images || cs->so->info.reads_image_sideband ||
+          (needs_pbe || cs->so->info.reads_image_sideband ||
            !agx_g18_msaa4_storage(dev, agx_resource(view->resource),
                                  view->format))) {
+         if (dev->debug & AGX_DBG_FAULTTRACE)
+            fprintf(stderr,
+                    "G18_IMAGE_REJECT index=%u stage=%u format=%s samples=%u "
+                    "shader_access=%u access=%u shader_writes=%u needs_pbe=%u "
+                    "sideband=%u storage=%u\n",
+                    i, stage, util_format_short_name(view->format),
+                    view->resource->nr_samples, view->shader_access, view->access,
+                    cs->so->info.writes_images, needs_pbe,
+                    cs->so->info.reads_image_sideband,
+                    agx_g18_msaa4_storage(dev, agx_resource(view->resource),
+                                         view->format));
          agx_native_descriptor_rejected(batch, "G18G multisample image");
          return;
       }
@@ -4800,13 +4820,13 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
             return;
          }
 
-      /* A G18G shader that never writes an image nor reads a PBE has no
+      /* A G18G shader that never consumes this image's PBE has no
        * consumer for this descriptor: native run112 kick 19's read-only
        * launch binds the texture and a sampler record and no PBE at all.
        * Bind the null PBE instead of the image's, whose AGX2 software
        * sideband (filled for every writeable image) has no Gen10 encoding
        * and would drop the batch. */
-      if (dev->chip == AGX_CHIP_G18G && !cs->so->info.writes_images) {
+      if (dev->chip == AGX_CHIP_G18G && !needs_pbe) {
          if (!agx_gallium_set_null_native_pbe(descriptor_generation, pbe)) {
             agx_native_descriptor_rejected(batch, "null storage PBE");
             return;

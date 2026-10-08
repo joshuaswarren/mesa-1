@@ -274,8 +274,22 @@ lower(nir_builder *b, nir_instr *instr, void *data)
        */
       if (intr->intrinsic != nir_intrinsic_image_load &&
           intr->intrinsic != nir_intrinsic_image_size &&
-          intr->intrinsic != nir_intrinsic_image_samples)
+          intr->intrinsic != nir_intrinsic_image_samples) {
          offset++;
+
+         if (options->image_pbe_mask) {
+            STATIC_ASSERT(PIPE_MAX_SHADER_IMAGES <= 64);
+            const unsigned count = b->shader->info.num_images;
+            assert(count > 0 && count <= PIPE_MAX_SHADER_IMAGES);
+            if (nir_scalar_is_const(index_scalar)) {
+               const unsigned slot = nir_scalar_as_uint(index_scalar);
+               assert(slot < count);
+               *options->image_pbe_mask |= BITFIELD64_BIT(slot);
+            } else {
+               *options->image_pbe_mask |= BITFIELD64_MASK(count);
+            }
+         }
+      }
 
       /* G17P has no texture state registers to name a PBE with: imgwci reads
        * its PBE from a heap -- a 64-bit uniform -- at a record index held in
