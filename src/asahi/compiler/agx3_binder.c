@@ -54,11 +54,24 @@ agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic, int ep,
       fields[overrides[i].field] = overrides[i].value;
    }
 
+   /* Only the listed fields can be nonzero. */
+   uint64_t nonzero[3] = {0};
+   for (unsigned i = 0; i < nbaseline; ++i) {
+      const unsigned field = baseline[i].field;
+      if (fields[field])
+         nonzero[field / 64] |= UINT64_C(1) << (field % 64);
+   }
+   for (unsigned i = 0; i < noverrides; ++i) {
+      const unsigned field = overrides[i].field;
+      if (fields[field])
+         nonzero[field / 64] |= UINT64_C(1) << (field % 64);
+   }
+
    /* agx3_compose keeps its words invocation-local and does not touch out
     * until every predicate, deposit and field-consumption check succeeds.
     * Encode directly into the caller's buffer instead of copying the same
     * validated instruction through a second 32-byte stack buffer. */
-   if (!agx3_compose(t, (uint32_t)form, fields, out))
+   if (!agx3_compose_known(t, (uint32_t)form, fields, nonzero, out))
       return false;
 
    const uint8_t size = t->forms[form].size;
