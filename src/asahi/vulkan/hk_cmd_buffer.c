@@ -292,7 +292,6 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
-   cmd->g17p_trace_draws = 0;
    hk_sync_reset(cmd);
 
    memset(&cmd->state, 0, sizeof(cmd->state));

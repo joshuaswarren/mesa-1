@@ -1124,10 +1124,6 @@ struct hk_cmd_buffer {
     * large_bos, so it dies with the recording like every other program
     * reference. */
    struct hk_ioto_arena ioto;
-
-   /* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3 per-command-buffer draw index. */
-   uint32_t g17p_trace_draws;
-
 };
 
 /* Transfer entry points bracket their recording so the streams they create
