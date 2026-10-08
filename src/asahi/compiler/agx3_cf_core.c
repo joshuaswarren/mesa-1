@@ -231,17 +231,6 @@ agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
 }
 
 bool
-agx3_cf_icmp_zero16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
-                    unsigned slot, uint16_t src0,
-                    uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
-{
-   /* Preserve the historical native specimen API; production uses the
-    * runtime variant with register-allocation hints and actual waits. */
-   return src0 < 256 && agx3_cf_icmp_zero16_runtime(enc,cond,slot,src0,
-                 (struct agx3_cf_source_hints){false,true},32,out,len);
-}
-
-bool
 agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                  bool or_nan, unsigned slot, uint16_t src0, uint16_t src1,
                  uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)

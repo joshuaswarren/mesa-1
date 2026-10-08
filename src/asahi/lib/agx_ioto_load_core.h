@@ -239,11 +239,6 @@ enum agx_ioto_load_alloc_result {
 
 enum agx_ioto_load_encoding agx_ioto_load_target_encoding(enum agx_chip chip);
 
-/* Remains false until every live resource category and loadFrom* form is
- * grounded.  Narrow G17S minimal dispatch admission is tracked separately by
- * agx3_g17s_minimal_compute_dispatch_ready(). */
-bool agx_ioto_load_production_ready(enum agx_chip chip);
-
 bool agx_ioto_load_core_init(struct agx_ioto_load_core *core,
                              enum agx_chip chip, struct agx_ioto_load_sink sink,
                              struct agx_ioto_inflight_load *loads,
@@ -336,23 +331,6 @@ bool agx_ioto_load_absolute(struct agx_ioto_load_core *core,
                             const struct agx_ioto_load_emit_ops *ops,
                             struct agx_ioto_load_workspace workspace,
                             struct agx_ioto_load_allocation *allocation);
-
-/* Exact bounded direct-source forms.  loadFromSCS lazily emits
- * LDIMM r4l, 0x6000; loadFromABIBuffer addresses one of the seven native ABI
- * base registers above.  Unsafe mixing with aliased ABI slot 4 fails closed.
- * Neither API changes production readiness. */
-bool agx_ioto_load_from_scs(struct agx_ioto_load_core *core,
-                            const struct agx_ioto_load_from_fixed *load,
-                            const struct agx_ioto_load_emit_ops *ops,
-                            struct agx_ioto_load_workspace workspace,
-                            struct agx_ioto_load_allocation *allocation);
-
-bool agx_ioto_load_from_abi_buffer(struct agx_ioto_load_core *core,
-                                   enum agx_ioto_abi_buffer_slot source,
-                                   const struct agx_ioto_load_from_fixed *load,
-                                   const struct agx_ioto_load_emit_ops *ops,
-                                   struct agx_ioto_load_workspace workspace,
-                                   struct agx_ioto_load_allocation *allocation);
 
 #ifdef __cplusplus
 }

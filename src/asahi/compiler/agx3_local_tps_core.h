@@ -60,18 +60,10 @@ bool agx3_local_encode_load(enum agx_isa_encoding enc,
                             const struct agx3_local_desc *d,
                             uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
                             uint8_t *len);
-bool agx3_local_encode_load_form(enum agx_isa_encoding enc,
-                                 const struct agx3_local_desc *d, uint8_t ep,
-                                 uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
-                                 uint8_t *len);
 bool agx3_local_encode_store(enum agx_isa_encoding enc,
                              const struct agx3_local_desc *d,
                              uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
                              uint8_t *len);
-bool agx3_local_encode_store_form(enum agx_isa_encoding enc,
-                                  const struct agx3_local_desc *d, uint8_t ep,
-                                  uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
-                                  uint8_t *len);
 
 struct agx3_tps_desc {
    uint16_t data; /* load destination / store value, half-register units */
@@ -98,17 +90,9 @@ struct agx3_tps_desc {
 bool agx3_tps_encode_load(enum agx_isa_encoding enc,
                           const struct agx3_tps_desc *d,
                           uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len);
-bool agx3_tps_encode_load_form(enum agx_isa_encoding enc,
-                               const struct agx3_tps_desc *d, uint8_t ep,
-                               uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
-                               uint8_t *len);
 bool agx3_tps_encode_store(enum agx_isa_encoding enc,
                            const struct agx3_tps_desc *d,
                            uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len);
-bool agx3_tps_encode_store_form(enum agx_isa_encoding enc,
-                                const struct agx3_tps_desc *d, uint8_t ep,
-                                uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
-                                uint8_t *len);
 
 #ifdef __cplusplus
 }

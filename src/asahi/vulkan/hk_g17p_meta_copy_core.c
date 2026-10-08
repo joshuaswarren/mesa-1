@@ -51,22 +51,6 @@ hk_g17p_build_mip_axis(uint32_t src_extent, uint32_t dst_extent,
    return true;
 }
 
-uint8_t
-hk_g17p_filter_unorm8(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
-                      uint8_t wx, uint8_t wy)
-{
-   const uint32_t ix = 256u - wx;
-   const uint32_t iy = 256u - wy;
-   const uint32_t value = a * ix * iy + b * wx * iy +
-                          c * ix * wy + d * wx * wy;
-   const uint32_t fixed4 = (value + 2048u) >> 12;
-   uint32_t out = fixed4 >> 4;
-   const uint32_t remainder = fixed4 & 15u;
-
-   out += remainder > 8u || (remainder == 8u && out < 128u);
-   return out;
-}
-
 bool
 hk_g17p_tile_address_config_init(
    uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,

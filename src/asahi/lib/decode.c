@@ -87,36 +87,6 @@ agxdecode_find_handle(struct agxdecode_ctx *ctx, unsigned handle)
    return NULL;
 }
 
-bool
-agxdecode_copy_gpu_mem(struct agxdecode_ctx *ctx, uint64_t gpu_va,
-                       size_t size, void *data)
-{
-   const struct agx_bo *mem =
-      agxdecode_find_mapped_gpu_mem_containing(ctx, gpu_va);
-   if (!mem || !mem->_map || gpu_va - mem->va->addr > mem->size ||
-       size > mem->size - (gpu_va - mem->va->addr))
-      return false;
-
-   memcpy(data, mem->_map + gpu_va - mem->va->addr, size);
-   return true;
-}
-
-bool
-agxdecode_gpu_mem_bounds(struct agxdecode_ctx *ctx, uint64_t gpu_va,
-                         uint64_t *base, size_t *size)
-{
-   const struct agx_bo *mem =
-      agxdecode_find_mapped_gpu_mem_containing(ctx, gpu_va);
-   if (!mem)
-      return false;
-
-   if (base)
-      *base = mem->va->addr;
-   if (size)
-      *size = mem->size;
-   return true;
-}
-
 static size_t
 _agxdecode_grab_mapped(struct agxdecode_ctx *ctx, uint64_t gpu_va, void **buf,
                        int line, const char *filename)

@@ -169,12 +169,3 @@ agx3_funop_encode_source_lifetime(
    return true;
 }
 
-bool
-agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
-                  uint16_t src, bool src_abs, bool src_neg, bool saturate,
-                  uint16_t wait_mask, uint8_t out[AGX3_FUNOP_MAX_LENGTH],
-                  uint8_t *len)
-{
-   return agx3_funop_encode_source_lifetime(enc, op, dest, src, src_abs, src_neg,
-                                           saturate, wait_mask, false, out, len);
-}

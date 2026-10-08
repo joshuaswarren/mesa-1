@@ -119,11 +119,6 @@ bool agx3_select_encode(enum agx_isa_encoding encoding,
                         const struct agx3_sel_instr *instr,
                         uint8_t out[AGX3_SEL_MAX_LENGTH], uint8_t *len);
 
-/* Whether the core has a grade-A mapping for this op at all, independent of the
- * operand domain. Lets the shim distinguish "refused because unmapped" from
- * "refused because out of domain" for diagnostics. */
-bool agx3_select_op_supported(enum agx3_sel_op op);
-
 #ifdef __cplusplus
 }
 #endif

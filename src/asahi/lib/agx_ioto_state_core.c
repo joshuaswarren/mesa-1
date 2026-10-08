@@ -550,27 +550,6 @@ agx_ioto_g17s_minimal_compute_tail_build(
 }
 
 bool
-agx_ioto_g17p_compute_ldshdr_build(
-   uint64_t shader_va, struct agx_ioto_state *state)
-{
-   if (!state)
-      return false;
-
-   struct agx_ioto_state staged = {0};
-   staged.f[0] = shader_va;
-   staged.f[1] = 3;
-   staged.f[23] = 1;
-
-   uint8_t packed[AGX_IOTO_LDSHDR_SIZE];
-   if (!agx_ioto_state_pack_ldshdr(AGX_CHIP_G17P, &staged, packed,
-                                   sizeof(packed)))
-      return false;
-
-   *state = staged;
-   return true;
-}
-
-bool
 agx_ioto_g17p_compiler_ldshdr_pack(
    uint64_t shader_va, uint32_t fetch_span, void *output, size_t capacity)
 {
@@ -688,24 +667,6 @@ agx_ioto_g17p_compiler_spectpr_values(uint32_t spill_bytes,
    *spill_quads = (uint16_t)((spill_bytes + 3) >> 2);
    *d_rounded =
       (uint16_t)(((((uint64_t)d_value + 3) >> 2) + 1) & UINT64_C(0xffe));
-   return true;
-}
-
-bool
-agx_ioto_g17p_compiler_spectpr_build(
-   uint32_t spill_bytes, uint32_t d_value, struct agx_ioto_state *state)
-{
-   uint16_t spill_quads, d_rounded;
-   if (!state || !agx_ioto_g17p_compiler_spectpr_values(
-                    spill_bytes, d_value, &spill_quads, &d_rounded))
-      return false;
-
-   struct agx_ioto_state staged = {0};
-   staged.f[20] = spill_quads;
-   staged.f[21] = spill_quads;
-   staged.f[22] = d_rounded;
-
-   *state = staged;
    return true;
 }
 

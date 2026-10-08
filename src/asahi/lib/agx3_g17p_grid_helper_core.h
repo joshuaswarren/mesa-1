@@ -96,9 +96,6 @@ extern "C" {
  */
 #define AGX3_G17P_GRID_HELPER_SHADER_SIZE 97u
 
-/* Pointer to the 97-byte image; never NULL. */
-const uint8_t *agx3_g17p_grid_helper_shader_image(void);
-
 /* The exact MSL the image was compiled from, as a NUL-terminated string. */
 const char *agx3_g17p_grid_helper_source(void);
 
@@ -106,31 +103,6 @@ struct agx3_g17p_indirect_geometry {
    uint32_t global_size[3];
    uint32_t local_size[3];
 };
-
-/*
- * Host reference for what the grid helper computes, so a driver can predict
- * the block it is about to make the GPU produce and so tests can check it.
- *
- * The helper multiplies in 32-bit and wraps.  Wrapping would silently launch
- * the wrong grid, so this refuses instead: a caller that cannot prove
- * groups[i] * local[i] fits in u32 must not record the dispatch.  Zero
- * components are refused for the same reason -- an all-zero geometry is
- * indistinguishable from an unwritten block.
- *
- * *out is unchanged on failure.
- */
-bool agx3_g17p_indirect_geometry_from_groups(
-   const uint32_t groups[3], const uint32_t local_size[3],
-   struct agx3_g17p_indirect_geometry *out);
-
-/* Serialize/parse the six little-endian u32.  Transactional. */
-bool agx3_g17p_indirect_geometry_pack(
-   const struct agx3_g17p_indirect_geometry *geometry,
-   uint8_t out[AGX3_G17P_INDIRECT_GEOMETRY_SIZE]);
-
-bool agx3_g17p_indirect_geometry_unpack(
-   const uint8_t in[AGX3_G17P_INDIRECT_GEOMETRY_SIZE],
-   struct agx3_g17p_indirect_geometry *out);
 
 #ifdef __cplusplus
 }

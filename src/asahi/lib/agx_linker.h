@@ -394,8 +394,6 @@ bool agx_nir_lower_fs_output_to_epilog(nir_shader *s,
 /* True if every colour output component of this (not yet lowered) fragment
  * shader is a float provably in [0, 1]. Conservative: unknown is false. */
 bool agx_nir_fs_colour_outputs_unit_range(nir_shader *s);
-bool agx_nir_lower_fs_output_to_epilog_g17p(
-   nir_shader *s, struct agx_fs_epilog_link_info *out);
 bool agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out);
 
@@ -410,7 +408,6 @@ void agx_nir_gather_fs_colour_exports(const nir_shader *s,
                                       uint8_t *loc_written, uint8_t *size_32,
                                       uint32_t *colour_comps);
 
-bool agx_nir_lower_g17p_1x_tile_samples(nir_shader *s);
 bool agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples);
 
 /* G17P currently exposes only single-sample rasterization. Collapse API

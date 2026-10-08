@@ -70,31 +70,6 @@ struct agx_ioto_imageblock_result {
    uint64_t h;
 };
 
-/* Exactly the eleven directly witnessed M3/M4/A18 Pro/M5 identities. */
-bool agx_ioto_imageblock_target_supported(enum agx_chip chip);
-
-/* Return the recovered gpu0/gpu1 constructor family, or UNSUPPORTED. */
-enum agx_ioto_imageblock_encoding
-agx_ioto_imageblock_target_encoding(enum agx_chip chip);
-
-/*
- * Apply the exact recovered transform.  Unsupported targets and null inputs
- * fail closed.  `result` is cleared on every failure.
- *
- * Apple's ceil-power step is:
- *
- *    e = (0u - clz32(p - 1u)) & 31;
- *    x = 1u << e;
- *
- * where clz32(0) is 32.  Consequently 0 and 1 map to 1,
- * 0x80000000 maps to itself, and larger inputs wrap back to 1.  The following
- * log encoder recognizes only powers 2 through 1024 (codes 1 through 10); 1
- * and every other value encode as zero.
- */
-bool agx_ioto_imageblock_transform(
-   enum agx_chip chip, const struct agx_ioto_imageblock_params *params,
-   struct agx_ioto_imageblock_result *result);
-
 #ifdef __cplusplus
 }
 #endif

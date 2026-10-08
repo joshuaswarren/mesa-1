@@ -121,11 +121,6 @@ bool agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                               uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
                               uint8_t *len);
 
-bool agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
-                             uint16_t src0, uint16_t src1, uint8_t immediate,
-                             const struct agx3_falu_runtime *runtime,
-                             uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
-
 bool agx3_falu_fma_addend_imm_mod(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src0, uint16_t src1,
    uint8_t immediate, bool src0_abs, bool src0_neg, bool src1_abs,

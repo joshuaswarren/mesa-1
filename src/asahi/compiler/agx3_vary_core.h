@@ -99,11 +99,6 @@ bool agx3_vary_interp_at_start(enum agx_isa_encoding enc, uint16_t dest,
                                enum agx3_vary_location location, bool first,
                                uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
 
-/* Backward-compatible center-location wrapper. */
-bool agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
-                      uint16_t coef_index, bool perspective,
-                      uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
-
 /* Load the raw coefficient triple for `coef_index` into `dest`, on scoreboard
  * slot `slot` (1..6/1..8). */
 /* Native G17P sets f48 on a plain program's first LDCF; see f63 above. */

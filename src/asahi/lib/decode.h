@@ -37,16 +37,6 @@ void agxdecode_track_alloc(struct agxdecode_ctx *ctx, struct agx_bo *alloc);
 
 void agxdecode_track_free(struct agxdecode_ctx *ctx, struct agx_bo *bo);
 
-/* Failure diagnostics: copy from a still-tracked BO without asserting when
- * the allocation has already left the live map. */
-bool agxdecode_copy_gpu_mem(struct agxdecode_ctx *ctx, uint64_t gpu_va,
-                           size_t size, void *data);
-
-/* Failure diagnostics: report the live tracked allocation containing an
- * address without exposing the decoder's private allocation table. */
-bool agxdecode_gpu_mem_bounds(struct agxdecode_ctx *ctx, uint64_t gpu_va,
-                             uint64_t *base, size_t *size);
-
 struct libagxdecode_config {
    uint32_t chip_id;
    size_t (*read_gpu_mem)(uint64_t addr, size_t size, void *data);

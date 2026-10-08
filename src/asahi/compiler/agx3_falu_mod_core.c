@@ -385,17 +385,6 @@ agx3_falu_fma_addend_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
-bool
-agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
-                         uint16_t src0, uint16_t src1, uint8_t immediate,
-                         const struct agx3_falu_runtime *runtime,
-                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_falu_fma_addend_imm_mod(enc, dest, src0, src1, immediate,
-                                       false, false, false, false, runtime,
-                                       out, len);
-}
-
 /* The immediate multiplier and addend occupy independent native fields.
  * This is still one fused operation with one rounding, e.g. depth*2-1. */
 bool

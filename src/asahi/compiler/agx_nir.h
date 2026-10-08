@@ -43,9 +43,6 @@ bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
 bool agx_nir_lower_g17p_helper_samples(struct nir_shader *s);
 bool agx_nir_lower_g17p_texture_early(struct nir_shader *s,
                                      bool support_lod_bias);
-bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
-                                                    bool support_lod_bias,
-                                                    bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
 /* robust_formatless_images: formatless image loads have not been lowered for
@@ -73,7 +70,6 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
  * storage descriptor pair. Other generations retain their existing ABI. */
 #define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
 
-bool agx_nir_lower_g17p_bindless_storage(struct nir_shader *s);
 /* G17P storage descriptors reserve the following eight bytes for the two
  * texture-heap indices.  Image atomics keep their software address metadata
  * in a separate packed word after those indices, 40 bytes past the native PBE
@@ -124,8 +120,6 @@ bool agx_nir_lower_g17p_indexed_samplers(struct nir_shader *s);
 /* Packed native32 array handles are byte offsets; sampler handles already
  * name their native entry, including the reserved texel-fetch sampler0. */
 bool agx_nir_lower_g17p_native32_samplers(struct nir_shader *s, uint8_t texture_set);
-
-bool agx_nir_lower_g17p_cube_samples(struct nir_shader *s);
 
 struct agx_g17p_combined_sampler_binding {
    uint32_t texture_offset_B;

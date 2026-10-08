@@ -394,16 +394,3 @@ decode(enum agx_isa_encoding enc, const uint8_t *bytes, size_t length,
    return false;
 }
 
-bool
-agx3_scs_decode_load(enum agx_isa_encoding enc, const uint8_t *bytes,
-                     size_t length, struct agx3_scs_desc *out)
-{
-   return decode(enc, bytes, length, true, out);
-}
-
-bool
-agx3_scs_decode_store(enum agx_isa_encoding enc, const uint8_t *bytes,
-                      size_t length, struct agx3_scs_desc *out)
-{
-   return decode(enc, bytes, length, false, out);
-}

@@ -69,12 +69,6 @@ bool agx_pbe_agx3_2d_array_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    uint32_t layers, struct agx_pbe_agx3_descriptor *out);
 
-/* Gen9 HAL200 3D extension: the array packet with dimension5 and depth-1 in
- * the layer field. */
-bool agx_pbe_agx3_3d_pack(
-   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
-   uint32_t depth, struct agx_pbe_agx3_descriptor *out);
-
 /* The layered packets with the native mip extension of
  * agx_pbe_agx3_2d_mip_pack(). Layers or depth, width, height and buffer
  * describe the whole chain; level selects the addressed level. */

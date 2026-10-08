@@ -284,12 +284,6 @@ agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip)
 }
 
 bool
-agx_chip_has_hardware_ray_tracing(enum agx_chip chip)
-{
-   return agx_chip_isa(chip) == AGX_ISA_AGX3;
-}
-
-bool
 agx_chip_needs_scheduling_stalls(enum agx_chip chip)
 {
    /* The M3 base part alone. Not a property of its encoding: G15G shares the
@@ -321,18 +315,6 @@ agx_chip_name(enum agx_chip chip)
    case AGX_CHIP_G17S: return "G17S";
    case AGX_CHIP_G17C: return "G17C";
    case AGX_CHIP_UNKNOWN:
-   default: return "unknown";
-   }
-}
-
-const char *
-agx_isa_encoding_name(enum agx_isa_encoding encoding)
-{
-   switch (encoding) {
-   case AGX_ISA_ENCODING_AGX2: return "agx2";
-   case AGX_ISA_ENCODING_AGX3B: return "agx3b";
-   case AGX_ISA_ENCODING_AGX3C: return "agx3c";
-   case AGX_ISA_ENCODING_UNKNOWN:
    default: return "unknown";
    }
 }

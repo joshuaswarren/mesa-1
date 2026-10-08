@@ -107,10 +107,6 @@ struct agx_ioto_g17s_minimal_compute_resources {
  * failure.  body may be NULL only when body_size is zero and may overlap
  * output on success.  preshader code may also overlap output.
  */
-/* Locate the final contiguous COPY round after validating the whole body.
- * Earlier completed rounds may contain COPYs before later loads reuse GPRs. */
-bool agx_ioto_program_copy_suffix_offset(enum agx_chip chip, const void *body,
-                                          size_t body_size, size_t *offset);
 
 bool agx_ioto_program_compose_no_pixrel(
    enum agx_chip chip, uint64_t program_va, const void *body, size_t body_size,
@@ -126,56 +122,13 @@ bool agx_ioto_straight_line_program_compose(
    const struct agx_ioto_profile_control *profile, void *output,
    size_t capacity, size_t *written);
 
-/* Compose the exact 196-byte G17P direct-add3 Ioto program recovered in the
- * SPDX-MIT m1n1 NATIVE_ADD3_SHADER witness. The two fixed scheduled regions
- * surround a semantic runtime state tail. Only the witnessed launch-header
- * fields and shader address are relocated. This is a bounded bring-up
- * program, not general compute feature admission. */
-bool agx_ioto_g17p_direct_add3_program_compose(
-   uint64_t program_va, uint64_t shader_va, void *output, size_t capacity,
-   size_t *written);
-
-/* Compose the G17P program form used when the state loader has no resource
- * records.  Apple's program is one packed type-0 state tail, the 58-byte
- * default profile loader, and the four-byte terminal record.  program_va
- * identifies the separately uploaded, 64-byte-aligned program.
- *
- * The packed form is required because the hardware-positive G17P fragment
- * tail contains runtime SPECLM bits which the anonymous semantic field map
- * does not name yet.  Each record is still checked against the G17P Ioto
- * grammar before publication.  This function does not add uniform, texture,
- * sampler, image, or driver argument loads.  Output and *written are unchanged
- * when validation fails. */
-bool agx_ioto_g17p_no_resource_program_compose(
-   uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
-   void *output, size_t capacity, size_t *written);
 bool agx_ioto_g17p_no_resource_program_compose_trusted(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    void *output, size_t capacity, size_t *written);
 
-/* Compose the ordinary no-resource G17P fragment-stage program captured in
- * every valid EXP-G1a vary0-class run.  Unlike compute and vertex programs,
- * the fragment loader terminates its default profile prefix with the exact
- * six-byte PIXREL record before stop; it has no SETPROFILECTL suffix.
- * colour_classes names consumed synchronization partitions (bits 0..2),
- * independent of the number or physical placement of colour attachments. */
-bool agx_ioto_g17p_fragment_no_resource_program_compose(
-   uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_classes, void *output, size_t capacity, size_t *written);
 bool agx_ioto_g17p_fragment_no_resource_program_compose_trusted(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    unsigned colour_classes, void *output, size_t capacity, size_t *written);
-
-/* Compose a G17P resource program around a body emitted by the HAL200 ESL
- * scheduler. Resource loads and their drain padding precede the packed shader
- * state. The default profile loader then copies those results into CProg and
- * terminates. pre_copy_body and copies are validated as separate record spans;
- * the latter may contain COPY records only. */
-bool agx_ioto_g17p_resource_program_compose(
-   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
-   const void *copies, size_t copies_size,
-   const struct agx_ioto_state_tail_output *packed_tail, void *output,
-   size_t capacity, size_t *written);
 
 /* Fast forms for state tails and bodies produced transactionally by the
  * in-tree HAL200 scheduler/packers. They preserve destination, capacity,
@@ -188,28 +141,12 @@ bool agx_ioto_g17p_resource_program_compose_trusted(
    const struct agx_ioto_state_tail_output *packed_tail, void *output,
    size_t capacity, size_t *written);
 
-/* The resource-bearing fragment form has the same scheduled loads, shader
- * tail, profile prefix and COPY body, but closes with PIXREL instead of the
- * vertex/compute SETPROFILECTL suffix. */
-bool agx_ioto_g17p_fragment_resource_program_compose(
-   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
-   const void *copies, size_t copies_size,
-   const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_classes, void *output, size_t capacity, size_t *written);
 bool agx_ioto_g17p_fragment_resource_program_compose_trusted(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
    unsigned colour_classes, void *output, size_t capacity, size_t *written);
 
-/* Native coverage fragment metadata keeps the loader's pixel class0 held:
- * __GPU_METADATA_2.field1=0x2f2, versus opaque0x2f3. This composer accepts
- * empty resource spans for the no-resource form as well. */
-bool agx_ioto_g17p_coverage_fragment_program_compose(
-   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
-   const void *copies, size_t copies_size,
-   const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_classes, void *output, size_t capacity, size_t *written);
 bool agx_ioto_g17p_coverage_fragment_program_compose_trusted(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
@@ -226,28 +163,6 @@ bool agx_ioto_g17p_external_setup_launcher_compose(
    const struct agx_ioto_state_tail_output *packed_tail, uint64_t setup_va,
    void *output, size_t capacity, size_t *written);
 
-/* Same layout for a root prefix and state tail generated immediately by the
- * in-tree packers.  Skips re-decoding those trusted bytes and emits the fixed
- * G17P request prelude directly.  Never pass serialized/application bytes. */
-bool agx_ioto_g17p_external_setup_launcher_compose_trusted(
-   uint64_t program_va, const void *root_prefix, size_t root_prefix_size,
-   const struct agx_ioto_state_tail_output *packed_tail, uint64_t setup_va,
-   void *output, size_t capacity, size_t *written);
-
-bool agx_ioto_g17p_external_setup_suffix_compose(
-   const void *body, size_t body_size, bool fragment, bool coverage,
-   unsigned colour_classes, void *output, size_t capacity, size_t *written);
-
-/* Internal background clear/reload programs with no shader pixel-dependency
- * operations use the native BG PIXREL descriptor 0x200, not ordinary FS
- * 0x2f3. The scheduled-load and COPY validation is identical to the other
- * resource composers. This is not a general replacement for fragment state.
- */
-bool agx_ioto_g17p_background_resource_program_compose(
-   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
-   const void *copies, size_t copies_size,
-   const struct agx_ioto_state_tail_output *packed_tail, void *output,
-   size_t capacity, size_t *written);
 bool agx_ioto_g17p_background_resource_program_compose_trusted(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,

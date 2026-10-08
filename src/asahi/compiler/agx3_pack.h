@@ -309,14 +309,6 @@ bool agx3_pack_ldimm_u32(enum agx_isa_encoding encoding, uint16_t dest,
                          uint32_t imm, struct agx3_encoded_ldimm *out);
 
 /*
- * Decode exactly the same bounded semantic subset.  Unknown/reserved bits must
- * be zero, so a future form is rejected instead of being mistaken for u32.
- */
-bool agx3_unpack_ldimm_u32(enum agx_isa_encoding encoding,
-                           const uint8_t *bytes, size_t available,
-                           uint16_t *dest, uint32_t *imm, uint8_t *length);
-
-/*
  * Encode/decode the source-grounded register-plus-inline-u8 form of 32-bit
  * integer add.  `dest` and `src` are 16-bit half-register indices, so both
  * must be even.  Apple's encoder tables limit this encoding point to r0..r95
@@ -335,10 +327,6 @@ bool agx3_unpack_ldimm_u32(enum agx_isa_encoding encoding,
 bool agx3_pack_iadd_u32_imm8(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src, uint8_t imm,
    struct agx3_encoded_iadd_u32_imm8 *out);
-bool agx3_unpack_iadd_u32_imm8(enum agx_isa_encoding encoding,
-                               const uint8_t *bytes, size_t available,
-                               uint16_t *dest, uint16_t *src, uint8_t *imm,
-                               uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register form of 32-bit integer
@@ -360,9 +348,6 @@ bool agx3_unpack_iadd_u32_imm8(enum agx_isa_encoding encoding,
 bool agx3_pack_iadd_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_iadd_u32_reg_reg *out);
-bool agx3_unpack_iadd_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the exact compact register-register f32 add selection common
@@ -678,9 +663,6 @@ bool agx3_unpack_f32_to_int_rtz_reg(
 bool agx3_pack_bit_and_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_bit_and_u32_reg_reg *out);
-bool agx3_unpack_bit_and_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register u32 `bit_or` form.
@@ -699,9 +681,6 @@ bool agx3_unpack_bit_and_u32_reg_reg(
 bool agx3_pack_bit_or_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_bit_or_u32_reg_reg *out);
-bool agx3_unpack_bit_or_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register u32 `bit_xor` form.
@@ -720,9 +699,6 @@ bool agx3_unpack_bit_or_u32_reg_reg(
 bool agx3_pack_bit_xor_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_bit_xor_u32_reg_reg *out);
-bool agx3_unpack_bit_xor_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded u32 register `bit_not` form, named `inv`
@@ -739,9 +715,6 @@ bool agx3_unpack_bit_xor_u32_reg_reg(
 bool agx3_pack_bit_not_u32_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src,
    struct agx3_encoded_bit_not_u32_reg *out);
-bool agx3_unpack_bit_not_u32_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register u32 subtraction form,
@@ -759,9 +732,6 @@ bool agx3_unpack_bit_not_u32_reg(
 bool agx3_pack_isub_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_isub_u32_reg_reg *out);
-bool agx3_unpack_isub_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register u32 variable shift-left
@@ -780,9 +750,6 @@ bool agx3_unpack_isub_u32_reg_reg(
 bool agx3_pack_sll_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_sll_u32_reg_reg *out);
-bool agx3_unpack_sll_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register i32 arithmetic variable
@@ -801,9 +768,6 @@ bool agx3_unpack_sll_u32_reg_reg(
 bool agx3_pack_asr_i32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_asr_i32_reg_reg *out);
-bool agx3_unpack_asr_i32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register u32 logical variable
@@ -822,9 +786,6 @@ bool agx3_unpack_asr_i32_reg_reg(
 bool agx3_pack_lsr_u32_reg_reg(
    enum agx_isa_encoding encoding, uint16_t dest, uint16_t src0,
    uint16_t src1, struct agx3_encoded_lsr_u32_reg_reg *out);
-bool agx3_unpack_lsr_u32_reg_reg(
-   enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
-   uint16_t *dest, uint16_t *src0, uint16_t *src1, uint8_t *length);
 
 /*
  * Encode/decode the source-grounded three-register low-u32 multiply form.
@@ -898,18 +859,6 @@ bool agx3_unpack_yield_i16_reg(
    uint16_t *src, uint8_t *length);
 
 /*
- * Encode/decode the canonical two-byte scheduler nop.  The zero-field form is
- * common to AGX3b and AGX3c in Apple's independently extracted encoder tables;
- * it is also present throughout the hash-pinned G17 compute corpus.  Only this
- * field-free form is accepted -- scoreboard-bearing extended nop forms remain
- * outside the proven subset.
- */
-bool agx3_pack_nop(enum agx_isa_encoding encoding,
-                   struct agx3_encoded_nop *out);
-bool agx3_unpack_nop(enum agx_isa_encoding encoding, const uint8_t *bytes,
-                     size_t available, uint8_t *length);
-
-/*
  * Encode/decode the fixed workgroup barrier emitted for air.wg.barrier.
  * Forced n=0..4 occurrence ladders reproduce the exact six-byte AGX3b form on
  * G15G/G15S/G16G/G17P and the distinct six-byte AGX3c form on G17S.  Apple's
@@ -920,9 +869,6 @@ bool agx3_unpack_nop(enum agx_isa_encoding encoding, const uint8_t *bytes,
 bool agx3_pack_threadgroup_barrier(
    enum agx_isa_encoding encoding,
    struct agx3_encoded_threadgroup_barrier *out);
-bool agx3_unpack_threadgroup_barrier(enum agx_isa_encoding encoding,
-                                     const uint8_t *bytes, size_t available,
-                                     uint8_t *length);
 
 /*
  * Encode/decode the complete field-free AGX3 fence scope family recovered
@@ -934,10 +880,6 @@ bool agx3_unpack_threadgroup_barrier(enum agx_isa_encoding encoding,
 bool agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
                               enum agx3_barrier_scope scope,
                               struct agx3_encoded_scoped_barrier *out);
-bool agx3_unpack_scoped_barrier(enum agx_isa_encoding encoding,
-                                const uint8_t *bytes, size_t available,
-                                enum agx3_barrier_scope *scope,
-                                uint8_t *length);
 
 /*
  * Encode/decode the canonical unconditional shader terminator.  The exact
@@ -949,8 +891,6 @@ bool agx3_unpack_scoped_barrier(enum agx_isa_encoding encoding,
  */
 bool agx3_pack_end(enum agx_isa_encoding encoding,
                    struct agx3_encoded_end *out);
-bool agx3_unpack_end(enum agx_isa_encoding encoding, const uint8_t *bytes,
-                     size_t available, uint8_t *length);
 
 /*
  * Encode/decode a canonical terminal `end` carrying the observed one-shot
@@ -973,21 +913,6 @@ bool agx3_pack_end_with_wait_fence_mask(
 bool agx3_unpack_end_with_wait_fence_mask(
    enum agx_isa_encoding encoding, const uint8_t *bytes, size_t available,
    uint8_t *wait_fence_mask, uint8_t *length);
-
-/*
- * Encode/decode the exact canonical zero-argument
- * llvm.agx3.enable.all.threads machine instruction.  Five-target n=0..4
- * ladders establish a six-byte AGX3b form on G15G/G15S/G16G/G17P and an
- * eight-byte AGX3c form on G17S.  The first instruction in a run has a distinct
- * zero-wait scheduler field; this bounded API deliberately accepts only the
- * repeated canonical form until scheduler placement is modeled by codegen.
- */
-bool agx3_pack_enable_all_threads(
-   enum agx_isa_encoding encoding,
-   struct agx3_encoded_enable_all_threads *out);
-bool agx3_unpack_enable_all_threads(enum agx_isa_encoding encoding,
-                                    const uint8_t *bytes, size_t available,
-                                    uint8_t *length);
 
 /*
  * Encode/decode the fixed, zero-argument llvm.agx3.update.node intrinsic

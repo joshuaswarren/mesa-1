@@ -109,18 +109,6 @@ instrs_equal(const void *_i1, const void *_i2)
    return true;
 }
 
-/*
- * Exposed for testing. instrs_equal() enumerates the instruction's immediates
- * one at a time, so a field added to agx_instr without a matching line here
- * lets two otherwise-identical instructions collapse into one --
- * test-agx3-pack-binary.cpp guards I->offset_xyz against exactly that.
- */
-bool
-agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2)
-{
-   return instrs_equal(i1, i2);
-}
-
 /* Determines what instructions the above routines have to handle */
 static bool
 instr_can_cse(const agx_instr *I)

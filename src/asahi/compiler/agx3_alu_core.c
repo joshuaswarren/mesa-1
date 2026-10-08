@@ -121,25 +121,6 @@ agx3_alu_sqrt_step_source_modifiers(enum agx_isa_encoding enc, uint16_t dest, ui
 }
 
 bool
-agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                       enum agx3_alu_hint hint, bool dest_cache,
-                       uint16_t wait_mask, bool src_abs,
-                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_sqrt_step_source_modifiers(enc, dest, src, hint, dest_cache,
-                                             wait_mask, src_abs, false, out, len);
-}
-
-bool
-agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_sqrt_step_mod(enc, dest, src, hint, dest_cache, wait_mask,
-                                 false, out, len);
-}
-
-bool
 agx3_alu_sqrt_step_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                         enum agx3_alu_hint hint, bool dest_cache,
                         uint16_t wait_mask,
@@ -235,16 +216,6 @@ agx3_alu_fmul_minifloat_narrow(
    memcpy(out, encoded, encoded_len);
    *len = encoded_len;
    return true;
-}
-
-bool
-agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
-                        uint16_t src, uint16_t immediate,
-                        enum agx3_alu_hint hint, uint16_t wait_mask,
-                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_fmul_minifloat_mod(
-      enc, dest, src, immediate, false, false, hint, wait_mask, out, len);
 }
 
 bool
@@ -602,19 +573,6 @@ agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
-bool
-agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
-                       uint16_t src, uint8_t immediate, uint16_t addend,
-                       enum agx3_alu_hint src_hint,
-                       enum agx3_alu_hint addend_hint, bool dest_cache,
-                       uint16_t wait_mask,
-                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_fma_minifloat_mod(enc, dest, src, immediate, addend, false, false,
-                                     src_hint, addend_hint, dest_cache,
-                                     wait_mask, out, len);
-}
-
 static bool
 agx3_alu_int16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     enum agx3_alu_hint hint, bool is_signed, uint16_t wait_mask,
@@ -760,18 +718,6 @@ agx3_alu_float_to_int16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                                            !!(wait_mask & (1u << slot))};
 
    return agx3_bind_compose(enc, "flt2int", 0, base, 6, fields, n, out, len);
-}
-
-bool
-agx3_alu_f32_to_s16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                    enum agx3_alu_hint hint, bool dest_cache,
-                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                    uint8_t *len)
-{
-   if (wait_mask != 0 && wait_mask != 32)
-      return false;
-   return agx3_alu_float_to_int16(enc, dest, src, false, true, hint,
-                                  dest_cache, wait_mask, out, len);
 }
 
 bool
@@ -1519,18 +1465,6 @@ agx3_alu_bit_orc(enum agx_isa_encoding enc, uint16_t dest,
                              wait_mask, out, len);
 }
 
-/* Native iadd_live/isub_live retain both inputs, while their dead variants
- * set f27/f42. Keep the same canonical opcode/register fields. */
-bool
-agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
-                 uint16_t dest, const uint16_t src[2],
-                 const enum agx3_alu_hint hints[2], uint16_t wait_mask,
-                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_integer_reg_shift(enc, op, dest, src, hints, 0, wait_mask,
-                                     out, len);
-}
-
 /*
  * The same two forms with slot B shifted left first (f54).
  *
@@ -2009,19 +1943,6 @@ agx3_alu_fcmp_select_imm_width_abs(enum agx_isa_encoding enc, uint16_t dest,
       dest_cache, wait_mask, false, src_abs, out, len);
 }
 
-bool
-agx3_alu_fcmp_select_imm_width_neg_second(
-   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
-   const bool src_16[2], const enum agx3_alu_hint hints[2],
-   unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
-   bool dest_cache, uint16_t wait_mask,
-   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_fcmp_select_imm_width_internal(
-      enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
-      dest_cache, wait_mask, true, (const bool[2]){false, false}, out, len);
-}
-
 /* The same select with the negate on either comparator. A negate on the first
  * one has no bit: it is the operand swap with the relation reversed, which is
  * what `neg[0]` performs here so that no caller has to know the asymmetry.
@@ -2344,18 +2265,6 @@ agx3_alu_fcmp_select_zero(enum agx_isa_encoding enc, uint16_t dest,
       if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, 14, out, len))
          return true;
    return false;
-}
-
-bool
-agx3_alu_fcmp_select_imm(enum agx_isa_encoding enc, uint16_t dest,
-                        const uint16_t src[2], const enum agx3_alu_hint hints[2],
-                        unsigned condition, uint8_t if_true, uint8_t if_false,
-                        bool dest_16, bool dest_cache, uint16_t wait_mask,
-                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   const bool src_16[2] = {false, false};
-   return agx3_alu_fcmp_select_imm_width(enc, dest, src, src_16, hints, condition,
-      if_true, if_false, dest_16, dest_cache, wait_mask, out, len);
 }
 
 /* Integer source liveness remains relevant after conversion: IDs can still
@@ -3773,15 +3682,6 @@ agx3_alu_rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-              enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_rcp(enc, dest, src, true, true, false, false, hint,
-                       dest_cache, wait_mask, out, len);
-}
-
-bool
 agx3_alu_f32rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
@@ -3820,16 +3720,6 @@ agx3_alu_f32rsqrt_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 13, out, len);
 }
 
-bool
-agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                  enum agx3_alu_hint hint, bool dest_cache,
-                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                  uint8_t *len)
-{
-   return agx3_alu_f32rsqrt_mod(enc, dest, src, hint, dest_cache, wait_mask,
-                                false, false, out, len);
-}
-
 /* log2/exp2 share independently selected f10 destination and f26 source
  * widths. Full-width forms have all six recovered wait bits; any half-width
  * log2 is currently grounded for no wait and slot 6. */
@@ -3861,34 +3751,6 @@ agx3_alu_unop(enum agx_isa_encoding enc, const char *mnemonic,
       fields[7 + i] =
          (struct agx3_field_kv){35 + i, !!(wait_mask & (1u << i))};
    return agx3_bind_compose(enc, mnemonic, 0, base, 4, fields, 13, out, len);
-}
-
-bool
-agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_log2(enc, dest, src, false, false, false, false, hint,
-                        dest_cache, wait_mask, out, len);
-}
-
-bool
-agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_unop(enc, "f32exp2", dest, src, false, false, hint,
-                        dest_cache, wait_mask, false, false, out, len);
-}
-
-bool
-agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                     enum agx3_alu_hint hint, bool dest_cache,
-                     uint16_t wait_mask, bool src_neg, bool src_abs,
-                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_alu_log2(enc, dest, src, false, false, src_abs, src_neg, hint,
-                        dest_cache, wait_mask, out, len);
 }
 
 bool
@@ -3990,16 +3852,6 @@ agx3_alu_hrsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_hexp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-               enum agx3_alu_hint hint, bool dest_cache,
-               uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-               uint8_t *len)
-{
-   return agx3_alu_hexp2_neg(enc, dest, src, hint, dest_cache, wait_mask,
-                             false, out, len);
-}
-
-bool
 agx3_alu_hexp2_neg(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                    enum agx3_alu_hint hint, bool dest_cache,
                    uint16_t wait_mask, bool src_neg,
@@ -4007,16 +3859,6 @@ agx3_alu_hexp2_neg(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 {
    return agx3_alu_unop(enc, "f32exp2", dest, src, true, true, hint,
                         dest_cache, wait_mask, src_neg, false, out, len);
-}
-
-bool
-agx3_alu_hlog2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-               enum agx3_alu_hint hint, bool dest_cache,
-               uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-               uint8_t *len)
-{
-   return agx3_alu_log2(enc, dest, src, true, true, false, false, hint,
-                        dest_cache, wait_mask, out, len);
 }
 
 static bool

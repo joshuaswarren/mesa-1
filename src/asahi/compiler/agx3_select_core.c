@@ -24,39 +24,6 @@ dest_is_reg32(const struct agx3_sel_instr *I)
 }
 
 bool
-agx3_select_op_supported(enum agx3_sel_op op)
-{
-   switch (op) {
-   case AGX3_SEL_OP_END:
-   case AGX3_SEL_OP_BARRIER:
-   case AGX3_SEL_OP_MOV_IMM:
-   case AGX3_SEL_OP_FADD:
-   case AGX3_SEL_OP_FMUL:
-   case AGX3_SEL_OP_FFMA:
-   case AGX3_SEL_OP_IADD:
-   case AGX3_SEL_OP_IMAD:
-   case AGX3_SEL_OP_ASR:
-   case AGX3_SEL_OP_BITOP:
-   case AGX3_SEL_OP_SLL:
-   case AGX3_SEL_OP_LSR:
-   case AGX3_SEL_OP_F_TO_I32:
-   case AGX3_SEL_OP_F_TO_U32:
-   case AGX3_SEL_OP_I32_TO_F:
-   case AGX3_SEL_OP_U32_TO_F:
-   case AGX3_SEL_OP_ISUB:
-   case AGX3_SEL_OP_IMUL:
-   case AGX3_SEL_OP_F_RCP:
-   case AGX3_SEL_OP_F_RSQRT:
-   case AGX3_SEL_OP_F_RINT:
-   case AGX3_SEL_OP_FMIN:
-   case AGX3_SEL_OP_FMAX:
-      return true;
-   default:
-      return false;
-   }
-}
-
-bool
 agx3_select_encode(enum agx_isa_encoding encoding,
                    const struct agx3_sel_instr *I,
                    uint8_t out[AGX3_SEL_MAX_LENGTH], uint8_t *len)

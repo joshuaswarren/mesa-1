@@ -1557,14 +1557,6 @@ lower_texture_early(nir_shader *s, bool support_lod_bias,
    return progress;
 }
 
-bool
-agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
-                                               bool support_lod_bias,
-                                               bool lower_2d_robustness)
-{
-   return lower_texture_early(s, support_lod_bias, lower_2d_robustness, false);
-}
-
 static bool
 lower_lod_clamp(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 {

@@ -98,14 +98,6 @@ struct agx3_coverage_desc {
    bool word_hint;
 };
 
-/*
- * Emit `rld`, two `iadd`s and the staging `copy` that together publish the
- * coverage word. Writes at most `capacity` bytes and reports the length.
- */
-bool agx3_coverage_word(enum agx_isa_encoding enc,
-                        const struct agx3_coverage_desc *d, uint8_t *out,
-                        unsigned capacity, unsigned *len);
-
 #ifdef __cplusplus
 }
 #endif

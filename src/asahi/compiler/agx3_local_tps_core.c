@@ -137,28 +137,11 @@ local_auto(enum agx_isa_encoding enc, const struct agx3_local_desc *d,
 }
 
 bool
-agx3_local_encode_load_form(enum agx_isa_encoding enc,
-                            const struct agx3_local_desc *d, uint8_t ep,
-                            uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len)
-{
-   return local_form(enc, d, true, ep, out, len);
-}
-
-bool
 agx3_local_encode_load(enum agx_isa_encoding enc,
                        const struct agx3_local_desc *d,
                        uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len)
 {
    return local_auto(enc, d, true, out, len);
-}
-
-bool
-agx3_local_encode_store_form(enum agx_isa_encoding enc,
-                             const struct agx3_local_desc *d, uint8_t ep,
-                             uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH],
-                             uint8_t *len)
-{
-   return local_form(enc, d, false, ep, out, len);
 }
 
 bool
@@ -255,26 +238,10 @@ tps_auto(enum agx_isa_encoding enc, const struct agx3_tps_desc *d,
 }
 
 bool
-agx3_tps_encode_load_form(enum agx_isa_encoding enc,
-                          const struct agx3_tps_desc *d, uint8_t ep,
-                          uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len)
-{
-   return tps_form(enc, d, true, ep, out, len);
-}
-
-bool
 agx3_tps_encode_load(enum agx_isa_encoding enc, const struct agx3_tps_desc *d,
                      uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len)
 {
    return tps_auto(enc, d, true, out, len);
-}
-
-bool
-agx3_tps_encode_store_form(enum agx_isa_encoding enc,
-                           const struct agx3_tps_desc *d, uint8_t ep,
-                           uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH], uint8_t *len)
-{
-   return tps_form(enc, d, false, ep, out, len);
 }
 
 bool

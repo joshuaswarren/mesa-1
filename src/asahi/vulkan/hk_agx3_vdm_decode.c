@@ -135,22 +135,6 @@ hk_agx3_g17p_vertex_program_info(
 }
 
 bool
-hk_agx3_decode_vdm_record(enum agx_chip chip, const void *command,
-                          size_t available,
-                          struct agx_vdm_decoded_record *record)
-{
-   return agx_vdm_decode_one(chip, command, available, record);
-}
-
-bool
-hk_agx3_encode_vdm_state_update_template(
-   enum agx_chip chip, const struct agx_vdm_state_update_template_info *info,
-   struct agx_vdm_state_update *out)
-{
-   return agx_vdm_state_update_template_pack(chip, info, out);
-}
-
-bool
 hk_agx3_encode_vdm_state_update_draw(
    enum agx_chip chip, const struct agx_vdm_state_update_draw_info *info,
    struct agx_vdm_state_update *out)

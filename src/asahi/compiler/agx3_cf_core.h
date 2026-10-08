@@ -139,10 +139,6 @@ bool agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc,
                                 uint16_t wait_mask,
                                 uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
-bool agx3_cf_icmp_zero16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
-                         unsigned slot, uint16_t src0,
-                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
-
 bool agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                       bool or_nan, unsigned slot, uint16_t src0, uint16_t src1,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);

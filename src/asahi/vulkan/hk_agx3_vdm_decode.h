@@ -79,21 +79,6 @@ bool hk_agx3_g17p_vertex_program_info(
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
    struct agx_vdm_state_update_program_info *program);
 
-/*
- * Decode one record from a potentially longer AGX3 VDM stream through the
- * shared Mesa classifier. This is a validation surface only: it does not
- * follow links, inspect PPP payloads, emit commands, submit work, admit an
- * AGX3 device, or expose a Vulkan capability.
- */
-bool hk_agx3_decode_vdm_record(enum agx_chip chip, const void *command,
-                               size_t available,
-                               struct agx_vdm_decoded_record *record);
-
-/* Validation-only structural bridge. */
-bool hk_agx3_encode_vdm_state_update_template(
-   enum agx_chip chip, const struct agx_vdm_state_update_template_info *info,
-   struct agx_vdm_state_update *out);
-
 /* Exact AGX3 VertexProgramVariant selector bridge used by live draw emission. */
 bool hk_agx3_encode_vdm_state_update_draw(
    enum agx_chip chip, const struct agx_vdm_state_update_draw_info *info,

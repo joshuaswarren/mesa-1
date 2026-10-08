@@ -151,43 +151,6 @@ struct agx3_g17p_native_indirect_dispatch {
    uint64_t geometry_va;
 };
 
-/*
- * Compose the Ioto program and prepare its native launch state as one
- * transaction.  output, *written and *program are unchanged on every
- * failure.  This does not infer either ShaderInfo value from legacy Mesa USC
- * counts, allocate GPU memory, submit work, or admit an AGX3 device.
- */
-bool agx3_compute_program_prepare(const struct agx3_compute_program_desc *desc,
-                                  void *output, size_t capacity,
-                                  size_t *written,
-                                  struct agx3_compute_program *program);
-
-/* Compose the exact G17P direct-add3 Ioto witness and bind it to the native
- * direct-launch template. This host-only preparation does not enable Vulkan
- * compute advertisement. */
-bool agx3_g17p_direct_add3_program_prepare(
-   const struct agx3_g17p_direct_add3_program_desc *desc, void *output,
-   size_t capacity, size_t *written, struct agx3_compute_program *program);
-
-/* Transactional mapped-allocation handoff. cpu and gpu_va identify the same
- * 64-byte-aligned program allocation; success admits only this exact witness
- * for the bounded launch append below. */
-bool agx3_g17p_direct_add3_program_upload_prepare(
-   enum agx_chip chip,
-   const struct agx3_g17p_direct_add3_program_desc *desc,
-   const struct agx3_compute_program_upload *upload, size_t *written,
-   struct agx3_compute_program *program);
-
-bool agx3_g17p_direct_add3_dispatch_ready(enum agx_chip chip);
-
-/* Append the output-positive 40-byte A18 Pro add3 launch and its flags=0
- * barrier.  The witnessed grid is fixed at 64 global threads in groups of
- * 32.  This remains a bring-up API and does not expose a Vulkan capability. */
-bool agx3_g17p_direct_add3_dispatch_append(
-   const struct agx3_compute_program *program,
-   const struct agx3_compute_direct_grid *grid,
-   struct agx3_compute_dispatch_sink *sink);
-
 /* Bind a successfully composed runtime Ioto program to its native direct CDM
  * launch state.  No bytes are generated here. */
 bool agx3_g17p_native_compute_program_bind(

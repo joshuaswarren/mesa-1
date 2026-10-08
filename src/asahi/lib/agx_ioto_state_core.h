@@ -110,12 +110,6 @@ bool agx_ioto_state_tail_pack_shader(
 bool agx_ioto_g17s_minimal_compute_tail_build(
    uint64_t shader_va, struct agx_ioto_state_tail *tail);
 
-/* Exact A18 Pro/G17P LDSHDR constructor defaults plus shader address.  This is
- * a single-record producer, not a complete G17P state tail: SPECLM/SPECTPR
- * remain runtime-context dependent.  `state` is unchanged on failure. */
-bool agx_ioto_g17p_compute_ldshdr_build(
-   uint64_t shader_va, struct agx_ioto_state *state);
-
 /* Pack the minimal G17P LDSHDR used by compiler-generated graphics and
  * compute programs directly. This is equivalent to the semantic state with
  * only f0=shader_va, f1=fetch_span and required f23=1 populated. `output` is
@@ -147,12 +141,6 @@ bool agx_ioto_g17p_runtime_compute_tail_build_shared(
    uint64_t shader_va, enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1,
    uint32_t threadgroup_memory_size_B,
    struct agx_ioto_state_tail_output *output);
-
-/* Build the exact pre-runtime G17P SPECTPR fields from Apple's raw compiler
- * spill-byte and D values.  These are intentionally not sourced from Mesa's
- * scratch_size: the runtime may subsequently overwrite f10/f11/f20/f22. */
-bool agx_ioto_g17p_compiler_spectpr_build(
-   uint32_t spill_bytes, uint32_t d_value, struct agx_ioto_state *state);
 
 /* Pack those same compiler fields directly into the exact G17P SPECTPR
  * record. This is equivalent to build + generic pack without materializing a

@@ -214,9 +214,3 @@ bool hk_g17p_image_blit_slice(enum agx_chip chip, VkImageType src_type,
 bool hk_g17p_build_mip_axis(uint32_t src_extent, uint32_t dst_extent,
                             uint32_t *entries);
 
-/* Integer oracle for G17P's UNORM8 linear sampler followed by a UNORM8 colour
- * write.  Coordinates are Q8; the sampler rounds its four-tap result half-up
- * to four fractional colour bits, while exact output ties round toward the
- * midpoint code 128. */
-uint8_t hk_g17p_filter_unorm8(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
-                              uint8_t wx, uint8_t wy);

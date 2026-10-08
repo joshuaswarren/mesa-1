@@ -390,36 +390,6 @@ bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
 
 /* The `_at` stagers publish the operands of a read whose coordinates are
  * staged at half `bank` (0 or 16) into bank + 6 instead of bank 6. */
-/* CEM's selected face together with a per-lane level or bias: the same
- * two-operand word as agx3_tex_stage_array_lod with the cube selector.
- * Apple's `depthcube.sample_compare(s, dir, ref, level(v))` fragment emits
- * exactly 1705540600040c00f0c01100 for discarded face r1 and level half 3. */
-bool agx3_tex_stage_cube_z_lod(enum agx_isa_encoding enc, uint16_t z,
-                               uint16_t lod, uint8_t slot, uint16_t wait_mask,
-                               bool z_cache, bool z_discard, bool lod_cache,
-                               bool lod_discard,
-                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
-/* Cube-array comparison with a per-lane level or bias: the face+level word
- * above with the three cube-array selectors (f51 = 2, f55 = 1, f75 = 12).
- * Apple's `depthcube_array.sample_compare(s, dir, layer, ref, level(v))`
- * fragment emits exactly 1705540600040c00f0c21700 for face r1 and level
- * half 3, both discarded, on slot 1. */
-bool agx3_tex_stage_cube_array_z_lod(enum agx_isa_encoding enc, uint16_t z,
-                                     uint16_t lod, uint8_t slot,
-                                     uint16_t wait_mask, bool z_cache,
-                                     bool z_discard, bool lod_cache,
-                                     bool lod_discard,
-                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
-                                     uint8_t *len);
-/* The auxiliary integer layer publication that accompanies that word: the
- * array-layer PACK_SMPIR (f74 = 4) with f5 = 0, f9 = 4 and three fixed bits
- * the binder does not model. Apple emits 1705540003200000f0880400 for a
- * discarded layer at half 16 on slot 1; its uniform-level preambles use the
- * same f5/f9/fixed-bit pattern with the FLOAT kind. `src` is a half index. */
-bool agx3_tex_stage_aux_layer(enum agx_isa_encoding enc, uint16_t src,
-                              uint8_t slot, uint16_t wait_mask,
-                              bool src_cache, bool src_discard,
-                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 /* The same publication into a rotated staging group: `bank` is 6, 14 or 22,
  * the level operand of groups 0, 8 and 16. Apple's second in-flight fragment
  * texel fetch stages its level at bank 14 (PACK_SMPIR f5 = 14). */
@@ -498,11 +468,6 @@ bool agx3_tex_stage_array_minimum_gradient(
    bool minimum_cache, bool minimum_discard,
    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* The texel-fetch variant packs a full uint LOD beside the array layer. */
-bool agx3_tex_stage_array_integer_lod(
-   enum agx_isa_encoding enc, uint16_t layer, uint16_t lod, uint8_t slot,
-   uint16_t wait_mask, bool layer_cache, bool layer_discard, bool lod_cache,
-   bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 bool agx3_tex_stage_array_integer_lod_at(
    enum agx_isa_encoding enc, uint16_t bank, uint16_t layer, uint16_t lod,
    uint8_t slot, uint16_t wait_mask, bool layer_cache, bool layer_discard,

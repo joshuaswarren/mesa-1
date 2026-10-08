@@ -503,8 +503,6 @@ agx_is_vertex_store(const agx_instr *I)
           I->op == AGX_OPCODE_ST_VARY_FMA_AGX3;
 }
 
-bool agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2);
-
 static inline void
 agx_replace_src(agx_instr *I, unsigned src_index, agx_index replacement)
 {
@@ -1206,9 +1204,6 @@ bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
 #define AGX3_UVS_POSITION_ENTRIES 4u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
-/* Materialize nonzero minifloats used by G17P structured f32 control flow so
- * the compare uses the already grounded register/register form. */
-void agx_materialize_agx3_cf_constants(agx_context *ctx);
 /* Number of 16-bit registers RA keeps reserved at the bottom of the register
  * file for the whole shader.
  */
@@ -1312,7 +1307,6 @@ void agx_lower_agx3_mixed_width_unary(agx_context *ctx);
 void agx_lower_agx3_half_converts(agx_context *ctx);
 bool agx_lower_agx3_cf_constants(agx_context *ctx);
 bool agx_lower_agx3_half_iadd_constants(agx_context *ctx);
-bool agx_lower_agx3_widening_iadd(agx_context *ctx);
 
 struct agx_cycle_estimate {
    /* ALU throughput */

@@ -1406,13 +1406,6 @@ agx_nir_lower_fs_output_to_epilog(nir_shader *s,
 }
 
 bool
-agx_nir_lower_fs_output_to_epilog_g17p(
-   nir_shader *s, struct agx_fs_epilog_link_info *out)
-{
-   return lower_fs_output_to_epilog(s, out, true);
-}
-
-bool
 agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out)
 {
@@ -1647,16 +1640,6 @@ agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
    struct g17p_tile_sample_state state = {.samples = nr_samples};
    return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
                                      nir_metadata_control_flow, &state);
-}
-
-bool
-agx_nir_lower_g17p_1x_tile_samples(nir_shader *s)
-{
-   /* Honeykrisp advertises only one sample on G17P.  Per-sample epilog
-    * lowering still materializes `1 << sample_id`, but sample_id can only be
-    * zero.  Native 1x fragments encode the ordinary whole-pixel LSTCOL/LLDCOL
-    * forms, which carry no sample operand. */
-   return agx_nir_lower_g17p_tile_samples(s, 1);
 }
 
 bool

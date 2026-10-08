@@ -316,16 +316,6 @@ const char *agx_chip_exact_product_name(enum agx_chip chip);
 bool agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip);
 
 /*
- * Hardware ray tracing.
- *
- * Present on every AGX3 part and on none before. Measured rather than
- * assumed: an intersect() call compiles to roughly 900-980 bytes on every
- * AGX3 family against 3315 bytes of software traversal on G13, G14 and the
- * one AGX2 G15 phone part.
- */
-bool agx_chip_has_hardware_ray_tracing(enum agx_chip chip);
-
-/*
  * Whether the compiler must insert explicit scheduling stalls.
  *
  * The M3 base part needs them and nothing else does: stripping its stall words
@@ -345,10 +335,6 @@ const char *agx_chip_name(enum agx_chip chip);
 
 /* Stable name for the instruction set, e.g. "AGX3". Never NULL. */
 const char *agx_isa_name(enum agx_isa isa);
-
-/* Stable name for the encoding, matching its XML table, e.g. "agx3b". Never
- * NULL. */
-const char *agx_isa_encoding_name(enum agx_isa_encoding encoding);
 
 const char *agx_command_stream_generation_name(
    enum agx_command_stream_generation generation);

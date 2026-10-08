@@ -79,23 +79,6 @@ struct agx_vdm_tessellate_indirect {
    uint8_t length;
 };
 
-/*
- * The seven-dword indirect Tessellate record, built by
- * HWTessellationContext::drawPatches(indirect) in the G17P render plugin
- * (0x216cb8910..0x216cb8958):
- *
- *   word0 0xb4300c00 | factor_buffer[39:32]
- *   word1 factor_buffer[31:0]
- *   word2 indirect_buffer[47:32]
- *   word3 indirect_buffer[31:0], whose low two bits are cleared
- *   word4 instance stride word
- *   word5 factor buffer size in words, minus one
- *   word6 factor_buffer[47:40]
- */
-bool agx_vdm_tessellate_indirect_pack(
-   enum agx_chip chip, const struct agx_vdm_tessellate_indirect_info *info,
-   struct agx_vdm_tessellate_indirect *out);
-
 bool agx_vdm_tessellate_indirect_unpack(
    enum agx_chip chip, const void *bytes, size_t size,
    struct agx_vdm_tessellate_indirect_info *info);
@@ -131,21 +114,6 @@ struct agx_vdm_tessellation_state_info {
    /* The factor scale as an IEEE half; 1.0 is 0x3c00. */
    uint16_t scale_half;
 };
-
-/*
- * The VDM state update a hardware tessellator reads before a Tessellate
- * record: block type 2 with its tessellation and tessellation-scale words
- * present. Built by HWTessellationContext::drawPatches in the G17P render
- * plugin (0x216cbe490..0x216cbe578):
- *
- *   word0 0x40000090
- *   word1 partition[31:30] ccw[29] (max - 1 - fractional_odd)[28:23] 1[21]
- *         quads[20] float_factors[19] step[18:17] program_flag[16]
- *   word2 scale as a half
- */
-bool agx_vdm_tessellation_state_pack(
-   enum agx_chip chip, const struct agx_vdm_tessellation_state_info *info,
-   uint8_t out[AGX_VDM_TESSELLATION_STATE_LENGTH]);
 
 bool agx_vdm_tessellation_state_unpack(
    enum agx_chip chip, const void *bytes, size_t size,

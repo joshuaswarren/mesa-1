@@ -308,13 +308,6 @@ agx3_ioto_load_packer_init(struct agx3_ioto_load_packer *packer,
    return true;
 }
 
-bool
-agx3_ioto_load_absolute_packer_ready(enum agx_chip chip)
-{
-   return agx_ioto_load_target_encoding(chip) !=
-          AGX_IOTO_LOAD_ENCODING_UNSUPPORTED;
-}
-
 void
 agx3_ioto_load_packer_ops(struct agx3_ioto_load_packer *packer,
                           struct agx_ioto_load_emit_ops *ops)
@@ -363,26 +356,6 @@ agx3_ioto_load_absolute_native(struct agx_ioto_load_core *core,
       return false;
    agx3_ioto_load_packer_ops(&packer, &ops);
    return agx_ioto_load_absolute(core, load, &ops, workspace, allocation);
-}
-
-bool
-agx3_ioto_load_from_abi_buffer_native(
-   struct agx_ioto_load_core *core, enum agx_ioto_abi_buffer_slot source,
-   const struct agx_ioto_load_from_fixed *load,
-   struct agx_ioto_load_workspace workspace,
-   struct agx_ioto_load_allocation *allocation)
-{
-   if (core == NULL || (core->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 &&
-                        !core->gpu0_round_nops))
-      return false;
-
-   struct agx3_ioto_load_packer packer;
-   struct agx_ioto_load_emit_ops ops;
-   if (!agx3_ioto_load_packer_init(&packer, core->chip))
-      return false;
-   agx3_ioto_load_packer_ops(&packer, &ops);
-   return agx_ioto_load_from_abi_buffer(core, source, load, &ops, workspace,
-                                        allocation);
 }
 
 static bool
@@ -509,28 +482,6 @@ load_indirect_uniform_range(
 
    *written = offset;
    return true;
-}
-
-bool
-agx3_ioto_load_indirect_uniform_range(
-   enum agx_chip chip, uint16_t root_base_half, int16_t pointer_offset,
-   uint16_t uniform_half, uint16_t size_halfs, void *output, size_t capacity,
-   size_t *written)
-{
-   return load_indirect_uniform_range(
-      chip, root_base_half, false, pointer_offset, uniform_half, size_halfs,
-      NULL, output, capacity, written);
-}
-
-bool
-agx3_ioto_load_indirect_uniform_range_from_uniform_root(
-   enum agx_chip chip, uint16_t root_base_half, int16_t pointer_offset,
-   uint16_t uniform_half, uint16_t size_halfs, void *output, size_t capacity,
-   size_t *written)
-{
-   return load_indirect_uniform_range(
-      chip, root_base_half, true, pointer_offset, uniform_half, size_halfs,
-      NULL, output, capacity, written);
 }
 
 bool

@@ -184,15 +184,6 @@ agx3_vary_interp_at(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
-agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
-                 uint16_t coef_index, bool perspective,
-                 uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
-{
-   return agx3_vary_interp_at(enc, dest, coef_index, perspective,
-                              AGX3_VARY_CENTER, out, len);
-}
-
-bool
 agx3_vary_ldcf_at_start(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t coef_index, uint8_t slot, bool first,
                         uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)

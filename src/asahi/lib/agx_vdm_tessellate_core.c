@@ -132,42 +132,6 @@ agx_vdm_tessellate_direct_unpack(
 #define AGX_VDM_TESSELLATE_INDIRECT_FIXED UINT32_C(0xb4300c00)
 
 bool
-agx_vdm_tessellate_indirect_pack(
-   enum agx_chip chip, const struct agx_vdm_tessellate_indirect_info *info,
-   struct agx_vdm_tessellate_indirect *out)
-{
-   if (out)
-      memset(out, 0, sizeof(*out));
-
-   if (!out || !info || chip != AGX_CHIP_G17P ||
-       info->factor_buffer >= (UINT64_C(1) << 48) ||
-       info->indirect_buffer >= (UINT64_C(1) << 48) ||
-       (info->indirect_buffer & 3) ||
-       info->instance_stride_word > AGX_VDM_TESSELLATE_INSTANCE_STRIDE_MAX)
-      return false;
-
-   agx_vdm_tessellate_store_le32(
-      &out->bytes[0],
-      AGX_VDM_TESSELLATE_INDIRECT_FIXED |
-         (uint32_t)((info->factor_buffer >> 32) & UINT64_C(0xff)));
-   agx_vdm_tessellate_store_le32(&out->bytes[4],
-                                 (uint32_t)info->factor_buffer);
-   agx_vdm_tessellate_store_le32(&out->bytes[8],
-                                 (uint32_t)(info->indirect_buffer >> 32));
-   agx_vdm_tessellate_store_le32(&out->bytes[12],
-                                 (uint32_t)info->indirect_buffer);
-   agx_vdm_tessellate_store_le32(&out->bytes[16],
-                                 info->instance_stride_word);
-   agx_vdm_tessellate_store_le32(&out->bytes[20],
-                                 info->factor_buffer_size_minus_one);
-   agx_vdm_tessellate_store_le32(
-      &out->bytes[24],
-      (uint32_t)((info->factor_buffer >> 40) & UINT64_C(0xff)));
-   out->length = AGX_VDM_TESSELLATE_INDIRECT_LENGTH;
-   return true;
-}
-
-bool
 agx_vdm_tessellate_indirect_unpack(
    enum agx_chip chip, const void *bytes, size_t size,
    struct agx_vdm_tessellate_indirect_info *info)
@@ -206,38 +170,6 @@ agx_vdm_tessellate_indirect_unpack(
 #define AGX_VDM_TESSELLATION_STATE_HEADER UINT32_C(0x40000090)
 #define AGX_VDM_TESSELLATION_STATE_FIXED  (UINT32_C(1) << 21)
 #define AGX_VDM_TESSELLATION_STATE_ZERO   (UINT32_C(0xffff) | (UINT32_C(1) << 22))
-
-bool
-agx_vdm_tessellation_state_pack(
-   enum agx_chip chip, const struct agx_vdm_tessellation_state_info *info,
-   uint8_t out[AGX_VDM_TESSELLATION_STATE_LENGTH])
-{
-   if (out)
-      memset(out, 0, AGX_VDM_TESSELLATION_STATE_LENGTH);
-
-   if (!out || !info || !agx_vdm_tessellate_direct_target_supported(chip) ||
-       (unsigned)info->partition > AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN ||
-       (unsigned)info->step > AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE ||
-       info->max_factor < 1 || info->max_factor > 64 ||
-       (info->partition == AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD &&
-        info->max_factor < 2))
-      return false;
-
-   const unsigned odd =
-      info->partition == AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD;
-   const uint32_t word1 =
-      ((uint32_t)info->partition << 30) |
-      ((uint32_t)info->counterclockwise << 29) |
-      ((uint32_t)(info->max_factor - odd - 1) << 23) |
-      AGX_VDM_TESSELLATION_STATE_FIXED | ((uint32_t)info->quads << 20) |
-      ((uint32_t)info->float_factors << 19) |
-      ((uint32_t)info->step << 17) | ((uint32_t)info->program_flag << 16);
-
-   agx_vdm_tessellate_store_le32(&out[0], AGX_VDM_TESSELLATION_STATE_HEADER);
-   agx_vdm_tessellate_store_le32(&out[4], word1);
-   agx_vdm_tessellate_store_le32(&out[8], info->scale_half);
-   return true;
-}
 
 bool
 agx_vdm_tessellation_state_unpack(

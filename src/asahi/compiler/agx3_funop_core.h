@@ -52,18 +52,6 @@ enum agx3_funop {
    AGX3_FUNOP_COUNT,
 };
 
-/*
- * Encode one funop. `dest` and `src` are 32-bit registers in half units
- * (even, < 128, matching every witness). `wait_mask` is the scoreboard wait
- * set (bit i = slot i+1); it is accepted only for the ops whose wait-bit
- * fields are grade A in the wait-field map (f32rint/f32log2/f32exp2, fields
- * f35..f40 on AGX3b and f35..f42 on AGX3c). saturate is AGX3c-only.
- */
-bool agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op,
-                       uint16_t dest, uint16_t src, bool src_abs, bool src_neg,
-                       bool saturate, uint16_t wait_mask,
-                       uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len);
-
 /* Preserve a live G17P rounding/log/exp source. Other instruction families
  * retain their canonical encoding; the wrapper above is the last-use form. */
 bool agx3_funop_encode_source_lifetime(

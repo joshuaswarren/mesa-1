@@ -131,14 +131,6 @@ spans_overlap(const void *a, size_t a_size, const void *b, size_t b_size)
 }
 
 static bool
-array_overlaps(const void *array, size_t count, size_t element_size,
-               const void *output, size_t output_size)
-{
-   return count > SIZE_MAX / element_size ||
-          spans_overlap(array, count * element_size, output, output_size);
-}
-
-static bool
 workspace_overlaps(struct agx3_ioto_uniform_program_workspace workspace)
 {
    if (workspace.load_capacity >
@@ -265,44 +257,3 @@ agx3_ioto_uniform_program_body_generate(
    return true;
 }
 
-bool
-agx3_ioto_uniform_program_generate(
-   enum agx_chip chip, const struct agx3_ioto_uniform_program_desc *desc,
-   struct agx3_ioto_uniform_program_workspace workspace, void *output,
-   size_t capacity, size_t *written)
-{
-   size_t body_bound, chunk_count;
-   if (desc == NULL || output == NULL || written == NULL ||
-       !agx3_ioto_uniform_program_desc_body_bound(
-          chip, desc, &body_bound, &chunk_count) ||
-       (body_bound > workspace.body_capacity &&
-        !(desc->cprog_inputs && desc->cprog_inputs->count)) ||
-       (workspace.body_capacity != 0 && workspace.body == NULL) ||
-       workspace_overlaps(workspace) ||
-       spans_overlap(workspace.body, workspace.body_capacity, output,
-                     capacity) ||
-       array_overlaps(workspace.loads, workspace.load_capacity,
-                      sizeof(workspace.loads[0]), output, capacity) ||
-       array_overlaps(workspace.sort, workspace.sort_capacity,
-                      sizeof(workspace.sort[0]), output, capacity) ||
-       array_overlaps(workspace.cache, workspace.cache_capacity,
-                      sizeof(workspace.cache[0]), output, capacity))
-      return false;
-
-   (void)body_bound;
-   (void)chunk_count;
-   size_t body_size, copy_offset;
-   if (!agx3_ioto_uniform_program_body_generate(chip, desc, workspace,
-                                                &body_size, &copy_offset))
-      return false;
-   (void)copy_offset;
-
-   const struct agx_ioto_profile_control profile = {
-      .chip = chip,
-      .payload0 = desc->profile_payload0,
-      .payload1 = desc->profile_payload1,
-   };
-   return agx_ioto_program_compose_no_pixrel(
-      chip, desc->program_va, workspace.body, body_size, &desc->tail, &profile,
-      &desc->preshader, output, capacity, written);
-}

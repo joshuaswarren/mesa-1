@@ -18,13 +18,6 @@ store_le32(uint8_t *dst, uint32_t value)
    dst[3] = (uint8_t)(value >> 24);
 }
 
-static uint32_t
-load_le32(const uint8_t *src)
-{
-   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-          ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
 static bool
 primitive_supported(uint8_t primitive)
 {
@@ -90,37 +83,6 @@ agx_vdm_hal200_direct_draw_pack(
 }
 
 bool
-agx_vdm_hal200_direct_draw_unpack(
-   enum agx_chip chip, const void *bytes, size_t size,
-   struct agx_vdm_hal200_direct_draw_fields *fields)
-{
-   if (fields)
-      memset(fields, 0, sizeof(*fields));
-
-   if (!bytes || !fields || chip != AGX_CHIP_G17P ||
-       size != AGX_VDM_HAL200_DIRECT_DRAW_LENGTH)
-      return false;
-
-   const uint8_t *raw = bytes;
-   const uint32_t header = load_le32(&raw[4]);
-   const uint32_t offset = load_le32(&raw[0]);
-   const uint8_t primitive = (uint8_t)(header >> 8);
-   if (offset == 0 || (offset & 3) != 0 ||
-       (header & UINT32_C(0xffff00ff)) !=
-          (AGX_VDM_HAL200_DIRECT_DRAW_OPCODE << 16) ||
-       !primitive_supported(primitive) || load_le32(&raw[8]) == 0 ||
-       load_le32(&raw[12]) == 0)
-      return false;
-
-   fields->draw_state_context_offset = offset;
-   fields->primitive = primitive;
-   fields->vertex_count = load_le32(&raw[8]);
-   fields->instance_count = load_le32(&raw[12]);
-   fields->vertex_start = load_le32(&raw[16]);
-   return true;
-}
-
-bool
 agx_vdm_hal200_draw_emit(enum agx_chip chip, const void *packed,
                          size_t packed_size, bool render_state_emitted,
                          void *stream, size_t stream_capacity,
@@ -182,15 +144,6 @@ agx_vdm_hal200_index_range(uint64_t address, uint64_t range_B,
    *relocated = address + offset_B;
    *size_word = (uint32_t)(((range_B - offset_B + 3) >> 2) - 1);
    return true;
-}
-
-bool
-agx_vdm_hal200_u16_index_range(uint64_t address, uint64_t range_B,
-                               uint32_t first_index, uint32_t count,
-                               uint64_t *relocated, uint32_t *size_word)
-{
-   return agx_vdm_hal200_index_range(address, range_B, first_index, count,
-                                    2, relocated, size_word);
 }
 
 bool

@@ -95,17 +95,6 @@ bool agx3_ioto_uniform_program_body_generate(
    struct agx3_ioto_uniform_program_workspace workspace, size_t *written,
    size_t *copy_offset);
 
-/* Generate:
- *   absolute uniform resource loads, profile, state tail, terminal suffix.
- *
- * This is not a broad production-readiness gate. Odd-half ranges and the
- * texture, sampler, image, and loadFrom* semantics are not exposed here.
- */
-bool agx3_ioto_uniform_program_generate(
-   enum agx_chip chip, const struct agx3_ioto_uniform_program_desc *desc,
-   struct agx3_ioto_uniform_program_workspace workspace, void *output,
-   size_t capacity, size_t *written);
-
 #ifdef __cplusplus
 }
 #endif
