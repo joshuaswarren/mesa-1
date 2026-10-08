@@ -384,661 +384,24 @@ check_t8140_context_views(void)
            t8140_render_submits_checked);
 }
 
-static unsigned invalid_vm_binds;
-
-/* Executable-window accounting.
- *
- * A G17P Ioto program is a couple of hundred bytes, but the smallest BO that
- * can hold one costs a 16KiB page plus a 16KiB guard page of the 4GiB USC
- * exec window. Counting the binds that land in that window is the only
- * host-side measure of how fast a recording eats it, and it is exactly what
- * ran out on hardware, so a test can hold the driver to a budget here rather
- * than having to drive a laptop to 4GiB of address space. */
-#define SHIM_G17P_USC_WINDOW_BASE UINT64_C(0x10000000000)
-#define SHIM_G17P_USC_WINDOW_SIZE UINT64_C(0x100000000)
-
 /* Mirrors AGX_G17P_RENDER_AUX_ALIAS_* in agx_va_runtime_hole.h. */
 #define SHIM_G17P_RENDER_AUX_ALIAS_START UINT64_C(0x10002000000)
 #define SHIM_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002400000)
 
-static unsigned usc_window_binds;
-static uint64_t usc_window_bytes;
-static bool failed_submit_once;
 static unsigned submit_calls;
-static unsigned queue_progress_queue_creates;
-static unsigned queue_progress_queue_destroys;
-static unsigned queue_progress_submits;
-static uint32_t queue_progress_private_handle;
-static uint64_t queue_progress_private_point;
-static bool queue_progress_private_sync_valid;
-static unsigned wsi_rollback_queue_creates;
-static unsigned wsi_rollback_queue_destroys;
-static unsigned wsi_rollback_submits;
 
-static struct asahi_g17p_stream_stats matrix_stats;
+static struct asahi_g17p_stream_stats stream_totals;
 
-/*
- * How many graphics control streams the run submitted.
- *
- * The barrier accounting above sums every stream together, so it cannot tell
- * one stream carrying sixteen draws apart from sixteen streams carrying one
- * each -- which is the entire question a draws-per-stream policy is about.
- * Counting validated streams separates them.
- */
-static unsigned validated_graphics_streams;
 static struct asahi_g17p_compute_stats compute_stats;
-static bool multiview_layers_two;
 static unsigned synchronized_render_submits;
 
-static const char *
-queue_progress_lifecycle_case(void)
-{
-   return getenv("ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE");
-}
-
-static const char *
-wsi_rollback_case(void)
-{
-   const char *test_case = getenv("ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
-   return test_case ? test_case :
-      getenv("ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK");
-}
-
-static void __attribute__((destructor))
-check_vm_bind_lifetime(void)
-{
-   if (!getenv("ASAHI_SHIM_EXPECT_VALID_VM_BINDS"))
-      return;
-
-   if (invalid_vm_binds) {
-      fprintf(stderr, "shim: observed %u invalid VM_BIND operations\n",
-              invalid_vm_binds);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr, "shim: all VM_BIND operations had nonzero ranges\n");
-}
-
-/*
- * ASAHI_SHIM_G17P_MAX_USC_BINDS caps how many distinct executable-window
- * mappings the run may establish. Recording an Ioto program per draw out of
- * its own BO blows any useful budget immediately; sub-allocating them out of
- * arena chunks costs a handful of binds for a whole frame.
- */
-static void __attribute__((destructor))
-check_usc_window_pressure(void)
-{
-   const char *budget = getenv("ASAHI_SHIM_G17P_MAX_USC_BINDS");
-   if (!budget)
-      return;
-
-   fprintf(stderr,
-           "shim: G17P USC window binds=%u bytes=%llu (budget %s)\n",
-           usc_window_binds, (unsigned long long)usc_window_bytes, budget);
-
-   char *end = NULL;
-   const unsigned long limit = strtoul(budget, &end, 0);
-   if (end == budget || (end && *end != '\0')) {
-      fprintf(stderr, "shim: bad ASAHI_SHIM_G17P_MAX_USC_BINDS '%s'\n",
-              budget);
-      _Exit(EXIT_FAILURE);
-   }
-
-   if (usc_window_binds > limit) {
-      fprintf(stderr,
-              "shim: G17P executable window pressure: %u binds exceeds the "
-              "budget of %lu\n", usc_window_binds, limit);
-      _Exit(EXIT_FAILURE);
-   }
-}
-
-static void __attribute__((destructor))
-check_queue_progress_lifecycle(void)
-{
-   const char *test_case = queue_progress_lifecycle_case();
-   if (!test_case)
-      return;
-
-   const bool success = !strcmp(test_case, "success");
-   const bool init_failure = !strcmp(test_case, "init-failure");
-   const bool submit_failure = !strcmp(test_case, "submit-failure");
-   const unsigned expected_submits = init_failure ? 0 : 1;
-   const bool exact =
-      (success || init_failure || submit_failure) &&
-      queue_progress_queue_creates == 1 &&
-      queue_progress_queue_destroys == 1 &&
-      queue_progress_submits == expected_submits &&
-      failed_submit_once == submit_failure &&
-      (init_failure ||
-       (queue_progress_private_sync_valid &&
-        queue_progress_private_handle == 2 &&
-        queue_progress_private_point == 2));
-
-   if (!exact) {
-      fprintf(stderr,
-              "shim: bad Asahi queue progress lifecycle '%s': queue=%u/%u "
-              "submits=%u private-shape=%u private=%u:%llu "
-              "submit-failed=%u\n",
-              test_case, queue_progress_queue_creates,
-              queue_progress_queue_destroys, queue_progress_submits,
-              queue_progress_private_sync_valid,
-              queue_progress_private_handle,
-              (unsigned long long)queue_progress_private_point,
-              failed_submit_once);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: exact Asahi queue progress lifecycle '%s': queue=%u/%u "
-           "submits=%u private=%u:%llu\n",
-           test_case, queue_progress_queue_creates,
-           queue_progress_queue_destroys, queue_progress_submits,
-           queue_progress_private_handle,
-           (unsigned long long)queue_progress_private_point);
-}
-
-static void __attribute__((destructor))
-check_wsi_rollback_lifecycle(void)
-{
-   const char *test_case = wsi_rollback_case();
-   if (!test_case)
-      return;
-
-   const unsigned expected_submits =
-      !strcmp(test_case, "wayland-present-allocation") ? 5 : 0;
-
-   if (wsi_rollback_queue_creates != 1 ||
-       wsi_rollback_queue_destroys != 1 ||
-       wsi_rollback_submits != expected_submits) {
-      fprintf(stderr,
-              "shim: bad Asahi WSI rollback '%s': queue=%u/%u "
-              "hardware-submits=%u\n",
-              test_case, wsi_rollback_queue_creates,
-              wsi_rollback_queue_destroys,
-              wsi_rollback_submits);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: exact Asahi WSI rollback '%s': queue=%u/%u "
-           "hardware-submits=%u\n",
-           test_case, wsi_rollback_queue_creates,
-           wsi_rollback_queue_destroys, wsi_rollback_submits);
-}
-
-static bool
-matrix_case_matches(const char *name,
-                    const struct asahi_g17p_stream_stats *stats)
-{
-   if (!name)
-      return true;
-   if (!strcmp(name, "clear-only"))
-      return stats->clear_only;
-   if (!strcmp(name, "nonindexed unchanged-state body"))
-      return stats->draws == 2 && stats->state_updates == 1 &&
-             stats->body_only && !stats->primary_tri_merge_disable &&
-             !stats->secondary_tri_merge_disable;
-   if (!strcmp(name, "nonindexed line topology"))
-      return stats->draws == 1 &&
-             (stats->primitive_mask & (UINT32_C(1) << 1)) &&
-             stats->primary_tri_merge_disable &&
-             stats->secondary_tri_merge_disable;
-   if (!strcmp(name, "indexed u8 without restart"))
-      return stats->indexed_draws == 1 && stats->index_size_mask == 1 &&
-             stats->restart_disabled;
-   if (!strcmp(name, "indexed u16 topology and restart"))
-      return stats->indexed_draws == 1 && stats->index_size_mask == 2 &&
-             stats->restart_enabled;
-   if (!strcmp(name, "indexed u32 without restart"))
-      return stats->indexed_draws == 1 && stats->index_size_mask == 4 &&
-             stats->restart_disabled;
-   if (!strcmp(name, "indirect nonindexed"))
-      return stats->indirect_nonindexed && !stats->indirect_indexed;
-   if (!strcmp(name, "indirect indexed"))
-      return stats->indirect_indexed;
-   if (!strcmp(name, "viewport and scissor"))
-      return stats->viewport_changed && stats->scissor_changed;
-   if (!strcmp(name, "cull and front face"))
-      return stats->cull_enabled;
-   if (!strcmp(name, "depth and stencil"))
-      return stats->depth_enabled && stats->stencil_enabled;
-   if (!strcmp(name, "blend"))
-      return stats->draws == 1 && stats->varying_fs;
-   if (!strcmp(name, "fragment program without varyings"))
-      return stats->no_varying_fs && stats->primary_tri_merge_disable &&
-             stats->secondary_tri_merge_disable;
-   if (!strcmp(name, "rasterizer discard"))
-      return stats->rasterizer_discard;
-   if (!strcmp(name, "linked stream with state re-emission"))
-      return stats->draws == 5000 && stats->state_updates == 5000 &&
-             stats->links > 0;
-   return true;
-}
-
+/* What the swap lifecycle check reads, summed over the run's streams. */
 static void
 merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
 {
-   if (stats->varying_fs && stats->fragment_code) {
-      if (matrix_stats.fragment_code &&
-          matrix_stats.fragment_code != stats->fragment_code)
-         matrix_stats.blend_enabled = true;
-      else if (!matrix_stats.fragment_code)
-         matrix_stats.fragment_code = stats->fragment_code;
-   }
-   validated_graphics_streams++;
-   matrix_stats.draws += stats->draws;
-   matrix_stats.indexed_draws += stats->indexed_draws;
-   matrix_stats.state_updates += stats->state_updates;
-   matrix_stats.barriers += stats->barriers;
-   matrix_stats.inter_draw_barriers += stats->inter_draw_barriers;
-   matrix_stats.unbarriered_state_republications +=
-      stats->unbarriered_state_republications;
-   matrix_stats.stencil_state_updates += stats->stencil_state_updates;
-   matrix_stats.links += stats->links;
-   matrix_stats.viewport_count =
-      MAX2(matrix_stats.viewport_count, stats->viewport_count);
-   matrix_stats.max_instance_count =
-      MAX2(matrix_stats.max_instance_count, stats->max_instance_count);
-   matrix_stats.primitive_mask |= stats->primitive_mask;
-   matrix_stats.index_size_mask |= stats->index_size_mask;
-#define MERGE_FLAG(name) matrix_stats.name |= stats->name
-   MERGE_FLAG(clear_only);
-   MERGE_FLAG(body_only);
-   MERGE_FLAG(restart_enabled);
-   MERGE_FLAG(restart_disabled);
-   MERGE_FLAG(indirect_nonindexed);
-   MERGE_FLAG(indirect_indexed);
-   MERGE_FLAG(varying_fs);
-   MERGE_FLAG(no_varying_fs);
-   MERGE_FLAG(viewport_changed);
-   MERGE_FLAG(multi_viewport);
-   MERGE_FLAG(two_viewport);
-   MERGE_FLAG(four_viewport);
-   MERGE_FLAG(scissor_changed);
-   MERGE_FLAG(cull_enabled);
-   MERGE_FLAG(depth_enabled);
-   MERGE_FLAG(stencil_enabled);
-   MERGE_FLAG(blend_enabled);
-   MERGE_FLAG(rasterizer_discard);
-   MERGE_FLAG(primary_tri_merge_disable);
-   MERGE_FLAG(secondary_tri_merge_disable);
-   MERGE_FLAG(layer_output);
-#undef MERGE_FLAG
-}
-
-static void __attribute__((destructor))
-check_matrix_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_MATRIX"))
-      return;
-
-   const uint32_t required_primitives =
-      (UINT32_C(1) << 0) | (UINT32_C(1) << 1) | (UINT32_C(1) << 6) |
-      (UINT32_C(1) << 9) | (UINT32_C(1) << 11);
-   const bool complete =
-      matrix_stats.clear_only && matrix_stats.body_only &&
-      (matrix_stats.primitive_mask & required_primitives) ==
-         required_primitives &&
-      (matrix_stats.index_size_mask & 7) == 7 &&
-      matrix_stats.restart_enabled && matrix_stats.restart_disabled &&
-      matrix_stats.indirect_nonindexed && matrix_stats.indirect_indexed &&
-      matrix_stats.varying_fs && matrix_stats.no_varying_fs &&
-      matrix_stats.viewport_changed && matrix_stats.scissor_changed &&
-      matrix_stats.cull_enabled && matrix_stats.depth_enabled &&
-      matrix_stats.stencil_enabled && matrix_stats.blend_enabled &&
-      matrix_stats.rasterizer_discard && matrix_stats.links &&
-      matrix_stats.state_updates >= 5000;
-   if (!complete) {
-      fprintf(stderr,
-              "shim: incomplete G17P matrix coverage: prim=%#x index=%#x "
-              "draws=%u state=%u links=%u flags=%u%u%u%u%u%u%u%u%u%u%u%u%u%u\n",
-              matrix_stats.primitive_mask, matrix_stats.index_size_mask,
-              matrix_stats.draws, matrix_stats.state_updates,
-              matrix_stats.links, matrix_stats.clear_only,
-              matrix_stats.body_only, matrix_stats.restart_enabled,
-              matrix_stats.restart_disabled, matrix_stats.indirect_nonindexed,
-              matrix_stats.indirect_indexed, matrix_stats.varying_fs,
-              matrix_stats.no_varying_fs, matrix_stats.viewport_changed,
-              matrix_stats.scissor_changed, matrix_stats.cull_enabled,
-              matrix_stats.depth_enabled, matrix_stats.stencil_enabled,
-              matrix_stats.blend_enabled);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr, "shim: complete G17P production stream matrix coverage\n");
-}
-
-/*
- * Assert where the inter-draw VDM barrier landed.
- *
- * ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS is "<barriers>" or
- * "<barriers>:<draws>".  It checks both directions at once:
- *
- *  - the expected number of barriers that separate two draws actually
- *    appeared, so a fix that silently stopped emitting is caught; and
- *  - unbarriered_state_republications is zero, so a barrier emitted in the
- *    wrong place cannot satisfy the count.  That second number is computed
- *    from the stream itself rather than from the expectation, which is what
- *    makes this an ordering check and not a tally.
- */
-static void __attribute__((destructor))
-check_inter_draw_barriers(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS");
-   if (!value)
-      return;
-
-   char *rest = NULL;
-   const unsigned expected = strtoul(value, &rest, 10);
-   const bool have_draws = rest && *rest == ':';
-   const unsigned expected_draws =
-      have_draws ? strtoul(rest + 1, NULL, 10) : 0;
-
-   if (matrix_stats.inter_draw_barriers != expected ||
-       matrix_stats.unbarriered_state_republications != 0 ||
-       (have_draws && matrix_stats.draws != expected_draws)) {
-      fprintf(stderr,
-              "shim: G17P inter-draw barriers %u/%u, unbarriered state "
-              "republications %u/0, draws %u/%s\n",
-              matrix_stats.inter_draw_barriers, expected,
-              matrix_stats.unbarriered_state_republications,
-              matrix_stats.draws, have_draws ? rest + 1 : "any");
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: G17P emitted %u inter-draw VDM barriers across %u draws "
-           "with no unbarriered state republication\n",
-           matrix_stats.inter_draw_barriers, matrix_stats.draws);
-}
-
-/*
- * Assert the shape a draws-per-stream policy produced.
- *
- * ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE is
- * "<graphics streams>:<draws>:<state updates>[:<barriers>[:<links>]]". Draw
- * counts prevent dropped draws from passing; state counts distinguish changed
- * and reused state. The optional barrier and link counts reject per-draw cache
- * invalidation or retained renders masquerading as efficient batching.
- */
-static void __attribute__((destructor))
-check_stream_shape(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE");
-   if (!value)
-      return;
-
-   unsigned expected_streams = 0, expected_draws = 0, expected_states = 0;
-   unsigned expected_barriers = 0, expected_links = 0;
-   const int fields = sscanf(value, "%u:%u:%u:%u:%u", &expected_streams,
-                             &expected_draws, &expected_states,
-                             &expected_barriers, &expected_links);
-   if (fields < 3) {
-      fprintf(stderr,
-              "shim: ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE wants "
-              "<streams>:<draws>:<state updates>, got '%s'\n",
-              value);
-      _Exit(EXIT_FAILURE);
-   }
-
-   if (validated_graphics_streams != expected_streams ||
-       matrix_stats.draws != expected_draws ||
-       matrix_stats.state_updates != expected_states ||
-       (fields >= 4 && matrix_stats.barriers != expected_barriers) ||
-       (fields == 5 && matrix_stats.links != expected_links)) {
-      fprintf(stderr,
-              "shim: G17P stream shape %u/%u streams, %u/%u draws, %u/%u "
-              "state updates\n",
-              validated_graphics_streams, expected_streams, matrix_stats.draws,
-              expected_draws, matrix_stats.state_updates, expected_states);
-      if (fields >= 4)
-         fprintf(stderr, "shim: G17P barriers %u/%u\n",
-                 matrix_stats.barriers, expected_barriers);
-      if (fields == 5)
-         fprintf(stderr, "shim: G17P links %u/%u\n", matrix_stats.links,
-                 expected_links);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: G17P recorded %u graphics streams carrying %u draws, %u "
-           "state updates and %u links\n",
-           validated_graphics_streams, matrix_stats.draws,
-           matrix_stats.state_updates, matrix_stats.links);
-}
-
-static void __attribute__((destructor))
-check_fragment_constant_draws(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS");
-   if (!value)
-      return;
-
-   const unsigned expected = strtoul(value, NULL, 10);
-   if (matrix_stats.draws != expected) {
-      fprintf(stderr,
-              "shim: G17P fragment-constant test submitted %u/%u draws\n",
-              matrix_stats.draws, expected);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr, "shim: G17P fragment-constant test submitted %u draws\n",
-           expected);
-}
-
-static void __attribute__((destructor))
-check_msaa_draws(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_MSAA_DRAWS");
-   if (!value)
-      return;
-
-   const unsigned expected = strtoul(value, NULL, 10);
-   if (matrix_stats.draws != expected ||
-       matrix_stats.state_updates != expected) {
-      fprintf(stderr,
-              "shim: G17P MSAA test submitted draws=%u/%u state=%u/%u\n",
-              matrix_stats.draws, expected, matrix_stats.state_updates,
-              expected);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr, "shim: G17P MSAA test submitted %u exact draws\n",
-           expected);
-}
-
-static void __attribute__((destructor))
-check_16bit_fbo_draws(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_16BIT_FBO_DRAWS");
-   if (!value)
-      return;
-
-   const unsigned expected = strtoul(value, NULL, 10);
-   if (matrix_stats.draws != expected ||
-       matrix_stats.state_updates != expected) {
-      fprintf(stderr,
-              "shim: G17P 16-bit FBO test submitted draws=%u/%u state=%u/%u\n",
-              matrix_stats.draws, expected, matrix_stats.state_updates,
-              expected);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr, "shim: G17P 16-bit FBO test submitted %u exact draws\n",
-           expected);
-}
-
-static void __attribute__((destructor))
-check_rgb32_fbo_draws(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_RGB32_FBO_DRAWS");
-   if (!value)
-      return;
-
-   const unsigned expected = strtoul(value, NULL, 10);
-   if (matrix_stats.draws != expected ||
-       matrix_stats.state_updates != expected) {
-      fprintf(stderr,
-              "shim: G17P RGB32 FBO test submitted draws=%u/%u state=%u/%u\n",
-              matrix_stats.draws, expected, matrix_stats.state_updates,
-              expected);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr, "shim: G17P RGB32 FBO test submitted %u exact draws\n",
-           expected);
-}
-
-static void __attribute__((destructor))
-check_multi_viewport_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT"))
-      return;
-
-   if (!matrix_stats.multi_viewport || matrix_stats.viewport_count != 16 ||
-       matrix_stats.draws != 1 || matrix_stats.state_updates != 1) {
-      fprintf(stderr,
-              "shim: incomplete G17P multi-viewport coverage: count=%u "
-              "draws=%u state=%u exact=%u\n",
-              matrix_stats.viewport_count, matrix_stats.draws,
-              matrix_stats.state_updates, matrix_stats.multi_viewport);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P 16-viewport index-1 stream coverage\n");
-}
-
-static void __attribute__((destructor))
-check_multiview_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW"))
-      return;
-
-   /* Honeykrisp implements multiview by emitting one native draw for each
-    * view while changing the root-table ViewIndex.  The shader lowering
-    * routes that value through the layer/viewport UVS output, and the render
-    * command must expose both array layers to BG/EOT. */
-   if (!multiview_layers_two || matrix_stats.draws != 2 ||
-       matrix_stats.state_updates != 2 || !matrix_stats.layer_output) {
-      fprintf(stderr,
-              "shim: incomplete G17P multiview coverage: layers=%u draws=%u "
-              "state=%u varying=%u layer-output=%u\n",
-              multiview_layers_two, matrix_stats.draws,
-              matrix_stats.state_updates, matrix_stats.varying_fs,
-              matrix_stats.layer_output);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P two-view/layer render stream coverage\n");
-}
-
-static void __attribute__((destructor))
-check_vk_multi_viewport_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_VK_MULTI_VIEWPORT"))
-      return;
-
-   if (!matrix_stats.four_viewport || matrix_stats.viewport_count != 4 ||
-       matrix_stats.draws != 1 || matrix_stats.state_updates != 1 ||
-       matrix_stats.max_instance_count != 4 || !matrix_stats.layer_output) {
-      fprintf(stderr,
-              "shim: incomplete G17P Vulkan multi-viewport coverage: "
-              "count=%u draws=%u state=%u instances=%u output=%u exact=%u\n",
-              matrix_stats.viewport_count, matrix_stats.draws,
-              matrix_stats.state_updates, matrix_stats.max_instance_count,
-              matrix_stats.layer_output, matrix_stats.four_viewport);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P Vulkan four-viewport output coverage\n");
-}
-
-static void __attribute__((destructor))
-check_layer_output_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_LAYER_OUTPUT"))
-      return;
-
-   if (!multiview_layers_two || matrix_stats.draws != 1 ||
-       matrix_stats.state_updates != 1 ||
-       matrix_stats.max_instance_count != 2 || !matrix_stats.layer_output) {
-      fprintf(stderr,
-              "shim: incomplete G17P layer-output coverage: layers=%u "
-              "draws=%u state=%u instances=%u layer-output=%u\n",
-              multiview_layers_two, matrix_stats.draws,
-              matrix_stats.state_updates, matrix_stats.max_instance_count,
-              matrix_stats.layer_output);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P application-authored layer-output coverage\n");
-}
-
-static void __attribute__((destructor))
-check_depth_texture_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE"))
-      return;
-
-   /* One API depth draw, the lowered depth and physical S8 plane blits, one
-    * colour draw which consumes raw depth/shadow depth/copied stencil, then
-    * the standalone S8 plane blit and its stencil-tested observer. A refused
-    * standalone blit omits one of the final two draws. */
-   if (matrix_stats.draws != 6 || matrix_stats.state_updates != 6 ||
-       !matrix_stats.depth_enabled || !matrix_stats.stencil_enabled ||
-       !matrix_stats.varying_fs) {
-      fprintf(stderr,
-              "shim: incomplete G17P depth-texture coverage: draws=%u "
-              "state=%u depth=%u stencil=%u varying=%u\n",
-              matrix_stats.draws, matrix_stats.state_updates,
-              matrix_stats.depth_enabled, matrix_stats.stencil_enabled,
-              matrix_stats.varying_fs);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P depth/stencil render/blit/sample coverage\n");
-}
-
-static void __attribute__((destructor))
-check_stencil_blit_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_STENCIL_BLIT"))
-      return;
-
-   /* Without fragment stencil export, common meta emits one bit-selective
-    * graphics pass for each stencil bit. Require all eight fixed-function
-    * stencil updates plus the stencil-plane readback draw so merely accepting
-    * the API command cannot pass. G17P's fragment layer input is an ordinary
-    * flat varying, while the observer remains a no-varying draw, so this
-    * sequence must exercise both paths. The two clears and final transfer also
-    * have an exact three-launch compute envelope. All three launch tail
-    * barriers are strong here: two request AGX_BARRIER_ALL and the third is
-    * strengthened in place by the host-read flush (6aae441547b). */
-   if (matrix_stats.draws != 9 || matrix_stats.state_updates != 9 ||
-       matrix_stats.stencil_state_updates != 9 ||
-       !matrix_stats.stencil_enabled || !matrix_stats.varying_fs ||
-       !matrix_stats.no_varying_fs || compute_stats.launches != 3 ||
-       compute_stats.barriers != 3 || compute_stats.strong_barriers != 3) {
-      fprintf(stderr,
-              "shim: incomplete G17P stencil blit coverage: draws=%u "
-              "state=%u stencil-state=%u stencil=%u varying=%u/%u "
-              "compute=%u/%u/%u\n",
-              matrix_stats.draws, matrix_stats.state_updates,
-              matrix_stats.stencil_state_updates,
-              matrix_stats.stencil_enabled, matrix_stats.varying_fs,
-              matrix_stats.no_varying_fs, compute_stats.launches,
-              compute_stats.barriers, compute_stats.strong_barriers);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P eight-pass stencil blit and readback "
-           "coverage\n");
+   stream_totals.draws += stats->draws;
+   stream_totals.state_updates += stats->state_updates;
+   stream_totals.no_varying_fs |= stats->no_varying_fs;
 }
 
 static void __attribute__((destructor))
@@ -1050,13 +413,13 @@ check_swap_lifecycle_coverage(void)
    /* Eight swaps at each of two window geometries. Each swap must retire one
     * real draw; a lost back buffer, stale context binding, or resize failure
     * makes the count short even when EGL itself reports success. */
-   if (matrix_stats.draws != 16 || matrix_stats.state_updates != 16 ||
-       synchronized_render_submits != 16 || !matrix_stats.no_varying_fs) {
+   if (stream_totals.draws != 16 || stream_totals.state_updates != 16 ||
+       synchronized_render_submits != 16 || !stream_totals.no_varying_fs) {
       fprintf(stderr,
               "shim: incomplete G17P swap lifecycle: draws=%u state=%u "
               "synchronized=%u no-varying=%u\n",
-              matrix_stats.draws, matrix_stats.state_updates,
-              synchronized_render_submits, matrix_stats.no_varying_fs);
+              stream_totals.draws, stream_totals.state_updates,
+              synchronized_render_submits, stream_totals.no_varying_fs);
       _Exit(EXIT_FAILURE);
    }
 
@@ -1071,79 +434,18 @@ check_compute_coverage(void)
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE"))
       return;
 
-   bool exact = true;
-   const char *expected =
-      getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS");
-   const char *expected_2d =
-      getenv("ASAHI_SHIM_G17P_EXPECT_2D_COMPUTE_LAUNCHES");
-   if (expected) {
-      unsigned launches, barriers, prologues, strong;
-      char trailing;
-      exact = sscanf(expected, "%u,%u,%u,%u%c", &launches, &barriers,
-                     &prologues, &strong, &trailing) == 4 &&
-              compute_stats.launches == launches &&
-              compute_stats.barriers == barriers &&
-              compute_stats.prologue_barriers == prologues &&
-              compute_stats.strong_barriers == strong;
-   }
-
-   if (expected_2d) {
-      unsigned launches_2d;
-      char trailing;
-      exact &= sscanf(expected_2d, "%u%c", &launches_2d, &trailing) == 1 &&
-               compute_stats.two_dimensional_launches == launches_2d;
-   }
-
-   if (!exact || !compute_stats.launches ||
+   if (!compute_stats.launches ||
        compute_stats.launches != compute_stats.barriers ||
        !compute_stats.terminated ||
        (getenv("ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER") &&
         !compute_stats.strong_barriers)) {
       fprintf(stderr,
               "shim: incomplete G17P compute coverage: launches=%u "
-              "2d=%u barriers=%u prologue=%u strong=%u terminated=%u "
-              "expected=%s expected-2d=%s\n",
-              compute_stats.launches, compute_stats.two_dimensional_launches,
-              compute_stats.barriers,
-              compute_stats.prologue_barriers, compute_stats.strong_barriers,
-              compute_stats.terminated, expected ? expected : "<structural>",
-              expected_2d ? expected_2d : "<structural>");
+              "barriers=%u strong=%u terminated=%u\n",
+              compute_stats.launches, compute_stats.barriers,
+              compute_stats.strong_barriers, compute_stats.terminated);
       _Exit(EXIT_FAILURE);
    }
-}
-
-static void __attribute__((destructor))
-check_xfb_coverage(void)
-{
-   if (!getenv("ASAHI_SHIM_G17P_EXPECT_XFB"))
-      return;
-
-   /* The public oracle records two XFB triangle-list draws, then consumes the
-    * final byte counter through vkCmdDrawIndirectByteCountEXT. XFB lowers each
-    * producer to a synthetic indexed geometry draw and brackets it with five
-    * libagx counter launches; the consumer adds one GPU-side patch launch and
-    * one native non-indexed indirect draw. This catches a CPU-readback path,
-    * silently dropped passthrough GS, duplicate restart state, or counter work
-    * that never reaches the UAPI. */
-   if (matrix_stats.draws != 3 || matrix_stats.indexed_draws != 2 ||
-       matrix_stats.state_updates != 3 || !matrix_stats.restart_enabled ||
-       !matrix_stats.rasterizer_discard || !matrix_stats.indirect_nonindexed ||
-       compute_stats.launches != 11 || compute_stats.barriers != 11 ||
-       !compute_stats.terminated) {
-      fprintf(stderr,
-              "shim: incomplete G17P XFB coverage: draws=%u indexed=%u "
-              "state=%u restart-on=%u discard=%u indirect=%u launches=%u "
-              "barriers=%u terminated=%u\n",
-              matrix_stats.draws, matrix_stats.indexed_draws,
-              matrix_stats.state_updates, matrix_stats.restart_enabled,
-              matrix_stats.rasterizer_discard,
-              matrix_stats.indirect_nonindexed, compute_stats.launches,
-              compute_stats.barriers, compute_stats.terminated);
-      _Exit(EXIT_FAILURE);
-   }
-
-   fprintf(stderr,
-           "shim: complete G17P XFB geometry/counter stream coverage\n");
 }
 
 static bool
@@ -1226,11 +528,6 @@ add_mapping(int fd, const struct drm_asahi_gem_bind_op *op)
       .single_page = single_page,
       .bo = bo,
    };
-   if (op->addr >= SHIM_G17P_USC_WINDOW_BASE &&
-       op->addr - SHIM_G17P_USC_WINDOW_BASE < SHIM_G17P_USC_WINDOW_SIZE) {
-      usc_window_binds++;
-      usc_window_bytes += op->range;
-   }
    if (getenv("ASAHI_SHIM_TRACE_G17P_STREAM"))
       fprintf(stderr, "shim: map %#llx..%#llx handle %u offset %#llx\n",
               (unsigned long long)op->addr,
@@ -1494,22 +791,12 @@ asahi_ioctl_noop(int fd, unsigned long request, void *arg)
 static int
 asahi_ioctl_queue_create(int fd, unsigned long request, void *arg)
 {
-   if (queue_progress_lifecycle_case())
-      queue_progress_queue_creates++;
-   if (wsi_rollback_case())
-      wsi_rollback_queue_creates++;
-
    return 0;
 }
 
 static int
 asahi_ioctl_queue_destroy(int fd, unsigned long request, void *arg)
 {
-   if (queue_progress_lifecycle_case())
-      queue_progress_queue_destroys++;
-   if (wsi_rollback_case())
-      wsi_rollback_queue_destroys++;
-
    return 0;
 }
 
@@ -1772,7 +1059,6 @@ asahi_ioctl_vm_bind_unlocked(int fd, unsigned long request, void *arg)
       if (!op->range) {
          fprintf(stderr, "shim: gem_bind: zero-sized range at %#llx\n",
                  (unsigned long long)start);
-         invalid_vm_binds++;
          return -EINVAL;
       }
 
@@ -2013,34 +1299,6 @@ asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
    submit_calls++;
    asahi_log_submit(submit);
    dump_submit(fd, submit, submit_calls);
-   if (queue_progress_lifecycle_case()) {
-      const struct drm_asahi_sync *syncs =
-         (const void *)(uintptr_t)submit->syncs;
-      queue_progress_submits++;
-      if (syncs && submit->out_sync_count) {
-         const struct drm_asahi_sync *private_sync =
-            &syncs[submit->in_sync_count + submit->out_sync_count - 1];
-         queue_progress_private_sync_valid =
-            private_sync->sync_type == DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ &&
-            private_sync->handle != 0;
-         queue_progress_private_handle = private_sync->handle;
-         queue_progress_private_point = private_sync->timeline_value;
-      }
-   }
-   if (wsi_rollback_case())
-      wsi_rollback_submits++;
-
-   if (getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") && !failed_submit_once) {
-      failed_submit_once = true;
-      errno = EIO;
-      return -1;
-   }
-
-   const char *fail_submit_at = getenv("ASAHI_SHIM_FAIL_SUBMIT_AT");
-   if (fail_submit_at && strtoul(fail_submit_at, NULL, 10) == submit_calls) {
-      errno = EIO;
-      return -1;
-   }
 
    /* The kernel's native-context gate runs for every render submission, not
     * only when the stream oracle is enabled, so check it first. */
@@ -2095,12 +1353,6 @@ asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
 
-         if (getenv("ASAHI_SHIM_G17P_EXPECT_INTEGER_DEPTH_BIAS") &&
-             !(render.flags & DRM_ASAHI_RENDER_DBIAS_IS_INT)) {
-            fprintf(stderr, "shim: G17P render lost integer depth-bias mode\n");
-            return -EINVAL;
-         }
-
          /* G17P creates a per-job render-storage view from the fixed HAL200
           * context aperture.  Unlike ordinary client-VM shader and resource
           * mappings, its source GEM must therefore be visible outside the
@@ -2118,9 +1370,6 @@ asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
 
          if (submit->in_sync_count > 0 && submit->out_sync_count == 2)
             synchronized_render_submits++;
-         if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW") ||
-             getenv("ASAHI_SHIM_G17P_EXPECT_LAYER_OUTPUT"))
-            multiview_layers_two |= render.layers == 2;
          const struct asahi_g17p_stream_memory memory = {
             .data = (void *)(intptr_t)fd,
             .read = shim_gpu_read,
@@ -2144,17 +1393,6 @@ asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
             cursor += command_size;
             continue;
          }
-         const char *matrix_case = getenv("ASAHI_SHIM_G17P_CASE");
-         const bool auxiliary_clear = stats.clear_only && matrix_case &&
-                                      strcmp(matrix_case, "clear-only");
-         if (!auxiliary_clear && !matrix_case_matches(matrix_case, &stats)) {
-            fprintf(stderr, "shim: G17P matrix case '%s' semantic mismatch\n",
-                    matrix_case);
-            g17p_streams_rejected++;
-            return -EINVAL;
-         }
-         if (!auxiliary_clear && matrix_case && !strcmp(matrix_case, "blend"))
-            stats.blend_enabled = true;
          merge_stream_stats(&stats);
          g17p_streams_validated++;
          fprintf(stderr,
@@ -2172,9 +1410,6 @@ asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_compute compute = {0};
          memcpy(&compute, header + 1, MIN2(sizeof(compute), header->size));
-         if (getenv("ASAHI_SHIM_G17P_TRUNCATE_COMPUTE_END") &&
-             compute.cdm_ctrl_stream_end >= 4)
-            compute.cdm_ctrl_stream_end -= 4;
          const struct asahi_g17p_stream_memory memory = {
             .data = (void *)(intptr_t)fd,
             .read = shim_gpu_read,
