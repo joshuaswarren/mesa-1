@@ -224,10 +224,9 @@ struct hk_shader {
    /* Address of the start of the shader data section */
    uint64_t data_addr;
 
-   /* v54 AGX_G17P_INLINE_BLEND: the fragment main's NIR (serialized just
-    * before its backend compile) and that compile's key, so fast-link can
-    * build one program with the draw's colour epilog inlined. NULL when the
-    * flag is off or the shape is not eligible. */
+   /* The fragment main's NIR (serialized just before its backend compile)
+    * and that compile's key, so fast-link can build one program with the
+    * draw's colour epilog inlined. NULL when the shape is not eligible. */
    void *g17p_mono_nir;
    size_t g17p_mono_nir_size;
    struct agx_shader_key g17p_mono_key;
@@ -500,7 +499,7 @@ struct hk_linked_shader {
    } usc;
 };
 
-/* v54: `main_part`, when non-NULL, replaces main->b as the linked main part
+/* `main_part`, when non-NULL, replaces main->b as the linked main part
  * (the inline-blend monolithic fragment program); main still supplies the
  * API shader's uniform and resource layout. */
 struct hk_linked_shader *hk_fast_link_part(struct hk_device *dev, bool fragment,

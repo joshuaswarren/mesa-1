@@ -1459,13 +1459,10 @@ hk_get_device_properties(const struct agx_device *dev,
    }
 }
 
-/* v56f/v57d: every AGX_*, HK_* and ASAHI_* environment knob that can change
- * generated code or serialized objects is part of the cache identity, not
- * only the ones hk_physical_device_compiler_flags() packs into bits
- * (AGX_MESA_DEBUG's codegen flags and the AGX_G17P_* register/scheduling/
- * packing diagnostics were missing). Knobs that only print or pick a runtime
- * path are excluded so tracing keeps a warm cache. The build is already part
- * of both identities (driver_build_sha). */
+/* Every AGX_*, HK_* and ASAHI_* environment variable that can change generated
+ * code or serialized objects is part of the cache identity, not only the bits
+ * hk_physical_device_compiler_flags() packs. Variables that only print or pick
+ * a runtime path are excluded so tracing keeps a warm cache. */
 extern char **environ;
 static int
 hk_env_cmp(const void *a, const void *b)
@@ -1479,12 +1476,7 @@ hk_codegen_env_hash(void)
    static const char *const runtime_only[] = {
       "TRACE", "DUMP", "_LOG", "PERF", "VERBOSE", "DEBUG_OBJECT", "SLOW_DRAW",
       "DISK_CACHE_ID", "LAZY_GENERIC", "FORCE_GENERIC", "BIND_PREDICT",
-      "VARIANT_TRACE",
-      /* v96: HK_G17P_SLOW_SUBMIT_US only prints. */
-      "SLOW_SUBMIT",
-      /* v96: prolog/epilog disk caching changes where a part comes from,
-       * never its bytes (the verify mode proves it). */
-      "PROLOG_DISK_CACHE",
+      "VARIANT_TRACE", "SLOW_SUBMIT", "PROLOG_DISK_CACHE",
    };
    const char *list[512];
    unsigned n = 0;

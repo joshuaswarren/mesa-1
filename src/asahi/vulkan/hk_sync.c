@@ -848,15 +848,11 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
 
       struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
       hk_sync_src_dep(cmd, src_kinds, gfx, dep);
-      /* v56h/v57f: the render can only wait on streams positioned before
-       * it. The latest stream of a kind may be this render's own
-       * post-graphics stream (an earlier in-pass stamp's copy, an occlusion
-       * query's availability write), which itself waits on the render:
-       * waiting on it formed a VDM<->CDM cycle the firmware never resolves
-       * (three in-pass stamps, or an ended occlusion query followed by one
-       * stamp, in one pass -> the render's CDM barrier named a later
-       * command; debug builds assert in queue_submit, release builds hang
-       * the 3D job). That stream runs after the render anyway, so the
+      /* The render can only wait on streams positioned before it. The
+       * latest stream of a kind may be this render's own post-graphics
+       * stream (an in-pass stamp's copy, an occlusion query's availability
+       * write), which itself waits on the render; waiting on it would form a
+       * VDM<->CDM cycle. That stream runs after the render anyway, so the
        * stamp's first scope needs nothing from it. */
       for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
          if (dep[sq].cut && dep[sq].cut != gfx &&
@@ -1208,7 +1204,7 @@ hk_sync_resolve_submit(struct hk_queue *queue,
 
       list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
          for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
-            /* v56h/v57f safety net: a wait on a stream positioned after
+            /* Safety net: a wait on a stream positioned after
              * this one can never be satisfied (the kernel receives a barrier
              * past the commands submitted before it and the job hangs until
              * the firmware times it out). Clamp to the latest earlier

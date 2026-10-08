@@ -133,7 +133,7 @@ struct hk_device {
 
    struct hk_code_heap code_heap;
 
-   /* v48: kernel-maintained copy of this VM's sticky status
+   /* Kernel-maintained copy of this VM's sticky status
     * (DRM_ASAHI_FEATURE_VM_STATUS_MIRROR). NULL: query per check instead. */
    struct {
       struct agx_bo *bo;

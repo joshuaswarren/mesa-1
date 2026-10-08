@@ -573,7 +573,7 @@ hk_g17p_internal_graphics_uniform_ranges(
       ranges[HK_G17P_COMPUTE_MAX_RANGES],
    size_t *range_count)
 {
-   /* Uniform DMA (v51a/b) is only enabled for hardware graphics stages;
+   /* Uniform DMA is only enabled for hardware graphics stages;
     * this internal path cannot publish its span, so fail closed. */
    if (s->b.info.agx3_uniform_dma_valid)
       return false;

@@ -389,9 +389,8 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
-/* v48 (neo-host-path-mesa-v48): register the kernel-maintained VM status
- * mirror so the per-wait device-lost check is a load instead of a GET_PARAMS
- * ioctl. The kernel stores a job's sticky error in the word before it
+/* Register the kernel-maintained VM status mirror so the per-wait
+ * device-lost check is a load instead of a GET_PARAMS ioctl. The kernel stores a job's sticky error in the word before it
  * signals that job's fence, exactly the ordering the per-wait query relies
  * on, and refuses registration whenever the query could report more than the
  * VM's own status. Any failure here leaves the query path in place.

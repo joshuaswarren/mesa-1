@@ -238,9 +238,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
                          agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
                          mem->bo->size, 0, DRM_ASAHI_BIND_READ);
    if (ret) {
-      /* v56h/v57f: this bind fails once the VM carries a sticky error. It
-       * leaked the BO and the VkDeviceMemory and returned an error code the
-       * command is not allowed to return. */
+      /* The bind fails once the VM carries a sticky error. */
       agx_bo_unreference(&dev->dev, mem->bo);
       mem->bo = NULL;
       vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
