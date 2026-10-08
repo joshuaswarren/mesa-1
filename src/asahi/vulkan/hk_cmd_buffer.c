@@ -3346,7 +3346,8 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
 
    /* An empty final stream of a pass with earlier draws is not an empty
     * render. Replacing it with the load-op clears would erase those draws. */
-   if (cmd->sync.pass_vdm != cs)
+   const bool continuation = cmd->sync.pass_vdm != cs;
+   if (continuation && dev->dev.chip != AGX_CHIP_G17P)
       return false;
 
    /* Two reasons to keep the graphics representation on G17P rather than
@@ -3381,9 +3382,11 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    if (cs->timestamp.start.handle || cs->timestamp.end.handle)
       return false;
 
-   if (dev->dev.chip == AGX_CHIP_G17P && cs->cr.process_empty_tiles &&
-       (g17p_output_only_through_eot ||
-        !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4))) {
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       (continuation ||
+        (cs->cr.process_empty_tiles &&
+         (g17p_output_only_through_eot ||
+          !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4))))) {
       /* Normally supplied by the first draw. A clear has no application
        * sample-location state; use the attachment sample count and leave
        * has_sample_locations uncommitted, just like other meta operations.
