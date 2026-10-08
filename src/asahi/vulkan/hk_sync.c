@@ -130,24 +130,21 @@ void
 hk_sync_pass_footprints_done(struct hk_cmd_buffer *cmd)
 {
    struct hk_sync_state *st = &cmd->sync;
-   struct hk_cs *wait = NULL;
-
-   if (st->pass_fp_count == 0)
-      return;
-
-   util_dynarray_foreach(&cmd->sync_pass_records, struct hk_sync_pass_record,
-                         rec) {
-      if (!rec->last || (wait && rec->last->sync.seq <= wait->sync.seq))
+   struct hk_cs *wait[HK_SYNC_NUM_SQ] = {0};
+   util_dynarray_foreach(&cmd->sync_pass_records, struct hk_sync_pass_record, rec) {
+      if (!rec->last)
+         continue;
+      const unsigned sq = hk_sync_sq(rec->last);
+      if (wait[sq] && rec->last->sync.seq <= wait[sq]->sync.seq)
          continue;
       for (unsigned i = 0; i < st->pass_fp_count; ++i) {
          if (footprints_share_tile(&rec->fp, &st->pass_fp[i])) {
-            wait = rec->last;
+            wait[sq] = rec->last;
             break;
          }
       }
    }
-
-   st->pass_tile_wait = wait;
+   memcpy(st->pass_tile_wait, wait, sizeof(wait));
 }
 
 /* Record the footprints of the pass instance that ends, with its streams. */
@@ -155,13 +152,14 @@ static void
 pass_footprints_commit(struct hk_cmd_buffer *cmd)
 {
    struct hk_sync_state *st = &cmd->sync;
-   struct hk_cs *last = st->last_any[HK_SYNC_VDM];
+   struct hk_cs *first = st->pass_tile_first;
+   struct hk_cs *last = st->pass_tile_last;
 
-   if (st->pass_fp_count && st->pass_vdm && last) {
+   if (st->pass_fp_count && first && last) {
       for (unsigned i = 0; i < st->pass_fp_count; ++i) {
          const struct hk_sync_pass_record rec = {
             .fp = st->pass_fp[i],
-            .first = st->pass_vdm,
+            .first = first,
             .last = last,
          };
          util_dynarray_append(&cmd->sync_pass_records, rec);
@@ -169,7 +167,8 @@ pass_footprints_commit(struct hk_cmd_buffer *cmd)
    }
 
    st->pass_fp_count = 0;
-   st->pass_tile_wait = NULL;
+   memset(st->pass_tile_wait, 0, sizeof(st->pass_tile_wait));
+   st->pass_tile_first = st->pass_tile_last = NULL;
 }
 
 static void
@@ -183,8 +182,14 @@ records_replace_stream(struct hk_cmd_buffer *cmd, struct hk_cs *from,
       if (rec->last == from)
          rec->last = to;
    }
-   if (cmd->sync.pass_tile_wait == from)
-      cmd->sync.pass_tile_wait = to;
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      if (cmd->sync.pass_tile_wait[sq] == from)
+         cmd->sync.pass_tile_wait[sq] = to;
+   }
+   if (cmd->sync.pass_tile_first == from)
+      cmd->sync.pass_tile_first = to;
+   if (cmd->sync.pass_tile_last == from)
+      cmd->sync.pass_tile_last = to;
 }
 
 /*
@@ -501,27 +506,28 @@ hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (!compute) {
       /* Tile hazard: the pass instance shares a partly covered tile with an
        * earlier render that nothing else orders it after. */
-      if (st->in_pass && st->pass_tile_wait) {
-         const struct hk_sync_dep tile[HK_SYNC_NUM_SQ] = {
-            {.cut = st->pass_tile_wait}, {0}};
-         /* An attachment hazard: the fragment half alone. */
+      if (st->in_pass) {
+         struct hk_sync_dep tile[HK_SYNC_NUM_SQ] = {0};
+         for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq)
+            tile[sq].cut = st->pass_tile_wait[sq];
          stream_wait_frag(cs, tile);
       }
-
-      /* A stream that continues a render pass instance, whether after a
-       * split or when resuming a suspended instance, loads the tile buffer
-       * the previous stream of the instance stored. */
-      if (st->in_pass && (st->pass_vdm || st->resume_pending)) {
-         const struct hk_sync_dep cont[HK_SYNC_NUM_SQ] = {
-            {.cut = st->last_any[HK_SYNC_VDM],
-             .prior = st->resume_pending ? HK_SYNC_GFX : 0},
-            {0},
-         };
+      if (st->in_pass && (st->pass_tile_last || st->resume_pending)) {
+         struct hk_sync_dep cont[HK_SYNC_NUM_SQ] = {0};
+         if (st->pass_tile_last)
+            cont[hk_sync_sq(st->pass_tile_last)].cut = st->pass_tile_last;
+         if (st->resume_pending)
+            cont[HK_SYNC_VDM].prior = HK_SYNC_GFX;
          hk_sync_stream_wait(cs, cont);
          st->resume_pending = false;
       }
-      if (st->in_pass && !st->pass_vdm)
-         st->pass_vdm = cs;
+      if (st->in_pass) {
+         if (!st->pass_vdm)
+            st->pass_vdm = cs;
+         if (!st->pass_tile_first)
+            st->pass_tile_first = cs;
+         st->pass_tile_last = cs;
+      }
 
       /* The open compute stream sits before this render. It stays open
        * across the pass unless the render waits on it: then later compute
@@ -696,8 +702,13 @@ hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    replace_pointer(&st->last_any[sq], cs, prev);
    replace_pointer(&st->internal[sq].cut, cs, prev);
    replace_pointer(&st->pass_vdm, cs, NULL);
-   if (sq == HK_SYNC_VDM)
-      records_replace_stream(cmd, cs, prev);
+   if (st->pass_tile_first == cs) {
+      st->pass_tile_first = st->pass_tile_last = NULL;
+   } else if (st->pass_tile_last == cs &&
+              (!prev || prev->sync.seq < st->pass_tile_first->sync.seq)) {
+      st->pass_tile_last = st->pass_tile_first;
+   }
+   records_replace_stream(cmd, cs, prev);
 
    list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
       replace_pointer(&it->sync.dep[sq].cut, cs, prev);
@@ -718,6 +729,19 @@ hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    /* A stamp the stream carried is not lost: it becomes pending again. */
    if (cs->timestamp.start.handle && !st->pending_start_ts.handle)
       st->pending_start_ts = cs->timestamp.start;
+}
+
+void
+hk_sync_replace_render(struct hk_cmd_buffer *cmd, struct hk_cs *from,
+                        struct hk_cs *into)
+{
+   assert(from->type == HK_CS_VDM && into->type == HK_CS_CDM);
+   assert(cmd->sync.in_pass);
+   hk_sync_stream_wait(into, from->sync.dep);
+   if (cmd->sync.pass_tile_first == from)
+      cmd->sync.pass_tile_first = into;
+   if (cmd->sync.pass_tile_last == from)
+      cmd->sync.pass_tile_last = into;
 }
 
 void
@@ -749,8 +773,7 @@ hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
    }
    replace_pointer(&st->last_any[sq], from, into);
    replace_pointer(&st->internal[sq].cut, from, into);
-   if (sq == HK_SYNC_VDM)
-      records_replace_stream(cmd, from, into);
+   records_replace_stream(cmd, from, into);
 
    list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
       if (it != into && it != from) {
@@ -916,7 +939,8 @@ hk_sync_begin_rendering(struct hk_cmd_buffer *cmd, bool resuming)
    st->resume_pending = resuming;
    st->heap_pass = false;
    st->pass_fp_count = 0;
-   st->pass_tile_wait = NULL;
+   memset(st->pass_tile_wait, 0, sizeof(st->pass_tile_wait));
+   st->pass_tile_first = st->pass_tile_last = NULL;
 }
 
 void
@@ -1080,7 +1104,7 @@ hk_sync_submit_needs_completed(const struct hk_queue *queue,
    return false;
 }
 
-static bool
+static uint8_t
 recent_conflict(const struct hk_sync_queue *q, const struct hk_sync_footprint *fp,
                 uint64_t completed)
 {
@@ -1088,24 +1112,25 @@ recent_conflict(const struct hk_sync_queue *q, const struct hk_sync_footprint *f
       return false;
    /* A dropped entry may still be running: assume it shares the tile. */
    if (q->evicted > completed)
-      return true;
+      return BITFIELD_MASK(HK_SYNC_NUM_SQ);
+   uint8_t engines = 0;
    const uint32_t n = MIN2(q->recent_count, HK_SYNC_RECENT_FOOTPRINTS);
    for (uint32_t i = 0; i < n; ++i) {
       if (q->recent[i].point > completed &&
           footprints_share_tile(&q->recent[i].fp, fp))
-         return true;
+         engines |= BITFIELD_BIT(q->recent[i].sq);
    }
-   return false;
+   return engines;
 }
 
 static void
 recent_add(struct hk_sync_queue *q, const struct hk_sync_footprint *fp,
-           uint64_t point)
+           uint64_t point, enum hk_sync_sq sq)
 {
    struct hk_sync_recent *slot = &q->recent[q->recent_next];
    if (q->recent_count >= HK_SYNC_RECENT_FOOTPRINTS)
       q->evicted = MAX2(q->evicted, slot->point);
-   *slot = (struct hk_sync_recent){.fp = *fp, .point = point};
+   *slot = (struct hk_sync_recent){.fp = *fp, .point = point, .sq = sq};
    q->recent_next = (q->recent_next + 1) % HK_SYNC_RECENT_FOOTPRINTS;
    q->recent_count = MIN2(q->recent_count + 1, HK_SYNC_RECENT_FOOTPRINTS);
    q->recent_max = MAX2(q->recent_max, point);
@@ -1124,6 +1149,7 @@ barrier_at_least(uint16_t *barrier, hk_sync_value v)
 struct submit_footprint {
    struct hk_sync_footprint fp;
    hk_sync_value index;
+   enum hk_sync_sq sq;
 };
 
 /* The barrier and prior fields of one requirement on subqueue sq, with the
@@ -1243,16 +1269,18 @@ hk_sync_resolve_submit(struct hk_queue *queue,
                             struct hk_sync_pass_record, rec) {
          if (!rec->first || !rec->last)
             continue;
-         hk_sync_value v = HK_SYNC_NONE;
+         hk_sync_value v[HK_SYNC_NUM_SQ] = {HK_SYNC_NONE, HK_SYNC_NONE};
          util_dynarray_foreach(&submitted, struct submit_footprint, e) {
-            if (e->index > v && footprints_share_tile(&e->fp, &rec->fp))
-               v = e->index;
+            if (e->index > v[e->sq] && footprints_share_tile(&e->fp, &rec->fp))
+               v[e->sq] = e->index;
          }
-         if (v == HK_SYNC_NONE &&
-             recent_conflict(&queue->sync, &rec->fp, completed))
-            v = 0;
-         if (v != HK_SYNC_NONE)
-            barrier_at_least(&rec->first->sync.barrier[HK_SYNC_VDM], v);
+         const uint8_t recent = recent_conflict(&queue->sync, &rec->fp, completed);
+         for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+            if (v[sq] == HK_SYNC_NONE && (recent & BITFIELD_BIT(sq)))
+               v[sq] = 0;
+            if (v[sq] != HK_SYNC_NONE)
+               barrier_at_least(&rec->first->sync.barrier[sq], v[sq]);
+         }
       }
       util_dynarray_foreach(&cmd->sync_pass_records,
                             struct hk_sync_pass_record, rec) {
@@ -1261,6 +1289,7 @@ hk_sync_resolve_submit(struct hk_queue *queue,
          const struct submit_footprint e = {
             .fp = rec->fp,
             .index = (hk_sync_value)rec->last->sync.index,
+            .sq = hk_sync_sq(rec->last),
          };
          util_dynarray_append(&submitted, e);
       }
@@ -1367,7 +1396,7 @@ hk_sync_resolve_submit(struct hk_queue *queue,
    /* Every footprint of this ioctl stays live on the queue until the
     * timeline point it signals (queue_submit has already advanced it). */
    util_dynarray_foreach(&submitted, struct submit_footprint, e)
-      recent_add(&queue->sync, &e->fp, queue->drm.timeline_value);
+      recent_add(&queue->sync, &e->fp, queue->drm.timeline_value, e->sq);
    util_dynarray_fini(&submitted);
 
    if (queue->sync.exact_prior) {

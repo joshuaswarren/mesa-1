@@ -145,7 +145,7 @@ struct hk_sync_footprint {
    int32_t cx0, cx1, cy0, cy1;
 };
 
-/* A recorded pass instance footprint and its first and last render stream. */
+/* A pass footprint and its first and last attachment-producing streams. */
 struct hk_sync_pass_record {
    struct hk_sync_footprint fp;
    struct hk_cs *first, *last;
@@ -156,6 +156,7 @@ struct hk_sync_pass_record {
 struct hk_sync_recent {
    struct hk_sync_footprint fp;
    uint64_t point;
+   enum hk_sync_sq sq;
 };
 
 /* Per-stream state, embedded in hk_cs. */
@@ -232,12 +233,14 @@ struct hk_sync_state {
     * start timestamp. */
    struct agx_timestamp_req pending_start_ts;
 
-   /* Tile hazards: the partial-tile footprints of the open pass instance and
+   /* Tile hazards: attachment footprints of the open pass instance and
     * the latest earlier render stream it shares a tile with. The command
     * buffer keeps the recorded instances (hk_cmd_buffer::sync_pass_records). */
    struct hk_sync_footprint pass_fp[HK_SYNC_MAX_PASS_FOOTPRINTS];
    uint8_t pass_fp_count;
-   struct hk_cs *pass_tile_wait;
+   struct hk_cs *pass_tile_wait[HK_SYNC_NUM_SQ];
+   /* Attachment producers, including a compute replacement of a clear. */
+   struct hk_cs *pass_tile_first, *pass_tile_last;
 };
 
 /* Per-queue state: kinds of streams ever submitted on each subqueue. A
@@ -325,6 +328,8 @@ void hk_sync_pass_footprint(struct hk_cmd_buffer *cmd, const void *image,
                             uint32_t level_width, uint32_t level_height,
                             VkRect2D area, bool preserve_layers);
 void hk_sync_pass_footprints_done(struct hk_cmd_buffer *cmd);
+void hk_sync_replace_render(struct hk_cmd_buffer *cmd, struct hk_cs *from,
+                            struct hk_cs *into);
 /* Whether a submission records tile-hazard footprints, and whether the
  * queue may still be running one, so the caller fetches the completed
  * timeline point only when it can matter. */

@@ -164,6 +164,101 @@ test_multiview_layer_preservation(void)
      sparse->sync.barrier[HK_SYNC_VDM] == 0);
 }
 
+/* The empty-render optimizer executes the API clear on the compute engine. */
+static struct hk_cs *
+compute_clear_pass(struct hk_cmd_buffer *cmd, const void *image,
+                   uint32_t base_layer, bool end)
+{
+   hk_sync_begin_rendering(cmd, false);
+   hk_sync_pass_footprint(cmd, image, 0, base_layer, base_layer + 1, 32, 32,
+                         (VkRect2D){{0, 0}, {32, 32}}, false);
+   hk_sync_pass_footprints_done(cmd);
+   struct hk_cs *render = test_alloc(sizeof(*render));
+   render->type = HK_CS_VDM;
+   hk_sync_stream_created(cmd, render, &cmd->current_cs.gfx, false);
+   list_addtail(&render->node, &cmd->control_streams);
+   struct hk_cs *clear = test_alloc(sizeof(*clear));
+   clear->type = HK_CS_CDM;
+   clear->stats.cmds = 1;
+   cmd->sync.kind_override = HK_SYNC_GFX;
+   hk_sync_stream_created(cmd, clear, &cmd->current_cs.cs, true);
+   list_addtail(&clear->node, &cmd->control_streams);
+   cmd->sync.kind_override = 0;
+   hk_sync_replace_render(cmd, render, clear);
+   hk_sync_forget_stream(cmd, render);
+   list_del(&render->node);
+   if (end)
+      hk_sync_end_rendering(cmd);
+   return clear;
+}
+
+static void
+test_compute_clear_layer_preservation(void)
+{
+   const void *image = (void *)0x1234;
+   struct hk_cmd_buffer *cmd = new_cmd();
+   struct hk_cs *clear = compute_clear_pass(cmd, image, 0, true);
+   struct hk_cs *sparse = render_pass(cmd, image, 2, true);
+   T("sparse layer store waits on compute replacement clear",
+     sparse->sync.dep[HK_SYNC_CDM].cut == clear);
+   T("compute replacement does not fabricate render dependency",
+     sparse->sync.dep[HK_SYNC_VDM].cut == NULL);
+   struct hk_queue *queue = new_queue(true);
+   T("compute clear same command buffer submit", submit(queue, cmd));
+   T("compute clear resolves to correct engine prefix",
+     sparse->sync.barrier[HK_SYNC_CDM] == clear->sync.index &&
+     sparse->sync.barrier[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE);
+
+   queue = new_queue(true);
+   struct hk_cmd_buffer *a = new_cmd(), *b = new_cmd();
+   clear = compute_clear_pass(a, image, 0, true);
+   sparse = render_pass(b, image, 2, true);
+   struct hk_cmd_buffer *pair[] = {a, b};
+   T("compute clear across command buffers submit",
+     hk_sync_resolve_submit(queue, pair, 2, false, false, 0));
+   T("across command buffers names compute not render engine",
+     sparse->sync.barrier[HK_SYNC_CDM] == clear->sync.index &&
+     sparse->sync.barrier[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE);
+
+   queue = new_queue(true);
+   a = new_cmd(); b = new_cmd();
+   compute_clear_pass(a, image, 0, true);
+   sparse = render_pass(b, image, 2, true);
+   queue->drm.timeline_value = 1;
+   T("compute clear first queue submission", submit(queue, a));
+   queue->drm.timeline_value = 2;
+   struct hk_cmd_buffer *single[] = {b};
+   T("compute clear later queue submission",
+     hk_sync_resolve_submit(queue, single, 1, false, false, 0));
+   T("prior compute clear hazard names only compute history",
+     sparse->sync.barrier[HK_SYNC_CDM] == 0 &&
+     sparse->sync.barrier[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE);
+   T("completed prior clear submission", hk_sync_resolve_submit(
+      queue, single, 1, false, false, 1));
+   T("completed prior clear has no remaining hazard",
+     sparse->sync.barrier[HK_SYNC_CDM] == DRM_ASAHI_BARRIER_NONE);
+
+   /* Separate API layers are written on separate engines; preserving both
+    * needs both producers, not just whichever has the larger sequence. */
+   cmd = new_cmd();
+   struct hk_cs *graphics = render_pass(cmd, image, 1, false);
+   clear = compute_clear_pass(cmd, image, 1, true);
+   sparse = render_pass(cmd, image, 3, true);
+   T("sparse third layer waits on both physical producers",
+     sparse->sync.dep[HK_SYNC_VDM].cut == graphics &&
+     sparse->sync.dep[HK_SYNC_CDM].cut == clear);
+
+   cmd = new_cmd();
+   clear = compute_clear_pass(cmd, image, 0, false);
+   struct hk_cs *continued = test_alloc(sizeof(*continued));
+   continued->type = HK_CS_VDM;
+   hk_sync_stream_created(cmd, continued, &cmd->current_cs.gfx, false);
+   list_addtail(&continued->node, &cmd->control_streams);
+   T("render continuation waits on replaced clear",
+     continued->sync.dep[HK_SYNC_CDM].cut == clear);
+   hk_sync_end_rendering(cmd);
+}
+
 int
 main(void)
 {
@@ -171,6 +266,7 @@ main(void)
    if (!test_context)
       return EXIT_FAILURE;
    test_multiview_layer_preservation();
+   test_compute_clear_layer_preservation();
    /* Each matching destination retains the exact old source prefix, including
     * reuse of a recording and independent physical destinations on the queue. */
    struct hk_queue *q = new_queue(true);

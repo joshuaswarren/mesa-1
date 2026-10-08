@@ -3344,6 +3344,11 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
+   /* An empty final stream of a pass with earlier draws is not an empty
+    * render. Replacing it with the load-op clears would erase those draws. */
+   if (cmd->sync.pass_vdm != cs)
+      return false;
+
    /* Two reasons to keep the graphics representation on G17P rather than
     * replace it with the image clears below.
     *
@@ -3415,6 +3420,9 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    /* The clears stand in for the render: they are graphics work for every
     * later dependency, and they were recorded under the same requirements
     * the render was created under. */
+   /* Give the replacement an owned stream: extending an older compute job
+    * could place its clear before a render it must wait for. */
+   hk_cmd_buffer_end_compute(cmd);
    cmd->sync.kind_override = HK_SYNC_GFX;
 
    for (unsigned i = 0; i < render->color_att_count; ++i) {
@@ -3428,6 +3436,10 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
                              VK_IMAGE_ASPECT_STENCIL_BIT);
 
    cmd->sync.kind_override = 0;
+   if (cmd->current_cs.cs) {
+      hk_sync_replace_render(cmd, cs, cmd->current_cs.cs);
+      hk_cmd_buffer_end_compute(cmd);
+   }
 
    /* Remove the VDM control stream from the command buffer, now that it is
     * replaced by equivalent other operations.
