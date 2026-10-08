@@ -326,8 +326,6 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_tess_tri") ||
           !strcmp(func->name, "libagx_tess_quad") ||
           !strcmp(func->name, "libagx_prefix_sum_tess") ||
-          !strcmp(func->name, "libagx_g17p_local_probe") ||
-          !strcmp(func->name, "libagx_g17p_local_sg_probe") ||
           !strcmp(func->name, "libagx_draw_without_adj") ||
           /* Materialises an adjacency decomposition as an index buffer, which
            * is the only remap a G17P hardware vertex shader observes: it reads
