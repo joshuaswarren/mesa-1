@@ -900,7 +900,6 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    if (cmd->sync.in_pass) {
       uint8_t src_kinds, dst_kinds;
       hk_sync_dependency_kinds(pDependencyInfo, &src_kinds, &dst_kinds);
-      hk_sync_pass_barrier(cmd, src_kinds, dst_kinds);
       /* Software stages cannot cross an in-pass execution dependency by
        * extending a stream positioned before its source render. End that
        * stream too, even if the barrier has no memory access masks. */
@@ -910,6 +909,9 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
           cmd->current_cs.gfx) {
          hk_cmd_buffer_end_graphics(cmd);
       }
+      /* Ending an empty render can replace its clear with a CDM job. Capture
+       * the first scope only after that replacement has its physical stream. */
+      hk_sync_pass_barrier(cmd, src_kinds, dst_kinds);
       return;
    }
 

@@ -320,6 +320,15 @@ test_pass_software_graphics_dependencies(void)
      !unrelated->sync.dep[HK_SYNC_CDM].prior &&
      !unrelated->sync.dep[HK_SYNC_VDM].prior);
    hk_sync_end_rendering(cmd);
+
+   cmd = new_cmd();
+   struct hk_cs *clear = compute_clear_pass(cmd, (void *)0x1234, 0, false);
+   hk_sync_pass_barrier(cmd, HK_SYNC_GFX, HK_SYNC_GFX);
+   struct hk_cs *after_clear = add(cmd, false);
+   T("self-dependency follows an empty render replaced by compute clear",
+     after_clear->sync.dep[HK_SYNC_CDM].cut == clear &&
+     !after_clear->sync.dep[HK_SYNC_VDM].cut);
+   hk_sync_end_rendering(cmd);
 }
 
 int
