@@ -172,10 +172,15 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    /* Matched native G17G/G18G R32Float/Uint/Sint framebuffer-fetch
     * programs use the whole-pixel immediate form with mask1. Only f26
     * changes from the RGBA32 control; G18's f79=2 remains in transcode. */
-   bool scalar_pixel = enc == AGX_ISA_ENCODING_AGX3C &&
+   /* Native R8/RG8 Unorm/Snorm framebuffer fetches also use this immediate
+    * form, with f26=1/3 and the same G18 f79=2 transcode. Those witnesses
+    * address the first attachment; retain the offset restriction for them. */
+   bool narrow_pixel = enc == AGX_ISA_ENCODING_AGX3C &&
                        !sample.reg && !sample.kill && sample.value == 1 &&
-                       width == AGX3_TILE_W32 && chan_mask == 1 &&
-                       !(tile_off % 4);
+                       ((width == AGX3_TILE_W32 && chan_mask == 1 &&
+                         !(tile_off % 4)) ||
+                        (width == AGX3_TILE_W8 &&
+                         (chan_mask == 1 || chan_mask == 3) && tile_off == 0));
    if (sample.g17_register &&
        (enc != AGX_ISA_ENCODING_AGX3C || !sample.reg ||
         (width != AGX3_TILE_W8 && width != AGX3_TILE_W16 &&
@@ -194,7 +199,7 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
     *
     * None carries an incoming wait. */
    if (!common_ok(dest, width, chan_mask, sample, enc, wait_mask, tile_off) ||
-       (chan_mask != 15 && !scalar_ms && !scalar_pixel &&
+       (chan_mask != 15 && !scalar_ms && !narrow_pixel &&
         !(is_b(enc) &&
           (chan_mask == 1 || chan_mask == 3 ||
            (chan_mask == 7 && width == AGX3_TILE_W16)))) ||

@@ -1905,7 +1905,7 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    const bool norm16 = fmt == AGX_FORMAT_U16NORM || fmt == AGX_FORMAT_S16NORM;
    if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
         (norm8 || norm16)) ||
-       (b->shader->key->dev.emit_agx3d && norm16)) {
+       (b->shader->key->dev.emit_agx3d && (norm8 || norm16))) {
       const unsigned nr = instr->def.num_components;
       assert(nr >= 1 && nr <= 4 && packed_count == 0);
       assert(dest.size == AGX_SIZE_16 || dest.size == AGX_SIZE_32);
@@ -1914,8 +1914,10 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
        * agx3_fmt_to_width() has no normalized device witness, so a load left
        * carrying one is refused at the packer and the draw is dropped. Keep
        * the element width and index scaling intact and reuse the grounded
-       * normalized unpack the tile load already uses. G18's native UNORM16
-       * and SNORM16 unpack uses the same scalar/pair operand footprint.
+       * normalized unpack the tile load already uses. G18's native Char3/
+       * UChar3Normalized vertex fetches use W8/mask7 followed by pair/scalar
+       * normflt, retaining the three-byte memory footprint. Its UNORM16 and
+       * SNORM16 unpack uses the same scalar/pair operand footprint.
        * Byte loads reserve an aligned 32-bit payload even for a single
        * channel. */
       agx_index packed = norm8 ? agx_temp(b->shader, AGX_SIZE_32)
