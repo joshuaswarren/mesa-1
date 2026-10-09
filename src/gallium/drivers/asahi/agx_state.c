@@ -1631,7 +1631,9 @@ agx_g18_msaa4_zs_surface(const struct agx_device *dev,
  * single-target protocol, occupying the full 32-KiB imageblock.
  * Native315 also binds D32/S8 planes; colour-free renders retain this tile
  * geometry with empty colour programs. Native598/618/639 add layered
- * four-sample colour through sixteen bytes per sample; spills stay separate. */
+ * four-sample colour; native673 compares the two-sample array geometry and
+ * all five register lists. Both retain up to sixteen bytes per sample;
+ * spills stay separate. */
 static bool
 agx_g18_msaa4_tile_layout(const struct agx_device *dev,
                           const struct agx_tilebuffer_layout *tib)
@@ -1643,7 +1645,6 @@ agx_g18_msaa4_tile_layout(const struct agx_device *dev,
        (tib->nr_samples != 2 && tib->nr_samples != 4) ||
        (tib->sample_size_B != 8 && tib->sample_size_B != 16) ||
        tib->tile_size != (tib->nr_samples == 2 ? 32 * 32 : 32 * 16) ||
-       (tib->layered && tib->nr_samples != 4) ||
        agx_tilebuffer_spills(tib) ||
        agx_tilebuffer_offset_B(tib, 0) != 0)
       return false;
@@ -1926,6 +1927,19 @@ agx_batch_upload_pbe_internal(struct agx_batch *batch,
          } else {
             cfg.page_aligned_layers = tex->layout.page_aligned_layers;
             cfg.levels = tex->base.last_level + 1;
+
+            /* The M5 allocator's flag describes padding, so it is clear when
+             * a layer is exactly one page. G18 block stores still need the
+             * page-addressed array mode for that already-aligned backing.
+             * Do not select it for compact subpage or mipmapped layouts.
+             */
+            if (dev->chip == AGX_CHIP_G18G && block_access &&
+                target == PIPE_TEXTURE_2D_ARRAY && layers > 1 &&
+                cfg.levels == 1 && !tex->layout.compressed &&
+                util_res_sample_count(&tex->base) == 1 &&
+                tex->layout.layer_stride_B != 0 &&
+                (tex->layout.layer_stride_B % AIL_PAGESIZE) == 0)
+               cfg.page_aligned_layers = true;
          }
 
          /* G17G's Gen10 store packet is witnessed for one-level images only;

@@ -799,18 +799,24 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
       return;
 
    /* The render blitter fetches every stored sample and performs the format's
-    * resolve in the shader. Admit only sources sharing the writer/reload
-    * storage contract; other sample counts and layouts remain unsupported. */
+    * resolve in the shader. A non-layered framebuffer can select any valid
+    * layer of the supported array storage; u_blitter carries that layer into
+    * the source coordinates. Keep the single-layer extent and storage checks.
+    */
    if (g18_msaa4 && util_res_sample_count(info->src.resource) > 1 &&
        (!agx_g18_msaa4_storage(agx_device(ctx->base.screen),
                                 agx_resource(info->src.resource),
                                 info->src.format) ||
-        info->src.level != 0 || info->src.box.z != 0 ||
+        info->src.level != 0 || info->src.box.z < 0 ||
+        (unsigned)info->src.box.z >= info->src.resource->array_size ||
         info->src.box.depth != 1)) {
       mesa_loge("asahi: G18G multisample blit source %s %ux%u has "
-                "unsupported sample count, format or storage layout",
+                "unsupported sample count, format or storage layout "
+                "(level=%u layer=%d depth=%d samples=%u target=%u)",
                 util_format_name(info->src.format), info->src.box.width,
-                info->src.box.height);
+                info->src.box.height, info->src.level, info->src.box.z,
+                info->src.box.depth, util_res_sample_count(info->src.resource),
+                info->src.resource->target);
       return;
    }
 
