@@ -185,6 +185,7 @@ if with_tests
       'agx_tests',
       files(
          'test/test-compact-constants.cpp',
+         'test/test-hoist-loads.cpp',
          'test/test-lower-address.cpp',
          'test/test-lower-cmat.cpp',
          'test/test-minifloat.cpp',
