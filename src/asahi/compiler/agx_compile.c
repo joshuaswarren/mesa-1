@@ -3586,9 +3586,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          b, dst, AGX_SR_THREAD_INDEX_IN_THREADGROUP);
 
    case nir_intrinsic_load_layer_id:
-      /* Two G17P fragment programs read the tile's own layer rather than an
-       * API gl_Layer, and native SR 0xc3 (normalized SR12, W16) is what
-       * supplies it:
+      /* Driver-internal fragment programs read the tile's own layer rather
+       * than an API gl_Layer. G17P's native SR 0xc3 and G18G's native array
+       * EOT programs use the same normalized SR12, W16:
        *
        *  - the builtin background reload (fs.ignore_tib_dependencies), and
        *  - with a spilled render target, the fragment epilog's eMRT image
@@ -3603,7 +3603,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        * first (hk_shader.c) -- but it does from gallium, which lowers
        * VARYING_SLOT_LAYER back to this intrinsic with layer_as_varying
        * false and sets neither key bit. Leave that path alone. */
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+           (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+            b->shader->key->dev.emit_agx3d)) &&
           stage == MESA_SHADER_FRAGMENT &&
           (b->shader->key->fs.ignore_tib_dependencies ||
            b->shader->key->g17p_emrt))

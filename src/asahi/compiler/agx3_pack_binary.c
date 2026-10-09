@@ -945,7 +945,9 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       *width = AGX3_SR_W16;
       return true;
    case AGX_SR_BACKGROUND_LAYER_ID:
-      if (enc != AGX_ISA_ENCODING_AGX3B)
+      /* G17G/G18G native array EOT programs read the layer from W16 SR12.
+       * G18G's 21 84 43 00 00 40 is the same field vector as G17G's read. */
+      if (enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C)
          return false;
       *apple = 12;
       *width = AGX3_SR_W16;
