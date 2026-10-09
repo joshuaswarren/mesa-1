@@ -1931,12 +1931,13 @@ agx_batch_upload_pbe_internal(struct agx_batch *batch,
             /* The M5 allocator's flag describes padding, so it is clear when
              * a layer is exactly one page. G18 block stores still need the
              * page-addressed array mode for that already-aligned backing.
+             * This also applies to multisample layers: sample count changes
+             * the footprint, not the unit used to address the next layer.
              * Do not select it for compact subpage or mipmapped layouts.
              */
             if (dev->chip == AGX_CHIP_G18G && block_access &&
                 target == PIPE_TEXTURE_2D_ARRAY && layers > 1 &&
                 cfg.levels == 1 && !tex->layout.compressed &&
-                util_res_sample_count(&tex->base) == 1 &&
                 tex->layout.layer_stride_B != 0 &&
                 (tex->layout.layer_stride_B % AIL_PAGESIZE) == 0)
                cfg.page_aligned_layers = true;
