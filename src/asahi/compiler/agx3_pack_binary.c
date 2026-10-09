@@ -1158,7 +1158,7 @@ agx3_interp_uses_coords(enum agx_isa_encoding enc, const agx_instr *I)
 {
    return I->interpolation == AGX_INTERPOLATION_SAMPLE ||
           (I->interpolation == AGX_INTERPOLATION_CENTROID &&
-           enc == AGX_ISA_ENCODING_AGX3B);
+           (enc == AGX_ISA_ENCODING_AGX3B || agx_encoding_is_g17_class(enc)));
 }
 
 static bool
@@ -1170,12 +1170,13 @@ agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
        !agx3_vary_reg32(I->dest[0]) || I->src[0].type != AGX_INDEX_IMMEDIATE)
       return false;
 
-   /* Sample and G17P centroid interpolation consume an ITRCOORDS token
+   /* Sample and centroid interpolation consume an ITRCOORDS token
     * through the same f32interp leaves. */
    const bool token = agx3_interp_uses_coords(enc, I);
    enum agx3_vary_location location;
    if (token) {
-      if (enc != AGX_ISA_ENCODING_AGX3B || first ||
+      if ((enc != AGX_ISA_ENCODING_AGX3B && !agx_encoding_is_g17_class(enc)) ||
+          first ||
           !agx3_vary_reg32(I->src[1]) || I->src[1].kill ||
           (I->src[1].cache && I->src[1].discard))
          return false;
@@ -12043,7 +12044,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_sample_coords_use(block, I))
                AGX3_REFUSE(I);
             if (I->op == AGX_OPCODE_RHW_INTERP_AGX3 &&
-                (enc != AGX_ISA_ENCODING_AGX3B ||
+                ((enc != AGX_ISA_ENCODING_AGX3B &&
+                  !agx_encoding_is_g17_class(enc)) ||
                  ctx->stage != MESA_SHADER_FRAGMENT ||
                  !agx3_private_rhw_use(ctx, block, I)))
                AGX3_REFUSE(I);
@@ -12132,7 +12134,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                .reciprocal_liveness = I->src[1].discard ? AGX3_OPERAND_KILL :
                   I->src[1].cache ? AGX3_OPERAND_LIVE : AGX3_OPERAND_UNMARKED,
                .vary_index = I->imm,
-               .dest_hint = true,
+               .dest_hint = enc == AGX_ISA_ENCODING_AGX3B,
                .wait_mask = wait,
             };
             uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH], len = 0;

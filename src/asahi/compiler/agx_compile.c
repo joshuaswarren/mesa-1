@@ -663,9 +663,9 @@ agx_interp_for_bary(nir_intrinsic_instr *bary, agx_index *sample_index)
 /* AGX3 removed AGX2's fused projective iterator. Build Apple's witnessed
  * scalar software sequence while values are still in SSA so register
  * allocation can place the temporary RHW, reciprocal, and channels safely.
- * G17P explicit at-sample interpolation first computes one ITRCOORDS token
+ * Explicit at-sample interpolation first computes one ITRCOORDS token
  * from the low half of the sample index, then shares it across RHW and every
- * scalar channel. G17P centroid interpolation computes the token from the
+ * scalar channel. Centroid interpolation computes the token from the
  * coverage word instead. Dynamic coefficient indices remain on the legacy IR
  * path so the AGX3 packer rejects them instead of guessing. */
 /* Pixel-centre 1/W is the same for every input of a fragment program, so
@@ -708,9 +708,8 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
 
    agx_index interp_coords = agx_zero();
    if (interp == AGX_INTERPOLATION_SAMPLE) {
-      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
-          (sample_index.size != AGX_SIZE_16 &&
-           sample_index.size != AGX_SIZE_32))
+      if (sample_index.size != AGX_SIZE_16 &&
+          sample_index.size != AGX_SIZE_32)
          return false;
 
       agx_index sample_half = sample_index;
@@ -726,9 +725,8 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
 
       interp_coords = agx_temp(b->shader, AGX_SIZE_32);
       agx_itrcoords_agx3_to(b, interp_coords, sample_half, interp);
-   } else if (interp == AGX_INTERPOLATION_CENTROID &&
-              b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      /* Apple's G17P centroid inputs, single-sample and multisample alike,
+   } else if (interp == AGX_INTERPOLATION_CENTROID) {
+      /* Apple's G17P/G17G/G18G centroid inputs, single and multisample alike,
        * pass native W16 SR39 -- the covered samples -- straight to
        * ITRCOORDS. With one sample that is the pixel centre. */
       agx_index coverage = agx_temp(b->shader, AGX_SIZE_16);
@@ -743,6 +741,12 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
       return false;
    }
 
+   /* The native G17G/G18G token sequence carries coefficient metadata in
+    * RHW, reciprocal and multiply instructions too. Keep its private RHW
+    * distinct from an ordinary position.w value through register allocation. */
+   const bool projective_sequence =
+      b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+      interp != AGX_INTERPOLATION_CENTER;
    agx_index reciprocal_w = agx_null();
    if (perspective) {
       agx_index rhw_cf = agx_get_cf(b->shader, VARYING_SLOT_POS, 3);
@@ -754,11 +758,11 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
          reciprocal_w = agx3_center_rcp_w(b->shader, rhw_cf);
       } else {
          agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
-         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         if (projective_sequence)
             agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
          else
             agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);
-         reciprocal_w = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
+         reciprocal_w = projective_sequence
                            ? agx_persp_rcp_agx3(b, rhw, rhw_cf.value)
                            : agx_rcp(b, rhw);
       }
@@ -772,8 +776,7 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
       agx_index raw = agx_temp(b->shader, AGX_SIZE_32);
       agx_interp_agx3_to(b, raw, channel_cf, interp_coords, interp,
                          perspective);
-      if (perspective &&
-          b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      if (perspective && projective_sequence) {
          /* Native f32mul.ep4 identifies the coefficient involved in this
           * projective divide. Preserve it explicitly rather than trying to
           * reconstruct SSA provenance after physical register allocation. */

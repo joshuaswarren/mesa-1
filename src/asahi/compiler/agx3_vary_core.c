@@ -37,19 +37,17 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
                       uint16_t coords, bool coords_kill,
                       uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
-   /* G18G (agx3d) keeps f32interp's agx3c encoding bit for bit (the
-    * applegpu_g18g builds of the m5 reference corpus repeat 264 of 355
-    * aligned G17G f32interp words byte-exactly, the rest differing only in
-    * destination and coefficient), but only the centre location is
-    * witnessed there, perspective and not. */
+   /* Native G17G/G18G pipelines use the same explicit coordinate token for
+    * centroid and sample interpolation, including projective RHW. There is
+    * no reserved implicit centroid register: its token is allocated normally. */
    if ((enc != AGX_ISA_ENCODING_AGX3B &&
         !agx_encoding_is_g17_class(enc)) ||
-       (is_d(enc) && location != AGX3_VARY_CENTER) ||
+       (!explicit_sample && location != AGX3_VARY_CENTER) ||
        (first && enc != AGX_ISA_ENCODING_AGX3B) ||
-       (projective_rhw && (enc != AGX_ISA_ENCODING_AGX3B ||
+       (projective_rhw && ((!is_b(enc) && !explicit_sample) ||
                            (!explicit_sample && location != AGX3_VARY_CENTER) ||
                            !perspective || coef_index > 0x7f)) ||
-       (explicit_sample && (enc != AGX_ISA_ENCODING_AGX3B || first ||
+       (explicit_sample && (first ||
                             (coords & 1) != 0 || coords >= 256)) ||
        (dest & 1) != 0 || dest >= 256 ||
        (location != AGX3_VARY_CENTER && location != AGX3_VARY_CENTROID))
@@ -78,17 +76,6 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
       ov[n++] = (struct agx3_field_kv)KV(39, 7);
       ov[n++] = (struct agx3_field_kv)KV(41, 0);
       ov[n++] = (struct agx3_field_kv)KV(32, 0);
-   } else {
-      /* AGX3C centroid interpolation uses the same register-source leaf, with
-       * the native implicit coordinate register selected by the shade model.
-       * G17P has no implicit form: its centroid coordinates are an explicit
-       * ITRCOORDS token. */
-      if (is_b(enc))
-         return false;
-      ov[n++] = (struct agx3_field_kv)KV(39, 2);
-      ov[n++] = (struct agx3_field_kv)KV(41, 1);
-      ov[n++] =
-         (struct agx3_field_kv)KV(32, perspective ? 0 : 6);
    }
    if (projective_rhw)
       ov[n++] = (struct agx3_field_kv)KV(54, 1);
@@ -106,26 +93,33 @@ agx3_vary_coords(enum agx_isa_encoding enc, uint16_t dest, uint8_t mode,
                  uint16_t source, bool source_kill, uint16_t wait_mask,
                  uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || (dest & 1) != 0 || dest >= 256 ||
-       source >= 256 || (wait_mask & ~0x3f) != 0)
+   const unsigned nwait = is_b(enc) ? 6 : 8;
+   if ((!is_b(enc) && !agx_encoding_is_g17_class(enc)) ||
+       (dest & 1) != 0 || dest >= 256 || source >= 256 ||
+       (wait_mask & ~((1u << nwait) - 1)) != 0)
       return false;
 
-   /* ITRCOORDS is an eight-byte G17P instruction: register/32-bit
-    * destination, register/16-bit source, and the mode in f38. */
+   /* Register/32-bit destination, register/16-bit source, and mode in f38.
+    * G17G and G18G add the same opcode constants f28=3/f29=0x66. */
    const struct agx3_field_kv base[] = {
       KV(9, 2), KV(10, 2), KV(11, 1), KV(23, 2), KV(24, 1), KV(38, mode),
    };
-   struct agx3_field_kv ov[10];
+   struct agx3_field_kv ov[13];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, dest);
    ov[n++] = (struct agx3_field_kv)KV(16, source);
    if (source_kill)
       ov[n++] = (struct agx3_field_kv)KV(27, 1);
-   for (unsigned i = 0; i < 6; ++i)
+   if (!is_b(enc)) {
+      ov[n++] = (struct agx3_field_kv)KV(28, 3);
+      ov[n++] = (struct agx3_field_kv)KV(29, 0x66);
+   }
+   for (unsigned i = 0; i < nwait; ++i)
       if (wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
 
-   return agx3_bind_compose(enc, "itrcoords", 0, base, 6, ov, n, out, len);
+   return agx3_bind_compose(enc, "itrcoords", agx3_bind_ep(enc, 0),
+                            base, 6, ov, n, out, len);
 }
 
 bool

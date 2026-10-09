@@ -326,9 +326,11 @@ agx3_persp_rcp_encode(enum agx_isa_encoding enc,
                        const struct agx3_persp_rcp_desc *d,
                        uint8_t out[AGX3_FLTNORM_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || !d || !b_only(enc) || d->dest >= 192 ||
+   const unsigned nwait = b_only(enc) ? 6 : 8;
+   if (!out || !len || !d ||
+       (!b_only(enc) && !agx_encoding_is_g17_class(enc)) || d->dest >= 192 ||
        d->rhw >= 192 || ((d->dest | d->rhw) & 1) ||
-       d->coef_index > 0x7f || (d->wait_mask & ~UINT16_C(0x3f)))
+       d->coef_index > 0x7f || (d->wait_mask & ~((1u << nwait) - 1)))
       return false;
 
    /* Fresh native smooth_scalar: af005400030000482001 (r0 -> r0).
@@ -339,15 +341,20 @@ agx3_persp_rcp_encode(enum agx_isa_encoding enc,
       KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2),
       KV(42, 6), KV(43, 2), KV(57, 1),
    };
-   struct agx3_field_kv ov[11] = {
+   struct agx3_field_kv ov[15] = {
       KV(2, d->dest), KV(11, 1), KV(18, d->rhw),
       KV(27, d->rhw_cache), KV(39, d->coef_index),
    };
    unsigned n = 5;
-   for (unsigned i = 0; i < 6; ++i)
+   if (!b_only(enc)) {
+      ov[n++] = (struct agx3_field_kv)KV(47, 3);
+      ov[n++] = (struct agx3_field_kv)KV(48, 0x40);
+   }
+   for (unsigned i = 0; i < nwait; ++i)
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(49 + i, 1);
-   return agx3_bind_compose(enc, "f32rcp", 0, base, 7, ov, n, out, len);
+   return agx3_bind_compose(enc, "f32rcp", agx3_bind_ep(enc, 0),
+                            base, 7, ov, n, out, len);
 }
 
 bool
@@ -360,17 +367,21 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
    memset(out, 0, AGX3_FLTNORM_MAX_LENGTH);
    *len = 0;
 
-   if (!b_only(enc))
+   if (!b_only(enc) && !agx_encoding_is_g17_class(enc))
       return false;
    if ((d->dest & 1) || d->dest >= 256 || (d->reciprocal & 1) ||
        d->reciprocal >= 256 || (d->raw & 1) || d->raw >= 256)
       return false;
-   if ((d->wait_mask & ~(uint16_t)0x3f) != 0)
+   const unsigned nwait = b_only(enc) ? 6 : 8;
+   if ((d->wait_mask & ~((1u << nwait) - 1)) != 0)
       return false;
    /* f70 is seven bits wide. */
    if (d->vary_index > 0x7f)
       return false;
    if (d->stage_dest ? (d->slot < 1 || d->slot > 6) : (d->slot != 0))
+      return false;
+   /* The G17G/G18G witnesses here use a general-register destination. */
+   if (!b_only(enc) && d->stage_dest)
       return false;
 
    /* The form's root predicates -- the composer refuses ep4 outright without
@@ -382,7 +393,7 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
       KV(59, 6), KV(60, 2), KV(73, 6), KV(74, 2), KV(88, 1),
    };
 
-   struct agx3_field_kv ov[16];
+   struct agx3_field_kv ov[20];
    unsigned n = 0;
    if (d->stage_dest) {
       ov[n++] = (struct agx3_field_kv)KV(9, 5);
@@ -405,7 +416,11 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
    }
    ov[n++] = (struct agx3_field_kv)KV(70, d->vary_index);
 
-   for (unsigned i = 0; i < 6; ++i)
+   if (!b_only(enc)) {
+      ov[n++] = (struct agx3_field_kv)KV(78, 3);
+      ov[n++] = (struct agx3_field_kv)KV(79, 0x3e);
+   }
+   for (unsigned i = 0; i < nwait; ++i)
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(80 + i, 1);
 
@@ -414,7 +429,8 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
     * the extended ep5 form.  Try the canonical compact form first so all
     * existing GPR and slot1 witnesses remain byte-identical. */
    for (unsigned ep = 4; ep <= 5; ++ep) {
-      if (agx3_bind_compose(enc, "f32mul", ep, base, 10, ov, n, out, len))
+      if (agx3_bind_compose(enc, "f32mul", agx3_bind_ep(enc, ep),
+                            base, 10, ov, n, out, len))
          return true;
    }
 
