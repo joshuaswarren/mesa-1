@@ -4535,6 +4535,40 @@ agx3_materialize_f32_source(agx_builder *b, agx_index source)
 static bool
 agx_lower_agx3_cf_constants(agx_context *ctx)
 {
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       ctx->key->dev.emit_agx3d) {
+      bool progress = false;
+      agx_foreach_instr_global_safe(ctx, I) {
+         switch (I->op) {
+         case AGX_OPCODE_IF_ICMP:
+         case AGX_OPCODE_ELSE_ICMP:
+         case AGX_OPCODE_WHILE_ICMP:
+         case AGX_OPCODE_BREAK_IF_ICMP:
+            break;
+         default:
+            continue;
+         }
+         if (I->nr_srcs != 2)
+            continue;
+
+         /* G18G has a grounded half register/register comparison. Its
+          * immediate form only accepts zero, so allocate other constants
+          * before RA without changing operand order or the predicate. */
+         for (unsigned s = 0; s < 2; ++s) {
+            agx_index src = I->src[s], other = I->src[1 - s];
+            if (src.type != AGX_INDEX_IMMEDIATE || src.value == 0 ||
+                src.value > UINT8_MAX || src.abs || src.neg ||
+                other.type == AGX_INDEX_IMMEDIATE ||
+                other.size != AGX_SIZE_16 || agx_channels(other) != 1)
+               continue;
+            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+            I->src[s] = agx_mov_imm(&b, 16, src.value);
+            progress = true;
+         }
+      }
+      return progress;
+   }
+
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
       return false;
 
