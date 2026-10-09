@@ -250,9 +250,9 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
 
 static unsigned
 agx_word_mrt_mask(const struct agx_tilebuffer_layout *tib,
-                  unsigned max_bytes_per_tile, bool raw32)
+                  unsigned max_bytes_per_tile, bool raw32, bool layered)
 {
-   if (!tib || tib->layered || tib->nr_samples != 1 ||
+   if (!tib || (tib->layered && !layered) || tib->nr_samples != 1 ||
        (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16))
       return 0;
 
@@ -265,7 +265,7 @@ agx_word_mrt_mask(const struct agx_tilebuffer_layout *tib,
            format != PIPE_FORMAT_B8G8R8A8_UNORM &&
            format != PIPE_FORMAT_R8G8B8X8_UNORM &&
            format != PIPE_FORMAT_B8G8R8X8_UNORM &&
-           !(raw32 && (format == PIPE_FORMAT_R32_UINT ||
+           !(raw32 && !tib->layered && (format == PIPE_FORMAT_R32_UINT ||
                        format == PIPE_FORMAT_R32_SINT ||
                        format == PIPE_FORMAT_R32_FLOAT))) ||
           tib->spilled[rt] || tib->_offset_B[rt] != 4 * count)
@@ -280,7 +280,7 @@ agx_word_mrt_mask(const struct agx_tilebuffer_layout *tib,
 unsigned
 agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
 {
-   return agx_word_mrt_mask(tib, 32767, false);
+   return agx_word_mrt_mask(tib, 32767, false, false);
 }
 
 unsigned
@@ -289,7 +289,7 @@ agx_g18g_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
    /* Native G18 clear/load/mixed/sparse capture308 binds 32-byte samples
     * in a 32x32 single-sample tile. Keep this separate from G17P's budget. */
    return tib && tib->tile_size == 32 * 32
-             ? agx_word_mrt_mask(tib, 32768, false) : 0;
+             ? agx_word_mrt_mask(tib, 32768, false, true) : 0;
 }
 
 unsigned
@@ -297,9 +297,11 @@ agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib)
 {
    /* R32 occupies the same four-byte tile slot as RGBA8. Native426/427
     * ground scalar word tile operations and the EOT argument/store ABI.
-    * Logical conversion remains in the per-attachment shader/descriptor. */
+    * Logical conversion remains in the per-attachment shader/descriptor.
+    * Layered G18 layouts admit only the RGBA8 family: native array MRT EOT
+    * programs cover two through eight targets, with the same compact offsets. */
    return tib && tib->tile_size == 32 * 32
-             ? agx_word_mrt_mask(tib, 32768, true) : 0;
+             ? agx_word_mrt_mask(tib, 32768, true, true) : 0;
 }
 
 unsigned

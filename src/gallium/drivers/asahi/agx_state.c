@@ -6818,7 +6818,8 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
                       (store ? op != AGX_EOT_STORE
                              : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD))) ||
        (key->tib.layered &&
-         (dev->chip != AGX_CHIP_G18G || (targets != 1 && !no_color) ||
+         (dev->chip != AGX_CHIP_G18G ||
+          (targets != 1 && !no_color && !word_mask) ||
          (key->tib.nr_samples != 1 && !msaa4) || batch->key.resolve)) ||
        (key->tib.nr_samples != 1 && !msaa4) ||
        key->tib.tile_size != (msaa4 && key->tib.nr_samples == 4 ? 32 * 16 : 32 * 32) ||
@@ -6883,9 +6884,12 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
        */
       /* Complete native G18 programs, including coordinates and all stores. */
       static const uint16_t g18_sizes[] = {0, 68, 106, 136, 166, 200, 234, 268, 302};
+      static const uint16_t g18_array_sizes[] =
+         {0, 88, 126, 156, 186, 220, 254, 288, 322};
       const unsigned eot_size =
          dev->chip == AGX_CHIP_G18G
-            ? (key->tib.layered ? 88 : g18_sizes[targets]) : 78;
+            ? (key->tib.layered ? g18_array_sizes[targets] : g18_sizes[targets])
+            : 78;
       if (shader->info.binary_size != eot_size || shader->info.nr_gprs != 8 ||
           shader->info.agx3_staging_halfs != 8 * targets) {
          if (dev->debug & AGX_DBG_FAULTTRACE)
@@ -9073,7 +9077,8 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    M5_DRAW_OUTSIDE(!depth_attachment_ok, "depth attachment shape");
    M5_DRAW_OUTSIDE(batch->key.layers > 1 &&
                         (dev->chip != AGX_CHIP_G18G ||
-                         (batch->key.nr_cbufs != 1 && !attachmentless) ||
+                         (batch->key.nr_cbufs != 1 && !attachmentless &&
+                          !agx_g18g_word_mrt_mask(&batch->tilebuffer_layout)) ||
                         batch->key.zsbuf.texture ||
                         (batch->tilebuffer_layout.nr_samples != 1 &&
                          !agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout))),

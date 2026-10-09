@@ -26,6 +26,7 @@
 #include "agx3_falu_mod_core.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_funop_core.h"
+#include "agx3_g17g_array_eot.h"
 #include "agx3_g17p_array_eot.h"
 #include "agx3_g17p_quad_eot.h"
 #include "agx3_iadd_core.h"
@@ -9510,6 +9511,8 @@ static unsigned
 agx3_g17p_array_multi_eot_count(const agx_context *ctx, const char **why)
 {
    const unsigned count = ctx->key->g17p_mrt_eot_count;
+   const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                    ctx->key->dev.emit_agx3d;
 
 #define REJECT(reason)                                                         \
    do {                                                                        \
@@ -9518,13 +9521,24 @@ agx3_g17p_array_multi_eot_count(const agx_context *ctx, const char **why)
       return 0;                                                                \
    } while (0)
 
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble ||
        ctx->key->no_stop || list_length(&ctx->blocks) != 1)
-      REJECT("not a single-block G17P compute end-of-tile shader");
+      REJECT("not a single-block array compute end-of-tile shader");
 
    if (count < 2 || count > AGX_MAX_RTS)
       REJECT("key does not name two to eight mixed targets");
+
+   /* The G18 witness family below is single-sample RGBA8. Keep its admission
+    * separate from G17P's broader selector and multisample replacement. */
+   if (g18) {
+      if (ctx->key->g17p_rt0_eot_multisample)
+         REJECT("G18 array MRT witness is single-sample");
+      for (unsigned rt = 0; rt < count; ++rt) {
+         if (ctx->key->g17p_mrt_eot_selectors[rt] != 0x75)
+            REJECT("G18 array MRT witness requires RGBA8 stores");
+      }
+   }
 
    /* values[r]: the immediate r holds, or UINT_MAX. role[r]: which coordinate
     * source r currently carries. Both are ordinary forward dataflow, so a
@@ -9954,6 +9968,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const unsigned array_eot_count =
       agx3_g17p_array_multi_eot_count(ctx, &array_eot_why);
    if (array_eot_count) {
+      if (enc == AGX_ISA_ENCODING_AGX3C) {
+         /* Complete G17G builtins, with identical instruction fields in all
+          * paired G18 captures. The ordinary transcode emits G18 bytes.
+          * Native metadata uses four GPR dwords and sixteen staging bytes
+          * per target, including the early stores in the seven/eight forms. */
+         const struct agx3_g17g_array_eot_program *program =
+            &agx3_g17g_array_eot[array_eot_count];
+         ctx->max_reg = 7;
+         ctx->agx3_staging_halfs = 8 * array_eot_count;
+         memcpy(util_dynarray_grow_bytes(emission, 1, program->size),
+                program->text, program->size);
+         return true;
+      }
       const uint8_t *text = agx3_g17p_array_eot[array_eot_count].text;
       const unsigned size = agx3_g17p_array_eot[array_eot_count].size;
       const bool multisample = ctx->key->g17p_rt0_eot_multisample;
