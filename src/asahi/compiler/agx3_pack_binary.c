@@ -2710,6 +2710,25 @@ agx3_g17g_runtime_gather(const agx_instr *I)
           !I->sparse && !I->query_lod && !I->agx3_tex_coords_staged;
 }
 
+/* Native685r4 independently compiles the 2D float, integer, raw-depth and
+ * comparison gathers in every stage, with constant and runtime offsets.
+ * The indirect sampler uses the same 64-bit descriptor operand as Native653;
+ * only its native register/uniform selector differs from the fixed sampler.
+ * Admission of this shape in the stream packer remains G18-specific. */
+static bool
+agx3_g18g_indirect_gather(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->dim == AGX_DIM_2D &&
+          I->gather != AGX_GATHER_NONE && I->nr_srcs == 6 &&
+          I->nr_dests == 1 && I->src[3].type == AGX_INDEX_IMMEDIATE &&
+          (I->src[4].type == AGX_INDEX_REGISTER ||
+           I->src[4].type == AGX_INDEX_UNIFORM) &&
+          I->src[4].size == AGX_SIZE_64 && agx_channels(I->src[4]) == 1 &&
+          I->lod_mode == AGX_LOD_MODE_AUTO_LOD && I->mask == 15 &&
+          I->dest[0].size == AGX_SIZE_32 &&
+          !I->sparse && !I->query_lod && !I->agx3_tex_coords_staged;
+}
+
 /* Native413 covers projected cube and cube-array gathers in all three
  * stages, over immediate descriptors and without LOD/offset modifiers. */
 static bool
@@ -2742,11 +2761,13 @@ agx3_g17g_plain_2d_sample(const agx_instr *I)
  * (coordinates at +0/+2, comparison reference at +4, level/bias word at +6)
  * rather than naming its coordinate registers directly. */
 static bool
-agx3_g17g_staged_block(const agx_instr *I)
+agx3_g17g_staged_block(const agx_instr *I, bool g18g)
 {
    /* Repeated gathers republish coordinates before asynchronous SMPs.
     * Give each outstanding consumer its own block, as for comparisons. */
    return agx3_g17g_basic_gather(I) ||
+          (g18g && agx3_g18g_indirect_gather(I) &&
+           (!I->offset || I->offset_xyz > 0)) ||
           (agx3_g17g_plain_2d_sample(I) &&
            (I->shadow || I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
             (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
@@ -2921,7 +2942,8 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
     * witness and stays refused. */
    const bool gpu1_gather = enc == AGX_ISA_ENCODING_AGX3C &&
       (agx3_g17g_basic_gather(I) || agx3_g17g_runtime_gather(I) ||
-       agx3_g17g_array_gather(I) || agx3_g17g_cube_gather(I));
+       agx3_g17g_array_gather(I) || agx3_g17g_cube_gather(I) ||
+       (g18g && agx3_g18g_indirect_gather(I)));
    const bool gpu1_plain_2d = enc == AGX_ISA_ENCODING_AGX3C &&
       !three_d && !cube && !gather && !query_lod && !min_lod &&
       I->nr_srcs == 6 &&
@@ -3185,7 +3207,7 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
     * two-texture colour fragment samples one staged pair twice); a slot is
     * never shared between in-flight samples, so it keys the block. */
    const bool g17g_block =
-      enc == AGX_ISA_ENCODING_AGX3C && agx3_g17g_staged_block(I);
+      enc == AGX_ISA_ENCODING_AGX3C && agx3_g17g_staged_block(I, g18g);
    const uint16_t base = g17g_block ? 8u * (stage_slot - 1) : 0;
    /* G18G stages an array sample in its own block layout: X at 4, Y at 0
     * (SMP f56 = 0) and the layer word at 2 (agx3_tex_stage_array_layer_g18g).
@@ -11725,7 +11747,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (enc == AGX_ISA_ENCODING_AGX3C) {
       bool relay_needed = false;
       for (unsigned i = 0; i < count; ++i)
-         relay_needed |= agx3_g17g_staged_block(ordered[i]) &&
+         relay_needed |= agx3_g17g_staged_block(ordered[i], ctx->key->dev.emit_agx3d) &&
                          agx3_g17g_register_lod(ordered[i]) && res[i].slot > 1;
       if (relay_needed) {
          const unsigned base =
@@ -12531,7 +12553,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode == AGX_LOD_MODE_LOD_GRAD;
             const bool gpu1_fixed_gather = enc == AGX_ISA_ENCODING_AGX3C &&
                (agx3_g17g_runtime_gather(I) || agx3_g17g_array_gather(I) ||
-                agx3_g17g_cube_gather(I));
+                agx3_g17g_cube_gather(I) ||
+                (ctx->key->dev.emit_agx3d && agx3_g18g_indirect_gather(I) &&
+                 I->offset && !I->offset_xyz));
+            const bool g18g_indirect_gather = ctx->key->dev.emit_agx3d &&
+               agx3_g18g_indirect_gather(I);
             const bool g18g_colour_level_sample = ctx->key->dev.emit_agx3d &&
                (agx3_g18g_colour_sample(I) || agx3_g18g_binding_sample(I));
             if (g18g_gradient_sample && ctx->stage != MESA_SHADER_VERTEX &&
@@ -12697,7 +12723,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                     : staged_compare ? 6
                     : (enc == AGX_ISA_ENCODING_AGX3B ||
                        (enc == AGX_ISA_ENCODING_AGX3C &&
-                        agx3_g17g_basic_gather(I))) ? 4
+                        (agx3_g17g_basic_gather(I) || g18g_indirect_gather))) ? 4
                                                    : I->src[0].value + 4);
             uint16_t bank_base = published ? resource_bases[published_resource] : 0;
             if (enc == AGX_ISA_ENCODING_AGX3B && !published) {
@@ -12795,7 +12821,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * assignment wraps onto a slot that is still outstanding once
              * eight async results are in flight; retire that producer here
              * so restaging the block cannot overtake its consumer. */
-            if (enc == AGX_ISA_ENCODING_AGX3C && agx3_g17g_staged_block(I) &&
+            if (enc == AGX_ISA_ENCODING_AGX3C &&
+                agx3_g17g_staged_block(I, ctx->key->dev.emit_agx3d) &&
                 (outstanding_here & (1u << (slot - 1))) &&
                 !(sample_wait & (1u << (slot - 1))) &&
                 !agx3_retire_slots_noop(emission, enc,
@@ -12807,7 +12834,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    I->gather != AGX_GATHER_NONE) &&
                  !(enc == AGX_ISA_ENCODING_AGX3C &&
                    (vertex_sample_stage || compute_sample_stage) &&
-                   (agx3_g17g_basic_gather(I) || gpu1_fixed_gather))) ||
+                   (agx3_g17g_basic_gather(I) || gpu1_fixed_gather ||
+                    g18g_indirect_gather))) ||
                 /* Keep the pixel-entry gate after all native coordinate
                  * staging and immediately before SMP, matching Apple. */
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
@@ -12851,7 +12879,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* A G17G staged block sits at 8 * (slot - 1); the footprint must
              * reach past the highest half its stagers write. */
             const uint16_t g17g_block_base =
-               enc == AGX_ISA_ENCODING_AGX3C && agx3_g17g_staged_block(I)
+               enc == AGX_ISA_ENCODING_AGX3C &&
+               agx3_g17g_staged_block(I, ctx->key->dev.emit_agx3d)
                   ? 8u * (slot - 1)
                   : 0;
             const unsigned sample_staging_end =

@@ -386,6 +386,19 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
       (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
 
+   /* Native685r4 covers 2D gathers through register and uniform samplers,
+    * including raw depth, comparisons and constant/runtime offsets. The
+    * sampler descriptor selector is orthogonal to the gather publication. */
+   const bool gpu1_indirect_gather = enc == AGX_ISA_ENCODING_AGX3C &&
+      d->gather != AGX3_TEX_GATHER_NONE && !d->array && !d->cube &&
+      !d->three_d && d->width == AGX3_TEX_W32 && d->mask == 15 &&
+      !d->offset_staged && !d->query_lod && !d->min_lod && !d->sparse &&
+      d->lod == AGX3_TEX_LOD_AUTO &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
+      (d->sampler_kind == AGX3_TEX_OPERAND_REGISTER ||
+       d->sampler_kind == AGX3_TEX_OPERAND_UNIFORM);
+
    /* Native371/403/408/413 cover ordinary, runtime-offset, constant-offset
     * and cube gathers, including their distinct array/face publications. */
    const bool gpu1_gather = enc == AGX_ISA_ENCODING_AGX3C &&
@@ -397,7 +410,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       d->lod == AGX3_TEX_LOD_AUTO &&
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
       (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
-      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
+      ((d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE ||
+       gpu1_indirect_gather);
 
    /* g18-gradient-reference, compiled independently for G17G and G18G:
     * ordinary 2D/array gradients carry f139=5 in both stages, with an
@@ -616,6 +630,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    const unsigned sk = d->sampler_kind ? d->sampler_kind : 1;
    if (tk > 3 || sk > 3 ||
        ((tk != 1 || sk != 1) && enc != AGX_ISA_ENCODING_AGX3B && !gpu1_binding &&
+        !gpu1_indirect_gather &&
         !((tk == AGX3_TEX_OPERAND_UNIFORM ||
            tk == AGX3_TEX_OPERAND_REGISTER) && sk == tk && d->array &&
           d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0)) ||

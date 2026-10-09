@@ -199,6 +199,9 @@ struct PACKED agx_stage_uniforms {
    /* Logical API colour returned after texture swizzling. */
    uint32_t custom_border[PIPE_MAX_SAMPLERS][4];
 
+   /* PIPE_FUNC_* in bits 0..2; bit 3 clamps a fixed-point depth reference. */
+   uint16_t custom_border_compare[PIPE_MAX_SAMPLERS];
+
    /* LOD bias as float16 */
    uint16_t lod_bias[PIPE_MAX_SAMPLERS];
 
@@ -1205,7 +1208,9 @@ struct agx_lower_bindings_options {
 
 bool agx_nir_lower_bindings(nir_shader *shader,
                        struct agx_lower_bindings_options *options);
-bool agx_nir_lower_custom_border_g17p(nir_shader *shader);
+bool agx_nir_lower_custom_border_g17p(nir_shader *shader,
+                                     bool shadow_gather,
+                                     bool *fully_supported);
 bool agx_nir_rebind_g17p_texture_crawls(nir_shader *shader);
 bool agx_nir_lower_g17p_storage_records(nir_shader *shader,
                                         unsigned record_size_B);

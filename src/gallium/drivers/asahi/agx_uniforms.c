@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "pipe/p_state.h"
+#include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "util/macros.h"
 #include "agx_device.h"
@@ -95,18 +96,20 @@ agx_set_sampler_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
    struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
    struct agx_device *dev = agx_device(ctx->base.screen);
 
-   if (dev->chip == AGX_CHIP_G17P) {
+   const bool custom_border = dev->chip == AGX_CHIP_G17P ||
+                              dev->chip == AGX_CHIP_G18G;
+   if (custom_border) {
       for (unsigned s = 0; s < PIPE_MAX_SAMPLERS; ++s) {
          unif->custom_border_sampler_handle[s] = -1;
          memset(unif->custom_border[s], 0, sizeof(unif->custom_border[s]));
+         unif->custom_border_compare[s] = 0;
       }
    }
 
    u_foreach_bit(s, st->valid_samplers) {
       unif->lod_bias[s] = st->samplers[s]->lod_bias_as_fp16;
 
-      if (dev->chip == AGX_CHIP_G17P &&
-          st->samplers[s]->uses_custom_border) {
+      if (custom_border && st->samplers[s]->uses_custom_border) {
          uint16_t handle;
          if (!agx_gallium_g17p_custom_border_handle(dev->chip, s, &handle))
             UNREACHABLE("G17P custom-border sampler index outside table");
@@ -114,6 +117,13 @@ agx_set_sampler_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
          unif->custom_border_sampler_handle[s] = handle;
          memcpy(unif->custom_border[s], st->samplers[s]->custom_border,
                 sizeof(unif->custom_border[s]));
+         const struct pipe_sampler_state *state = &st->samplers[s]->base;
+         const bool fixed_depth =
+            util_format_is_depth_or_stencil(state->border_color_format) &&
+            state->border_color_format != PIPE_FORMAT_Z32_FLOAT &&
+            state->border_color_format != PIPE_FORMAT_Z32_FLOAT_S8X24_UINT;
+         unif->custom_border_compare[s] = state->compare_func |
+                                         (fixed_depth ? 8 : 0);
       }
    }
 

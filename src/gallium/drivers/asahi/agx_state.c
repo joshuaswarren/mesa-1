@@ -2524,13 +2524,15 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
               _mesa_hash_table_num_entries(so->variants));
 
    const bool custom_borders =
-      dev->chip == AGX_CHIP_G17P &&
+      (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G18G) &&
       ((so->type == MESA_SHADER_FRAGMENT && key_->fs.custom_borders) ||
        ((so->type == MESA_SHADER_VERTEX ||
          so->type == MESA_SHADER_TESS_EVAL) &&
         key_->vs.custom_borders));
+   bool custom_border_supported = true;
    if (custom_borders)
-      NIR_PASS(_, nir, agx_nir_lower_custom_border_g17p);
+      NIR_PASS(_, nir, agx_nir_lower_custom_border_g17p,
+               dev->chip == AGX_CHIP_G18G, &custom_border_supported);
 
    struct agx_unlinked_uvs_layout uvs = {0};
    bool translucent = false;
@@ -2766,7 +2768,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       dev, nir, &pctx->debug, so->type, false, so->type != MESA_SHADER_FRAGMENT,
       false, 0, so->type == MESA_SHADER_FRAGMENT ? key_->fs.nr_samples : 0,
       attrib_components_read);
-   compiled->g17p_custom_border_emulation = custom_borders;
+   compiled->g17p_custom_border_emulation =
+      custom_borders &&
+      (dev->chip != AGX_CHIP_G18G || custom_border_supported);
 
    if (so->type == MESA_SHADER_FRAGMENT) {
       /* XXX: don't replicate this all over the driver */
@@ -4395,7 +4399,8 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
 
    /* Clamp to binding table maximum, anything larger will be bindless */
    return agx_translate_sampler_state_count(MIN2(sampler_count(ctx, stage), 16),
-                                            dev->chip != AGX_CHIP_G17P &&
+                                             dev->chip != AGX_CHIP_G17P &&
+                                                !agx_chip_m5_paths(dev->chip) &&
                                                ctx->stage[stage].custom_borders);
 }
 
@@ -11676,8 +11681,9 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
          if (!cs->g17p_texture_resources ||
              !batch->stage_uniforms[stage].texture_base ||
              (!cs->g17p_storage_write &&
-              (!batch->samplers[stage] ||
-               batch->ctx->stage[stage].custom_borders)))
+               (!batch->samplers[stage] ||
+                (batch->ctx->stage[stage].custom_borders &&
+                 !cs->g17p_custom_border_emulation))))
             {
                agx_native_descriptor_rejected(batch, "compute texture resources");
                return;

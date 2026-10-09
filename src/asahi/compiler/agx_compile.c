@@ -9064,6 +9064,12 @@ agx3_order_g18_msaa_tile_ops(agx_context *ctx)
 static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
+   /* This optional pass cannot affect a non-fragment program or a preamble.
+    * Returning false means no transformation, not a refused shader. Avoid
+    * reporting these ordinary calls as failed MRT admission. */
+   if (ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble)
+      return false;
+
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
        ctx->key->dev.emit_agx3d && ctx->stage == MESA_SHADER_FRAGMENT &&
        ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&

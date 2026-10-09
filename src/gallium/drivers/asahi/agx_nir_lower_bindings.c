@@ -465,15 +465,82 @@ has_custom_border(nir_builder *b, nir_tex_instr *tex)
 {
    return nir_build_texture_query(b, tex,
                                   nir_texop_has_custom_border_color_agx, 1,
-                                  nir_type_bool1, false, false);
+                                   nir_type_bool1, false, false);
+}
+
+struct custom_border_options {
+   bool shadow_gather;
+   bool fully_supported;
+};
+
+static nir_tex_instr *
+raw_depth_gather(nir_builder *b, const nir_tex_instr *tex, bool clamp_to_zero)
+{
+   nir_tex_instr *raw =
+      nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
+   /* Source removal updates SSA use lists. Register the clone's uses before
+    * removing its comparator, rather than moving unlinked sources. */
+   nir_builder_instr_insert(b, &raw->instr);
+   raw->is_shadow = false;
+   raw->is_new_style_shadow = false;
+   nir_tex_instr_remove_src(raw,
+                           nir_tex_instr_src_index(raw, nir_tex_src_comparator));
+   if (clamp_to_zero)
+      raw->backend_flags |= AGX_TEXTURE_FLAG_CLAMP_TO_0;
+   return raw;
+}
+
+static nir_def *
+custom_border_shadow_gather(nir_builder *b, nir_tex_instr *tex,
+                            nir_def *ordinary)
+{
+   /* Comparison results cannot identify the border: an interior depth can
+    * compare identically to either native border value. Raw gathers with the
+    * two companion samplers differ only on lanes outside the image. Compare
+    * their bits so an interior NaN is not mistaken for the border. */
+   nir_tex_instr *one = raw_depth_gather(b, tex, false);
+   nir_tex_instr *zero = raw_depth_gather(b, tex, true);
+   nir_def *interior = nir_ieq(b, &one->def, &zero->def);
+
+   struct agx_stage_uniforms *s = NULL;
+   nir_def *packed = load_stage_array(
+      b, sampler_index(b, tex), 1, 16, (uintptr_t)&s->custom_border_compare,
+      sizeof(s->custom_border_compare[0]), 2, PIPE_MAX_SAMPLERS);
+   packed = nir_u2u32(b, packed);
+   nir_def *func = nir_iand_imm(b, packed, 7);
+   nir_def *fixed = nir_ine_imm(b, nir_iand_imm(b, packed, 8), 0);
+   nir_def *ref = tex->src[nir_tex_instr_src_index(
+      tex, nir_tex_src_comparator)].src.ssa;
+   nir_def *depth = nir_channel(b, query_custom_border(b, tex), 0);
+
+   /* OpenGL 4.6 section 8.23 clamps both operands for fixed-point depth;
+    * floating-point depth preserves their full range. */
+   ref = nir_bcsel(b, fixed, nir_fsat(b, ref), ref);
+   depth = nir_bcsel(b, fixed, nir_fsat(b, depth), depth);
+   nir_def *compared = nir_imm_false(b);
+   for (unsigned f = PIPE_FUNC_LESS; f < PIPE_FUNC_ALWAYS; ++f) {
+      nir_def *value = nir_compare_func(b, (enum compare_func)f, ref, depth);
+      compared = nir_bcsel(b, nir_ieq_imm(b, func, f), value, compared);
+   }
+   compared = nir_ior(b, compared, nir_ieq_imm(b, func, PIPE_FUNC_ALWAYS));
+   nir_def *border = nir_replicate(b, nir_b2f32(b, compared), 4);
+   return nir_bcsel(b, interior, ordinary, border);
 }
 
 static bool
-lower_custom_border(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+lower_custom_border(nir_builder *b, nir_tex_instr *tex, void *data)
 {
-   if (!nir_tex_instr_need_sampler(tex) || nir_tex_instr_is_query(tex) ||
-       tex->is_shadow)
+   struct custom_border_options *options = data;
+   if (!nir_tex_instr_need_sampler(tex) || nir_tex_instr_is_query(tex))
       return false;
+
+   if (tex->is_shadow &&
+       (!options->shadow_gather || tex->op != nir_texop_tg4)) {
+      /* Keep admission closed for comparison filtering until its fractional
+       * border contribution is implemented; a gather has four exact lanes. */
+      options->fully_supported = false;
+      return false;
+   }
 
    b->cursor = nir_after_instr(&tex->instr);
    nir_def *has_custom = has_custom_border(b, tex);
@@ -484,7 +551,9 @@ lower_custom_border(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 
    nir_push_if(b, has_custom);
    nir_def *replaced;
-   {
+   if (tex->is_shadow) {
+      replaced = custom_border_shadow_gather(b, tex, clamp_to_one);
+   } else {
       nir_instr *zero_instr = nir_instr_clone(b->shader, &tex->instr);
       nir_builder_instr_insert(b, zero_instr);
       nir_tex_instr *tex_zero = nir_instr_as_tex(zero_instr);
@@ -512,15 +581,23 @@ lower_custom_border(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 }
 
 bool
-agx_nir_lower_custom_border_g17p(nir_shader *shader)
+agx_nir_lower_custom_border_g17p(nir_shader *shader, bool shadow_gather,
+                                bool *fully_supported)
 {
+   struct custom_border_options options = {
+      .shadow_gather = shadow_gather,
+      .fully_supported = true,
+   };
    bool progress = nir_shader_tex_pass(shader, lower_custom_border,
-                                       nir_metadata_none, NULL);
+                                       nir_metadata_none, &options);
+   *fully_supported = options.fully_supported;
 
    if (progress) {
       bool uses_bindless_samplers = false;
       struct agx_lower_bindings_options options = {
          .uses_bindless_samplers = &uses_bindless_samplers,
+         /* Native descriptor operands are represented by one 64-bit AIR
+          * source, even though the value names a 16-bit table entry. */
          .g17p_native_sampler_handles = true,
          .bindful_sampler_count = AGX_GALLIUM_G17P_API_SAMPLERS,
       };
