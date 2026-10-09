@@ -120,6 +120,90 @@ protected:
    }
 };
 
+/* A conversion chain through a type narrower than its source rounds, so
+ * float(float16_t(x)) must keep the narrowing conversion. The pass leaves the
+ * original (now unused) instructions in place, so look at the value that the
+ * store actually uses after the pass, not at the instruction that was built.
+ */
+static nir_alu_instr *
+alu_of(nir_def *def, nir_op op)
+{
+   nir_instr *instr = nir_def_instr(def);
+   if (instr->type != nir_instr_type_alu)
+      return NULL;
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   return alu->op == op ? alu : NULL;
+}
+
+static nir_def *
+stored_value(nir_shader *shader)
+{
+   nir_def *value = NULL;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_store_deref)
+               value = intr->src[1].ssa;
+         }
+      }
+   }
+
+   return value;
+}
+
+TEST_F(nir_opt_algebraic_test, float_roundtrip_through_f16_is_kept)
+{
+   nir_def *x = nir_channel(b, nir_load_global_invocation_id(b, 32), 0);
+   /* a float that is not itself a conversion, so no other chain rule applies */
+   nir_def *f = nir_fmul_imm(b, nir_u2f32(b, x), 0.1);
+   nir_def *r = nir_f2f32(b, nir_f2f16(b, f));
+   nir_build_store_deref(b, &nir_build_deref_var(b, res_var)->def, r, 0x1);
+
+   run_pass();
+
+   nir_def *v = stored_value(b->shader);
+   ASSERT_NE(v, nullptr);
+   nir_alu_instr *up = alu_of(v, nir_op_f2f32);
+   ASSERT_NE(up, nullptr);
+   EXPECT_NE(alu_of(up->src[0].src.ssa, nir_op_f2f16), nullptr);
+}
+
+TEST_F(nir_opt_algebraic_test, int_through_f16_is_kept)
+{
+   nir_def *x = nir_channel(b, nir_load_global_invocation_id(b, 32), 0);
+   nir_def *r = nir_f2f32(b, nir_u2f16(b, x));
+   nir_build_store_deref(b, &nir_build_deref_var(b, res_var)->def, r, 0x1);
+
+   run_pass();
+
+   nir_def *v = stored_value(b->shader);
+   ASSERT_NE(v, nullptr);
+   nir_alu_instr *up = alu_of(v, nir_op_f2f32);
+   ASSERT_NE(up, nullptr);
+   EXPECT_NE(alu_of(up->src[0].src.ssa, nir_op_u2f16), nullptr);
+}
+
+TEST_F(nir_opt_algebraic_test, float_to_int_through_f16_is_kept)
+{
+   nir_def *x = nir_channel(b, nir_load_global_invocation_id(b, 32), 0);
+   /* a float that is not itself a conversion, so no other chain rule applies */
+   nir_def *f = nir_fmul_imm(b, nir_u2f32(b, x), 0.1);
+   nir_def *r = nir_f2u32(b, nir_f2f16(b, f));
+   nir_build_store_deref(b, &nir_build_deref_var(b, res_var)->def, r, 0x1);
+
+   run_pass();
+
+   nir_def *v = stored_value(b->shader);
+   ASSERT_NE(v, nullptr);
+   nir_alu_instr *cvt = alu_of(v, nir_op_f2u32);
+   ASSERT_NE(cvt, nullptr);
+   EXPECT_NE(alu_of(cvt->src[0].src.ssa, nir_op_f2f16), nullptr);
+}
+
 TEST_F(nir_opt_algebraic_test, umod_pow2_src2)
 {
    for (int i = 0; i <= 9; i++)

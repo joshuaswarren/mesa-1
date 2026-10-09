@@ -1267,16 +1267,24 @@ for s in [16, 32, 64]:
        (('fadd', ('b2f{}'.format(s), ('flt', 0.0, 'a@{}'.format(s))), ('fneg', ('b2f{}'.format(s), ('flt', 'a@{}'.format(s), 0.0)))), ('fsign', a), match_fsign_cond),
        (('iadd', ('b2i{}'.format(s), ('flt', 0, 'a@{}'.format(s))), ('ineg', ('b2i{}'.format(s), ('flt', 'a@{}'.format(s), 0)))), ('f2i{}'.format(s), ('fsign', a)), match_fsign_cond),
 
-       # float? -> float? -> floatS ==> float? -> floatS
-       (('~f2f{}'.format(s), ('f2f', a)), ('f2f{}'.format(s), a)),
-
-       # int? -> float? -> floatS ==> int? -> floatS
-       (('~f2f{}'.format(s), ('u2f', a)), ('u2f{}'.format(s), a)),
-       (('~f2f{}'.format(s), ('i2f', a)), ('i2f{}'.format(s), a)),
-
-       # float? -> float? -> intS ==> float? -> intS
-       (('~f2u{}'.format(s), ('f2f', a)), ('f2u{}'.format(s), a)),
-       (('~f2i{}'.format(s), ('f2f', a)), ('f2i{}'.format(s), a)),
+       # A chain through a type narrower than its source (or, for integers,
+       # narrower than the result) rounds, so folding it away changes the
+       # value: float(float16_t(x)) must not become x. Only fold chains whose
+       # middle type is at least as wide as the type it converts from.
+       #
+       # float? -> floatM -> floatS ==> float? -> floatS, source N <= M
+       # int? -> floatM -> floatS ==> int? -> floatS, M >= S
+       # float? -> floatM -> intS ==> float? -> intS, source N <= M
+       *[(('~f2f{}'.format(s), ('f2f{}'.format(M), 'a@{}'.format(N))), ('f2f{}'.format(s), a))
+         for M in [16, 32, 64] for N in [16, 32, 64] if N <= M],
+       *[(('~f2u{}'.format(s), ('f2f{}'.format(M), 'a@{}'.format(N))), ('f2u{}'.format(s), a))
+         for M in [16, 32, 64] for N in [16, 32, 64] if N <= M],
+       *[(('~f2i{}'.format(s), ('f2f{}'.format(M), 'a@{}'.format(N))), ('f2i{}'.format(s), a))
+         for M in [16, 32, 64] for N in [16, 32, 64] if N <= M],
+       *[(('~f2f{}'.format(s), ('u2f{}'.format(M), a)), ('u2f{}'.format(s), a))
+         for M in [16, 32, 64] if M >= s],
+       *[(('~f2f{}'.format(s), ('i2f{}'.format(M), a)), ('i2f{}'.format(s), a))
+         for M in [16, 32, 64] if M >= s],
 
        # HLSL's sign function returns an integer
        (('i2f{}'.format(s), ('f2i', ('fsign', 'a@{}'.format(s)))), ('fsign', a)),
