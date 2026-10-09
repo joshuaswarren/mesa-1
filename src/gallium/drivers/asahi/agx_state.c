@@ -9079,7 +9079,10 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
                         (dev->chip != AGX_CHIP_G18G ||
                          (batch->key.nr_cbufs != 1 && !attachmentless &&
                           !agx_g18g_word_mrt_mask(&batch->tilebuffer_layout)) ||
-                        batch->key.zsbuf.texture ||
+                        (batch->key.zsbuf.texture &&
+                         (batch->tilebuffer_layout.nr_samples != 1 ||
+                          (zs_format != PIPE_FORMAT_Z32_FLOAT &&
+                           zs_format != PIPE_FORMAT_Z32_FLOAT_S8X24_UINT))) ||
                         (batch->tilebuffer_layout.nr_samples != 1 &&
                          !agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout))),
                    "layered render");

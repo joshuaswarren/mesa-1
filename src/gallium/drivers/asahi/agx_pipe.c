@@ -1307,6 +1307,33 @@ build_timestamp_offset(struct agx_batch *batch, unsigned offset)
 #define timestamp_offset(batch, offs)                                          \
    build_timestamp_offset(batch, offsetof(struct agx_timestamps, offs))
 
+/* Native G18 ZLS arrays use either 16-KiB pages (bit 0) or 128-byte
+ * cachelines. The upper field stores units minus one. In particular, a
+ * 128-byte layer is encoded as zero; it is not a missing array stride.
+ * Witness: layered-zls native682, including sub-page Z32 and S8 arrays. */
+static uint32_t
+agx_zls_layer_stride(struct agx_device *dev, const struct ail_layout *layout,
+                     bool single_layer)
+{
+   if (layout->policy == AIL_LAYOUT_POLICY_M5 && single_layer)
+      return 0;
+
+   if (dev->chip == AGX_CHIP_G18G && layout->policy == AIL_LAYOUT_POLICY_M5) {
+      uint64_t stride = layout->layer_stride_B;
+      bool pages = util_is_aligned(stride, AIL_PAGESIZE);
+      unsigned unit = pages ? AIL_PAGESIZE : AIL_CACHELINE;
+      assert(stride && util_is_aligned(stride, unit));
+      assert((stride / unit - 1) <= (UINT32_MAX >> 14));
+      return ((stride / unit - 1) << 14) | pages;
+   }
+
+   assert((layout->depth_px == 1 ||
+           util_is_aligned(layout->layer_stride_B, AIL_PAGESIZE)) &&
+          "Page aligned Z/S layers");
+   unsigned pages = layout->layer_stride_B / AIL_PAGESIZE;
+   return ((pages - 1) << 14) | 1;
+}
+
 static void
 agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
            struct agx_pool *pool, struct agx_batch *batch,
@@ -1369,18 +1396,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
          c->depth.base = agx_map_texture_gpu(zres, first_layer) +
                          ail_get_level_offset_B(&zres->layout, level);
 
-         /* Native M5-layout ZLS uses no array stride for a single selected
-          * layer. Small array layers need not be page-aligned; the base above
-          * already selects the layer. Layered commands retain the page ABI. */
-         if (zres->layout.policy == AIL_LAYOUT_POLICY_M5 && single_layer) {
-            c->depth.stride = 0;
-         } else {
-            assert((zres->layout.depth_px == 1 ||
-                    util_is_aligned(zres->layout.layer_stride_B, AIL_PAGESIZE)) &&
-                   "Page aligned Z layers");
-            unsigned stride_pages = zres->layout.layer_stride_B / AIL_PAGESIZE;
-            c->depth.stride = ((stride_pages - 1) << 14) | 1;
-         }
+         c->depth.stride = agx_zls_layer_stride(dev, &zres->layout, single_layer);
 
          if (zres->layout.compressed) {
             c->depth.comp_base =
@@ -1412,15 +1428,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
          c->stencil.base = agx_map_texture_gpu(sres, first_layer) +
                            ail_get_level_offset_B(&sres->layout, level);
 
-         if (sres->layout.policy == AIL_LAYOUT_POLICY_M5 && single_layer) {
-            c->stencil.stride = 0;
-         } else {
-            assert((sres->layout.depth_px == 1 ||
-                    util_is_aligned(sres->layout.layer_stride_B, AIL_PAGESIZE)) &&
-                   "Page aligned S layers");
-            unsigned stride_pages = sres->layout.layer_stride_B / AIL_PAGESIZE;
-            c->stencil.stride = ((stride_pages - 1) << 14) | 1;
-         }
+         c->stencil.stride = agx_zls_layer_stride(dev, &sres->layout, single_layer);
 
          if (sres->layout.compressed) {
             c->stencil.comp_base =
