@@ -269,3 +269,106 @@ agx_pressure_schedule(agx_context *ctx)
 
    ralloc_free(memctx);
 }
+
+/*
+ * Latency hoist (compute): move each non-coherent device_load
+ * up past ALU, threadgroup barriers and workgroup-memory accesses, to just
+ * after the last instruction that produces its sources, but never more than
+ * HOIST_WINDOW instructions. The load then overlaps that work instead of
+ * being issued right before its first use. Stops at anything that could
+ * order device memory: device stores, atomics, memory barriers, coherent
+ * loads, image ops, control flow.
+ */
+#define HOIST_WINDOW 64
+
+/*
+ * A uniform_store writes at most four 16-bit uniform registers starting at its
+ * index and nothing else. A load may move above it unless one of the load's
+ * uniform sources overlaps [index, index + 16). The window is wider than the
+ * store, which keeps the check conservative. An index that is not an
+ * immediate is never crossed.
+ */
+static bool
+hoist_uniform_store_conflict(const agx_instr *store, const agx_instr *load)
+{
+   if (store->src[1].type != AGX_INDEX_IMMEDIATE)
+      return true;
+
+   unsigned lo = store->src[1].value, hi = lo + 16;
+
+   agx_foreach_src(load, s) {
+      agx_index src = load->src[s];
+      if (src.type != AGX_INDEX_UNIFORM)
+         continue;
+
+      unsigned src_lo = src.value, src_hi = src_lo + agx_index_size_16(src);
+      if (src_lo < hi && lo < src_hi)
+         return true;
+   }
+
+   return false;
+}
+
+static bool
+hoist_can_cross(const agx_instr *P, const agx_instr *load)
+{
+   if (P->op == AGX_OPCODE_THREADGROUP_BARRIER ||
+       P->op == AGX_OPCODE_LOCAL_LOAD || P->op == AGX_OPCODE_LOCAL_STORE)
+      return true;
+
+   if (P->op == AGX_OPCODE_DEVICE_LOAD)
+      return !P->coherent;
+
+   if (P->op == AGX_OPCODE_UNIFORM_STORE)
+      return !hoist_uniform_store_conflict(P, load);
+
+   /* Anything else must be pure: free of side effects and reorderable. The
+    * default schedule class is none, so the class alone also admits
+    * doorbell, stack_map and similar.
+    */
+   const struct agx_opcode_info *info = &agx_opcodes_info[P->op];
+   return info->schedule_class == AGX_SCHEDULE_CLASS_NONE &&
+          info->can_reorder && info->can_eliminate;
+}
+
+void
+agx_hoist_loads(agx_context *ctx)
+{
+   agx_foreach_block(ctx, block) {
+      agx_foreach_instr_in_block_safe(block, I) {
+         if (instr_after_logical_end(I))
+            break;
+
+         if (I->op != AGX_OPCODE_DEVICE_LOAD || I->coherent)
+            continue;
+
+         agx_instr *target = NULL;
+         unsigned n = 0;
+
+         for (agx_instr *P = list_entry(I->link.prev, agx_instr, link);
+              &P->link != &block->instructions && n < HOIST_WINDOW;
+              P = list_entry(P->link.prev, agx_instr, link), ++n) {
+
+            if (!hoist_can_cross(P, I))
+               break;
+
+            bool dep = false;
+            agx_foreach_ssa_dest(P, d) {
+               agx_foreach_ssa_src(I, s) {
+                  if (I->src[s].value == P->dest[d].value)
+                     dep = true;
+               }
+            }
+            if (dep)
+               break;
+
+            target = P;
+         }
+
+         if (target) {
+            agx_remove_instruction(I);
+            list_addtail(&I->link, &target->link);
+         }
+      }
+   }
+}

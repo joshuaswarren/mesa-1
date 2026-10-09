@@ -105,6 +105,20 @@ hk_large_constants(void)
    return debug_get_bool_option("HK_LARGE_CONSTANTS", true);
 }
 
+/* Compute load hoist: on by default on generation 13 (M1 family), opt-in on
+ * generation 14 with AGX_HOIST_LOADS=1, never on other generations.
+ * AGX_HOIST_LOADS=0 turns it off everywhere. Part of the compiler flags, so
+ * toggling it never serves a shader cached under the other setting.
+ */
+static bool
+hk_hoist_loads_enabled(const struct hk_physical_device *pdev)
+{
+   const unsigned gen = pdev->dev.params.gpu_generation;
+
+   return (gen == 13 || gen == 14) &&
+          debug_get_bool_option("AGX_HOIST_LOADS", gen == 13);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -115,6 +129,7 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)(getenv("AGX_HWMAT_VEC2_OFF") != NULL) << 34) |
          ((uint64_t)(getenv("AGX_LOCAL_FOLD_OFF") != NULL) << 35) |
          ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36) |
+         ((uint64_t)hk_hoist_loads_enabled(pdev) << 37) |
          ((uint64_t)hk_large_constants() << 40);
 }
 
@@ -1209,6 +1224,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       .promote_constants = true,
       .promote_textures = true,
    };
+
+   backend_key.dev.hoist_loads =
+      hk_hoist_loads_enabled(hk_device_physical(dev));
 
    /* For now, sample shading is always dynamic. Indicate that. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&

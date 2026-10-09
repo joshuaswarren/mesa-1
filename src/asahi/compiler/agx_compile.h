@@ -275,6 +275,12 @@ struct agx_device_key {
     */
    bool g13;
 
+   /* Hoist device loads of compute shaders above independent ALU, barriers
+    * and workgroup memory accesses (agx_hoist_loads). Measured on G13 and
+    * G14 only.
+    */
+   bool hoist_loads;
+
    /* Index global accesses whose lea shift is below the format shift (the
     * cooperative-matrix loads) by the scaled offset instead of a 64-bit
     * address. Measured per device: on for the single-cluster G13 (M1), off

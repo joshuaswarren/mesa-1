@@ -3574,6 +3574,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       AGX_PASS(ctx, agx_pressure_schedule);
    }
 
+   if (nir->info.stage == MESA_SHADER_COMPUTE && ctx->key->dev.hoist_loads) {
+      AGX_PASS(ctx, agx_hoist_loads);
+   }
+
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
