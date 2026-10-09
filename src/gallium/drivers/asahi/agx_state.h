@@ -210,8 +210,9 @@ struct PACKED agx_stage_uniforms {
    uint64_t texture_buffer_address[PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
    /* G18 bound raw image addresses: base lo/hi, linear row pitch B, tiled
-    * stride el, tile width/height el, layer stride B lo/hi, sample count. */
-   uint32_t image_address_metadata[PIPE_MAX_SHADER_IMAGES][9];
+    * stride el, tile width/height el, layer stride B lo/hi, sample count,
+    * actual bound-view texel size B. */
+   uint32_t image_address_metadata[PIPE_MAX_SHADER_IMAGES][10];
 };
 
 /* In the architecture, there are 512 uniform registers, each 16-bits. In a

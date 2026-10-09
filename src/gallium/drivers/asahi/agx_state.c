@@ -4513,7 +4513,7 @@ agx_upload_spilled_rt_descriptors(void *out, struct agx_batch *batch,
 /* The native PBE has no software atomic address fields. Describe the actual
  * uncompressed view allocation separately, after resource legalization. */
 static bool
-agx_image_address_metadata(uint32_t out[9], const struct pipe_image_view *view)
+agx_image_address_metadata(uint32_t out[10], const struct pipe_image_view *view)
 {
    struct agx_resource *rsrc = agx_resource(view->resource);
    const struct ail_layout *layout = &rsrc->layout;
@@ -4569,6 +4569,7 @@ agx_image_address_metadata(uint32_t out[9], const struct pipe_image_view *view)
    out[6] = layout->layer_stride_B;
    out[7] = layout->layer_stride_B >> 32;
    out[8] = samples;
+   out[9] = bytes;
    return true;
 }
 
@@ -4788,7 +4789,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
          cs->so->info.image_pbe_mask & BITFIELD64_BIT(i);
 
       if (cs->so->info.image_address_mask & BITFIELD64_BIT(i)) {
-         uint32_t metadata[9];
+         uint32_t metadata[10];
          if (!agx_image_address_metadata(metadata, view) ||
              (view->resource->nr_samples > 1 && !agx_g18_msaa4(dev))) {
             agx_native_descriptor_rejected(batch, "G18G raw image layout");

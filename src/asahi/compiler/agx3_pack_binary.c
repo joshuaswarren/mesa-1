@@ -1477,10 +1477,8 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
       I->src[3].value <= 252 &&
       !(I->src[3].cache && (I->src[3].discard || I->src[3].kill)) &&
       agx3_tex_plain_uniform64(I->src[2]);
-   /* Native G18 texture arrays use the same scalar f75=1 profile as indexed
-    * image reads (native549/633). Gallium rebinding supplies the zero-extended
-    * native table index and sampler zero; the old descriptor byte offset
-    * with a uniform base is deliberately not admitted here. */
+   /* Gallium rebinding supplies the zero-extended native table index and
+    * sampler zero; the old descriptor byte offset is not admitted here. */
    const bool native_indexed_fetch = I->op == AGX_OPCODE_TEXTURE_LOAD &&
       !immediate && I->src[3].size == AGX_SIZE_64 &&
       (agx3_tex_plain_reg(I->src[3]) ||
@@ -1488,9 +1486,11 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
       agx3_tex_imm(I->src[2], 0);
    const bool g18g_indexed_scalar = g18g &&
       (bindless_image || native_indexed_fetch) &&
-      I->dim == AGX_DIM_2D && I->mask == 1 &&
-      (I->lod_mode == AGX_LOD_MODE_AUTO_LOD || immediate_lod) &&
-      agx3_tex_imm(I->src[1], 0);
+      (I->dim == AGX_DIM_2D || array || three_d || ms_2d || ms_array) &&
+      I->mask == 1 &&
+      (register_lod ||
+       ((I->lod_mode == AGX_LOD_MODE_AUTO_LOD || immediate_lod) &&
+        agx3_tex_imm(I->src[1], 0)));
    /* Apple's G17P lane-indexed image read publishes coordinates and uint LOD
     * on staging slot 2, then issues the texture result on slot 1. Keep those
     * two independent scoreboard domains; reusing slot 1 for both is not a
@@ -1672,7 +1672,10 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
             : g18g
                ? agx3_tex_stage_typed_lod_g18g(
                     staging_coord, I->src[1].value, staging_slot,
-                    staging_wait, I->src[1].cache, I->src[1].discard,
+                    /* Native539 retains live integer levels without the
+                     * optional cache hint; native659 uses the same uncached
+                     * publication. Preserve liveness when dropping the hint. */
+                    staging_wait, false, I->src[1].discard,
                     AGX3_TEX_LEVEL_INTEGER, lod, &lod_len)
                : agx3_tex_stage_typed_lod(
                     enc, I->src[1].value, staging_slot, staging_wait,
@@ -2798,7 +2801,7 @@ agx3_g18g_colour_sample(const agx_instr *I)
           (agx3_tex_imm(I->src[1], 0) ||
            (agx3_tex_plain_reg(I->src[1]) &&
             I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1)) &&
-          I->dest[0].size == AGX_SIZE_32 && I->mask == 15 &&
+          I->dest[0].size == AGX_SIZE_32 && (I->mask == 1 || I->mask == 15) &&
           !I->shadow && !I->offset && !I->sparse && !I->query_lod &&
           I->gather == AGX_GATHER_NONE && !I->agx3_tex_coords_staged &&
           !agx_texture_resource(I);

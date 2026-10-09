@@ -117,15 +117,15 @@ agx_set_sampler_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
       }
    }
 
-   /* Materialize indirect sampler handles. AGX2 uses its global heap; G17P
-    * indexes the native per-stage table uploaded with the graphics program. */
+   /* Materialize indirect sampler handles using the same ABI as binding
+    * lowering and agx_upload_samplers(). Native tables reserve slot zero for
+    * texel fetch; AGX2 uses its separate global heap. */
    if (st->shader && st->shader->uses_bindless_samplers) {
       u_foreach_bit(s, st->valid_samplers) {
-         if (dev->chip == AGX_CHIP_G17P) {
-            /* The G17P graphics Ioto program publishes the per-stage HAL200
-             * table directly. Indirect operands therefore name the same
-             * i+1 entries as immediate operands; the old 28+index handle
-             * belongs to AGX2's separate 8-byte global heap. */
+         if (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) {
+            /* Indirect and immediate operands name the same i+1 entries in
+             * the native per-stage table. The 28+index handle belongs to
+             * AGX2's separate 8-byte global heap. */
             uint16_t native_handle;
             if (!agx_gallium_g17p_sampler_handle(dev->chip, s,
                                                   &native_handle))

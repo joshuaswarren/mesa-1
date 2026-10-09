@@ -129,12 +129,10 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
         /* Argument-buffer (uniform handle) reads name sampler 1 like the
          * fragment fetches; the register-handle reads name sampler 0. */
         (d->sampler_value && tk != AGX3_TEX_OPERAND_UNIFORM) ||
-         /* G18 native549 also witnesses a scalar register-indexed 2D
-          * read at level zero. Its f75=1 uses the existing scalar encoding;
-          * the packer keeps G17G callers on the full-vector profile. */
-         (d->mask != 15 && (tk != AGX3_TEX_OPERAND_UNIFORM || d->array) &&
-          !(tk == AGX3_TEX_OPERAND_REGISTER && !d->array &&
-            !d->multisample && !d->three_d && !d->register_lod))))
+        /* Native659 adds scalar array/3D/MS/MS-array reads with register
+         * and uniform descriptors, including dynamic level/sample inputs.
+         * The coordinate/publication gates above remain unchanged. */
+        (d->mask != 1 && d->mask != 15)))
       return false;
 
    /* The level. f29 is 12 bits of 1/64 fixed point; the per-lane form has no
@@ -432,7 +430,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * publication remains the stream packer's architecture-specific job. */
    const bool gpu1_colour_level = enc == AGX_ISA_ENCODING_AGX3C &&
       (d->three_d != d->cube) && (!d->array || d->cube) && !d->shadow &&
-      d->width == AGX3_TEX_W32 && d->mask == 15 && d->coord == 0 &&
+      d->width == AGX3_TEX_W32 && (d->mask == 1 || d->mask == 15) &&
+      d->coord == 0 &&
       !d->offset && !d->offset_register && !d->offset_staged &&
       !d->query_lod && !d->min_lod && !d->sparse &&
       d->gather == AGX3_TEX_GATHER_NONE &&

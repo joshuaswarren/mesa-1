@@ -124,6 +124,11 @@ bound_ms_image_store(const nir_intrinsic_instr *intr, const void *data)
       return false;
 
    switch (nir_intrinsic_format(intr)) {
+   case PIPE_FORMAT_NONE:
+      /* Formatless writes use the actual bound view's raw32 block size.
+       * The Gallium metadata validator rejects packed/normalized formats
+       * until their conversion lowering is implemented. */
+      return true;
    case PIPE_FORMAT_R32_FLOAT:
    case PIPE_FORMAT_R32_SINT:
    case PIPE_FORMAT_R32_UINT:
@@ -155,9 +160,23 @@ lower_bound_ms_image_store(nir_builder *b, nir_intrinsic_instr *intr, void *data
       .access = nir_intrinsic_access(intr));
    nir_intrinsic_set_range_base(nir_def_as_intrinsic(address),
                                 nir_intrinsic_range_base(intr));
-   nir_store_global(b, nir_trim_vector(b, intr->src[3].ssa, components), address,
-                    .align_mul = 4, .write_mask = BITFIELD_MASK(components),
-                    .access = nir_intrinsic_access(intr));
+   if (format == PIPE_FORMAT_NONE) {
+      nir_def *bytes = nir_load_image_block_size_agx(b, intr->src[0].ssa);
+      /* R/RG/RGBA raw32 views occupy 4/8/16 bytes. Never write unused
+       * components into the adjacent pixel or sample. The view may change
+       * between dispatches without recompiling this formatless program. */
+      for (unsigned c = 0; c < 4; ++c) {
+         nir_push_if(b, nir_uge_imm(b, bytes, (c + 1) * 4));
+         nir_store_global(b, nir_channel(b, intr->src[3].ssa, c),
+                          nir_iadd_imm(b, address, c * 4), .align_mul = 4,
+                          .write_mask = 1, .access = nir_intrinsic_access(intr));
+         nir_pop_if(b, NULL);
+      }
+   } else {
+      nir_store_global(b, nir_trim_vector(b, intr->src[3].ssa, components), address,
+                       .align_mul = 4, .write_mask = BITFIELD_MASK(components),
+                       .access = nir_intrinsic_access(intr));
+   }
    if (!(nir_intrinsic_access(intr) & ACCESS_NON_READABLE))
       nir_fence_mem_to_tex_agx(b);
 
@@ -174,7 +193,7 @@ agx_nir_lower_bound_ms_image_stores(nir_shader *s)
     * of whether the GL context requested robust buffer access. */
    bool progress = nir_lower_robust_access(s, bound_ms_image_store, NULL);
    return nir_shader_intrinsics_pass(s, lower_bound_ms_image_store,
-                                     nir_metadata_control_flow, NULL) || progress;
+                                     nir_metadata_none, NULL) || progress;
 }
 
 static bool

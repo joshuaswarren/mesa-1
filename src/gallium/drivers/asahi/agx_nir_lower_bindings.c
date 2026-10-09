@@ -191,6 +191,7 @@ lower(nir_builder *b, nir_instr *instr, void *data)
       case nir_intrinsic_image_atomic:
       case nir_intrinsic_image_atomic_swap:
       case nir_intrinsic_image_texel_address:
+      case nir_intrinsic_load_image_block_size_agx:
          break;
       default:
          return false;
@@ -200,7 +201,8 @@ lower(nir_builder *b, nir_instr *instr, void *data)
       nir_def *index = intr->src[0].ssa;
       nir_scalar index_scalar = nir_scalar_resolved(index, 0);
 
-      if (intr->intrinsic == nir_intrinsic_image_texel_address) {
+      if (intr->intrinsic == nir_intrinsic_image_texel_address ||
+          intr->intrinsic == nir_intrinsic_load_image_block_size_agx) {
          if (!options->image_address_mask)
             return false;
 
@@ -228,6 +230,12 @@ lower(nir_builder *b, nir_instr *instr, void *data)
             (uintptr_t)&s->image_address_metadata);
          nir_def *metadata = nir_iadd(b, table_base, nir_u2u64(b, offset));
 
+         if (intr->intrinsic == nir_intrinsic_load_image_block_size_agx) {
+            nir_def_replace(&intr->def, nir_load_global_constant(
+               b, 1, 32, nir_iadd_imm(b, metadata, 36), .align_mul = 4));
+            return true;
+         }
+
          /* Even constant slots use ordinary loads. Pushing metadata for
           * every image can exhaust uniforms in legal image-heavy shaders. */
          nir_def *base = nir_load_global_constant(b, 4, 32, metadata,
@@ -239,13 +247,17 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          nir_def *samples = msaa ? nir_load_global_constant(
             b, 1, 32, nir_iadd_imm(b, metadata, 32), .align_mul = 4) :
             nir_imm_int(b, 1);
+         nir_def *bytes = nir_intrinsic_format(intr) == PIPE_FORMAT_NONE
+            ? nir_load_global_constant(b, 1, 32, nir_iadd_imm(b, metadata, 36),
+                                        .align_mul = 4)
+            : nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr)));
          const bool layered = nir_intrinsic_image_array(intr) ||
                               dim == GLSL_SAMPLER_DIM_CUBE ||
                               dim == GLSL_SAMPLER_DIM_3D;
          nir_def *address = libagx_bound_image_texel_address(
             b, base, layout, intr->src[1].ssa, samples,
             msaa ? intr->src[2].ssa : nir_imm_int(b, 0),
-            nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))),
+            bytes,
             nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D ||
                             dim == GLSL_SAMPLER_DIM_BUF),
             nir_imm_bool(b, layered));
