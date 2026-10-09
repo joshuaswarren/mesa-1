@@ -8697,6 +8697,16 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
       fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
       !fs->epilog_key.write_s && !fs->so->info.writes_memory;
    const bool unrolled_memory = agx_g18_msaa_memory_shader(ctx, batch);
+   /* The API mask prolog tests TARGET=0xff with LIVE=api_sample_mask.
+    * Native666's constant masks at 2x/4x use this full-target coverage
+    * transaction. Keep it separate from shader masks, explicit early tests
+    * and Z/S exports, which have their own ordering requirements. */
+   const bool per_pixel_api_mask =
+      fs && fs->so && !fs->b.info.early_fragment_tests &&
+      !fs->so->info.uses_sample_shading && !fs->so->info.writes_memory &&
+      !fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
+      !fs->epilog_key.write_s && !fs->b.info.writes_sample_mask &&
+      !fs->b.info.reads_tib;
    /* Native G18 dynamic coverage uses the same late SR39/MOVMSK transaction
     * at 2x and 4x. The compiler proves full-testing versus non-testing words;
     * this per-pixel profile adds no sample loop, memory or Z/S export. */
@@ -8727,7 +8737,7 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
              fragment_pass == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)) ||
            resident_mrt_preserve) &&
           ctx->rast->base.multisample &&
-          (unrolled_colour || unrolled_memory ||
+           (per_pixel_api_mask || unrolled_colour || unrolled_memory ||
            (ctx->sample_mask & BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) ==
               BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) &&
           !ctx->blend->key.alpha_to_coverage &&

@@ -737,13 +737,17 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
                                    : info->dst.resource;
          stencil.dst.format = PIPE_FORMAT_R8_UINT;
          stencil.mask = PIPE_MASK_R;
-         /* There is no meaningful average of stencil values, so resolving a
-          * multisample stencil buffer takes sample zero. Saying so also keeps
-          * u_blitter off its per-sample shading path, whose sample loop the
-          * G17P fast linker cannot encode: without this the blit's fragment
-          * program fails to link and the stencil aspect is silently dropped.
+         /* Resolves take sample zero rather than averaging stencil values.
+          * Equal-sample-count G18 copies must preserve each source sample;
+          * its render blitter supports the per-sample shading path. Keep the
+          * G17P sample-zero path, whose linker cannot encode that sample loop.
           */
-         stencil.sample0_only = info->src.resource->nr_samples > 1;
+         const bool preserve_samples =
+            agx_device(pipe->screen)->chip == AGX_CHIP_G18G &&
+            util_res_sample_count(stencil.src.resource) ==
+               util_res_sample_count(stencil.dst.resource);
+         stencil.sample0_only =
+            info->src.resource->nr_samples > 1 && !preserve_samples;
          agx_blit(pipe, &stencil);
          return;
       }
