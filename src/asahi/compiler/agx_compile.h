@@ -274,6 +274,12 @@ struct agx_device_key {
     * codegen defaults that are measured on G13 only.
     */
    bool g13;
+
+   /* Hoist device loads of compute shaders above independent ALU, barriers
+    * and workgroup memory accesses (agx_hoist_loads). Measured on G13 and
+    * G14 only.
+    */
+   bool hoist_loads;
 };
 
 struct agx_shader_key {
