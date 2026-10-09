@@ -15,6 +15,7 @@
 #include "util/u_printf.h"
 #include "util/vma.h"
 #include "agx_bo.h"
+#include "agx_va_layout.h"
 #include "agx_pack.h"
 #include "decode.h"
 #include "layout.h"

@@ -619,7 +619,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       .kernel_end = dev->params.vm_end,
    };
 
-   uint64_t user_size = vm_create.kernel_start - user_start;
+   uint64_t user_size = 0;
 
    int ret = asahi_simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
@@ -628,22 +628,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
       return false;
    }
 
-   /* Round the user VA window to powers-of-two... */
-   user_start = util_next_power_of_two64(user_start);
-   user_size = util_next_power_of_two64(user_size + 1) >> 1;
-
-   /* ...so when we cut user size in half to emulate sparse buffers... */
-   user_size /= 2;
-
-   /* ...or maybe in quarters if necessary to disambiguate */
-   if (user_size == user_start) {
-      user_size /= 2;
+   if (!agx_sparse_layout(user_start, vm_create.kernel_start,
+                          &dev->sparse_ro_offset, &user_size)) {
+      fprintf(stderr, "No user address window for the heap\n");
+      assert(0);
+      return false;
    }
-
-   /* ...we can distinguish the top/bottom half by an address bit */
-   dev->sparse_ro_offset = user_size;
-   assert((user_start & dev->sparse_ro_offset) == 0);
-   assert(((user_start + (user_size - 1)) & dev->sparse_ro_offset) == 0);
 
    simple_mtx_init(&dev->vma_lock, mtx_plain);
    util_vma_heap_init(&dev->main_heap, user_start, user_size);

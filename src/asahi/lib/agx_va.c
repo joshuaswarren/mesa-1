@@ -5,11 +5,40 @@
 
 #include "agx_bo.h"
 #include "agx_device.h"
+#include "agx_va_layout.h"
 
 static struct util_vma_heap *
 agx_vma_heap(struct agx_device *dev, enum agx_va_flags flags)
 {
    return (flags & AGX_VA_USC) ? &dev->usc_heap : &dev->main_heap;
+}
+
+/*
+ * Sparse buffers map every page twice, read-write at X and read-only at
+ * X + ro_offset, so the heap [user_start, user_start + size) is split by one
+ * address bit: ro_offset is a power of two, every read-write address lies
+ * below it (bit clear) and the shadow of the last one still fits below
+ * kernel_start. Choose the ro_offset that leaves the largest heap. On a
+ * 512 GiB window with the heap at 72 GiB that is 256 GiB and a 152 GiB heap;
+ * rounding the window and halving it twice left 64 GiB.
+ */
+bool
+agx_sparse_layout(uint64_t user_start, uint64_t kernel_start,
+                  uint64_t *ro_offset, uint64_t *size)
+{
+   *size = 0;
+
+   for (uint64_t p = util_next_power_of_two64(user_start + 1);
+        p && user_start + p < kernel_start; p <<= 1) {
+      uint64_t s = MIN2(p - user_start, kernel_start - user_start - p);
+
+      if (s > *size) {
+         *size = s;
+         *ro_offset = p;
+      }
+   }
+
+   return *size != 0;
 }
 
 struct agx_va *

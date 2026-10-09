@@ -76,9 +76,11 @@ if with_tests
       files(
         'tests/test-packing.cpp',
         'tests/test-tilebuffer.cpp',
+        'tests/test-va-layout.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_asahi],
       dependencies: [idep_gtest, idep_agx_pack, idep_mesautil],
       link_with : [libasahi_lib, libasahi_layout],
     ),
