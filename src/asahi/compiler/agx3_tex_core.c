@@ -409,6 +409,21 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       !d->compute_stage && !d->offset_register && !d->offset_staged &&
       d->lod == AGX3_TEX_LOD_GRADIENT;
 
+   /* Native653 independently covers all nine descriptor-class pairs for
+    * ordinary 2D/array/3D samples, with masks 1/15, register level in every
+    * stage and implicit/register bias in fragments. The stream packer owns
+    * staging and retirement; unrelated sampling profiles stay gated. */
+   const bool gpu1_binding = enc == AGX_ISA_ENCODING_AGX3C &&
+      !d->cube && !(d->three_d && d->array) && !d->shadow &&
+      d->width == AGX3_TEX_W32 && (d->mask == 1 || d->mask == 15) &&
+      !d->offset && !d->offset_register && !d->offset_staged &&
+      !d->query_lod && !d->min_lod && !d->sparse &&
+      d->gather == AGX3_TEX_GATHER_NONE &&
+      (d->lod == AGX3_TEX_LOD_REGISTER ||
+       (!d->vertex_stage && !d->compute_stage &&
+        (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS_REGISTER))) &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
+
    /* Native607 compiles float4 3D/cube samples independently for G17G and
     * G18G in all three execution stages. Explicit zero and register levels
     * use the existing f139=2/4 selectors and f76=3/4 dimensions. Native610
@@ -505,7 +520,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * f150 = 2, and the vertex ones clear both. */
    if ((d->sample_group_nonterminal || d->sample_group_end) &&
        ((enc != AGX_ISA_ENCODING_AGX3B &&
-         !((gpu1_plain_2d || gpu1_cube || gpu1_colour_level) &&
+         !((gpu1_plain_2d || gpu1_cube || gpu1_colour_level || gpu1_binding) &&
            !(d->sample_group_nonterminal && d->array))) ||
         d->lod == AGX3_TEX_LOD_GRADIENT ||
         (d->sample_group_nonterminal && d->sample_group_end)))
@@ -539,7 +554,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        * and bias are grounded above; gradients require the narrower profile
        * established by the independent 2D/array reference. */
       if ((enc != AGX_ISA_ENCODING_AGX3B &&
-           !(((gpu1_plain_2d || gpu1_cube || gpu1_colour_level) &&
+           !(((gpu1_plain_2d || gpu1_cube || gpu1_colour_level || gpu1_binding) &&
               d->lod != AGX3_TEX_LOD_GRADIENT) || gpu1_gradient)) ||
           d->lod_x64 != 0)
          return false;
@@ -575,7 +590,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * literal-gradient kernels (see AGX3_TEX_GRADIENT_BANK_DDX_Z). Array,
     * gather and comparison combinations remain closed. */
    if (d->three_d &&
-       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_colour_level) || d->array || d->cube ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_colour_level && !gpu1_binding) || d->array || d->cube ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 
@@ -601,7 +616,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
    const unsigned sk = d->sampler_kind ? d->sampler_kind : 1;
    if (tk > 3 || sk > 3 ||
-       ((tk != 1 || sk != 1) && enc != AGX_ISA_ENCODING_AGX3B &&
+       ((tk != 1 || sk != 1) && enc != AGX_ISA_ENCODING_AGX3B && !gpu1_binding &&
         !((tk == AGX3_TEX_OPERAND_UNIFORM ||
            tk == AGX3_TEX_OPERAND_REGISTER) && sk == tk && d->array &&
           d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0)) ||

@@ -363,10 +363,11 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
 {
    enum ra_class cls = ra_class_for_index(I->dest[d]);
    unsigned limit = rctx->bound[cls];
-   /* G17P TEX encodes a seven-bit half-register destination, for image
+   /* AGX3B/C TEX encodes a seven-bit half-register destination, for image
     * reads as for texture reads. Coordinate and other staged sources are
     * bounded separately through texture_gpr below. */
-   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   if ((rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+        rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
        (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
         I->op == AGX_OPCODE_TEXTURE_LOAD || I->op == AGX_OPCODE_IMAGE_LOAD))
       limit = MIN2(limit, 128);
@@ -382,6 +383,13 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
        ra_class_for_index(I->dest[d]) == RA_GPR &&
        BITSET_TEST(rctx->texture_gpr, I->dest[d].value))
       limit = MIN2(limit, 128);
+   /* The AGX3C stream packer accepts direct coordinate bases through half
+    * 60. Keep the complete coordinate vector in the low bank, including
+    * after an overlapping TEX destination evicts a still-live value. */
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       ra_class_for_index(I->dest[d]) == RA_GPR &&
+       BITSET_TEST(rctx->texture_gpr, I->dest[d].value))
+      limit = MIN2(limit, 64);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        ra_class_for_index(I->dest[d]) == RA_GPR &&
        (I->op == AGX_OPCODE_LOG2 ||
@@ -2249,6 +2257,16 @@ agx_ra(agx_context *ctx)
          agx_foreach_ssa_src(I, s)
             BITSET_SET(texture_gpr, I->src[s].value);
       }
+
+      /* AGX3C has its own direct-coordinate bound. Mark the SSA web so a
+       * low TEX destination cannot relocate its still-live coordinates
+       * into an unencodable high bank. Other operands keep their limits. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+           I->op == AGX_OPCODE_TEXTURE_LOAD ||
+           I->op == AGX_OPCODE_IMAGE_LOAD) &&
+          I->src[0].type == AGX_INDEX_NORMAL)
+         BITSET_SET(texture_gpr, I->src[0].value);
 
       /* G17P publishes sampled coordinates through COPY, whose source field
        * has seven bits and no high-bit extension. CEM has the same source

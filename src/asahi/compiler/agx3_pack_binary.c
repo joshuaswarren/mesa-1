@@ -2756,6 +2756,30 @@ agx3_g17g_register_lod(const agx_instr *I)
 }
 
 static bool
+agx3_g18g_binding_sample(const agx_instr *I)
+{
+   /* Native653 covers all nine immediate/register/uniform descriptor pairs
+    * for ordinary 2D, array and 3D samples, with full or scalar results.
+    * Register levels work in every execution stage; implicit/bias sampling
+    * is fragment-only, as checked by the caller. Keep the existing gates
+    * for comparisons, offsets, gradients, cubes and sparse operations. */
+   return I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+          (I->dim == AGX_DIM_2D || I->dim == AGX_DIM_2D_ARRAY ||
+           I->dim == AGX_DIM_3D) &&
+          I->nr_srcs == 6 && I->nr_dests == 1 &&
+          ((I->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
+            agx3_tex_imm(I->src[1], 0)) ||
+           ((I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+             I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+            agx3_tex_plain_reg(I->src[1]) &&
+            I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1)) &&
+          I->dest[0].size == AGX_SIZE_32 && (I->mask == 1 || I->mask == 15) &&
+          !I->shadow && !I->offset && !I->sparse && !I->query_lod &&
+          I->gather == AGX_GATHER_NONE && !I->agx3_tex_coords_staged &&
+          !agx_texture_resource(I);
+}
+
+static bool
 agx3_g18g_colour_sample(const agx_instr *I)
 {
    /* Native607 grounds explicit levels in all stages; native610 adds
@@ -2910,9 +2934,12 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
     * shapes retain their existing gates. */
    const bool g18g_gradient = g18g && gpu1_plain_2d && gradient_lod &&
                              !shadow && !min_lod && !native_coord_slot;
-   const bool g18g_colour_level = g18g &&
-      enc == AGX_ISA_ENCODING_AGX3C && agx3_g18g_colour_sample(I) &&
+   const bool g18g_binding = g18g && enc == AGX_ISA_ENCODING_AGX3C &&
+      agx3_g18g_binding_sample(I) &&
       ((!vertex_stage && !compute_stage) || explicit_lod);
+   const bool g18g_colour_level = g18g_binding || (g18g &&
+      enc == AGX_ISA_ENCODING_AGX3C && agx3_g18g_colour_sample(I) &&
+      ((!vertex_stage && !compute_stage) || explicit_lod));
    const bool lod_enc_ok =
       enc == AGX_ISA_ENCODING_AGX3B || gpu1_plain_2d || gpu1_cube ||
       g18g_colour_level;
@@ -3133,7 +3160,7 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
     * samples bank 0.  The staging address is an ABI location, not the source
     * GPR number.  AGX3c retains its independently decoded coordinate field. */
    const uint16_t coord_bank = (enc == AGX_ISA_ENCODING_AGX3B ||
-                                native_staged_coords || explicit_lod ||
+                                native_staged_coords || g18g_binding || explicit_lod ||
                                 register_bias || array || three_d || cube ||
                                 gradient_lod || shadow)
                                   ? 0
@@ -12472,7 +12499,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                (agx3_g17g_runtime_gather(I) || agx3_g17g_array_gather(I) ||
                 agx3_g17g_cube_gather(I));
             const bool g18g_colour_level_sample = ctx->key->dev.emit_agx3d &&
-               agx3_g18g_colour_sample(I);
+               (agx3_g18g_colour_sample(I) || agx3_g18g_binding_sample(I));
             if (g18g_gradient_sample && ctx->stage != MESA_SHADER_VERTEX &&
                 ctx->stage != MESA_SHADER_FRAGMENT)
                AGX3_REFUSE(I);
