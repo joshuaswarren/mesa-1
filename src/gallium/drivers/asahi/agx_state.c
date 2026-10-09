@@ -6818,7 +6818,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
                       (store ? op != AGX_EOT_STORE
                              : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD))) ||
        (key->tib.layered &&
-        (dev->chip != AGX_CHIP_G18G || targets != 1 ||
+         (dev->chip != AGX_CHIP_G18G || (targets != 1 && !no_color) ||
          (key->tib.nr_samples != 1 && !msaa4) || batch->key.resolve)) ||
        (key->tib.nr_samples != 1 && !msaa4) ||
        key->tib.tile_size != (msaa4 && key->tib.nr_samples == 4 ? 32 * 16 : 32 * 32) ||
@@ -8935,10 +8935,18 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       zs_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT ||
       (dev->chip == AGX_CHIP_G18G && zs_format == PIPE_FORMAT_S8_UINT &&
        !ctx->zs->base.depth_enabled);
+   /* An attachmentless framebuffer still rasterizes fragment image stores.
+    * Reuse the colour-free tile programs and inactive ZLS state; neither
+    * requires a backing attachment. Keep multisample admission separate.
+    */
+   const bool attachmentless =
+      dev->chip == AGX_CHIP_G18G && batch->key.nr_cbufs == 0 &&
+      !zsbuf->texture && zs_units_idle && batch->tilebuffer_layout.nr_samples == 1;
    const bool depth_attachment_ok =
-      (batch->key.nr_cbufs || zsbuf->texture) &&
-      (zsbuf->texture ? (zs_units_idle || depth_format_ok)
-                      : !ctx->zs->base.depth_enabled);
+      attachmentless ||
+      ((batch->key.nr_cbufs || zsbuf->texture) &&
+       (zsbuf->texture ? (zs_units_idle || depth_format_ok)
+                      : !ctx->zs->base.depth_enabled));
    /* A fragment that writes gl_FragDepth is carried by the record encoder's
     * fragment_writes_depth; one that writes stencil moves fields with no
     * witness, and encoding it as though it did not would be silently wrong
@@ -9064,7 +9072,8 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    M5_DRAW_OUTSIDE(!color_attachment_ok, "colour attachment shape");
    M5_DRAW_OUTSIDE(!depth_attachment_ok, "depth attachment shape");
    M5_DRAW_OUTSIDE(batch->key.layers > 1 &&
-                       (dev->chip != AGX_CHIP_G18G || batch->key.nr_cbufs != 1 ||
+                        (dev->chip != AGX_CHIP_G18G ||
+                         (batch->key.nr_cbufs != 1 && !attachmentless) ||
                         batch->key.zsbuf.texture ||
                         (batch->tilebuffer_layout.nr_samples != 1 &&
                          !agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout))),
