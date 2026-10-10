@@ -31,12 +31,9 @@
 #define HK_MEMORY_CHECK_MIN     (1ull << 20)
 
 static bool
-hk_system_memory_fits(uint64_t size)
+hk_system_memory_fits_now(uint64_t size)
 {
    uint64_t available, total;
-
-   if (size < HK_MEMORY_CHECK_MIN)
-      return true;
 
    /* If the kernel does not tell us, only the heap limit applies. */
    if (!os_get_available_system_memory(&available))
@@ -47,6 +44,24 @@ hk_system_memory_fits(uint64_t size)
       reserve = MAX2(reserve, total / 50);
 
    return available >= size + reserve;
+}
+
+static bool
+hk_system_memory_fits(struct hk_device *dev, uint64_t size)
+{
+   if (size < HK_MEMORY_CHECK_MIN)
+      return true;
+
+   if (hk_system_memory_fits_now(size))
+      return true;
+
+   /* Freed device memory is parked in the driver's BO cache and still counts
+    * as used for MemAvailable. The cache is only trimmed when another BO is
+    * freed or an allocation fails, so refusing here would keep an application
+    * that just freed gigabytes from reusing them. Give the cache back first.
+    */
+   agx_bo_cache_evict_all(&dev->dev);
+   return hk_system_memory_fits_now(size);
 }
 
 /* Supports opaque fd only */
@@ -245,7 +260,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       if (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
          flags |= AGX_BO_WRITEBACK;
 
-      if (!hk_system_memory_fits(aligned_size)) {
+      if (!hk_system_memory_fits(dev, aligned_size)) {
          result = vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                             "Not enough free system memory for %" PRIu64
                             " MiB", aligned_size >> 20);
