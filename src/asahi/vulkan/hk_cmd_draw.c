@@ -4478,6 +4478,7 @@ hk_begin_rendering(VkCommandBuffer commandBuffer,
       return;
 
    memset(render, 0, sizeof(*render));
+   hk_cmd_buffer_untrack_cdm(cmd);
 
    hk_sync_begin_rendering(
       cmd, pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT);

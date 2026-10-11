@@ -746,6 +746,21 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
       return;
    }
 
+   /* Graphics or meta work in this command buffer: flush after every launch
+    * (and before the first one if a tracked launch is still unflushed).
+    */
+   if (cs->cmd->state.cs.untracked) {
+      if (cs->cmd->state.cs.cdm_barrier_pending || cs->cdm_flush_pending) {
+         hk_cdm_cache_flush(dev, cs);
+         cs->cmd->state.cs.cdm_barrier_pending = false;
+         cs->cdm_flush_pending = false;
+      }
+      cs->current =
+         agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
+      hk_cdm_cache_flush(dev, cs);
+      return;
+   }
+
    /* Deferred CDM flush: no barrier between the launches of one batch. The
     * batch ends at every vkCmdPipelineBarrier2 (hk_cmd_buffer.c), and
     * hk_cs_finish_pending_flush emits the barrier there.

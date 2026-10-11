@@ -1007,6 +1007,14 @@ struct hk_compute_state {
     * survives CS splits and merge_control_streams.
     */
    bool cdm_barrier_pending;
+
+   /* The command buffer recorded graphics or meta work (a render pass, an
+    * image copy, or a precomp launch that feeds or follows a draw). From then
+    * on every CDM launch is flushed as before: the consumers of those
+    * launches are draws and copies the app declares no barrier for, so the
+    * dependency tracking has nothing to key on.
+    */
+   bool untracked;
 };
 
 /*
@@ -2283,6 +2291,19 @@ hk_cs_destroy(struct hk_cs *cs)
    }
 
    free(cs);
+}
+
+/* Stop dependency-tracking the CDM barrier for the rest of this command
+ * buffer. Launches already recorded without a trailing flush are covered by
+ * the pending flag, which the next launch (or the end of the stream) consumes.
+ */
+static inline void
+hk_cmd_buffer_untrack_cdm(struct hk_cmd_buffer *cmd)
+{
+   if (!cmd->state.cs.untracked) {
+      cmd->state.cs.untracked = true;
+      cmd->state.cs.cdm_barrier_pending = true;
+   }
 }
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
