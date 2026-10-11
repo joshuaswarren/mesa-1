@@ -802,6 +802,8 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    agx_usc_words_precomp(t.cpu, &prog->b, uploaded_data, data_size);
 
+   if (barrier & (AGX_PREGFX | AGX_POSTGFX))
+      hk_cmd_buffer_untrack_cdm(cmd);
    /* An internal full-barrier launch orders in both directions: drain the
     * producers before it, and it drains before the next CDM launch. The
     * producer side is not tracked by cdm_barrier_pending, since an internal

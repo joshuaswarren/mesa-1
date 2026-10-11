@@ -100,6 +100,7 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 {
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
 
+   hk_cmd_buffer_untrack_cdm(cmd);
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       save->dynamic = cmd->vk.dynamic_graphics_state;
       save->_dynamic_vi = cmd->state.gfx._dynamic_vi;

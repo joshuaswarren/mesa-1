@@ -541,6 +541,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
+   hk_cmd_buffer_untrack_cdm(cmd);
 
    render->flags = pRenderingInfo->flags;
    render->area = pRenderingInfo->renderArea;
