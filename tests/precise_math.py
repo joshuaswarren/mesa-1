@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix="mesa-math-") as td:
     inp.tofile(td / "in.bin")
     subprocess.run(["glslangValidator", "-V", str(here / "precise_math.comp"), "-o", str(td / "probe.spv")], check=True, timeout=30)
     env = dict(os.environ, VK_DRIVER_FILES=icd, VK_ICD_FILENAMES=icd, MESA_SHADER_CACHE_DISABLE="true")
-    subprocess.run(["flock", "-w", "30", "/tmp/m1-gpu.lock", runner,
+    subprocess.run(["flock", "-w", "30", "/tmp/gpu.lock", runner,
                     str(td / "probe.spv"), str(td / "in.bin"), str(td / "out.bin"),
                     str(n * 6 * 4), str(n // 64)], env=env, check=True, timeout=120)
     out = np.fromfile(td / "out.bin", dtype=np.uint32).reshape(n, 6)

@@ -6,7 +6,7 @@ cd "$(dirname "$0")" || exit 1
 pass=0; fail=0
 run() {
   desc="$1"; shift
-  out=$(VK_DRIVER_FILES="$ICD" VK_ICD_FILENAMES="$ICD" AGX_SIMDMAT=1 MESA_SHADER_CACHE_DISABLE=true flock -w 30 /tmp/m1-gpu.lock timeout --kill-after=5s 120 ./cmshape2 "$@" 2>&1)
+  out=$(VK_DRIVER_FILES="$ICD" VK_ICD_FILENAMES="$ICD" AGX_SIMDMAT=1 MESA_SHADER_CACHE_DISABLE=true flock -w 30 /tmp/gpu.lock timeout --kill-after=5s 120 ./cmshape2 "$@" 2>&1)
   rc=$?
   echo "$out"
   if [ $rc -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "^^ FAIL: $desc" >&2; fi
