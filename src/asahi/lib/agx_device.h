@@ -205,11 +205,17 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
    return addr + dev->sparse_ro_offset;
 }
 
+static inline size_t
+agx_bo_map_len(const struct agx_bo *bo)
+{
+   return bo->_map_size ? bo->_map_size : bo->size;
+}
+
 static inline void
 agx_bo_unmap(struct agx_bo *bo)
 {
    if (bo->_map) {
-      munmap(bo->_map, bo->_map_size ? bo->_map_size : bo->size);
+      munmap(bo->_map, agx_bo_map_len(bo));
       bo->_map = NULL;
       bo->_map_size = 0;
    }

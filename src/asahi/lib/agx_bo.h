@@ -85,8 +85,9 @@ struct agx_bo {
    /* Suffixed to force agx_bo_map access */
    void *_map;
 
-   /* Length of the live mapping in _map, or 0 when it is the whole BO. A
-    * placed mapping can be shorter than the BO.
+   /* Length of the live mapping in _map. Zero when the mapping was not made
+    * by bo_mmap (the trace wrapper), which covers the whole BO. A placed
+    * mapping can be shorter than the BO.
     */
    size_t _map_size;
 
