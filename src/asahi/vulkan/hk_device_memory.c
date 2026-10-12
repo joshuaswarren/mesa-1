@@ -394,7 +394,8 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
       /* memoryMapRangePlaced is false, so a placed map covers the whole
        * allocation from offset 0.
        */
-      if (offset != 0 || size != mem->vk.size) {
+      if (offset != 0 || size != mem->vk.size ||
+          mem->vk.size > mem->bo->size) {
          return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                           "A placed map must cover the whole allocation.");
       }
