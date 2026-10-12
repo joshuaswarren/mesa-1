@@ -86,8 +86,7 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    const uint64_t handle = bo->handle;
 
-   if (bo->_map)
-      munmap(bo->_map, bo->size);
+   agx_bo_unmap(bo);
 
    /* Free the VA. No need to unmap the BO or unbind the VA, as the kernel will
     * take care of that when we close it.
@@ -228,7 +227,8 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
 }
 
 static void
-agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
+agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+            size_t size)
 {
    assert(bo->_map == NULL && "not double mapped");
 
@@ -243,14 +243,17 @@ agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
    }
 
    flags = MAP_SHARED | (fixed_addr ? MAP_FIXED : 0);
-   bo->_map = os_mmap(fixed_addr, bo->size, PROT_READ | PROT_WRITE, flags,
-                      dev->fd, gem_mmap_offset.offset);
+   bo->_map = os_mmap(fixed_addr, size, PROT_READ | PROT_WRITE, flags, dev->fd,
+                      gem_mmap_offset.offset);
    if (bo->_map == MAP_FAILED) {
-      bo->_map = NULL;
       fprintf(stderr,
               "mmap failed: result=%p size=0x%llx fd=%i offset=0x%llx %m\n",
-              bo->_map, (long long)bo->size, dev->fd,
+              bo->_map, (long long)size, dev->fd,
               (long long)gem_mmap_offset.offset);
+      bo->_map = NULL;
+      bo->_map_size = 0;
+   } else {
+      bo->_map_size = size;
    }
 }
 

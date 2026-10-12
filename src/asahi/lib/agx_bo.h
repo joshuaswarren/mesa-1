@@ -85,6 +85,11 @@ struct agx_bo {
    /* Suffixed to force agx_bo_map access */
    void *_map;
 
+   /* Length of the live mapping in _map, or 0 when it is the whole BO. A
+    * placed mapping can be shorter than the BO.
+    */
+   size_t _map_size;
+
    /* Process-local index */
    uint32_t handle;
 

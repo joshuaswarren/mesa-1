@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <sys/mman.h>
 #include <stdint.h>
 #include <xf86drm.h>
 #include "drm-uapi/asahi_drm.h"
@@ -77,7 +78,8 @@ typedef struct {
                               enum agx_bo_flags flags);
    int (*bo_bind)(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
                   uint32_t count);
-   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr);
+   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+                   size_t size);
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -203,11 +205,28 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
    return addr + dev->sparse_ro_offset;
 }
 
-static inline void *
-agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
+static inline void
+agx_bo_unmap(struct agx_bo *bo)
 {
+   if (bo->_map) {
+      munmap(bo->_map, bo->_map_size ? bo->_map_size : bo->size);
+      bo->_map = NULL;
+      bo->_map_size = 0;
+   }
+}
+
+/* Map the first `size` bytes of the BO, at fixed_addr when it is not NULL. A
+ * mapping left by an earlier owner of a cached BO is dropped first, as it
+ * cannot be at the requested address.
+ */
+static inline void *
+agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t size)
+{
+   if (fixed_addr)
+      agx_bo_unmap(bo);
+
    if (!bo->_map)
-      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr);
+      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr, size);
 
    return bo->_map;
 }
@@ -215,7 +234,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
 static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
-   return agx_bo_map_placed(bo, NULL);
+   return agx_bo_map_placed(bo, NULL, bo->size);
 }
 
 static inline bool
