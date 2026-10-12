@@ -356,15 +356,18 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
        */
       cmd->state.cs.cdm_barrier_pending = true;
 
-      /* Outside a render pass only a CDM control stream can be open; the
-       * pending flag above orders it against the next launch. Ending the
-       * compute batch here would only produce the stream
-       * merge_control_streams stitches back together at hk_EndCommandBuffer,
-       * plus a stream link and a fresh chunk per barrier; keep it open. The
-       * batches must end when a graphics batch is open: the dependency then
-       * spans batch types and the kernel orders the resulting commands
-       * (agx_cmd_header barriers). */
-      if (!cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
+      /* Keep the compute batch open across the barrier only when it is the
+       * LAST control stream of the command buffer and no graphics batch is
+       * open. Streams are submitted in list order, each ordered after every
+       * stream listed before it. An older compute stream left open behind a
+       * later graphics stream would run before that graphics work, so the
+       * dispatch recorded after the barrier would read unrendered data. In
+       * that case end it, so the next dispatch starts a new tail stream. */
+      struct hk_cs *open_cs = cmd->current_cs.cs;
+      bool is_tail =
+         !open_cs ||
+         list_last_entry(&cmd->control_streams, struct hk_cs, node) == open_cs;
+      if (is_tail && !cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
           !cmd->current_cs.post_gfx)
          return;
    }
