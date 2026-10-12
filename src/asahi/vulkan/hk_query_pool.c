@@ -1360,6 +1360,12 @@ hk_cmd_copy_query_pool_results(struct hk_cmd_buffer *cmd,
       return;
    }
 
+   /* Occlusion results are written by the graphics batch. A CDM cache flush
+    * does not wait for that batch. Close it before the copy, for every query
+    * type, not only timestamps. */
+   hk_cmd_buffer_end_graphics(cmd);
+   hk_cmd_buffer_end_compute(cmd);
+
    struct libagx_copy_query_args info = {
       .availability = hk_has_available(pool) ? pool->bo->va->addr : 0,
       .results = pool->oq_queries ? dev->occlusion_queries.bo->va->addr
