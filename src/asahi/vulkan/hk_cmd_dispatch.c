@@ -61,12 +61,11 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    } else if (HK_PERF(dev, USCCDMBARRIER)) {
       /* Perftest only: keep the USC cache invalidate, drop the rest. */
       cs->current = agx_cdm_barrier_usc(cs->current);
-   } else if (unlikely(p_atomic_read(&dev->sparse_used)) ||
-              (cs->cmd && cs->cmd->state.cs.untracked)) {
-      /* Full word (bits 0-19). The reduced G13X word is enough for
-       * compute-only streams. It is not enough once this command buffer has
-       * recorded graphics or meta: query copies and depth suballocation reads
-       * need the PBE/texture flush. Sparse mappings need the same word.
+   } else if (unlikely(p_atomic_read(&dev->sparse_used))) {
+      /* Sparse resources change page mappings behind the launches. The
+       * reduced G13X word leaves sparse-image atomics wrong and the GPU
+       * faulting, so a device that created one keeps the full word
+       * (bits 0-19, the barrier before the reduction).
        */
       uint32_t *word = cs->current;
       *word = 0xfffff | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
@@ -101,9 +100,9 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
     * recorded since the previous launch declares a memory dependency, so the
     * next launch carries the full designed barrier set. Between launches the
     * app left unordered, Vulkan defines no ordering, so the barrier enforces
-    * nothing and the drain it costs is skipped. Query copies and other
-    * driver-internal consumers call hk_cdm_cache_flush. After graphics or
-    * meta, that flush uses the full barrier word, not the reduced G13X word.
+    * nothing and the drain it costs is skipped. Driver-internal ordering that
+    * does not ride on vkCmdPipelineBarrier (query availability writes) calls
+    * hk_cdm_cache_flush explicitly and is unaffected.
     */
    if (cs->cmd->state.cs.cdm_barrier_pending) {
       assert(cs->type == HK_CS_CDM);
