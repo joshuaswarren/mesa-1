@@ -6,6 +6,8 @@
  */
 #include "hk_buffer.h"
 
+#include <inttypes.h>
+
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "hk_device.h"
@@ -131,12 +133,28 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          buffer->vk.create_flags &
          VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
 
-      enum agx_va_flags flags = 0;
+      /* Capture/replay buffers draw from their own VA range, which no other
+       * allocation uses, so a captured address is free again when it is
+       * replayed.
+       */
+      enum agx_va_flags flags = bda_capture_replay ? AGX_VA_CAPTURE : 0;
       uint64_t bda_fixed_addr = 0;
       if (bda_capture_replay) {
          bda_fixed_addr = hk_get_bda_replay_addr(pCreateInfo);
-         if (bda_fixed_addr != 0)
+         if (bda_fixed_addr != 0) {
+            /* An address that cannot be in the range is not available, which
+             * is not the same as running out of address space.
+             */
+            if (!agx_va_capture_valid(&dev->dev, bda_fixed_addr, vma_size_B,
+                                      alignment)) {
+               vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+               return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                                "Capture address 0x%" PRIx64
+                                " is outside the capture range",
+                                bda_fixed_addr);
+            }
             flags |= AGX_VA_FIXED;
+         }
       }
 
       buffer->va =
@@ -144,6 +162,16 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
 
       if (!buffer->va) {
          vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+
+         /* A fixed request has one place to go. If it fails the address is in
+          * use. A request without an address fails when the range is full.
+          */
+         if (bda_fixed_addr != 0) {
+            return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                             "Capture address 0x%" PRIx64 " is in use",
+                             bda_fixed_addr);
+         }
+
          return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Sparse VMA allocation failed");
       }

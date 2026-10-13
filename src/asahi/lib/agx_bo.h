@@ -45,6 +45,13 @@ enum agx_va_flags {
 
    /* VA must be fixed, otherwise allocated by the driver. */
    AGX_VA_FIXED = (1 << 1),
+
+   /* VA must be inside the capture/replay range. Only buffers created with
+    * VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT use it, and no other
+    * allocation draws from it, so a captured address stays free for the
+    * replay. Not allowed together with AGX_VA_USC.
+    */
+   AGX_VA_CAPTURE = (1 << 2),
 };
 
 struct agx_va {

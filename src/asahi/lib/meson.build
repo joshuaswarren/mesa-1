@@ -87,6 +87,20 @@ if with_tests
     suite : ['asahi'],
     protocol : 'gtest',
   )
+
+  test(
+    'libasahi_va_tests',
+    executable(
+      'libasahi_va_tests',
+      files('tests/test-agx-va.c'),
+      include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
+      c_args : [no_override_init_args, '-Wno-c2x-extensions'],
+      gnu_symbol_visibility : 'hidden',
+      dependencies: [dep_libdrm, idep_agx_pack, idep_mesautil, idep_libagx, idep_libpoly],
+      link_with : [libasahi_lib, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
 endif
 
 if dep_iokit.found()

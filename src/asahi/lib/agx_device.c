@@ -639,7 +639,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    }
 
    simple_mtx_init(&dev->vma_lock, mtx_plain);
-   util_vma_heap_init(&dev->main_heap, user_start, user_size);
+   agx_va_init_user(dev, user_start, user_size);
    util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
 
    dev->vm_id = vm_create.vm_id;
@@ -722,7 +722,7 @@ agx_close_device(struct agx_device *dev)
    util_sparse_array_finish(&dev->bo_map);
    agxdecode_destroy_context(dev->agxdecode);
 
-   util_vma_heap_finish(&dev->main_heap);
+   agx_va_finish_user(dev);
    util_vma_heap_finish(&dev->usc_heap);
    glsl_type_singleton_decref();
 
