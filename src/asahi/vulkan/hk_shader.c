@@ -3228,7 +3228,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          !(nir->info.stage == MESA_SHADER_FRAGMENT &&
            (nir->info.num_ubos || nir->info.num_ssbos ||
             nir->info.num_textures || nir->info.num_images ||
-            hk_nir_has_tex(nir))),
+            hk_nir_has_tex(nir)))),
    };
 
    /* The native constant-program lowering applies exactly when G17P lets
