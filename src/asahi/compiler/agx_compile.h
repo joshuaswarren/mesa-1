@@ -275,6 +275,12 @@ struct agx_device_key {
     */
    bool g13;
 
+   /* Fold constant deltas between workgroup memory addresses into the
+    * lload/lstore index (agx_fold_shared_offsets). Measured on G13 and G14
+    * only.
+    */
+   bool fold_shared_offsets;
+
    /* Hoist device loads of compute shaders above independent ALU, barriers
     * and workgroup memory accesses (agx_hoist_loads). Measured on G13 and
     * G14 only.

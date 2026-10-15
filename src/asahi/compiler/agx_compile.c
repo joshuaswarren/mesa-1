@@ -2842,7 +2842,9 @@ agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
 
 /* Peel a constant addend out of a 16-bit shared address (through the u2u16
  * narrowing and nested iadds). The lload/lstore index immediate adds 4 elements
- * of the access type per unit (measured on G13G), so the multiple-of-unit part
+ * of the access type per unit (measured on G13G; on G14C the fold gives
+ * bit-identical cooperative matrix results and passes the shared memory
+ * conformance cases), so the multiple-of-unit part
  * of the constant moves into nir_intrinsic_base (bytes) and the remainder stays
  * in the address. */
 static nir_def *
@@ -2913,9 +2915,6 @@ agx_fold_shared_block(nir_builder *b, nir_block *block)
       b->cursor = nir_before_instr(instr);
       int64_t c = 0;
       nir_def *stripped = agx_peel_const(b, addr, &c);
-      if (stripped == addr && c == 0) {
-         /* no constant to peel; still a candidate as the group anchor */
-      }
       unsigned bits = intr->intrinsic == nir_intrinsic_load_shared
                          ? intr->def.bit_size
                          : nir_src_bit_size(intr->src[0]);
@@ -3907,7 +3906,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       assign_coefficient_regs(nir, &info->varyings.fs);
    }
 
-   if (key->dev.g13 && !getenv("AGX_LOCAL_FOLD_OFF")) {
+   if (key->dev.fold_shared_offsets && !getenv("AGX_LOCAL_FOLD_OFF")) {
       NIR_PASS(_, nir, agx_fold_shared_offsets);
       NIR_PASS(_, nir, nir_opt_dce);
    }
