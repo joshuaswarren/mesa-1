@@ -1227,6 +1227,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    backend_key.dev.hoist_loads =
       hk_hoist_loads_enabled(hk_device_physical(dev));
 
+   /* The workgroup memory offset fold is measured on G13 and G14; never on
+    * other generations.
+    */
+   backend_key.dev.fold_shared_offsets =
+      backend_key.dev.g13 ||
+      hk_device_physical(dev)->dev.params.gpu_generation == 14;
+
    /* For now, sample shading is always dynamic. Indicate that. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
        nir->info.fs.uses_sample_shading)
