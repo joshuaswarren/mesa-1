@@ -4770,7 +4770,6 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
    const unsigned image_records = cs->so->info.image_records;
    for (unsigned i = 0; i < nr_images; ++i) {
-      batch->stage_uniforms[stage].image_buffer_size[i] = 0;
       /* Image descriptors come in pairs after the textures, each followed on
        * G17P by its software tail record. */
       const unsigned image = nr_textures + (image_records * i);
@@ -4802,9 +4801,6 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
       struct pipe_image_view *view = &ctx->stage[stage].images[i];
       agx_batch_track_image(batch, view);
-      if (dev->chip == AGX_CHIP_G17P && view->resource->target == PIPE_BUFFER)
-         batch->stage_uniforms[stage].image_buffer_size[i] =
-            agx_texture_buffer_size_el(view->format, view->u.buf.size);
 
       /* A store to another binding does not consume this image's PBE.
        * Shader/API access flags can conservatively include writes even for
@@ -8727,6 +8723,13 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
       fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
       !fs->epilog_key.write_s && !fs->so->info.writes_memory;
    const bool unrolled_memory = agx_g18_msaa_memory_shader(ctx, batch);
+   /* The compiler records every emitted mask form. Color unrolling may use
+    * the same full-target late transaction as the per-pixel profile, with
+    * optional kill-only updates, but never partial or early testing. */
+   const bool unrolled_colour_mask =
+      unrolled_colour && !fs->b.info.early_fragment_tests &&
+      (fs->b.info.g18_sample_mask_forms & AGX_G18_SAMPLE_MASK_FULL) &&
+      !(fs->b.info.g18_sample_mask_forms & AGX_G18_SAMPLE_MASK_OTHER);
    /* The API mask prolog tests TARGET=0xff with LIVE=api_sample_mask.
     * Native666's constant masks at 2x/4x use this full-target coverage
     * transaction. Keep it separate from shader masks, explicit early tests
@@ -8778,7 +8781,7 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
           (!fs->epilog_key.sample_shading || unrolled_colour) &&
           !fs->epilog_key.write_s &&
           (!fs->b.info.writes_sample_mask || per_pixel_mask ||
-           unrolled_depth || unrolled_memory) &&
+            unrolled_depth || unrolled_memory || unrolled_colour_mask) &&
           !fs->b.info.reads_tib;
    if (!admitted && (dev->debug & AGX_DBG_FAULTTRACE)) {
       fprintf(stderr,

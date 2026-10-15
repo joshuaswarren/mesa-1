@@ -1,0 +1,50 @@
+{
+  "build_verified": true,
+  "hardware_qualified": false,
+  "base_revision": "29dd453f6690fccbfd5d86849f12d891ef844fc5",
+  "change": "Compile current J873 branch checkpoint without hardware qualification",
+  "sources_before": {
+    "src/asahi/compiler/agx_compile.c": "c402edbd9b9240aad611fd055184f560ee40edb1beaecff694acafc4ddd9f244",
+    "src/asahi/compiler/agx_compile.h": "7017296d968ddecfdfa4346e4cd3ed927b4a1dc926c54dc1a9e95684381faff3",
+    "src/asahi/compiler/agx_nir_lower_sample_mask.c": "2fd9289a436e2143f04cd7f00cdca568640c64b2c9224235aed0c1ad1a8a706e",
+    "src/asahi/layout/layout.c": "f61cda498b94967f1d05b7f3efbb64375d58986da768a147d73e3e0f2f08c20c",
+    "src/asahi/lib/agx_nir_prolog_epilog.c": "cd65acb197976865126c2d350cc1729151a73e252657723a46b964b386479cfd",
+    "src/gallium/drivers/asahi/agx_state.c": "5bdcac07ad8816059a7262bf64d7611b25f3230c9d9e1e56122743a4df2c2c54"
+  },
+  "candidate_source_files": {
+    "src/asahi/compiler/agx_compile.c": "hv/private/publish-checkpoint-1043-20261015/sources/src/asahi/compiler/agx_compile.c",
+    "src/asahi/compiler/agx_compile.h": "hv/private/publish-checkpoint-1043-20261015/sources/src/asahi/compiler/agx_compile.h",
+    "src/asahi/compiler/agx_nir_lower_sample_mask.c": "hv/private/publish-checkpoint-1043-20261015/sources/src/asahi/compiler/agx_nir_lower_sample_mask.c",
+    "src/asahi/layout/layout.c": "hv/private/publish-checkpoint-1043-20261015/sources/src/asahi/layout/layout.c",
+    "src/asahi/lib/agx_nir_prolog_epilog.c": "hv/private/publish-checkpoint-1043-20261015/sources/src/asahi/lib/agx_nir_prolog_epilog.c",
+    "src/gallium/drivers/asahi/agx_state.c": "hv/private/publish-checkpoint-1043-20261015/sources/src/gallium/drivers/asahi/agx_state.c"
+  },
+  "sources_after": {
+    "src/asahi/compiler/agx_compile.c": "86bd6f22ea145cf416bf1932b152eebe54f082f2e7e336cee6ebfeca80021e95",
+    "src/asahi/compiler/agx_compile.h": "c32c9432f81ae27c4b2f8261a38d88202177d155862f8c049236e96f54d1072a",
+    "src/asahi/compiler/agx_nir_lower_sample_mask.c": "b80755cb2c8c4764f21d62341768fc744247e3e0882726abe6380a1dffffc793",
+    "src/asahi/layout/layout.c": "ec2ce5430129dcc278ec7ad83056e2a885b16117ea00c4bba09c1c804f9cefdb",
+    "src/asahi/lib/agx_nir_prolog_epilog.c": "af00a1495a6e5addb8d911532193091ba3eafd58c285f1b117f65912c35da702",
+    "src/gallium/drivers/asahi/agx_state.c": "17926d77dfbbf1797aa92ac121cf11962b870331abb4b06aa7a40f2ce55e99bf"
+  },
+  "source_pins": {
+    "hv/private/publish-checkpoint-1043-20261015/build-in-vm.py": "6d5636df5f61ddb899af165ddf68fbd39e7a5051a95f59b00934eb4486cfef64",
+    "hv/private/publish-checkpoint-1043-20261015/CONTRACT.md": "3edb0c34902f5d9353d4de6ab9e644a20dcc000304515572d3dd1c1164e24354"
+  },
+  "base_library_sha256": "5b8259015099ec2d1284db37f777d3ea26321fb649086b4827c8ae87f5434d74",
+  "library_sha256": "42d81bc950a19eba2959d5f056a411f3b4fafb59aa874ea596d0f627fbd2449f",
+  "patch_sha256": "0cb69aad1298d554e2144a6047f0783ab7c1157f377a4761c723dc49b5125c49",
+  "patch_bytes": 387362,
+  "cache_restored": true,
+  "byte_identical_delta_reconstruction": true,
+  "results": [
+    {
+      "name": "candidate",
+      "exit_code": 0
+    },
+    {
+      "name": "restore",
+      "exit_code": 0
+    }
+  ]
+}

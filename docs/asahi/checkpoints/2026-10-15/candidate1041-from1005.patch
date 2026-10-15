@@ -1,0 +1,29 @@
+--- a/src/gallium/drivers/asahi/agx_state.c
++++ b/src/gallium/drivers/asahi/agx_state.c
+@@ -8784,12 +8784,25 @@
+       fs &&
+       util_bitcount(agx_g18g_ms_mrt_mask(&batch->tilebuffer_layout)) == 3 &&
+       fragment_pass == AGX_PASS_TYPE_TRANSLUCENT;
++   /* Native point captures at 1x/2x/4x reproduce the existing PPP
++    * packer byte for byte. Keep this initial MSAA profile to the same
++    * opaque per-pixel RGBA8 state; other point features need their own
++    * output qualification. Point size and varying validation remain in
++    * the ordinary draw-state builder below. */
++   const bool per_pixel_points =
++      batch->reduced_prim == MESA_PRIM_POINTS && per_pixel_api_mask &&
++      !fs->so->info.uses_fbfetch && fragment_pass == AGX_PASS_TYPE_OPAQUE &&
++      batch->key.nr_cbufs == 1 &&
++      batch->key.cbufs[0].format == PIPE_FORMAT_R8G8B8A8_UNORM &&
++      !batch->key.zsbuf.texture &&
++      (ctx->sample_mask & BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) ==
++         BITFIELD_MASK(batch->tilebuffer_layout.nr_samples);
+    const bool admitted = agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout) &&
+           (no_color ? batch->key.zsbuf.texture != NULL
+                     : agx_g18_msaa_color_surfaces(batch)) &&
+           agx_g18_msaa4_zs_surface(dev, &batch->key.zsbuf) &&
+           (batch->reduced_prim == MESA_PRIM_TRIANGLES ||
+-           batch->reduced_prim == MESA_PRIM_LINES) &&
++           batch->reduced_prim == MESA_PRIM_LINES || per_pixel_points) &&
+           (fragment_pass == AGX_PASS_TYPE_OPAQUE ||
+            fragment_pass == AGX_PASS_TYPE_PUNCH_THROUGH ||
+            (unrolled_memory &&

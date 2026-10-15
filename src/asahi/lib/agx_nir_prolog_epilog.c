@@ -1752,6 +1752,21 @@ agx_nir_lower_stats_fs(nir_shader *s)
    return nir_progress(true, b->impl, nir_metadata_control_flow);
 }
 
+/* A prolog that does not own Z/S tests only kills its targeted samples.
+ * Its generated LIVE complement is disjoint from TARGET, so canonicalize
+ * LIVE to zero before source provenance is lost during later lowering. */
+static bool
+lower_prolog_kill_only(nir_builder *b, nir_intrinsic_instr *intr,
+                      UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(&intr->src[1],
+                   nir_imm_intN_t(b, 0, intr->src[1].ssa->bit_size));
+   return true;
+}
+
 void
 agx_nir_fs_prolog(nir_builder *b, const void *key_)
 {
@@ -1795,6 +1810,9 @@ agx_nir_fs_prolog(nir_builder *b, const void *key_)
    NIR_PASS(_, b->shader, nir_shader_intrinsics_pass,
             lower_non_monolithic_uniforms, nir_metadata_control_flow, NULL);
    NIR_PASS(_, b->shader, lower_tests_zs, key->run_zs_tests);
+   if (!key->run_zs_tests)
+      NIR_PASS(_, b->shader, nir_shader_intrinsics_pass,
+               lower_prolog_kill_only, nir_metadata_control_flow, NULL);
 
    b->shader->info.io_lowered = true;
 }

@@ -3243,6 +3243,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        const unsigned g18_samples = b->shader->key->fs.nr_samples;
        if (b->shader->key->dev.emit_agx3d &&
            (g18_samples == 2 || g18_samples == 4) && no_tests) {
+           b->shader->out->g18_sample_mask_forms |= AGX_G18_SAMPLE_MASK_KILL;
           /* Native570's G18 multisample discard stages only the affected
            * sample bits: 0xff for whole-pixel discard, or a shifting
            * one-bit low half and zero high half in a memory sample loop.
@@ -3270,14 +3271,15 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
           !b->shader->force_early_tests_pending && !no_tests &&
           ((nir_src_is_const(instr->src[0]) &&
             nir_src_as_uint(instr->src[0]) == 0xff) ||
-           nir_intrinsic_flags(instr) == AGX_SAMPLE_MASK_FULL_OR_KILL) &&
-          (!nir_src_is_const(instr->src[1]) ||
-           nir_src_as_uint(instr->src[1]) <= 0xff)) {
+           nir_intrinsic_flags(instr) == AGX_SAMPLE_MASK_FULL_OR_KILL)) {
+         b->shader->out->g18_sample_mask_forms |= AGX_G18_SAMPLE_MASK_FULL;
          agx_index coverage = agx_temp(b->shader, AGX_SIZE_16);
          agx_get_sr_coverage_to(b, coverage, AGX_SR_INPUT_SAMPLE_MASK);
          agx_index keep;
          if (nir_src_is_const(instr->src[1])) {
-            keep = agx_mov_imm(b, 16, nir_src_as_uint(instr->src[1]) << 8);
+            /* Match the dynamic path: only the low byte contains samples. */
+            keep = agx_mov_imm(b, 16,
+                               (nir_src_as_uint(instr->src[1]) & 0xffu) << 8);
          } else {
             keep = agx_and(b, agx_src_index(&instr->src[1]),
                            agx_immediate(0xff));
@@ -3305,6 +3307,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          }
          return agx_sample_mask_agx3(b, agx_mov_imm(b, 16, 1), word, 2);
       }
+
+      if (b->shader->key->dev.emit_agx3d &&
+          (g18_samples == 2 || g18_samples == 4))
+         b->shader->out->g18_sample_mask_forms |= AGX_G18_SAMPLE_MASK_OTHER;
 
       /* G17G kills with the same MOVMSK protocol (Apple's applegpu_g17g
        * discard fragment, test/native/g18g oracle.discard.fragment.g17g:
@@ -4543,6 +4549,27 @@ agx_lower_agx3_cf_constants(agx_context *ctx)
        ctx->key->dev.emit_agx3d) {
       bool progress = false;
       agx_foreach_instr_global_safe(ctx, I) {
+         /* G18's branch compares registers of the same float width. A half
+          * propagated into a float comparison must be widened explicitly,
+          * after copy propagation and before RA. Binary16 to binary32 is
+          * exact; keep the original condition and inversion unchanged. */
+         if ((I->op == AGX_OPCODE_IF_FCMP ||
+              I->op == AGX_OPCODE_WHILE_FCMP ||
+              I->op == AGX_OPCODE_BREAK_IF_FCMP) && I->nr_srcs == 2) {
+            for (unsigned s = 0; s < 2; ++s) {
+               if (I->src[s].type != AGX_INDEX_NORMAL ||
+                   I->src[s].size != AGX_SIZE_16 ||
+                   I->src[s ^ 1].size != AGX_SIZE_32)
+                  continue;
+               agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+               agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+               agx_fmov_to(&b, wide, I->src[s]);
+               I->src[s] = wide;
+               progress = true;
+            }
+            continue;
+         }
+
          switch (I->op) {
          case AGX_OPCODE_IF_ICMP:
          case AGX_OPCODE_ELSE_ICMP:
@@ -5973,6 +6000,20 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          agx_index tmp = I->src[0];
          I->src[0] = I->src[1];
          I->src[1] = tmp;
+      }
+
+      /* The established 32x32->64 multiply uses register multiplicands.
+       * An unsigned byte immediate has the same value as a zero-extended
+       * dword register. Materialize it before RA instead of asking the
+       * packer for an unsupported wide immediate form. Keep its zero case
+       * available for the existing multiply-by-zero fold. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs == 3 &&
+          I->dest[0].size == AGX_SIZE_64 && I->shift == 0 &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE &&
+          I->src[1].value > 0 && I->src[1].value <= UINT8_MAX &&
+          !I->src[1].abs && !I->src[1].neg) {
+         I->src[1] = agx_abs(agx_mov_imm(&b, 32, I->src[1].value));
       }
 
       /* Neither register nor immediate multiplication has a grounded
@@ -12674,6 +12715,15 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       (form_preamble && key->promote_textures) ? &info->sampler_state_count
                                               : NULL,
       form_preamble ? key : NULL, info);
+
+   /* Safe uniform-load speculation and if/phi folding have now exposed
+    * matching sample copies. Preserve early subset proofs through those
+    * optimizations and promote them only after complete-sample coalescing. */
+   if (key->dev.emit_agx3d && nir->info.stage == MESA_SHADER_FRAGMENT &&
+       (key->fs.nr_samples == 2 || key->fs.nr_samples == 4) &&
+       !key->fs.inside_sample_loop)
+      NIR_PASS(_, nir, agx_nir_coalesce_sample_mask_updates,
+               key->fs.nr_samples);
 
    if (is_g17p && source_imul64)
       NIR_PASS(_, nir, agx_nir_lower_imul64);

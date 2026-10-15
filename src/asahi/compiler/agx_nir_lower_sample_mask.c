@@ -250,6 +250,17 @@ mark_g18_sample_mask_tests(UNUSED nir_builder *b, nir_intrinsic_instr *intr,
 
    nir_alu_instr *target = nir_src_as_alu(intr->src[0]);
    nir_alu_instr *live = nir_src_as_alu(intr->src[1]);
+   bool subset = false;
+   if (target && target->op == nir_op_iand) {
+      unsigned constant = nir_src_is_const(target->src[0].src) ? 0 : 1;
+      if (!nir_src_is_const(target->src[constant].src))
+         return false;
+      unsigned bits = nir_src_as_uint(target->src[constant].src);
+      if (!bits || (bits & ~ALL_SAMPLES))
+         return false;
+      target = nir_src_as_alu(target->src[constant ^ 1].src);
+      subset = true;
+   }
    if (!target || target->op != nir_op_ior || !live ||
        live->op != nir_op_ixor)
       return false;
@@ -268,7 +279,8 @@ mark_g18_sample_mask_tests(UNUSED nir_builder *b, nir_intrinsic_instr *intr,
              nir_src_as_uint(live->src[1 - k].src) != ALL_SAMPLES)
             continue;
 
-         nir_intrinsic_set_flags(intr, AGX_SAMPLE_MASK_FULL_OR_KILL);
+         nir_intrinsic_set_flags(intr, subset ? AGX_SAMPLE_MASK_SUBSET_FULL_OR_KILL
+                                               : AGX_SAMPLE_MASK_FULL_OR_KILL);
          return true;
       }
    }
@@ -763,4 +775,129 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
    nir_progress(true, impl, nir_metadata_none);
    NIR_PASS(_, shader, nir_lower_vars_to_ssa);
    return true;
+}
+
+bool
+agx_nir_coalesce_sample_mask_updates(nir_shader *shader, unsigned nr_samples)
+{
+   if ((nr_samples != 2 && nr_samples != 4) || shader->info.writes_memory ||
+       shader->info.fs.early_fragment_tests ||
+       shader->info.fs.needs_coarse_quad_helper_invocations ||
+       shader->info.fs.needs_full_quad_helper_invocations)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_intrinsic_instr *updates[4];
+   unsigned update_bits[4];
+   unsigned count = 0, covered = 0;
+   const unsigned all = BITFIELD_MASK(nr_samples);
+   nir_block *update_block = NULL;
+   nir_def *target = NULL, *live = NULL;
+   unsigned flags = 0;
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
+            continue;
+
+         /* Keep kill-only operations in place. Below, moving a testing
+          * update past one requires disjoint affected sample sets. */
+         if (nir_src_is_const(intr->src[1]) &&
+             nir_src_as_uint(intr->src[1]) == 0)
+            continue;
+
+         if (count == ARRAY_SIZE(updates) ||
+             (update_block && update_block != block))
+            return false;
+
+         nir_alu_instr *mask = nir_src_as_alu(intr->src[0]);
+         if (!mask || mask->op != nir_op_iand ||
+             intr->src[0].ssa->bit_size != 16 ||
+             intr->src[1].ssa->bit_size != 16)
+            return false;
+
+         unsigned constant = nir_src_is_const(mask->src[0].src) ? 0 : 1;
+         if (!nir_src_is_const(mask->src[constant].src))
+            return false;
+         unsigned bits = nir_src_as_uint(mask->src[constant].src);
+         nir_def *base = mask->src[constant ^ 1].src.ssa;
+         if (base->num_components != 1 ||
+             mask->src[constant].src.ssa->num_components != 1 ||
+             mask->src[constant ^ 1].swizzle[0] != 0 ||
+             mask->src[constant].swizzle[0] != 0)
+            return false;
+         if (!bits || (bits & ~all) || (covered & bits) ||
+             (target && target != base) ||
+             (live && live != intr->src[1].ssa) ||
+             (count && flags != nir_intrinsic_flags(intr)))
+            return false;
+
+         target = base;
+         live = intr->src[1].ssa;
+         flags = nir_intrinsic_flags(intr);
+         update_block = block;
+         covered |= bits;
+         update_bits[count] = bits;
+         updates[count++] = intr;
+      }
+   }
+
+   if (count < 2 || covered != all)
+      return false;
+
+   bool between = false;
+   unsigned next_update = 0, moved_samples = 0;
+   nir_foreach_instr(instr, update_block) {
+      if (instr == &updates[0]->instr)
+         between = true;
+      if (!between)
+         continue;
+      if (instr == &updates[count - 1]->instr)
+         break;
+      if (instr == &updates[next_update]->instr) {
+         moved_samples |= update_bits[next_update++];
+         continue;
+      }
+      if (instr->type == nir_instr_type_alu ||
+          instr->type == nir_instr_type_load_const)
+         continue;
+      if (instr->type != nir_instr_type_intrinsic)
+         return false;
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (intr->intrinsic == nir_intrinsic_sample_mask_agx) {
+         if (!nir_src_is_const(intr->src[1]) ||
+             nir_src_as_uint(intr->src[1]) != 0)
+            return false;
+         nir_alu_instr *mask = nir_src_as_alu(intr->src[0]);
+         if (!mask || mask->op != nir_op_iand ||
+             intr->src[0].ssa->bit_size != 16 ||
+             intr->src[0].ssa->num_components != 1)
+            return false;
+         unsigned constant = nir_src_is_const(mask->src[0].src) ? 0 : 1;
+         if (!nir_src_is_const(mask->src[constant].src) ||
+             mask->src[constant].src.ssa->num_components != 1 ||
+             mask->src[constant ^ 1].src.ssa->num_components != 1 ||
+             mask->src[constant].swizzle[0] != 0 ||
+             mask->src[constant ^ 1].swizzle[0] != 0)
+            return false;
+         unsigned killed = nir_src_as_uint(mask->src[constant].src);
+         if (killed & moved_samples)
+            return false;
+      } else if (intr->intrinsic != nir_intrinsic_export_agx &&
+          !nir_intrinsic_can_reorder(intr))
+         return false;
+   }
+
+   nir_builder b = nir_builder_at(nir_before_instr(&updates[count - 1]->instr));
+   nir_intrinsic_instr *combined = nir_sample_mask_agx(&b, target, live);
+   if (flags == AGX_SAMPLE_MASK_SUBSET_FULL_OR_KILL)
+      flags = AGX_SAMPLE_MASK_FULL_OR_KILL;
+   nir_intrinsic_set_flags(combined, flags);
+   for (unsigned i = 0; i < count; ++i)
+      nir_instr_remove(&updates[i]->instr);
+
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }

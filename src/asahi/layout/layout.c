@@ -176,7 +176,7 @@ ail_initialize_gpu_tiled(struct ail_layout *layout)
       layout->layer_stride_B =
          ail_m5_layer_stride_B(offset_B, layout->depth_px, layout->compressed);
       layout->page_aligned_layers =
-         layout->depth_px > 1 && offset_B > AIL_PAGESIZE;
+         layout->depth_px > 1 && offset_B >= AIL_PAGESIZE;
    } else {
       /* Align layer size if we have mipmaps and one miptree is larger than one
        * page */

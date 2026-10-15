@@ -123,6 +123,12 @@ agx3_uniform_dma_span_equal(const struct agx3_uniform_dma_span *a,
           a->halfs == b->halfs && a->offset_B == b->offset_B;
 }
 
+enum agx_g18_sample_mask_form {
+   AGX_G18_SAMPLE_MASK_KILL = (1 << 0),
+   AGX_G18_SAMPLE_MASK_FULL = (1 << 1),
+   AGX_G18_SAMPLE_MASK_OTHER = (1 << 2),
+};
+
 struct agx_shader_info {
    mesa_shader_stage stage;
    uint32_t binary_size;
@@ -195,6 +201,10 @@ struct agx_shader_info {
 
    /* Does the shader control the sample mask? */
    bool writes_sample_mask;
+
+   /* Union of emitted G18 2x/4x sample-mask forms. A full late transaction
+    * does not establish proof for an unrelated partial or early update. */
+   uint8_t g18_sample_mask_forms;
 
    /* Depth layout, never equal to NONE */
    enum gl_frag_depth_layout depth_layout;
@@ -643,7 +653,10 @@ bool agx_nir_lower_sample_mask(nir_shader *s);
 /* TARGET/LIVE retain their normal semantics. This flag records the proof that
  * the update is either whole-sample testing or a disjoint non-testing kill. */
 #define AGX_SAMPLE_MASK_FULL_OR_KILL (1u << 2)
+/* Proof about the unmasked source; not permission to emit a full update. */
+#define AGX_SAMPLE_MASK_SUBSET_FULL_OR_KILL (1u << 3)
 bool agx_nir_mark_g18_sample_mask_tests(nir_shader *s);
+bool agx_nir_coalesce_sample_mask_updates(nir_shader *s, unsigned nr_samples);
 bool agx_nir_lower_sample_mask_deferred(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying);
 bool agx_nir_fix_g17g_constant_interpolation(nir_shader *s);

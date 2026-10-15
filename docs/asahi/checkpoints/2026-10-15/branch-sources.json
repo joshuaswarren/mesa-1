@@ -1,0 +1,11 @@
+{
+  "base_revision": "29dd453f6690fccbfd5d86849f12d891ef844fc5",
+  "source_sha256": {
+    "src/asahi/compiler/agx_compile.c": "86bd6f22ea145cf416bf1932b152eebe54f082f2e7e336cee6ebfeca80021e95",
+    "src/asahi/compiler/agx_compile.h": "c32c9432f81ae27c4b2f8261a38d88202177d155862f8c049236e96f54d1072a",
+    "src/asahi/compiler/agx_nir_lower_sample_mask.c": "b80755cb2c8c4764f21d62341768fc744247e3e0882726abe6380a1dffffc793",
+    "src/asahi/layout/layout.c": "ec2ce5430129dcc278ec7ad83056e2a885b16117ea00c4bba09c1c804f9cefdb",
+    "src/asahi/lib/agx_nir_prolog_epilog.c": "af00a1495a6e5addb8d911532193091ba3eafd58c285f1b117f65912c35da702",
+    "src/gallium/drivers/asahi/agx_state.c": "17926d77dfbbf1797aa92ac121cf11962b870331abb4b06aa7a40f2ce55e99bf"
+  }
+}
