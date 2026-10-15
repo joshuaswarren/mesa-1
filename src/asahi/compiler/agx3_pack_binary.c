@@ -12313,7 +12313,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool vertex_fetch_stages_coordinates =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_VERTEX &&
-               I->op == AGX_OPCODE_TEXTURE_LOAD;
+               (I->op == AGX_OPCODE_TEXTURE_LOAD ||
+                I->op == AGX_OPCODE_IMAGE_LOAD);
             const bool staged =
                /* G18 image/texture fetches publish their operands even in
                 * lowered vertex programs used for GS/TES rasterization. */
@@ -13963,13 +13964,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * identity carrier before issuing the existing barrier pair. */
             const bool g18g_texture_barrier = ctx->key->dev.emit_agx3d &&
                I->imm == AGX3_BARRIER_SCOPE_TEXTURE;
-            if (g18g_texture_barrier)
-               wait |= outstanding_here;
-            if (!agx3_emit_scoped_barrier(emission, enc, I, wait))
+            /* Image-write slots are assigned by the staging allocator after
+             * the general scheduler. A device fence must also complete these
+             * issued writes, which the scheduler's drain cannot see. */
+            const bool device = I->imm == AGX3_BARRIER_SCOPE_DEVICE ||
+                                I->imm == AGX3_BARRIER_SCOPE_DEVICE_FENCE;
+            const uint16_t retire =
+               wait | ((device || g18g_texture_barrier) ? outstanding_here : 0);
+            if (!agx3_emit_scoped_barrier(emission, enc, I, retire))
                AGX3_REFUSE(I);
-            if (g18g_texture_barrier) {
-               outstanding &= (uint16_t)~wait;
-            }
+            outstanding &= (uint16_t)~retire;
+            agx3_staging_forget(&staging_banks, retire);
             continue;
          }
 

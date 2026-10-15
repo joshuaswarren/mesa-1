@@ -935,16 +935,27 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
     * pass instance, the first synchronization scope includes only commands
     * that occur earlier in submission order within the same subpass" and
     * likewise for the second). Nothing after the pass learns anything from
-    * it. The one thing the driver owes it is memory: input attachments are
+    * it, but software graphics stages on CDM must observe it within the pass.
+    * Input attachments are
     * lowered to texture loads (nir_lower_input_attachments in hk_shader.c),
     * so a dependency with a memory scope needs the tile buffer stored and
     * reloaded, which is a render split. The continuation stream then waits
     * on the stream it continues, see hk_sync_stream_created. */
    if (cmd->sync.in_pass) {
-      if (hk_dependency_has_memory_scope(pDependencyInfo) &&
+      uint8_t src_kinds, dst_kinds;
+      hk_sync_dependency_kinds(pDependencyInfo, &src_kinds, &dst_kinds);
+      /* Software stages cannot cross an in-pass execution dependency by
+       * extending a stream positioned before its source render. End that
+       * stream too, even if the barrier has no memory access masks. */
+      const bool software_stages = src_kinds && dst_kinds &&
+         (cmd->current_cs.pre_gfx || cmd->current_cs.post_gfx);
+      if ((hk_dependency_has_memory_scope(pDependencyInfo) || software_stages) &&
           cmd->current_cs.gfx) {
          hk_cmd_buffer_end_graphics(cmd);
       }
+      /* Ending an empty render can replace its clear with a CDM job. Capture
+       * the first scope only after that replacement has its physical stream. */
+      hk_sync_pass_barrier(cmd, src_kinds, dst_kinds);
       return;
    }
 

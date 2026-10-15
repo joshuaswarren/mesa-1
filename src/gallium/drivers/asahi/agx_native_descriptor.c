@@ -378,12 +378,10 @@ agx_gallium_pack_native_pbe_impl(
    if (!agx3_generation)
       return false;
 
-   /* Admit only the fields recovered by agx_pbe_agx3_core.h. Gen10's tiled
-    * multisample packets additionally carry array layers and compression
-    * metadata. Their descriptor representation does not establish storage
-    * or render-state support; those remain checked by the caller. Software
-    * addressing sidebands and unrelated extensions must never be dropped.
-    */
+   /* Keep Gen9's Honeykrisp-parity admission and the independently qualified
+    * Gen10 layered/multisample paths. Descriptor representation does not
+    * establish storage or render-state support; callers still check those.
+    * Never discard software-addressing sidebands or unrelated extensions. */
    const bool gen10_multisample =
       agx3_generation == AGX_PBE_AGX3_GENERATION_10 &&
       (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
@@ -392,17 +390,23 @@ agx_gallium_pack_native_pbe_impl(
       g18_mips &&
       (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY ||
        legacy->dimension == AGX_TEXTURE_DIMENSION_3D);
+   const bool gen9 = agx3_generation == AGX_PBE_AGX3_GENERATION_9;
    const bool array =
-      (agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
-       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
-       legacy->layers > 1) ||
-      (gen10_multisample &&
-       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED);
+      gen9 && legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   const bool array_multisample =
+      (gen9 || gen10_multisample) &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
+   const bool three_d = gen9 && legacy->dimension == AGX_TEXTURE_DIMENSION_3D;
+   const bool layered = array || array_multisample || three_d;
    const bool multisample =
       gen10_multisample ||
-      (agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
-       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED);
-   if ((!array && !multisample && !g18_layered &&
+      (gen9 && (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
+                array_multisample));
+   const bool compressed_2d =
+      legacy->compressed && gen9 &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D &&
+      legacy->layout == AGX_LAYOUT_GPU && !multisample;
+   if ((!layered && !multisample && !g18_layered &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        /* Gen10 linear is the J873 bgra8/gears/colour end-of-tile PBE
         * (ffc60a02 00007f80 00005800 0003f010 for BGRA8 256x256, pitch
@@ -419,26 +423,26 @@ agx_gallium_pack_native_pbe_impl(
        (multisample ? (legacy->samples != AGX_SAMPLE_COUNT_2 &&
                        legacy->samples != AGX_SAMPLE_COUNT_4)
                     : legacy->samples != AGX_SAMPLE_COUNT_2) ||
-       (legacy->compressed && !gen10_multisample) ||
+       (legacy->compressed && !compressed_2d && !gen10_multisample) ||
        legacy->mode != AGX_IMAGE_MODE_NORMAL ||
-       (!array && !g18_layered && legacy->layers != 1) ||
+       (!layered && !g18_layered && legacy->layers != 1) ||
        (g18_layered && legacy->layout == AGX_LAYOUT_LINEAR) ||
        (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
                         legacy->level != 0 || legacy->levels != 1 ||
-                        legacy->unk_mipmapped)) ||
-       (agx3_generation != AGX_PBE_AGX3_GENERATION_9 && !g18_mips &&
-        (legacy->level != 0 || legacy->levels != 1 ||
-         legacy->unk_mipmapped)) ||
-       legacy->srgb || legacy->extended != legacy->compressed ||
+                        legacy->unk_mipmapped || (gen9 && legacy->compressed))) ||
+       (!gen9 && !g18_mips && (legacy->level != 0 || legacy->levels != 1 ||
+                  legacy->unk_mipmapped)) ||
+       (!gen9 && legacy->srgb) ||
+       (legacy->extended != legacy->compressed) ||
        (legacy->layout == AGX_LAYOUT_LINEAR
            ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
            : legacy->stride != 0) ||
-       (!gen10_multisample && legacy->acceleration_buffer) ||
-       legacy->depth_linear != 1 ||
-       legacy->layer_stride_linear || legacy->level_offset_sw ||
-       legacy->aligned_width_msaa_sw || legacy->sample_count_log2_sw ||
-       legacy->tile_width_sw != 1 || legacy->tile_height_sw != 1 ||
-       legacy->layer_stride_sw || legacy->buffer_offset_sw)
+       (!legacy->compressed && !gen10_multisample && legacy->acceleration_buffer) ||
+       legacy->depth_linear != 1 || legacy->layer_stride_linear ||
+       legacy->level_offset_sw || legacy->aligned_width_msaa_sw ||
+       legacy->sample_count_log2_sw || legacy->tile_width_sw != 1 ||
+       legacy->tile_height_sw != 1 || legacy->layer_stride_sw ||
+       legacy->buffer_offset_sw)
       return false;
 
    const struct agx_pbe_agx3_2d_fields fields = {
@@ -457,29 +461,32 @@ agx_gallium_pack_native_pbe_impl(
       .stride_B =
          legacy->layout == AGX_LAYOUT_LINEAR ? legacy->stride + 4 : 0,
       .page_aligned_layers = legacy->page_aligned_layers,
+      .srgb = legacy->srgb,
    };
 
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid = g18_layered
-      ? agx_pbe_g18_layered_mip_pack(&fields, legacy->dimension, legacy->layers,
-                                    legacy->level, legacy->levels, &packed)
+   const unsigned samples = legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u;
+   const bool valid =
+      g18_layered
+         ? agx_pbe_g18_layered_mip_pack(&fields, legacy->dimension, legacy->layers,
+                                      legacy->level, legacy->levels, &packed)
       : multisample
-      ? (array
-            ? agx_pbe_agx3_2d_array_multisample_pack(
-                 agx3_generation, &fields, legacy->layers,
-                 legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
-            : agx_pbe_agx3_2d_multisample_pack(
-                 agx3_generation, &fields,
-                 legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed))
-      : array
-      ? (legacy->level == 0 && legacy->levels == 1 &&
-         !legacy->unk_mipmapped &&
-         agx_pbe_agx3_2d_array_pack(agx3_generation, &fields,
-                                    legacy->layers, &packed))
-      : agx3_generation == AGX_PBE_AGX3_GENERATION_9
-         ? agx_pbe_agx3_2d_mip_pack(agx3_generation, &fields, legacy->level,
-                                    legacy->levels, &packed)
-         : g18_mips
+         ? (array_multisample
+               ? agx_pbe_agx3_2d_array_multisample_pack(
+                    agx3_generation, &fields, legacy->layers, samples,
+                    &packed)
+               : agx_pbe_agx3_2d_multisample_pack(agx3_generation, &fields,
+                                                  samples, &packed))
+      : layered
+         ? (array ? agx_pbe_agx3_2d_array_mip_pack(
+                       agx3_generation, &fields, legacy->layers,
+                       legacy->level, legacy->levels, &packed)
+                  : agx_pbe_agx3_3d_mip_pack(agx3_generation, &fields,
+                                             legacy->layers, legacy->level,
+                                             legacy->levels, &packed))
+      : gen9 ? agx_pbe_agx3_2d_mip_pack(agx3_generation, &fields,
+                                        legacy->level, legacy->levels, &packed)
+      : g18_mips
          ? agx_pbe_g18_2d_mip_pack(&fields, legacy->level, legacy->levels, &packed)
          : agx_pbe_agx3_2d_pack(agx3_generation, &fields, &packed);
    if (!valid)

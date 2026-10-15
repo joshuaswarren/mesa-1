@@ -205,6 +205,12 @@ struct hk_sync_state {
     * submission at queue submit. */
    struct hk_sync_dep req[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
 
+   /* A self-dependency has both scopes inside the current pass instance.
+    * Software graphics stages execute on CDM, so it must order those streams
+    * too, without becoming a requirement on work after the pass. */
+   struct hk_sync_dep pass_req[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
+   uint32_t pass_start_seq;
+
    /* Dependencies added to every stream created while set. Used for the
     * driver's own passes that continue a render (resolves). */
    struct hk_sync_dep internal[HK_SYNC_NUM_SQ];
@@ -274,6 +280,8 @@ void hk_sync_dependency_kinds(const VkDependencyInfo *info, uint8_t *src,
  * complete before any later stream of the destination kinds starts. */
 void hk_sync_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
                      uint8_t dst_kinds);
+void hk_sync_pass_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
+                         uint8_t dst_kinds);
 
 /* The requirement that "all earlier streams of these kinds complete", for
  * the stream self when it is one the requirement will be applied to (it is

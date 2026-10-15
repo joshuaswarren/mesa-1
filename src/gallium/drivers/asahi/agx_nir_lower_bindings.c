@@ -39,8 +39,8 @@ stage_for_descriptors(nir_shader *shader)
 
 static nir_def *
 load_stage_array(nir_builder *b, nir_def *index, unsigned components,
-                  unsigned bit_size, uintptr_t binding, unsigned stride,
-                  unsigned align, unsigned count)
+                 unsigned bit_size, uintptr_t binding, unsigned stride,
+                 unsigned align, unsigned count)
 {
    const unsigned table = AGX_SYSVAL_STAGE(stage_for_descriptors(b->shader));
    nir_scalar scalar = nir_scalar_resolved(index, 0);
@@ -54,7 +54,7 @@ load_stage_array(nir_builder *b, nir_def *index, unsigned components,
 
    /* Keep a bad dynamic GL index from escaping the fixed driver table. */
    index = nir_umin(b, index,
-                     nir_imm_intN_t(b, count - 1,
+                    nir_imm_intN_t(b, count - 1,
                                    index->bit_size));
 
    struct agx_draw_uniforms *u = NULL;
@@ -98,7 +98,7 @@ load_custom_border_sampler(nir_builder *b, nir_def *index)
    struct agx_stage_uniforms *s = NULL;
    return load_stage_array(
       b, index, 1, 16, (uintptr_t)&s->custom_border_sampler_handle,
-       sizeof(s->custom_border_sampler_handle[0]), 2, PIPE_MAX_SAMPLERS);
+      sizeof(s->custom_border_sampler_handle[0]), 2, PIPE_MAX_SAMPLERS);
 }
 
 static bool
@@ -195,6 +195,21 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          break;
       default:
          return false;
+      }
+
+      /* A buffer image's logical extent is not the width/height of its 2D
+       * hardware view. AGX2 stores that extent in descriptor software bits;
+       * Gen9 does not. Read the bound view's texel count from the stage table,
+       * including for the bounds queries inserted by robustness lowering. */
+      if (options->g17p_bindless_storage &&
+          intr->intrinsic == nir_intrinsic_image_size &&
+          nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
+         struct agx_stage_uniforms *s = NULL;
+         nir_def *size = load_stage_array(
+            b, intr->src[0].ssa, 1, 32, (uintptr_t)&s->image_buffer_size,
+            sizeof(s->image_buffer_size[0]), 4, PIPE_MAX_SHADER_IMAGES);
+         nir_def_replace(&intr->def, nir_u2uN(b, size, intr->def.bit_size));
+         return true;
       }
 
 

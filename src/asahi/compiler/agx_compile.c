@@ -4731,6 +4731,47 @@ agx_lower_agx3_half_iadd_constants(agx_context *ctx)
    return progress;
 }
 
+/* A 32-bit add or multiply-add of halves -- 16-bit integer arithmetic the
+ * optimizer widened, as hk's int16 shaders and dynamically indexed uniform
+ * arrays produce -- has no mixed-width AGX3 form. Extend each half register
+ * explicitly: AGX IR plain half sources are signed and abs selects zero
+ * extension; negation and the add's shift stay on the widened operation. */
+static bool
+agx_lower_agx3_widening_int(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (!((I->op == AGX_OPCODE_IMAD && I->nr_srcs == 3) ||
+            (I->op == AGX_OPCODE_IADD && I->nr_srcs == 2 && !I->saturate)) ||
+          I->nr_dests != 1 || I->dest[0].size != AGX_SIZE_32 ||
+          agx_channels(I->dest[0]) != 1)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_foreach_src(I, s) {
+         agx_index src = I->src[s];
+         if (src.size != AGX_SIZE_16 || src.type == AGX_INDEX_IMMEDIATE ||
+             src.type == AGX_INDEX_NULL || agx_channels(src) != 1)
+            continue;
+         bool is_unsigned = src.abs;
+         bool negate = src.neg;
+         src.abs = false;
+         src.neg = false;
+         agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+         if (is_unsigned)
+            agx_mov_to(&b, wide, src);
+         else
+            agx_signext_to(&b, wide, src);
+         I->src[s] = negate ? agx_neg(wide) : wide;
+         progress = true;
+      }
+   }
+   return progress;
+}
+
 /* The immediate native descriptor index has four bits. Materialize larger
  * indices as the existing zero-extended 64-bit indexed-fetch operand after
  * copy propagation, so constants do not get folded back into that field. */
@@ -4897,7 +4938,10 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       const bool half_fsel =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
-         I->dest[0].size == AGX_SIZE_16;
+         (I->dest[0].size == AGX_SIZE_16 ||
+          (I->dest[0].size == AGX_SIZE_32 &&
+           I->src[0].size == AGX_SIZE_16 &&
+           I->src[1].size == AGX_SIZE_16));
       const bool half_round =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          (I->op == AGX_OPCODE_FLOOR || I->op == AGX_OPCODE_CEIL) &&
@@ -4908,15 +4952,67 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       /* Leave an immediate beside the modifier alone: #1.0 - x has its own
        * witnessed half form (agx3_alu_hadd_one_neg) and a plain x + #imm
        * does not. */
-      const bool half_add =
+      const bool half_add_candidate =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 && !I->saturate &&
-         I->dest[0].size == AGX_SIZE_16 &&
+         I->dest[0].size == AGX_SIZE_16;
+      const int add_imm = !half_add_candidate                       ? -1
+                          : I->src[0].type == AGX_INDEX_IMMEDIATE ? 0
+                          : I->src[1].type == AGX_INDEX_IMMEDIATE ? 1
+                                                                  : -1;
+      const bool one_minus =
+         add_imm >= 0 && I->src[add_imm].value == UINT8_C(0x30) &&
+         !I->src[add_imm].abs && !I->src[add_imm].neg &&
+         I->src[add_imm ^ 1].type != AGX_INDEX_IMMEDIATE &&
+         I->src[add_imm ^ 1].neg && !I->src[add_imm ^ 1].abs;
+      /* Apart from that and the signed-zero adds that implement
+       * conversions, a half add has no immediate form, with or without a
+       * modifier beside it -- mediump c - x and x - c, e.g. dEQP's trig range
+       * reduction. Make the immediate an exact half register; a modifier is
+       * made explicit below, and the add becomes a register HADD. */
+      const bool signed_zero =
+         add_imm >= 0 && (I->src[add_imm].value & 0x7f) == 0;
+      if (half_add_candidate && add_imm >= 0 && !one_minus && !signed_zero &&
+          I->src[add_imm ^ 1].type != AGX_INDEX_IMMEDIATE &&
+          I->src[add_imm ^ 1].size == AGX_SIZE_16) {
+         float value = agx_minifloat_decode(I->src[add_imm].value);
+         if (I->src[add_imm].abs)
+            value = fabsf(value);
+         if (I->src[add_imm].neg)
+            value = -value;
+         I->src[add_imm] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+      }
+      const bool half_add =
+         half_add_candidate &&
          I->src[0].type != AGX_INDEX_IMMEDIATE &&
          I->src[1].type != AGX_INDEX_IMMEDIATE;
 
-      if (half_fsel || half_round || half_add) {
-         const unsigned source_count = half_fsel ? 4 : half_add ? 2 : 1;
+      /* A modified half multiplier beside a literal has no native form.
+       * Keep half multiplication and its rounding, but use two registers
+       * with the exact sign-bit operations shared by the half add/select. */
+      const bool half_mul =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_HMUL && I->nr_srcs == 2 && !I->saturate &&
+         I->dest[0].size == AGX_SIZE_16 &&
+         ((I->src[0].type == AGX_INDEX_IMMEDIATE &&
+           I->src[1].size == AGX_SIZE_16 &&
+           (I->src[1].abs || I->src[1].neg)) ||
+          (I->src[1].type == AGX_INDEX_IMMEDIATE &&
+           I->src[0].size == AGX_SIZE_16 &&
+           (I->src[0].abs || I->src[0].neg)));
+      if (half_mul) {
+         const unsigned imm = I->src[0].type == AGX_INDEX_IMMEDIATE ? 0 : 1;
+         float value = agx_minifloat_decode(I->src[imm].value);
+         if (I->src[imm].abs)
+            value = fabsf(value);
+         if (I->src[imm].neg)
+            value = -value;
+         I->src[imm] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+      }
+
+      if (half_fsel || half_round || half_add || half_mul) {
+         const unsigned source_count = half_fsel ? 4
+                                       : half_add || half_mul ? 2 : 1;
          for (unsigned s = 0; s < source_count; ++s) {
             if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
                 I->src[s].size != AGX_SIZE_16 ||
@@ -4945,6 +5041,13 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 
             I->src[s] = value;
          }
+
+         /* Both sources are now plain halves. The register/register half add
+          * is encoded as HADD, the op NIR's own 16-bit fadd produces; a
+          * 16-bit FADD that reaches the packer has no form. */
+         if (half_add && I->src[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_16)
+            I->op = AGX_OPCODE_HADD;
       }
 
       /* frexp's full-precision path compares zero against fabs(x) and
@@ -6671,14 +6774,24 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
           * folds stay in the operand's own precision: the builder would size
           * the temporary from the leading immediate and make a 16-bit add of
           * a 32-bit quadrant, which neither keeps the precision nor packs. */
-         agx_index middle = agx_temp(b->shader, s0.size);
-         agx_fadd_to(b, middle, agx_immediate_f(2.0f), agx_neg(s0));
-         agx_index last = agx_fadd(b, s0, agx_immediate_f(-4.0f));
-         agx_index t = agx_fcmpsel(b, s0, agx_immediate_f(1.0f), s0,
+         /* The native sinc is a 32-bit funop with no half form, so a
+          * mediump quadrant is evaluated at full precision and narrowed. */
+         const bool half = s0.size == AGX_SIZE_16;
+         agx_index x = s0;
+         if (half) {
+            x = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, x, s0);
+         }
+         agx_index middle = agx_temp(b->shader, x.size);
+         agx_fadd_to(b, middle, agx_immediate_f(2.0f), agx_neg(x));
+         agx_index last = agx_fadd(b, x, agx_immediate_f(-4.0f));
+         agx_index t = agx_fcmpsel(b, x, agx_immediate_f(1.0f), x,
                                    middle, AGX_FCOND_LE);
-         t = agx_fcmpsel(b, s0, agx_immediate_f(3.0f), last, t,
+         t = agx_fcmpsel(b, x, agx_immediate_f(3.0f), last, t,
                          AGX_FCOND_GT);
-         return agx_fmul_to(b, dst, agx_sinc_agx3(b, t), t);
+         if (!half)
+            return agx_fmul_to(b, dst, agx_sinc_agx3(b, t), t);
+         return agx_fmov_to(b, dst, agx_fmul(b, agx_sinc_agx3(b, t), t));
       }
 
       agx_index fixup = agx_sin_pt_1(b, s0);
@@ -10068,6 +10181,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    agx_lower_agx3_mixed_width_unary(ctx);
    agx_lower_agx3_shifted_iadd_dest(ctx);
 
+   /* Before materialization, which lowers the SIGNEXT this introduces. */
+   AGX_PASS(ctx, agx_lower_agx3_widening_int);
+
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
 
@@ -10606,9 +10722,13 @@ agx_nir_lower_g17p_f16_classify(nir_builder *b, nir_alu_instr *alu,
       for (unsigned constant = 0; constant < 2; ++constant) {
          const unsigned value = constant ^ 1;
          nir_alu_instr *candidate = nir_src_as_alu(alu->src[value].src);
-         const double compare = nir_src_is_const(alu->src[constant].src)
-                                   ? nir_src_as_float(alu->src[constant].src)
-                                   : 0.0;
+         /* The constant may be a vector read through a swizzle (isinf of a
+          * vec2 compares each lane with one splatted infinity), so read the
+          * lane this comparison uses rather than the whole source. */
+         const nir_scalar k = nir_scalar_chase_alu_src(
+            nir_get_scalar(&alu->def, 0), constant);
+         const double compare =
+            nir_scalar_is_const(k) ? nir_scalar_as_float(k) : 0.0;
 
          if (candidate && candidate->op == nir_op_fabs &&
              nir_src_bit_size(candidate->src[0].src) == 16 &&

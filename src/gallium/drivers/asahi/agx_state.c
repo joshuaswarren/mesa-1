@@ -206,7 +206,7 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
       }
 
       ctx->stage[shader].image_mask &=
-         ~BITFIELD64_MASK(count + unbind_num_trailing_slots) << start_slot;
+         ~(BITFIELD64_MASK(count + unbind_num_trailing_slots) << start_slot);
       return;
    }
 
@@ -246,17 +246,17 @@ agx_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
 
       if (!image->resource) {
          util_copy_image_view(&ctx->stage[shader].images[start_slot + i], NULL);
-         ctx->stage[shader].image_mask &= ~BITFIELD_BIT(start_slot + i);
+         ctx->stage[shader].image_mask &= ~BITFIELD64_BIT(start_slot + i);
       } else {
          util_copy_image_view(&ctx->stage[shader].images[start_slot + i],
                               image);
-         ctx->stage[shader].image_mask |= BITFIELD_BIT(start_slot + i);
+         ctx->stage[shader].image_mask |= BITFIELD64_BIT(start_slot + i);
       }
    }
 
    /* Unbind start_slot+count...start_slot+count+unbind_num_trailing_slots */
    for (int i = 0; i < unbind_num_trailing_slots; i++) {
-      ctx->stage[shader].image_mask &= ~BITFIELD_BIT(start_slot + count + i);
+      ctx->stage[shader].image_mask &= ~BITFIELD64_BIT(start_slot + count + i);
       util_copy_image_view(&ctx->stage[shader].images[start_slot + count + i],
                            NULL);
    }
@@ -4770,6 +4770,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
    const unsigned image_records = cs->so->info.image_records;
    for (unsigned i = 0; i < nr_images; ++i) {
+      batch->stage_uniforms[stage].image_buffer_size[i] = 0;
       /* Image descriptors come in pairs after the textures, each followed on
        * G17P by its software tail record. */
       const unsigned image = nr_textures + (image_records * i);
@@ -4784,7 +4785,7 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
       if (tail)
          memset(tail, 0, descriptor_size);
 
-      if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i))) {
+      if (!(ctx->stage[stage].image_mask & BITFIELD64_BIT(i))) {
          if (!agx_gallium_set_null_native_texture(descriptor_generation,
                                                    texture))
             {
@@ -4801,6 +4802,9 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
       struct pipe_image_view *view = &ctx->stage[stage].images[i];
       agx_batch_track_image(batch, view);
+      if (dev->chip == AGX_CHIP_G17P && view->resource->target == PIPE_BUFFER)
+         batch->stage_uniforms[stage].image_buffer_size[i] =
+            agx_texture_buffer_size_el(view->format, view->u.buf.size);
 
       /* A store to another binding does not consume this image's PBE.
        * Shader/API access flags can conservatively include writes even for
@@ -5333,14 +5337,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
       ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
    size_t count = 0;
    const mesa_shader_stage stage = cs->stage;
-   /* Geometry's raster/copy program owns geometry-stage resources but runs
-    * as a native vertex program, with a matching resource-aware prolog. */
    const bool vertex_program = cs->b.info.stage == MESA_SHADER_VERTEX;
-   const bool resource_pair =
-      batch->texture_count[stage] != 0 &&
-      (stage == MESA_SHADER_FRAGMENT ||
-       (vertex_program && cs->g17p_texture_resources));
-
    /* G17G fragments reserve the same eight-half prefix for their texture
     * and sampler table pointers: Apple's own applegpu_g17g fragment with one
     * bindful texture moves every other uniform up by eight halves relative
@@ -5350,9 +5347,18 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
     * m5-texture-abi-witness-20260913.txt). The resource pair below is that
     * prefix. */
 
-   if (batch->texture_count[stage] && !resource_pair)
-      AGX3_PROGRAM_REFUSE("textures are bound but the program reserves no "
-                  "texture/sampler pointer pair");
+   /* A hardware vertex program -- the vertex shader, a tessellation
+    * evaluation shader run as one, or a geometry shader's copy program --
+    * takes the pair exactly when it was compiled to read it. The copy
+    * program samples nothing even when its geometry shader, whose texture
+    * table this stage's count describes, does. */
+   const bool resource_pair =
+      batch->texture_count[stage] != 0 &&
+      (stage == MESA_SHADER_FRAGMENT || cs->g17p_texture_resources);
+
+   if (batch->texture_count[stage] && !resource_pair &&
+       stage == MESA_SHADER_FRAGMENT)
+      return 0;
    if (resource_pair) {
       if (!batch->stage_uniforms[stage].texture_base)
          AGX3_PROGRAM_REFUSE("no texture table is uploaded for the stage");
@@ -5386,8 +5392,8 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
                  push->length, (unsigned long long)table);
 
       /* Fragment uniform zero is deliberately replaced by the resource pair.
-       * A textured VS instead shifts its complete fixed ABI; trimming a VBO
-       * or draw-parameter range here would corrupt vertex fetches. */
+       * A textured vertex/TES/copy program shifts its complete fixed ABI;
+       * trimming a VBO or draw-parameter range would corrupt vertex fetches. */
       if (resource_pair && vertex_program &&
           push->uniform < AGX_ABI_G17P_TEXTURE_POINTER_HALFS)
          AGX3_PROGRAM_REFUSE("a textured vertex program pushes a uniform range "

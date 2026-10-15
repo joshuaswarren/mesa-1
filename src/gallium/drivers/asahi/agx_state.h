@@ -186,6 +186,9 @@ struct PACKED agx_stage_uniforms {
    uint64_t ssbo_base[PIPE_MAX_SHADER_BUFFERS];
    uint32_t ssbo_size[PIPE_MAX_SHADER_BUFFERS];
 
+   /* Gen9 has no AGX2 buffer-image size sideband in its native descriptor. */
+   uint32_t image_buffer_size[PIPE_MAX_SHADER_IMAGES];
+
    /* If lowered to bindless, sampler index in the heap */
    uint16_t sampler_handle[PIPE_MAX_SAMPLERS];
 
@@ -423,7 +426,7 @@ struct agx_stage {
    uint32_t ssbo_mask;
 
    struct pipe_image_view images[PIPE_MAX_SHADER_IMAGES];
-   uint32_t image_mask;
+   uint64_t image_mask;
 
    /* Need full CSOs for u_blitter */
    struct agx_sampler_state *samplers[PIPE_MAX_SAMPLERS];
