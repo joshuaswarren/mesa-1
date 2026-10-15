@@ -22,6 +22,12 @@ struct hk_device_memory {
    struct agx_bo *bo;
 
    void *map;
+
+   /* The live mapping was made with VK_MEMORY_MAP_PLACED_BIT_EXT. Such a
+    * mapping belongs to this object, so it is dropped on unmap and on free
+    * instead of staying on a BO that returns to the BO cache.
+    */
+   bool placed_map;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_device_memory, vk.base, VkDeviceMemory,
