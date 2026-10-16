@@ -71,6 +71,12 @@ hk_flush_if_timestamp(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool)
     * This could maybe optimized.
     */
    if (pool->vk.query_type == VK_QUERY_TYPE_TIMESTAMP) {
+      /* Timestamp work is ordered by the driver, not by an app barrier: stop
+       * dependency-tracking the CDM barrier for the rest of this command
+       * buffer, so every launch before and after is flushed as in a command
+       * buffer with graphics work.
+       */
+      hk_cmd_buffer_untrack_cdm(cmd);
       perf_debug(cmd, "Flushing for timestamp copy");
       hk_cmd_buffer_end_graphics(cmd);
       hk_cmd_buffer_end_compute(cmd);
@@ -376,6 +382,11 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* See hk_flush_if_timestamp: no dependency-tracked CDM barrier in a command
+    * buffer that writes timestamps.
+    */
+   hk_cmd_buffer_untrack_cdm(cmd);
 
    uint64_t report_addr = hk_query_report_addr(dev, pool, query);
    bool after_gfx = cmd->current_cs.gfx != NULL;
