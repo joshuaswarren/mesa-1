@@ -355,18 +355,9 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
        * barrier were already flushed by the previous launch's gating.
        */
       cmd->state.cs.cdm_barrier_pending = true;
-
-      /* Outside a render pass only a CDM control stream can be open; the
-       * pending flag above orders it against the next launch. Ending the
-       * compute batch here would only produce the stream
-       * merge_control_streams stitches back together at hk_EndCommandBuffer,
-       * plus a stream link and a fresh chunk per barrier; keep it open. The
-       * batches must end when a graphics batch is open: the dependency then
-       * spans batch types and the kernel orders the resulting commands
-       * (agx_cmd_header barriers). */
-      if (!cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
-          !cmd->current_cs.post_gfx)
-         return;
+      /* Diagnostic arm: always end the compute and graphics batches at a
+       * barrier, as before the keep-open change; the pending flag above still
+       * orders the next CDM launch. */
    }
 
    hk_cmd_buffer_end_compute(cmd);
