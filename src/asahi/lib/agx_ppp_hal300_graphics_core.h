@@ -48,6 +48,20 @@ struct agx_ppp_hal300_graphics_fields {
     */
    bool no_color_attachment;
    /*
+    * Set on G18G when colour attachments are bound but the linked fragment
+    * program writes nothing to them: no tile store, memory write or coverage
+    * write (the linker's no_op). Only the ISP record's last word moves, to
+    * the colour-free zero. Native capture 1130 (J873, 26A428): of 39
+    * mixed-format MRT renders, the one whose four colour masks are all empty
+    * runs a fragment of only the pixel-transaction bracket and carries zero
+    * there, and each of the 38 that store a target carries a nonzero word.
+    * With 0x0001ffff, G18G replaces every covered pixel of every attachment
+    * with zero at end of tile although the fragment stored no lane. The
+    * varying count keeps the colour-render position; that render has no
+    * varyings, so it witnesses neither placement.
+    */
+   bool fragment_writes_nothing;
+   /*
     * ISP pass type: 0 opaque, 1 translucent, 2 punch through, and on G18G
     * 3 translucent punch through. The G18 native constructor selects 3
     * at 0x219564774..0x2195647f0; setFragmentVariant copies all three pass

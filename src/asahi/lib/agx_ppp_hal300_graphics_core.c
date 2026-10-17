@@ -92,6 +92,9 @@ agx_ppp_hal300_graphics_core_pack(
    /* Rasterizer discard is read from AGXMetalG18G; G17G has no witness. */
    if (fields->rasterizer_discard && chip != AGX_CHIP_G18G)
       return false;
+   /* The written-nothing ISP word is witnessed on G18G only. */
+   if (fields->fragment_writes_nothing && chip != AGX_CHIP_G18G)
+      return false;
    if (fields->depth_bias_enable &&
        (chip != AGX_CHIP_G18G || fields->object_type != AGX_PPP_HAL300_TRIANGLES))
       return false;
@@ -206,7 +209,8 @@ agx_ppp_hal300_graphics_core_pack(
                           ? 0x04000000
                           : 0),
        early_test, early_test,
-       fields->no_color_attachment ? 0 : 0x0001ffff},
+       fields->no_color_attachment || fields->fragment_writes_nothing
+          ? 0 : 0x0001ffff},
       /* W clamp and cull-2; bit 17 of the cull-2 word is rasterizer
        * discard (see agx_ppp_hal300_graphics_fields::rasterizer_discard)
        * and bit 12 a hardware primitive ID read by the fragment shader. */

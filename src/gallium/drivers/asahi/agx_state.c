@@ -9657,6 +9657,12 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
          batch->reduced_prim == MESA_PRIM_TRIANGLES &&
          (rast->base.offset_units != 0.0f || rast->base.offset_scale != 0.0f),
       .no_color_attachment = batch->key.nr_cbufs == 0,
+      /* Run 1139: the mixed-format epilog neither loads nor stores a target
+       * whose colour mask is empty, so with every mask empty the linked
+       * program writes nothing and the linker marks it no_op. Apple draws
+       * that with the colour-free ISP word (see the field). */
+      .fragment_writes_nothing = agx_g18_native_mixed_enabled() &&
+         dev->chip == AGX_CHIP_G18G && batch->key.nr_cbufs != 0 && fs->no_op,
       .fragment_pass = fragment_pass,
       /* Bit 26 of the shader's own fragment control; a discarding shader
        * carries it beside its punch-through pass type. Native1094's 2x/4x
@@ -9727,6 +9733,10 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       .flat_shading_vertex =
          dev->chip == AGX_CHIP_G18G && !rast->base.flatshade_first ? 2 : 0,
    };
+   if (graphics_fields.fragment_writes_nothing &&
+       getenv("ASAHI_G18_RESOURCE_TRACE"))
+      fprintf(stderr, "G18_FRAGMENT_WRITES_NOTHING cbufs=%u pass=%u\n",
+              batch->key.nr_cbufs, fragment_pass);
    struct agx_ppp_hal300_graphics_core graphics;
    if (!agx_ppp_hal300_graphics_core_pack(dev->chip, &graphics_fields, &graphics))
       return NULL;
