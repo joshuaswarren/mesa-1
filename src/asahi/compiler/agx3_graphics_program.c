@@ -9,6 +9,7 @@
 #include "agx3_copy_core.h"
 #include "agx3_ioto_load_packer.h"
 #include "agx3_pixel_core.h"
+#include "agx_debug.h"
 #include "asahi/lib/agx_ioto_preshader_core.h"
 #include "asahi/lib/agx_ioto_state_core.h"
 #include "util/macros.h"
@@ -894,6 +895,13 @@ g17g_graphics_program_generate(
            desc->imageblock.sample_size_B != 16 &&
            desc->imageblock.sample_size_B != 24 &&
            desc->imageblock.sample_size_B != 32 &&
+           /* Native1121 (run 1130): the mixed-format req2-clear layout's
+            * fragment, background and end-of-tile SPECLM records carry a
+            * 40-byte sample in the same 32x32 single-sample spelling
+            * (f19 = f20 = 5, f22 = 40, f25 = 1). */
+           !(target_chip == AGX_CHIP_G18G &&
+             desc->imageblock.sample_size_B == 40 &&
+             agx_g18_native1130_enabled()) &&
            !(target_chip == AGX_CHIP_G18G &&
              desc->imageblock.sample_size_B >= 48 &&
              desc->imageblock.sample_size_B <= 128 &&

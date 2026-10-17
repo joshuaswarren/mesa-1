@@ -290,6 +290,21 @@ unsigned agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib);
 unsigned agx_g18g_raw32_mrt_mask(const struct agx_tilebuffer_layout *tib);
 unsigned agx_g18g_ms_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
+/* Native-1121 mixed-format single-sample G18 layouts (run 1130): the
+ * imageblock bytes of a 32x32 tile for an admitted format list (zero if none),
+ * and the attachment mask of an admitted layout. */
+unsigned agx_g18g_mixed_tile_bytes(const enum pipe_format *formats,
+                                   unsigned nr_cbufs, unsigned nr_samples,
+                                   bool layered);
+unsigned agx_g18g_mixed_mrt_mask(const struct agx_tilebuffer_layout *tib);
+/* Whether an all-clear (has_clear) or all-reload (has_load) background of an
+ * admitted mixed-format layout is witnessed. */
+bool agx_g18g_mixed_bg_witnessed(const struct agx_tilebuffer_layout *tib,
+                                 bool has_clear, bool has_load);
+/* The same layouts in compacted end-of-tile key form. */
+unsigned
+agx_g18g_mixed_compact_mrt_mask(const struct agx_tilebuffer_layout *tib);
+
 /* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */
 unsigned
 agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib);

@@ -150,6 +150,32 @@ agx_g18_native1128_enabled(void)
    return debug_get_option_agx_g18_native1128();
 }
 
+/* The G18 mixed-format tile path grounded on the verified native capture 1121
+ * by run 1130 is on unless AGX_G18_NATIVE1130=0, which restores the 1128
+ * behaviour for A/B. AGX_G18_NATIVE1109, AGX_G18_NATIVE1121 and
+ * AGX_G18_NATIVE1128 keep their meanings. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g18_native1130, "AGX_G18_NATIVE1130", true)
+
+bool
+agx_g18_native1130_enabled(void)
+{
+   return debug_get_option_agx_g18_native1130();
+}
+
+/* Native req2-clear keeps a 40-byte sample in a 32x32 single-sample tile
+ * (40 KiB), which module 1120's render translator refuses (TilebufferSize:
+ * only <= 32 KiB or 48..128-byte samples in steps of 16). Off by default so no
+ * submission can fail; AGX_G18_NATIVE1130_TILE40=1 asserts a kernel that
+ * admits it, and has no effect when AGX_G18_NATIVE1130=0. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g18_native1130_tile40,
+                           "AGX_G18_NATIVE1130_TILE40", false)
+
+bool
+agx_g18_native1130_tile40_enabled(void)
+{
+   return debug_get_option_agx_g18_native1130_tile40();
+}
+
 static agx_index
 agx_cached_preload(agx_context *ctx, unsigned base, enum agx_size size)
 {

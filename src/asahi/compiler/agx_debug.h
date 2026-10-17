@@ -52,6 +52,14 @@ bool agx_g18_native1121_enabled(void);
 /* Native-1121 grounded G18 changes of run 1128; AGX_G18_NATIVE1128=0 opts out. */
 bool agx_g18_native1128_enabled(void);
 
+/* Native-1121 grounded G18 mixed-format tile path of run 1130;
+ * AGX_G18_NATIVE1130=0 opts out. */
+bool agx_g18_native1130_enabled(void);
+
+/* Assert a kernel that admits a 40-byte single-sample sample in a 32x32 G18
+ * tile (module 1120 does not); AGX_G18_NATIVE1130_TILE40=1, default off. */
+bool agx_g18_native1130_tile40_enabled(void);
+
 /* Fragment-structure code generation choices that remain selectable. */
 enum agx_fs_structure_flag {
    /* Compile the colour epilog into the fragment shader at link time, as

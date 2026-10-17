@@ -1482,9 +1482,18 @@ agx_gallium_tilebuffer_layout(const struct agx_device *dev,
       active++;
    }
    raw32 &= active >= 2 && active <= 8;
+   /* Native1121 (run 1130): Apple keeps an admitted mixed-format layout in a
+    * 32x32 tile of its whole sample (req2-clear: specLM f19 = f20 = 5,
+    * f22 = 40, i.e. 40 KiB). Budget exactly that allocation where the kernel
+    * admits it (agx_g18g_mixed_tile_bytes); the offsets do not move. */
+   const unsigned mixed_bytes =
+      g18_native && !raw32
+         ? agx_g18g_mixed_tile_bytes(formats, nr_cbufs, nr_samples, layered)
+         : 0;
    return agx_build_tilebuffer_layout_with_limits(
       formats, nr_cbufs, nr_samples, layered, raw32 ? 128 : 0,
-      raw32 ? 131072 : g18_native ? (nr_samples == 1 ? 32768 : 98304) : 0,
+      raw32 ? 131072 : mixed_bytes ? MAX2(mixed_bytes, 32768)
+      : g18_native ? (nr_samples == 1 ? 32768 : 98304) : 0,
       g18_native ? (nr_samples == 1 ? 1024 : 2048) : 0);
 }
 
@@ -6878,7 +6887,8 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
    const bool no_color = batch->key.nr_cbufs == 0;
    const unsigned word_mask = dev->chip == AGX_CHIP_G18G
                                 ? agx_g18g_word_mrt_mask(&key->tib) |
-                                     agx_g18g_raw32_mrt_mask(&key->tib) : 0;
+                                     agx_g18g_raw32_mrt_mask(&key->tib) |
+                                     agx_g18g_mixed_mrt_mask(&key->tib) : 0;
    const unsigned ms_mask = dev->chip == AGX_CHIP_G18G
                               ? agx_g18g_ms_mrt_mask(&key->tib) : 0;
    const unsigned mrt_mask = word_mask | ms_mask;
@@ -6909,6 +6919,12 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       has_clear |= key->op[rt] == AGX_BG_CLEAR;
       has_load |= key->op[rt] == AGX_BG_LOAD;
    }
+   /* Native1130: a mixed-format background only for the operations its
+    * captures show (agx_tilebuffer.c, agx_g18g_native1130_mixed). */
+   if (dev->chip == AGX_CHIP_G18G && !store &&
+       agx_g18g_mixed_mrt_mask(&key->tib) &&
+       !agx_g18g_mixed_bg_witnessed(&key->tib, has_clear, has_load))
+      return agx_reject_g17g_tile(batch, "M5 mixed-format background operation");
    const enum agx_bg_eot_op op = key->op[first_rt];
    /* The final direct resolve writes its single-sample destination. All
     * other stores preserve the actual multisample attachment, including
@@ -9241,7 +9257,8 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
        (dev->chip == AGX_CHIP_G18G &&
         (agx_g18g_word_mrt_mask(&batch->tilebuffer_layout) ||
          agx_g18g_raw32_mrt_mask(&batch->tilebuffer_layout) ||
-         agx_g18g_ms_mrt_mask(&batch->tilebuffer_layout)));
+         agx_g18g_ms_mrt_mask(&batch->tilebuffer_layout) ||
+         agx_g18g_mixed_mrt_mask(&batch->tilebuffer_layout)));
    const struct pipe_surface *zsbuf = &batch->key.zsbuf;
    /* With the comparison disabled the depth unit performs no test and, per
     * the API, no write either, and a disabled stencil unit does nothing at

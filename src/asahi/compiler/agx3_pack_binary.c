@@ -8893,6 +8893,90 @@ agx3_stage_runs_as_kernel(mesa_shader_stage stage)
           stage == MESA_SHADER_GEOMETRY;
 }
 
+/* Native1121 (Apple M6, verified capture 1121; run 1130): the tile stores of
+ * the admitted single-sample mixed-format layouts (agx_tilebuffer.c,
+ * agx_g18g_native1130_mixed), in ascending offset order. Each is one store per
+ * attachment with the attachment's lane width and lane count -- lstcol
+ * f10 = 2 (W32) / 1 (W16), f26 = the mask, f57 = the offset -- identically in
+ * Apple's fragment (every target written, full mask) and background (clear or
+ * reload) programs:
+ *
+ *  - req2-clear (workload 39, stamp 76), fragment and clear background:
+ *    RG32Sint W32 m3 @0, RGBA32Float W32 m15 @8, RG32Sint W32 m3 @24,
+ *    R16Uint W16 m1 @32;
+ *  - req2-load (workload 40, stamp 78), fragment and reload background:
+ *    RG32Sint W32 m3 @0, RG32Sint W32 m3 @8, R16Uint W16 m1 @16, slot 1
+ *    absent from the pass.
+ *
+ * A shader is accepted on this path only if its stores are exactly one row,
+ * target for target; a subset, another mask or another offset stays refused. */
+struct agx3_g18_mixed_store {
+   uint8_t target;
+   uint8_t mask;
+   uint8_t offset;
+   enum agx_format format;
+};
+
+static const struct agx3_g18_mixed_store agx3_g18_native1130_stores[][AGX_MAX_RTS] = {
+   {{0, 3, 0, AGX_FORMAT_I32}, {1, 15, 8, AGX_FORMAT_I32},
+    {2, 3, 24, AGX_FORMAT_I32}, {3, 1, 32, AGX_FORMAT_I16}},
+   {{0, 3, 0, AGX_FORMAT_I32}, {2, 3, 8, AGX_FORMAT_I32},
+    {3, 1, 16, AGX_FORMAT_I16}},
+};
+
+static unsigned
+agx3_g18_native1130_store_count(unsigned row)
+{
+   unsigned n = 0;
+   while (n < AGX_MAX_RTS && agx3_g18_native1130_stores[row][n].mask)
+      n++;
+   return n;
+}
+
+/* Whether the single-sample fragment-stage shader's tile stores are exactly
+ * one admitted row (any order; the protocol checks the order separately) and
+ * it has no tile load. */
+static bool
+agx3_g18_native1130_mixed_stores(const agx_context *ctx)
+{
+   if (!agx_g18_native1130_enabled() ||
+       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       !ctx->key->dev.emit_agx3d || ctx->stage != MESA_SHADER_FRAGMENT ||
+       ctx->is_preamble || ctx->key->fs.nr_samples > 1)
+      return false;
+
+   for (unsigned row = 0; row < ARRAY_SIZE(agx3_g18_native1130_stores); ++row) {
+      const unsigned count = agx3_g18_native1130_store_count(row);
+      unsigned seen = 0, stores = 0;
+      bool ok = true;
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_LD_TILE) {
+            ok = false;
+            break;
+         }
+         if (I->op != AGX_OPCODE_ST_TILE)
+            continue;
+         stores++;
+         unsigned i;
+         for (i = 0; i < count; ++i) {
+            const struct agx3_g18_mixed_store *s =
+               &agx3_g18_native1130_stores[row][i];
+            if (I->colour_target == s->target && I->format == s->format &&
+                I->mask == s->mask && I->pixel_offset == s->offset)
+               break;
+         }
+         if (i == count || (seen & BITFIELD_BIT(i))) {
+            ok = false;
+            break;
+         }
+         seen |= BITFIELD_BIT(i);
+      }
+      if (ok && stores == count && seen == BITFIELD_MASK(count))
+         return true;
+   }
+   return false;
+}
+
 static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_refused(unsigned line)
 {
@@ -8913,6 +8997,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
     * the fixed, unrolled resident sample groups. They do not use the G17P
     * native-spill descriptor ABI. */
    const bool multi_block = ctx->key->g17p_emrt || g18_ms;
+   /* Native1130: an admitted single-sample mixed-format store set. */
+   const bool g18_mixed = g18 && !g18_ms &&
+                          agx3_g18_native1130_mixed_stores(ctx);
    agx_block *tail = g18 ? NULL : agx_reconverged_mrt_tail(ctx);
    if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
@@ -8986,15 +9073,18 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          const bool g18_partial_store =
             native1109 && I->op == AGX_OPCODE_ST_TILE &&
             I->format == AGX_FORMAT_U8NORM && I->mask >= 1 && I->mask < 15;
-         if (g18 && !g18_rg32_store && !g18_partial_store &&
+         if (g18 && !g18_rg32_store && !g18_partial_store && !g18_mixed &&
              !(g18_ms ? agx3_g18_msaa_tile_stride(I)
                       : ((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
                          (I->format == AGX_FORMAT_I32 &&
                           (I->mask == 1 || I->mask == 15)))))
             return agx3_g17p_mrt_refused(__LINE__);
          partial_stores |= g18_partial_store;
-         if (g18_ms || g18_rg32_store ||
-             (g18 && I->format == AGX_FORMAT_I32 && I->mask == 15)) {
+         /* A native1130 mixed layout has no common stride: its offsets were
+          * checked against the admitted row above. */
+         if (!g18_mixed &&
+             (g18_ms || g18_rg32_store ||
+              (g18 && I->format == AGX_FORMAT_I32 && I->mask == 15))) {
             const unsigned stride =
                g18_rg32_store ? 8 : agx3_g18_msaa_tile_stride(I);
             if ((p.ms_tile_stride && p.ms_tile_stride != stride) ||
@@ -9085,8 +9175,10 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          return agx3_g17p_mrt_refused(__LINE__);
       for (unsigned i = 0; i < p.count; ++i) {
          /* Absent framebuffer slots compact the tile offsets, while native
-          * sparse-layout fragments retain their logical target's class. */
-         if (p.offsets[i] != (p.ms_tile_stride ? p.ms_tile_stride : 4) * i ||
+          * sparse-layout fragments retain their logical target's class.
+          * A native1130 mixed row fixes each offset itself. */
+         if ((!g18_mixed &&
+              p.offsets[i] != (p.ms_tile_stride ? p.ms_tile_stride : 4) * i) ||
              (g18_ms && p.targets[i] != i) || p.targets[i] >= AGX_MAX_RTS ||
              (i && p.targets[i] <= p.targets[i - 1]))
             return agx3_g17p_mrt_refused(__LINE__);
@@ -9287,12 +9379,30 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
    bool stopped = false;
    enum agx_format format = 0;
    BITSET_DECLARE(written_B, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
+   /* Native1130: Apple's clear and reload backgrounds of the admitted mixed
+    * layouts store each of the row's targets exactly once, with the row's
+    * forms and no pixel transaction (clear 0/8/24/32, reload 0/8/16, resume
+    * reload 8/0/24/32: disjoint bytes, so no order is implied). Mesa's own
+    * backgrounds store them in ascending offset order; require that. */
+   const bool g18_mixed = g18 && ctx->key->g17p_mrt_bg &&
+                          agx3_g18_native1130_mixed_stores(ctx);
+   int previous_offset = -1;
    agx_foreach_instr_global(ctx, I) {
       if (stopped || agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
           I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
          return false;
       if (I->op == AGX_OPCODE_STOP) {
          stopped = true;
+      } else if (I->op == AGX_OPCODE_ST_TILE && ctx->key->g17p_mrt_bg &&
+                 g18_mixed) {
+         if ((int)I->pixel_offset <= previous_offset || stores >= AGX_MAX_RTS ||
+             I->nr_srcs != 3 || I->nr_dests != 0 || I->explicit_coords ||
+             I->src[1].type != AGX_INDEX_IMMEDIATE ||
+             I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
+             !agx_is_null(I->src[2]))
+            return false;
+         previous_offset = I->pixel_offset;
+         stores++;
       } else if (I->op == AGX_OPCODE_ST_TILE && ctx->key->g17p_mrt_bg) {
          if (g18) {
             /* Native1094 rg32 load backgrounds: two lstcol W32 mask 3
@@ -9509,8 +9619,13 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
           (ctx->key->g17p_rt0_eot_multisample && mixed_count != 3))
          return false;
       for (unsigned rt = 0; rt < mixed_count; ++rt) {
+         /* Native1121 (run 1130): 16-bit-lane targets store with IMGWBLK
+          * f29 = 1 in every mixed end-of-tile program of the capture. */
          if (ctx->key->g17p_mrt_eot_selectors[rt] != 0x75 &&
-             ctx->key->g17p_mrt_eot_selectors[rt] != 0x35)
+             ctx->key->g17p_mrt_eot_selectors[rt] != 0x35 &&
+             !(ctx->key->g17p_mrt_eot_selectors[rt] == 0x15 &&
+               !ctx->key->g17p_rt0_eot_multisample &&
+               agx_g18_native1130_enabled()))
             return false;
          if (ctx->key->g17p_rt0_eot_multisample &&
              ctx->key->g17p_mrt_eot_selectors[rt] != 0x35)
@@ -10324,17 +10439,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          /* Native427's R32-word programs change IMGWBLK field29 (3 -> 2).
           * Native464's complete three-target MS program additionally changes
           * field30 (1 -> 2) in precisely these stores. All19 instructions,
-          * including argument/coordinate setup and waits, otherwise match. */
+          * including argument/coordinate setup and waits, otherwise match.
+          * Native1121 (run 1130): across all 60 mixed-format test programs of
+          * the capture, the two- to eight-target programs differ only in each
+          * target's IMGWBLK field29, a function of its lane width alone:
+          * 3 for U8NORM-stored, 2 for 32-bit and 1 for 16-bit lanes. */
          const unsigned offset = programs[multi_eot_count].stores[rt];
          if (offset + 12 > size)
             return false;
          uint64_t fields[AGX3_MAX_FIELDS];
          const int32_t form =
             agx3_decode(&agx3c_table, program + offset, 12, "imgwblk", fields);
+         const uint8_t selector = ctx->key->g17p_mrt_eot_selectors[rt];
          if (form < 0 || fields[29] != 3 || fields[30] != 1 ||
-             ctx->key->g17p_mrt_eot_selectors[rt] != 0x35)
+             (selector != 0x35 &&
+              !(selector == 0x15 && agx_g18_native1130_enabled())))
             return false;
-         fields[29] = 2;
+         fields[29] = selector == 0x15 ? 1 : 2;
          if (ctx->key->g17p_rt0_eot_multisample)
             fields[30] = 2;
          if (!agx3_compose(&agx3c_table, form, fields, program + offset))
