@@ -1800,6 +1800,24 @@ agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
                            wait_mask | extra, out, len);
 }
 
+/*
+ * The AGX3c path above composes that same `bit_and r0, ^r0, r0` specimen, so on
+ * G17G, and on G18G through its re-encoder, the carrier ends the lifetime of a
+ * register that may still be live. Apple's G18G compiler never emits a
+ * register bitop without a lifetime hint: a live source is cached (f25, f39;
+ * applegpu_g18g andc32_live `23048083c0200000`), a dead one discarded. This is
+ * the live form on both sources. The specimen's own slot-8 wait (f51) stays
+ * with the carrier, so the slots it retires are unchanged.
+ */
+bool
+agx3_alu_band_identity_live_gpu1(uint16_t reg, uint16_t wait_mask,
+                                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return bit_reg_gpu1("bit_and", 1, 10, !(reg & 1), reg, false, reg,
+                       AGX3_ALU_HINT_CACHE, reg, AGX3_ALU_HINT_CACHE,
+                       wait_mask | (UINT16_C(1) << 7), out, len);
+}
+
 bool
 agx3_alu_bit_imm(enum agx_isa_encoding enc, enum agx3_alu_op op, bool narrow,
                  uint16_t dest, uint16_t src, uint8_t immediate,

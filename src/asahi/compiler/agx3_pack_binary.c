@@ -55,6 +55,7 @@
 #include "agx_compiler.h"
 #include "agx_debug.h"
 #include "util/half_float.h"
+#include "util/u_debug.h"
 
 #include <limits.h>
 #include <math.h>
@@ -1341,6 +1342,39 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
               : agx3_vary_uvsw(enc, staging_half, index.value, slot, true,
                                staged, bytes, &len)) &&
           agx3_append(emission, bytes, len);
+}
+
+/*
+ * G18G retire carriers (run 1140). agx3_retire_slots_noop() waits through
+ * `band(r0, r0, r0)`, and on AGX3c agx3_alu_band_identity_wait() composes it
+ * from the `bit_and r0, ^r0, r0` specimen, whose first source is marked as its
+ * last use. Two hazards follow whenever r0 is live across a carrier:
+ *  - the carrier ends r0's lifetime (G17P's fix for the same specimen is in
+ *    agx3_alu_band_identity_wait());
+ *  - the carrier reads and rewrites r0 while an asynchronous result to r0 may
+ *    still be in flight on a slot outside its mask (the slot pass never sees
+ *    the carrier's r0 access), so the later consumer of r0, which waits that
+ *    slot, can find the carrier's stale value instead of the result.
+ * Apple's G18G code has no such carrier: its waits sit on the consumers.
+ * With the fix on, every G18G carrier takes the live form, and an r0 carrier
+ * also waits every slot whose in-flight producer writes r0. Waiting a slot
+ * early only costs latency. AGX_G18_CARRIER1140=0 restores the previous bytes
+ * for A/B attribution.
+ *
+ * Both values belong to the agx3_pack_binary() call on this thread, as
+ * agx_refusal does in agx_compile.c: shaders compile concurrently.
+ */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g18_carrier1140, "AGX_G18_CARRIER1140", true)
+static __thread bool agx3_carrier1140;
+static __thread uint16_t agx3_r0_inflight;
+
+static bool
+agx3_band_carrier(enum agx_isa_encoding enc, uint16_t reg, uint16_t mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_carrier1140 && enc == AGX_ISA_ENCODING_AGX3C
+             ? agx3_alu_band_identity_live_gpu1(reg, mask, out, len)
+             : agx3_alu_band_identity_wait(enc, reg, mask, out, len);
 }
 
 static bool
@@ -5829,8 +5863,8 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
       uint8_t prelude_len = 0;
       const bool ok =
          exact_in_place
-            ? agx3_alu_band_identity_wait(enc, S->dest, prewait, prelude,
-                                      &prelude_len)
+            ? agx3_band_carrier(enc, S->dest, prewait, prelude,
+                                &prelude_len)
             : agx3_alu_compose(enc, AGX3_ALU_LDIMM, S->dest, S->dest, S->dest,
                                0, 0, prewait, prelude, &prelude_len);
       if (!ok || !agx3_append(emission, prelude, prelude_len))
@@ -5926,8 +5960,8 @@ agx3_emit_simd_broadcast(struct util_dynarray *emission,
       uint8_t retire_bytes[AGX3_ALU_MAX_LENGTH], retire_length = 0;
       return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
              (!wait_mask ||
-              (agx3_alu_band_identity_wait(enc, I->dest[0].value, wait_mask,
-                                           retire_bytes, &retire_length) &&
+              (agx3_band_carrier(enc, I->dest[0].value, wait_mask,
+                                 retire_bytes, &retire_length) &&
                agx3_append(emission, retire_bytes, retire_length))) &&
              agx3_append(emission, bytes, length);
    }
@@ -6214,8 +6248,8 @@ agx3_emit_subgroup_reduce(struct util_dynarray *emission,
    uint8_t retire_bytes[AGX3_ALU_MAX_LENGTH], retire_length = 0;
    return agx3_subgroup_encode_reduce(enc, &d, bytes, &length) &&
           (!retire_wait ||
-           (agx3_alu_band_identity_wait(enc, I->dest[0].value, wait_mask,
-                                        retire_bytes, &retire_length) &&
+           (agx3_band_carrier(enc, I->dest[0].value, wait_mask,
+                              retire_bytes, &retire_length) &&
             agx3_append(emission, retire_bytes, retire_length))) &&
           agx3_append(emission, bytes, length);
 }
@@ -6976,12 +7010,20 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
    if (mask == 0)
       return true;
 
+   /* Enforce the precondition above instead of trusting every caller: a
+    * result still in flight to r0 joins the mask, so it lands before the
+    * carrier reads and rewrites r0 (see agx3_r0_inflight). */
+   if (agx3_carrier1140) {
+      mask |= agx3_r0_inflight;
+      agx3_r0_inflight &= (uint16_t)~mask;
+   }
+
    /* Wait on every slot in the one instruction that reads r0. Retiring the
     * slots one instruction at a time reads and writes r0 while a later slot
     * in the mask may still be producing it, which loses that result. */
    uint8_t bytes[AGX3_ALU_MAX_LENGTH];
    uint8_t len = 0;
-   return agx3_alu_band_identity_wait(enc, 0, mask, bytes, &len) &&
+   return agx3_band_carrier(enc, 0, mask, bytes, &len) &&
           agx3_append(emission, bytes, len);
 }
 
@@ -10359,6 +10401,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C)
       return false;
 
+   agx3_carrier1140 = enc == AGX_ISA_ENCODING_AGX3C &&
+                      ctx->key->dev.emit_agx3d &&
+                      debug_get_option_agx_g18_carrier1140();
+   agx3_r0_inflight = 0;
+
    /* MS MRT reloads reuse texture destinations for scalar sample indices.
     * Their synchronous ALU consumers and ldimm wait preludes can retire
     * slots 1..6. Keep the allocator within that common range rather than
@@ -12250,6 +12297,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          goto fail;
    }
 
+   /* The previous instruction's asynchronous producer of r0, which joins
+    * agx3_r0_inflight once that instruction has been emitted. */
+   uint16_t r0_issued = 0;
+
    agx_foreach_block(ctx, block) {
       block->offset = emission->size;
       block->loop_exit_offset = -1;
@@ -12279,6 +12330,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* A wait retires its slots before this instruction issues its own. */
          outstanding &= (uint16_t)~wait;
+         /* r0's in-flight producers for agx3_retire_slots_noop(): the
+          * previous instruction's has issued, and this wait retires what it
+          * names. Tokens below 2 are r0's halves. */
+         agx3_r0_inflight |= r0_issued;
+         agx3_r0_inflight &= (uint16_t)~wait;
+         r0_issued = 0;
+         if (agx3_carrier1140 && slot) {
+            for (unsigned d = 0; d < sl[instr_index].nr_dsts; ++d) {
+               if (sl[instr_index].dst[d] < 2)
+                  r0_issued = (uint16_t)(1u << (slot - 1));
+            }
+         }
          const uint16_t outstanding_here = outstanding;
          if (slot)
             outstanding |= (uint16_t)(1u << (slot - 1));
@@ -19642,8 +19705,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          const uint16_t alu_wait = retire_immediate_wait ? 0 : wait;
          if (retire_immediate_wait) {
             uint8_t retire_bytes[AGX3_ALU_MAX_LENGTH], retire_length = 0;
-            if (!agx3_alu_band_identity_wait(enc, I->dest[0].value, wait,
-                                             retire_bytes, &retire_length) ||
+            if (!agx3_band_carrier(enc, I->dest[0].value, wait,
+                                   retire_bytes, &retire_length) ||
                 !agx3_append(emission, retire_bytes, retire_length))
                AGX3_REFUSE(I);
          }
