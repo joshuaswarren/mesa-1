@@ -1488,7 +1488,10 @@ agx_gallium_tilebuffer_layout(const struct agx_device *dev,
     * admits it (agx_g18g_mixed_tile_bytes); the offsets do not move. */
    const unsigned mixed_bytes =
       g18_native && !raw32
-         ? agx_g18g_mixed_tile_bytes(formats, nr_cbufs, nr_samples, layered)
+         ? agx_g18g_mixed_tile_bytes(
+              formats, nr_cbufs, nr_samples, layered,
+              !!(dev->params.features &
+                 DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES))
          : 0;
    return agx_build_tilebuffer_layout_with_limits(
       formats, nr_cbufs, nr_samples, layered, raw32 ? 128 : 0,

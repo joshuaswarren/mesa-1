@@ -291,6 +291,14 @@ enum drm_asahi_feature {
 	 * private-memory pool and both launch pairs from that suffix.
 	 */
 	DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH = (1UL) << 8,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES: G18 single-sample,
+	 * single-layer renders with 32x32 utiles also accept 40-, 56- and
+	 * 72-byte samples (the native layouts of capture 1121), besides tiles
+	 * of at most 32 KiB and 48..128-byte samples in steps of 16.
+	 */
+	DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES = (1UL) << 9,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1

@@ -442,7 +442,8 @@ agx_g18g_native1130_mixed_key(const enum pipe_format *formats,
 
 unsigned
 agx_g18g_mixed_tile_bytes(const enum pipe_format *formats, unsigned nr_cbufs,
-                          unsigned nr_samples, bool layered)
+                          unsigned nr_samples, bool layered,
+                          bool kernel_native_samples)
 {
    const int k = agx_g18g_native1130_mixed_key(formats, nr_cbufs);
    if (k < 0 || nr_samples != 1 || layered)
@@ -452,13 +453,18 @@ agx_g18g_mixed_tile_bytes(const enum pipe_format *formats, unsigned nr_cbufs,
     * most 32 KiB, or a 48..128-byte sample in steps of 16 (module 1120,
     * g17_uapi.rs translate_g18_render_command `wide_single`); a larger tile
     * fails the submission (TilebufferSize). Apple keeps req2-clear's 40-byte
-    * sample in a 32x32 tile, which that kernel refuses, so the layout stays
-    * refused here unless AGX_G18_NATIVE1130_TILE40=1 asserts a kernel that
-    * admits it. Never emit a tile the kernel would reject. */
+    * sample in a 32x32 tile. Module 1134 also admits exactly the native 40-,
+    * 56- and 72-byte samples of capture 1121 and advertises that with
+    * DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES (kernel_native_samples), so the
+    * default stack needs no environment. Without the bit (module 1120) the
+    * layout stays refused here unless AGX_G18_NATIVE1130_TILE40=1 asserts a
+    * kernel that admits it. Never emit a tile the kernel would reject. */
    const unsigned sample_B = agx_g18g_native1130_mixed[k].sample_size_B;
    const unsigned bytes = sample_B * 32 * 32;
    const bool kernel_admits =
       bytes <= 32768 || (sample_B >= 48 && sample_B <= 128 && !(sample_B & 15)) ||
+      (kernel_native_samples &&
+       (sample_B == 40 || sample_B == 56 || sample_B == 72)) ||
       agx_g18_native1130_tile40_enabled();
    return kernel_admits ? bytes : 0;
 }

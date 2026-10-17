@@ -1072,6 +1072,9 @@ asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
        * scratch paths; the shim executes nothing either way. */
       if (shim_env_on("ASAHI_SHIM_G18_GRAPHICS_SCRATCH"))
          params.features |= DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH;
+      /* Replays a kernel that admits the native 40/56/72-byte 32x32 tiles. */
+      if (shim_env_on("ASAHI_SHIM_G18_NATIVE_TILE_SAMPLES"))
+         params.features |= DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES;
       const char *command_limit = getenv("ASAHI_SHIM_COMMAND_LIMIT");
       if (command_limit) {
          unsigned limit = strtoul(command_limit, NULL, 0);

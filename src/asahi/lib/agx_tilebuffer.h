@@ -292,10 +292,11 @@ unsigned agx_g18g_ms_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
 /* Native-1121 mixed-format single-sample G18 layouts (run 1130): the
  * imageblock bytes of a 32x32 tile for an admitted format list (zero if none),
- * and the attachment mask of an admitted layout. */
+ * and the attachment mask of an admitted layout. kernel_native_samples: the
+ * kernel advertises DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES (run 1134). */
 unsigned agx_g18g_mixed_tile_bytes(const enum pipe_format *formats,
                                    unsigned nr_cbufs, unsigned nr_samples,
-                                   bool layered);
+                                   bool layered, bool kernel_native_samples);
 unsigned agx_g18g_mixed_mrt_mask(const struct agx_tilebuffer_layout *tib);
 /* Whether an all-clear (has_clear) or all-reload (has_load) background of an
  * admitted mixed-format layout is witnessed. */
