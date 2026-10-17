@@ -1053,7 +1053,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    /* M6: the G18G records are the M5 ones (agx_chip_hal300_records) and its
     * code is G17G code re-encoded as agx3d (agx_gather_device_key). */
    const bool g18g_bringup =
-      debug_get_bool_option("ASAHI_G18G_BRINGUP", false) &&
+      debug_get_bool_option("ASAHI_G18G_BRINGUP", true) &&
       agx_params_g18g_bringup_supported(&dev->params);
    if (g18g_bringup)
       fprintf(stderr, "Experimental M6 G18G integration enabled (M5 paths, agx3d code); rendering is unqualified\n");

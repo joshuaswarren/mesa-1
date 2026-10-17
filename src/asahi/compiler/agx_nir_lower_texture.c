@@ -1001,10 +1001,10 @@ offset_lowered:
       nir_def *native_sampler =
          nir_iadd_imm(b, nir_u2u16(b, sampler), 1);
 
-      /* HAL200's register/uniform sampler operand is the widened native-table
+      /* Native Gen9/Gen10 register/uniform samplers use a widened table
        * index. Immediate indices remain constants after folding, while a
        * dynamic API index must reach the backend as one 64-bit operand. */
-      if (gen9)
+      if (gen9 || gen10)
          native_sampler = nir_u2u64(b, native_sampler);
 
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, native_sampler);

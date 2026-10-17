@@ -30,6 +30,7 @@ enum agx_compiler_dbg {
    AGX_DBG_SPILL       = BITFIELD_BIT(11),
    AGX_DBG_NOPROMOTE   = BITFIELD_BIT(12),
    AGX_DBG_REFUSE      = BITFIELD_BIT(13),
+   AGX_DBG_BINARIES    = BITFIELD_BIT(14),
 };
 /* clang-format on */
 
@@ -41,6 +42,15 @@ const char *agx_last_compile_refusal(void);
 
 /* G18 multisample admission/code generation remains explicitly selectable. */
 bool agx_g18_msaa4_enabled(void);
+
+/* Native-1094 grounded G18 encodings (run 1109); AGX_G18_NATIVE1109=0 opts out. */
+bool agx_g18_native1109_enabled(void);
+
+/* Native-1094 grounded G18 changes of run 1121; AGX_G18_NATIVE1121=0 opts out. */
+bool agx_g18_native1121_enabled(void);
+
+/* Native-1121 grounded G18 changes of run 1128; AGX_G18_NATIVE1128=0 opts out. */
+bool agx_g18_native1128_enabled(void);
 
 /* Fragment-structure code generation choices that remain selectable. */
 enum agx_fs_structure_flag {

@@ -37,14 +37,20 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
                       uint16_t coords, bool coords_kill,
                       uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
+   /* Native657's1x/2x/4x G17G/G18G center profiles also carry the
+    * private RHW marker, including first-input metadata on the first load. */
+   const bool native_center_rhw = enc == AGX_ISA_ENCODING_AGX3C &&
+      projective_rhw && !explicit_sample && perspective &&
+      location == AGX3_VARY_CENTER && coef_index <= 0x7f;
+
    /* Native G17G/G18G pipelines use the same explicit coordinate token for
     * centroid and sample interpolation, including projective RHW. There is
     * no reserved implicit centroid register: its token is allocated normally. */
    if ((enc != AGX_ISA_ENCODING_AGX3B &&
         !agx_encoding_is_g17_class(enc)) ||
        (!explicit_sample && location != AGX3_VARY_CENTER) ||
-       (first && enc != AGX_ISA_ENCODING_AGX3B) ||
-       (projective_rhw && ((!is_b(enc) && !explicit_sample) ||
+       (first && enc != AGX_ISA_ENCODING_AGX3B && !native_center_rhw) ||
+       (projective_rhw && ((!is_b(enc) && !explicit_sample && !native_center_rhw) ||
                            (!explicit_sample && location != AGX3_VARY_CENTER) ||
                            !perspective || coef_index > 0x7f)) ||
        (explicit_sample && (first ||

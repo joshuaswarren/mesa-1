@@ -87,7 +87,8 @@ agx_compose_float_src(agx_index to, agx_index from)
 static bool
 agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
 {
-   return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   return ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+                       ctx->key->dev.emit_agx3d) &&
           I->op == AGX_OPCODE_FCMPSEL && src < 4 &&
           agx_is_equiv(I->src[src], I->src[src ^ 2]);
 }
@@ -902,6 +903,13 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
 
    bool quad = I->op == AGX_OPCODE_QUAD_BALLOT;
    assert(quad || I->op == AGX_OPCODE_BALLOT);
+
+   /* G18's general ballot form tests a predicate against an immediate. Keep
+    * register comparisons separate instead of fusing an unsupported shape. */
+   if (!quad && ctx->key &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       def->src[1].type != AGX_INDEX_IMMEDIATE)
+      return;
 
    /* Replace with a fused instruction since the # of sources changes */
    agx_builder b = agx_init_builder(ctx, agx_before_instr(I));

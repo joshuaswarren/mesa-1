@@ -1068,6 +1068,10 @@ asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
          params.features |= DRM_ASAHI_FEATURE_VM_STATUS;
       if (shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR"))
          params.features |= DRM_ASAHI_FEATURE_VM_STATUS_MIRROR;
+      /* Replays both the refusing and the suffix-emitting G18 graphics
+       * scratch paths; the shim executes nothing either way. */
+      if (shim_env_on("ASAHI_SHIM_G18_GRAPHICS_SCRATCH"))
+         params.features |= DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH;
       const char *command_limit = getenv("ASAHI_SHIM_COMMAND_LIMIT");
       if (command_limit) {
          unsigned limit = strtoul(command_limit, NULL, 0);

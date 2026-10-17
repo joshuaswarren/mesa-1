@@ -6,6 +6,7 @@
 #include "compiler/list.h"
 #include "compiler/nir/nir_builder.h"
 #include "agx_compiler.h"
+#include "agx_nir.h"
 #include "nir.h"
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
@@ -901,3 +902,145 @@ agx_nir_coalesce_sample_mask_updates(nir_shader *shader, unsigned nr_samples)
 
    return nir_progress(true, impl, nir_metadata_control_flow);
 }
+
+/*
+ * Give a G17P tile access the sample-mask source its hardware form actually
+ * takes.
+ *
+ * At one sample the operand is the whole-pixel immediate, which is what Mesa
+ * already spells as ALL_SAMPLES, so nothing has to happen.
+ *
+ * At two or four samples there is no immediate form at all. Apple's compiler
+ * reads the live coverage word out of a special register and passes that
+ * register as the mask -- raw for a per-pixel shader ("every sample this
+ * fragment covers"), ANDed with a one-hot bit for each iteration of an
+ * unrolled per-sample shader. Reproduce exactly those two shapes.
+ *
+ * A non-constant mask is already an expression in a register, so it is left
+ * alone and reaches the packer as the register form by itself. An epilog
+ * unrolled per sample (agx_nir_unroll_g17p_samples) has folded each sample's
+ * `mask & active_samples` to that sample's one-hot constant beforehand, so it
+ * too becomes coverage ANDed with the sample's bit.
+ */
+struct g17p_tile_sample_state {
+   unsigned samples;
+   nir_def *coverage;
+   nir_block *block;
+   /* msaa163: G18G reads the coverage as the 16-bit active-sample word (W16
+    * SR39); its backend has no AGX3C encoding of load_sample_mask. */
+   bool g18;
+};
+
+static bool
+lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct g17p_tile_sample_state *state = data;
+   unsigned src;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_local_pixel_agx:
+      src = 0;
+      break;
+   case nir_intrinsic_store_local_pixel_agx:
+      src = 1;
+      break;
+   default:
+      /* Coverage changes at depth/stencil writes, demotes and interlocks.
+       * Conservatively end the local reuse window at any side effect. */
+      if (!(nir_intrinsic_infos[intr->intrinsic].flags &
+            NIR_INTRINSIC_CAN_ELIMINATE))
+         state->coverage = NULL;
+      return false;
+   }
+
+   const unsigned samples = state->samples;
+   if (samples == 1) {
+      /* Per-sample epilogs still carry a dynamic active-sample mask, but
+       * there is only sample zero. The native 1x tile instruction takes the
+       * whole-pixel immediate; preserve its form for these epilogs. */
+      if (nir_src_is_const(intr->src[src]) &&
+          nir_src_as_uint(intr->src[src]) == ALL_SAMPLES)
+         return false;
+
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_src_rewrite(&intr->src[src],
+                      nir_imm_intN_t(b, ALL_SAMPLES, 16));
+      return true;
+   }
+
+   /* Already a live expression: the per-sample lowerings have ANDed the mask
+    * with an active-sample register, which is the register form. */
+   if (!nir_src_is_const(intr->src[src]))
+      return false;
+
+   const unsigned mask = nir_src_as_uint(intr->src[src]);
+   if (mask == 0) {
+      /* Static unrolling can prove that the API mask excludes this sample.
+       * A zero-coverage tile access is dead, and keeping it would turn one
+       * surviving sample into an unsupported mixed zero/nonzero protocol. */
+      b->cursor = nir_before_instr(&intr->instr);
+      if (intr->intrinsic == nir_intrinsic_load_local_pixel_agx) {
+         nir_def_rewrite_uses(
+            &intr->def,
+            nir_undef(b, intr->def.num_components, intr->def.bit_size));
+      }
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+
+   if (mask != ALL_SAMPLES &&
+       mask >= (1u << samples))
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   /* active_samples_agx is a loop system value: NIR may CSE it across
+    * depth/stencil writes. At this point we need the hardware's *current*
+    * coverage, including the tests for this particular unrolled sample.
+    * load_sample_mask is ordered and lowers to the same G17P SR39 read. */
+   if (!state->coverage || state->block != intr->instr.block) {
+      state->coverage = state->g18 ? nir_load_active_samples_agx(b)
+                                   : nir_u2u16(b, nir_load_sample_mask(b));
+      state->block = intr->instr.block;
+   }
+   nir_def *coverage = state->coverage;
+   nir_def *sel = (mask == ALL_SAMPLES)
+                     ? coverage
+                     : nir_iand(b, coverage, nir_imm_intN_t(b, mask, 16));
+
+   nir_src_rewrite(&intr->src[src], sel);
+   return true;
+}
+
+bool
+agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
+{
+   if (nr_samples != 1 && nr_samples != 2 && nr_samples != 4)
+      return false;
+
+   struct g17p_tile_sample_state state = {.samples = nr_samples};
+   return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
+                                     nir_metadata_control_flow, &state);
+}
+
+bool
+agx_nir_lower_g18_tile_samples(nir_shader *s, unsigned nr_samples)
+{
+   /* Native326 adds two samples to the existing four-sample SR39 protocol. */
+   if (nr_samples != 2 && nr_samples != 4)
+      return false;
+
+   struct g17p_tile_sample_state state = {.samples = nr_samples, .g18 = true};
+   return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
+                                     nir_metadata_control_flow, &state);
+}
+
+bool
+agx_nir_lower_g17p_1x_tile_samples(nir_shader *s)
+{
+   /* Honeykrisp advertises only one sample on G17P.  Per-sample epilog
+    * lowering still materializes `1 << sample_id`, but sample_id can only be
+    * zero.  Native 1x fragments encode the ordinary whole-pixel LSTCOL/LLDCOL
+    * forms, which carry no sample operand. */
+   return agx_nir_lower_g17p_tile_samples(s, 1);
+}
+

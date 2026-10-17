@@ -127,6 +127,8 @@ enum agx_g18_sample_mask_form {
    AGX_G18_SAMPLE_MASK_KILL = (1 << 0),
    AGX_G18_SAMPLE_MASK_FULL = (1 << 1),
    AGX_G18_SAMPLE_MASK_OTHER = (1 << 2),
+   /* Native1121 psdiscard: per-sample kill and update words (run 1128). */
+   AGX_G18_SAMPLE_MASK_SAMPLE = (1 << 3),
 };
 
 struct agx_shader_info {
@@ -655,6 +657,9 @@ bool agx_nir_lower_sample_mask(nir_shader *s);
 #define AGX_SAMPLE_MASK_FULL_OR_KILL (1u << 2)
 /* Proof about the unmasked source; not permission to emit a full update. */
 #define AGX_SAMPLE_MASK_SUBSET_FULL_OR_KILL (1u << 3)
+/* sample_mask_agx3 IMM bit: stage the word at staging 2 with scoreboard slot
+ * 2 and no class transaction (native1121 psdiscard's update word). */
+#define AGX_SAMPLE_MASK_AGX3_SECOND_STAGING (1u << 2)
 bool agx_nir_mark_g18_sample_mask_tests(nir_shader *s);
 bool agx_nir_coalesce_sample_mask_updates(nir_shader *s, unsigned nr_samples);
 bool agx_nir_lower_sample_mask_deferred(nir_shader *s);

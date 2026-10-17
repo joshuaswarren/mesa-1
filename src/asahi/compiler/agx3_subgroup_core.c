@@ -106,16 +106,21 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
     * pinned: a pinned f41 claimed the lane was dead even when the vote and
     * shuffle lowerings read it again for the next component.
     */
-   if (enc == AGX_ISA_ENCODING_AGX3B && !d->quad &&
+   if ((enc == AGX_ISA_ENCODING_AGX3B || is_c(enc)) &&
+       (!d->quad || is_c(enc)) &&
        d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
-      const unsigned slots = 6;
-      if (d->lane >= 192 || (d->wait_mask >> slots) != 0 ||
+      /* Native886 G17G/G18G dynamic scalar/vector shuffles use the same
+       * lifetime fields, half-register lane address and wait bank. G18
+       * additionally carries its operation selector in f42/f43. */
+      const unsigned slots = is_c(enc) ? 8 : 6;
+      const unsigned lane_limit = is_c(enc) ? 256 : 192;
+      if (d->lane >= lane_limit || (d->wait_mask >> slots) != 0 ||
           (d->src_cache && d->src_discard) ||
           (d->lane_cache && d->lane_discard))
          return false;
 
       const unsigned width = d->half ? 1 : 2;
-      struct agx3_field_kv hbase[6];
+      struct agx3_field_kv hbase[8];
       unsigned hnb = 0;
       hbase[hnb++] = (struct agx3_field_kv){9, 2};
       hbase[hnb++] = (struct agx3_field_kv){10, width};
@@ -124,7 +129,15 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
       hbase[hnb++] = (struct agx3_field_kv){37, 2};
       hbase[hnb++] = (struct agx3_field_kv){38, 1};
 
-      struct agx3_field_kv hov[16];
+      if (is_c(enc)) {
+         static const uint8_t ids[2][AGX3_SUBGROUP_SHUFFLE_NUM] = {
+            {154, 155, 161, 160}, {140, 137, 142, 141},
+         };
+         hbase[hnb++] = (struct agx3_field_kv){42, 3};
+         hbase[hnb++] = (struct agx3_field_kv){43, ids[d->quad][d->op]};
+      }
+
+      struct agx3_field_kv hov[24];
       unsigned hnv = 0;
       hov[hnv++] = (struct agx3_field_kv){2, d->dest};
       hov[hnv++] = (struct agx3_field_kv){11, d->dest_hint ? 1u : 0u};
@@ -680,7 +693,21 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
        * lk_prefix_incl_load / lk_prefix_excl_load). */
       const bool c_simd_iadd = is_c(enc) && !d->quad && !d->half &&
                                d->op == AGX3_SUBGROUP_REDUCE_IADD;
-      ADD_FIELD((!is_c(enc) || c_simd_iadd) && d->src_live ? 25 : 27, 1);
+      /* Native999's live/dead pairs on both G17G and G18G use no
+       * source hint for a live full-width min/max/bitwise operand. In
+       * particular, f27 is a final-read hint, not the generic AGX3c
+       * reduction default. Preserve the existing IADD/quad/half paths. */
+      const bool c_keep_source = is_c(enc) && !d->quad && !d->half &&
+         d->src_live &&
+         (d->op == AGX3_SUBGROUP_REDUCE_SMIN ||
+          d->op == AGX3_SUBGROUP_REDUCE_SMAX ||
+          d->op == AGX3_SUBGROUP_REDUCE_AND ||
+          d->op == AGX3_SUBGROUP_REDUCE_OR ||
+          d->op == AGX3_SUBGROUP_REDUCE_XOR ||
+          d->op == AGX3_SUBGROUP_REDUCE_UMIN ||
+          d->op == AGX3_SUBGROUP_REDUCE_UMAX);
+      if (!c_keep_source)
+         ADD_FIELD((!is_c(enc) || c_simd_iadd) && d->src_live ? 25 : 27, 1);
       if (f->integer_class == 1)
          ADD_FIELD(28, 1);
       if (is_c(enc)) {

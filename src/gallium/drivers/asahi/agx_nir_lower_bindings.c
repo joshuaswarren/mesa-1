@@ -542,6 +542,69 @@ custom_border_shadow_gather(nir_builder *b, nir_tex_instr *tex,
    return nir_bcsel(b, interior, ordinary, border);
 }
 
+/* Keep the actual hardware filtering kernel. A fixed comparison reference
+ * makes the border-zero and border-one probes differ only on border taps,
+ * even when an interior floating depth is NaN or very large. */
+static nir_def *
+custom_border_compare_result(nir_builder *b, nir_def *func,
+                             nir_def *ref, nir_def *depth)
+{
+   nir_def *result = nir_imm_false(b);
+   for (unsigned f = PIPE_FUNC_LESS; f < PIPE_FUNC_ALWAYS; ++f) {
+      nir_def *value = nir_compare_func(b, (enum compare_func)f, ref, depth);
+      result = nir_bcsel(b, nir_ieq_imm(b, func, f), value, result);
+   }
+   return nir_ior(b, result, nir_ieq_imm(b, func, PIPE_FUNC_ALWAYS));
+}
+
+static nir_tex_instr *
+custom_border_shadow_probe(nir_builder *b, const nir_tex_instr *tex,
+                            nir_def *ref, bool clamp_to_zero)
+{
+   nir_tex_instr *probe = nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
+   nir_builder_instr_insert(b, &probe->instr);
+   int comparator = nir_tex_instr_src_index(probe, nir_tex_src_comparator);
+   assert(comparator >= 0);
+   nir_src_rewrite(&probe->src[comparator].src, ref);
+   if (clamp_to_zero)
+      probe->backend_flags |= AGX_TEXTURE_FLAG_CLAMP_TO_0;
+   return probe;
+}
+
+static nir_def *
+custom_border_shadow_filtered(nir_builder *b, nir_tex_instr *tex,
+                               nir_def *ordinary)
+{
+   struct agx_stage_uniforms *s = NULL;
+   nir_def *packed = load_stage_array(
+      b, sampler_index(b, tex), 1, 16, (uintptr_t)&s->custom_border_compare,
+      sizeof(s->custom_border_compare[0]), 2, PIPE_MAX_SAMPLERS);
+   packed = nir_u2u32(b, packed);
+   nir_def *func = nir_iand_imm(b, packed, 7);
+   nir_def *fixed = nir_ine_imm(b, nir_iand_imm(b, packed, 8), 0);
+   nir_def *ref = tex->src[nir_tex_instr_src_index(
+      tex, nir_tex_src_comparator)].src.ssa;
+   nir_def *depth = nir_f2fN(b, nir_channel(b, query_custom_border(b, tex), 0),
+                            ref->bit_size);
+   ref = nir_bcsel(b, fixed, nir_fsat(b, ref), ref);
+   depth = nir_bcsel(b, fixed, nir_fsat(b, depth), depth);
+
+   nir_def *equality = nir_ior(b, nir_ieq_imm(b, func, PIPE_FUNC_EQUAL),
+                              nir_ieq_imm(b, func, PIPE_FUNC_NOTEQUAL));
+   nir_def *probe_ref = nir_bcsel(b, equality,
+      nir_imm_floatN_t(b, 0.0, ref->bit_size),
+      nir_imm_floatN_t(b, 0.5, ref->bit_size));
+   nir_tex_instr *one = custom_border_shadow_probe(b, tex, probe_ref, false);
+   nir_tex_instr *zero = custom_border_shadow_probe(b, tex, probe_ref, true);
+   nir_def *weight = nir_fabs(b, nir_fsub(b, &one->def, &zero->def));
+   nir_def *custom = custom_border_compare_result(b, func, ref, depth);
+   nir_def *native = custom_border_compare_result(
+      b, func, ref, nir_imm_floatN_t(b, 1.0, ref->bit_size));
+   nir_def *delta = nir_fsub(b, nir_b2fN(b, custom, ordinary->bit_size),
+                              nir_b2fN(b, native, ordinary->bit_size));
+   return nir_fsat(b, nir_ffma(b, weight, delta, ordinary));
+}
+
 static bool
 lower_custom_border(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -549,10 +612,14 @@ lower_custom_border(nir_builder *b, nir_tex_instr *tex, void *data)
    if (!nir_tex_instr_need_sampler(tex) || nir_tex_instr_is_query(tex))
       return false;
 
+   const bool filtered_shadow = tex->op == nir_texop_tex ||
+      tex->op == nir_texop_txb || tex->op == nir_texop_txl ||
+      tex->op == nir_texop_txd;
    if (tex->is_shadow &&
-       (!options->shadow_gather || tex->op != nir_texop_tg4)) {
-      /* Keep admission closed for comparison filtering until its fractional
-       * border contribution is implemented; a gather has four exact lanes. */
+       (!options->shadow_gather ||
+        (tex->op != nir_texop_tg4 && !filtered_shadow) ||
+        nir_tex_instr_src_index(tex, nir_tex_src_comparator) < 0)) {
+      /* Unknown shadow operations still need an explicit emulation path. */
       options->fully_supported = false;
       return false;
    }
@@ -567,7 +634,9 @@ lower_custom_border(nir_builder *b, nir_tex_instr *tex, void *data)
    nir_push_if(b, has_custom);
    nir_def *replaced;
    if (tex->is_shadow) {
-      replaced = custom_border_shadow_gather(b, tex, clamp_to_one);
+      replaced = tex->op == nir_texop_tg4
+         ? custom_border_shadow_gather(b, tex, clamp_to_one)
+         : custom_border_shadow_filtered(b, tex, clamp_to_one);
    } else {
       nir_instr *zero_instr = nir_instr_clone(b->shader, &tex->instr);
       nir_builder_instr_insert(b, zero_instr);

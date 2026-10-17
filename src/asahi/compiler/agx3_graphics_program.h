@@ -104,6 +104,15 @@ bool agx3_g18g_compute_program_generate(
    const struct agx3_g17p_graphics_program_desc *desc,
    struct agx3_g17p_graphics_program *program);
 
+/* G18 vertex/fragment programs with a static TPS frame. Native1054 programs
+ * the 16-byte-aligned frame in both SPECTPR words, in four-byte units, for
+ * both stages. Canonical GPU1 output for agx3d re-encoding; the caller must
+ * report the frame in the render's drm_asahi_g18_render_resources so the
+ * kernel sizes the shared TA/3D pool. Tile programs stay scratch-free. */
+bool agx3_g18g_graphics_program_generate_tps(
+   const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program);
+
 /* No-preamble internal tile shaders: EOT has no PIXREL, background has the
  * distinct M5 release mask. Uniform ranges describe the compiled shader ABI. */
 bool agx3_g17g_tile_program_generate(

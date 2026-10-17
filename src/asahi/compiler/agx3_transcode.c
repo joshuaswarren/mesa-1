@@ -342,6 +342,13 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
          fields[56] = fields[76] == 1 || fields[76] == 3 ? fields[19] + 2 : 2;
       } else
          fields[19] = 4;
+       /* Native949 query3D publishes X/Z separately from Y. Unlike an
+        * ordinary 3D sample, G18's query names X at8 and Y at0. */
+       if (fields[155] == 2 && fields[74] == 0 && fields[76] == 3 &&
+           fields[139] == 0) {
+          fields[19] = 8;
+          fields[56] = 0;
+       }
       /* A comparison (f143) names its reference half on G18G -- f58, with
        * f59 set -- where G17G reads it implicitly at X + 4. applegpu_g18g
        * depth2d sample_compare (m6-shadow-lod): X 0, Y 2, reference 4 with
@@ -441,9 +448,24 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
    const bool scalar_pixel_load = fields[51] == 1 && fields[43] == 1 &&
                                   fields[10] == 2 && fields[26] == 1 &&
                                   !(fields[57] % 4);
+   /* Native844 pairs: whole-pixel loads at RT0 retain their width/mask
+    * fields but use the G18 long form. Do not extend this to other offsets
+    * or width/mask combinations without a matching native profile.
+    * Native844 brackets that long form with pixwait 0x200 ... pixrel 0x20c;
+    * Mesa's G18 fragment programs do not. Fault1080/1084: this unbracketed
+    * long RGBA8 (8-bit, mask 0xf) load is the only GPU-visible change in a
+    * render that recovers on M6; its short form passed physically through
+    * 723. Keep RGBA8 on that short form until the bracket is emitted and
+    * physically validated. */
+   const bool native844_pixel_load =
+      fields[51] == 1 && fields[43] == 1 && fields[57] == 0 &&
+      ((fields[10] == 0 && fields[26] == 3) ||
+       (fields[10] == 1 && (fields[26] == 1 || fields[26] == 3 ||
+                            fields[26] == 7 || fields[26] == 15)) ||
+       (fields[10] == 2 && (fields[26] == 1 || fields[26] == 3)));
    if (!strcmp(mnemonic, "lldcol") &&
        ((fields[51] == 2 && fields[10] <= 2 && fields[26] == 15) ||
-        scalar_pixel_load))
+        scalar_pixel_load || native844_pixel_load))
       fields[79] = 2;
    if (!strcmp(mnemonic, "ldcfr")) {
       /* Native G18 no-perspective interpolate_at_offset keeps the raw

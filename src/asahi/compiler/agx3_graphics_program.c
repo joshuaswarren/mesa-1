@@ -840,7 +840,7 @@ static bool
 g17g_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    enum agx_ioto_g17g_program_stage stage,
-   bool g18_compute_tps, struct agx3_g17p_graphics_program *program)
+   bool g18_tps, struct agx3_g17p_graphics_program *program)
 {
    /* G18 consumes this canonical GPU1 form through the caller's agx3d
     * re-encoder. Retain the target for imageblock admission before selecting
@@ -852,10 +852,15 @@ g17g_graphics_program_generate(
    if (chip != AGX_CHIP_G17G || !desc || !program ||
        !desc->shader_binary_size ||
        !desc->nr_gprs || desc->nr_gprs > 256 ||
-       (desc->scratch_size && !g18_compute_tps) ||
-       (g18_compute_tps && (stage != AGX_IOTO_G17G_PROGRAM_COMPUTE ||
-                           (desc->scratch_size & 15) ||
-                           desc->scratch_size > UINT16_MAX * 4u)) ||
+       (desc->scratch_size && !g18_tps) ||
+       /* Native G18 TPS frames: compute (fp64 TPS captures) and the vertex
+        * and fragment API programs (native1054). Tile programs have none. */
+       (g18_tps && ((stage != AGX_IOTO_G17G_PROGRAM_COMPUTE &&
+                     stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
+                     stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
+                     stage != AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT) ||
+                    (desc->scratch_size & 15) ||
+                    desc->scratch_size > UINT16_MAX * 4u)) ||
        !desc->compiler_d_valid || desc->compiler_d > 256 ||
        (desc->writes_sample_mask && !desc->fragment) ||
        (desc->threadgroup_memory_size_B &&
@@ -889,6 +894,10 @@ g17g_graphics_program_generate(
            desc->imageblock.sample_size_B != 16 &&
            desc->imageblock.sample_size_B != 24 &&
            desc->imageblock.sample_size_B != 32 &&
+           !(target_chip == AGX_CHIP_G18G &&
+             desc->imageblock.sample_size_B >= 48 &&
+             desc->imageblock.sample_size_B <= 128 &&
+             !(desc->imageblock.sample_size_B & 15)) &&
           desc->imageblock.sample_size_B != 0) ||
          desc->imageblock.nr_samples != 1 ||
          desc->imageblock.tile_size_px != 32 * 32)) ||
@@ -925,9 +934,11 @@ g17g_graphics_program_generate(
    spectpr.f[0] = 3;
    spectpr.f[1] = 166;
    spectpr.f[22] = (((desc->compiler_d + 3) >> 2) + 1) & ~1u;
-   if (g18_compute_tps) {
-      /* Native G18 TPS pressure captures: the compiler frame is bytes,
-       * aligned to sixteen; both SPECTPR fields count four-byte words. */
+   if (g18_tps) {
+      /* Native G18 TPS pressure captures (compute) and native1054 (vertex
+       * 528/2064 bytes -> 132/516, fragment likewise): the compiler frame
+       * is bytes, aligned to sixteen; both SPECTPR fields count four-byte
+       * words. */
       spectpr.f[20] = desc->scratch_size / 4;
       spectpr.f[21] = desc->scratch_size / 4;
    }
@@ -1153,6 +1164,21 @@ agx3_g18g_compute_program_generate(
    /* Canonical GPU1 record; the G18 caller must re-encode it as agx3d. */
    return desc && !desc->fragment && g17g_graphics_program_generate(
       AGX_CHIP_G17G, desc, AGX_IOTO_G17G_PROGRAM_COMPUTE, true, program);
+}
+
+bool
+agx3_g18g_graphics_program_generate_tps(
+   const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program)
+{
+   const enum agx_ioto_g17g_program_stage stage =
+      !desc                      ? AGX_IOTO_G17G_PROGRAM_VERTEX
+      : !desc->fragment          ? AGX_IOTO_G17G_PROGRAM_VERTEX
+      : desc->writes_sample_mask ? AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT
+                                 : AGX_IOTO_G17G_PROGRAM_FRAGMENT;
+   /* Canonical GPU1 record; the G18 caller must re-encode it as agx3d. */
+   return desc && desc->scratch_size && g17g_graphics_program_generate(
+      AGX_CHIP_G18G, desc, stage, true, program);
 }
 
 bool

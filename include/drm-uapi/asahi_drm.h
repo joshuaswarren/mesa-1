@@ -284,6 +284,13 @@ enum drm_asahi_feature {
 	 * DRM_ASAHI_RENDER_FRAGMENT_BARRIERS.
 	 */
 	DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS = (1UL) << 7,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH: G18 render commands accept
+	 * DRM_ASAHI_RENDER_G18_RESOURCES. The kernel sizes the shared TA/3D
+	 * private-memory pool and both launch pairs from that suffix.
+	 */
+	DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH = (1UL) << 8,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -1011,6 +1018,13 @@ enum drm_asahi_render_flags {
 	 * may depend on it. Requires DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS.
 	 */
 	DRM_ASAHI_RENDER_FRAGMENT_BARRIERS = (1U << 20),
+
+	/**
+	 * @DRM_ASAHI_RENDER_G18_RESOURCES: G18 only, requires
+	 * DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH. The payload is a
+	 * drm_asahi_cmd_render_g18 carrying drm_asahi_g18_render_resources.
+	 */
+	DRM_ASAHI_RENDER_G18_RESOURCES = (1U << 21),
 };
 
 /**
@@ -1341,6 +1355,36 @@ struct drm_asahi_cmd_render_with_prior {
 	struct drm_asahi_cmd_render legacy;
 	__u64 prior_vdm;
 	__u64 prior_cdm;
+};
+
+/* G18 per-render program demand, maximized over every draw of the render:
+ * 16-bit registers, the static thread-private (TPS) frame in bytes as
+ * programmed in SPECTPR (a multiple of 16), and IPR/staging halfwords. Tile
+ * programs are background, end-of-tile, partial background and partial
+ * end-of-tile; a zero register count marks an absent program, and tile
+ * programs never carry scratch. flags must be 3 (vertex and fragment
+ * present); reserved must be zero. Tile storage comes from the command. */
+struct drm_asahi_g18_render_resources {
+	__u32 version;
+	__u32 flags;
+	__u32 vertex_registers_16;
+	__u32 vertex_scratch_bytes;
+	__u32 vertex_staging_16;
+	__u32 fragment_registers_16;
+	__u32 fragment_scratch_bytes;
+	__u32 fragment_staging_16;
+	__u32 tile_registers_16[4];
+	__u32 tile_staging_16[4];
+	__u32 reserved[4];
+};
+
+/* DRM_ASAHI_RENDER_G18_RESOURCES payload: the kernel's complete render
+ * payload (prior_vdm/prior_cdm zero = absent) followed by the suffix. */
+struct drm_asahi_cmd_render_g18 {
+	struct drm_asahi_cmd_render legacy;
+	__u64 prior_vdm;
+	__u64 prior_cdm;
+	struct drm_asahi_g18_render_resources resources;
 };
 
 /**

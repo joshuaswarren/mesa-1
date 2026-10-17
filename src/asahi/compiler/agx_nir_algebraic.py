@@ -353,6 +353,17 @@ for bits in range(1, 16):
          ('ubitfield_extract', a, 16, bits)),
     ])
 
+# Computing (2*b)*b first can overflow even when a - 2*a*b*b is finite.
+# Multiplying a first bounds the intermediates when the final result is finite;
+# keeping the factor of two in the final FMA also avoids overflow before the
+# subtraction. Only reassociate non-precise FP32 operations with no shared
+# intermediate. Run after the generic algebraic passes to preserve this order.
+avoid_square_overflow = [
+    (('~ffma@32', ('fneg', a),
+      ('~fmul(is_used_once)', ('~fmul(is_used_once)', 2.0, b), b), a),
+     ('ffma', -2.0, ('fmul', ('fmul', a, b), b), a)),
+]
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--import-path', required=True)
@@ -372,6 +383,8 @@ def run():
     print(nir_algebraic.AlgebraicPass("agx_nir_lower_algebraic_late",
                                       lower_sm5_shift + lower_pack +
                                       lower_selects).render())
+    print(nir_algebraic.AlgebraicPass("agx_nir_avoid_square_overflow",
+                                      avoid_square_overflow).render())
     print(nir_algebraic.AlgebraicPass("agx_nir_fuse_selects",
                                       opt_selects).render())
     print(nir_algebraic.AlgebraicPass("agx_nir_fold_pixel_coord",

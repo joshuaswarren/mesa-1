@@ -423,18 +423,42 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
 
    /* Native653 independently covers all nine descriptor-class pairs for
     * ordinary 2D/array/3D samples, with masks 1/15, register level in every
-    * stage and implicit/register bias in fragments. The stream packer owns
-    * staging and retirement; unrelated sampling profiles stay gated. */
+    * stage and implicit/register bias in fragments. Native809 adds the same
+    * descriptor pairs for full-vector cube/cube-array colour and scalar
+    * 2D/array/cube/cube-array comparisons, with register levels in every
+    * stage and implicit fragment LOD. Native816 adds fragment register
+    * bias for those same descriptor pairs and masks. The stream packer still
+    * owns staging and retirement. */
    const bool gpu1_binding = enc == AGX_ISA_ENCODING_AGX3C &&
-      !d->cube && !(d->three_d && d->array) && !d->shadow &&
-      d->width == AGX3_TEX_W32 && (d->mask == 1 || d->mask == 15) &&
+      !(d->three_d && (d->array || d->cube || d->shadow)) &&
+      d->width == AGX3_TEX_W32 &&
+      (d->shadow ? d->mask == 1 : d->cube ? d->mask == 15
+                                          : (d->mask == 1 || d->mask == 15)) &&
       !d->offset && !d->offset_register && !d->offset_staged &&
       !d->query_lod && !d->min_lod && !d->sparse &&
       d->gather == AGX3_TEX_GATHER_NONE &&
       (d->lod == AGX3_TEX_LOD_REGISTER ||
        (!d->vertex_stage && !d->compute_stage &&
-        (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS_REGISTER))) &&
+        (d->lod == AGX3_TEX_LOD_AUTO ||
+         (d->lod == AGX3_TEX_LOD_BIAS_REGISTER)))) &&
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
+
+   /* Native917 pairs half4/float4 non-array cube results. Each pair
+    * differs only in f10. The stream packer retains its bank0 staging;
+    * bank4 reproduces the native instruction without rewriting evidence. */
+   const bool gpu1_cube_vector = enc == AGX_ISA_ENCODING_AGX3C &&
+      d->cube && !d->three_d && !d->array && !d->shadow &&
+      (d->width == AGX3_TEX_W16 || d->width == AGX3_TEX_W32) &&
+      d->mask == 15 && (d->coord == 0 || d->coord == 4) &&
+      !d->offset && !d->offset_register && !d->offset_staged &&
+      !d->query_lod && !d->min_lod && !d->sparse &&
+      d->gather == AGX3_TEX_GATHER_NONE &&
+      (d->lod == AGX3_TEX_LOD_REGISTER ||
+       (!d->vertex_stage && !d->compute_stage &&
+        d->lod == AGX3_TEX_LOD_BIAS_REGISTER)) &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
+      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
 
    /* Native607 compiles float4 3D/cube samples independently for G17G and
     * G18G in all three execution stages. Explicit zero and register levels
@@ -442,7 +466,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * adds implicit and register-bias fragment shapes (f139=0/3). Native615
     * grounds the same colour profiles for cube arrays (f77=2). Operand
     * publication remains the stream packer's architecture-specific job. */
-   const bool gpu1_colour_level = enc == AGX_ISA_ENCODING_AGX3C &&
+   const bool gpu1_colour_level = gpu1_cube_vector || (enc == AGX_ISA_ENCODING_AGX3C &&
       (d->three_d != d->cube) && (!d->array || d->cube) && !d->shadow &&
       d->width == AGX3_TEX_W32 && (d->mask == 1 || d->mask == 15) &&
       d->coord == 0 &&
@@ -455,7 +479,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS_REGISTER))) &&
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
       (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
-      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
+      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE);
 
    /* G17G's own cube witnesses, `gpu/m5-shadow-array-cube-reference.metal`
     * compiled with `metal-nt -arch applegpu_g17g`: depthcube and
@@ -505,11 +529,23 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
          d->lod != AGX3_TEX_LOD_GRADIENT)))
       return false;
 
+   /* Native949: scalar/pair float32 2D/3D fragment queries. G17G uses
+    * f155=2, not the f146 selector of G17P, and the compact ep1 form. */
+   const bool gpu1_query_lod = enc == AGX_ISA_ENCODING_AGX3C &&
+      d->query_lod && !d->array && !d->cube && !d->vertex_stage &&
+      !d->compute_stage && d->coord == 0 && !d->min_lod && !d->sparse &&
+      !d->offset_register && !d->offset_staged &&
+      !d->sample_group_nonterminal && !d->sample_group_end &&
+      (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
+      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
+
    /* Fresh native calculate_{clamped,unclamped}_lod witnesses cover the
     * ordinary derivative path only, returning packed X/Y float32 results. */
    if (d->query_lod &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->width != AGX3_TEX_W32 ||
-        d->lod != AGX3_TEX_LOD_AUTO || (d->mask & ~3u) || d->array_layer ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_query_lod) || d->width != AGX3_TEX_W32 ||
+        (d->lod != AGX3_TEX_LOD_AUTO &&
+         !(gpu1_query_lod && d->lod == AGX3_TEX_LOD_BIAS_REGISTER)) ||
+        (d->mask & ~3u) || d->array_layer ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow || d->offset ||
         d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
       return false;
@@ -567,7 +603,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        * and bias are grounded above; gradients require the narrower profile
        * established by the independent 2D/array reference. */
       if ((enc != AGX_ISA_ENCODING_AGX3B &&
-           !(((gpu1_plain_2d || gpu1_cube || gpu1_colour_level || gpu1_binding) &&
+           !(((gpu1_plain_2d || gpu1_cube || gpu1_colour_level || gpu1_binding || gpu1_query_lod) &&
               d->lod != AGX3_TEX_LOD_GRADIENT) || gpu1_gradient)) ||
           d->lod_x64 != 0)
          return false;
@@ -603,7 +639,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * literal-gradient kernels (see AGX3_TEX_GRADIENT_BANK_DDX_Z). Array,
     * gather and comparison combinations remain closed. */
    if (d->three_d &&
-       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_colour_level && !gpu1_binding) || d->array || d->cube ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_colour_level && !gpu1_binding && !gpu1_query_lod) || d->array || d->cube ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 
@@ -619,8 +655,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * Cube and cube-array comparisons reuse that CEM path with their own
     * packed face / layer operands. */
    if (d->cube &&
-       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_cube && !gpu1_colour_level) || d->three_d ||
-        d->coord != 0 ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_cube && !gpu1_colour_level && !gpu1_binding) || d->three_d ||
+        (d->coord != 0 && !gpu1_cube_vector) ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
          d->lod != AGX3_TEX_LOD_REGISTER && d->lod != AGX3_TEX_LOD_BIAS &&
          d->lod != AGX3_TEX_LOD_BIAS_REGISTER)))
@@ -669,9 +705,9 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER)
       return false;
 
-   /* Cube operand pairs are witnessed as immediate/immediate,
-    * uniform/uniform and register/register. */
-   if (d->cube && tk != sk)
+   /* Native809 adds all mixed cube descriptor pairs within gpu1_binding.
+    * Other profiles retain the original matching-class restriction. */
+   if (d->cube && tk != sk && !gpu1_binding)
       return false;
 
    /* The coordinate offset is one immediate nibble pair in f43 plus two
@@ -822,7 +858,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
                                     d->lod == AGX3_TEX_LOD_BIAS_REGISTER;
    if (d->shadow &&
        ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_plain_2d &&
-         !gpu1_cube && !gpu1_gather) ||
+         !gpu1_cube && !gpu1_gather && !gpu1_binding) ||
         d->three_d ||
         d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
         (((d->cube && !staged_register_lod && !gpu1_array_register_lod) ||
@@ -1075,7 +1111,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    if (d->shadow)
       ov[n++] = (struct agx3_field_kv)KV(143, 1);
    if (d->query_lod)
-      ov[n++] = (struct agx3_field_kv)KV(146, 1);
+      ov[n++] = (struct agx3_field_kv)KV(enc == AGX_ISA_ENCODING_AGX3C ? 155 : 146,
+                                       enc == AGX_ISA_ENCODING_AGX3C ? 2 : 1);
    if (d->offset) {
       if (d->offset_staged || d->offset_register) {
          ov[n++] = (struct agx3_field_kv)KV(141, 2);
@@ -1108,7 +1145,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     * depthcube); every other G17G sample, including the offset comparison,
     * is the 22-byte ep3 form. */
    const int ep = enc == AGX_ISA_ENCODING_AGX3C
-                     ? (d->gather != AGX3_TEX_GATHER_NONE
+                     ? (d->query_lod ? 1 : d->gather != AGX3_TEX_GATHER_NONE
                            ? (d->offset && !d->offset_register ? 3 : 2) :
                         d->shadow && !d->offset
                            ? ((d->cube ||
@@ -1757,6 +1794,18 @@ agx3_tex_stage_array_minimum_lod(enum agx_isa_encoding enc, uint16_t src,
 {
    return stage_typed_lod_half(enc, 4, src, slot, wait_mask, src_cache,
                                src_discard, AGX3_TEX_LEVEL_MINIMUM, false, out, len);
+}
+
+/* Experimental query-bias publication, validated by numeric hardware
+ * readback before promotion. Query3D uses Y0/bias2; query2D uses Y2/bias4. */
+bool
+agx3_tex_stage_query_bias_g18g(bool three_d, uint16_t src, uint8_t slot,
+                                uint16_t wait_mask,
+                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return stage_typed_lod_half(AGX_ISA_ENCODING_AGX3C, three_d ? 2 : 4,
+                               src, slot, wait_mask, false, true,
+                               AGX3_TEX_LEVEL_FLOAT, false, out, len);
 }
 
 bool

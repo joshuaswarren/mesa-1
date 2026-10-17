@@ -548,6 +548,11 @@ bool agx3_alu_fcmp_select32_gpu1(const struct agx3_fsel32_gpu1_desc *d,
  * register is a 16-bit half (any index) and a selected immediate is an 8-bit
  * integer, as in Mesa's fcmpsel; see agx3_alu_core.c for the witnesses.
  */
+bool agx3_alu_fcmp_select_half_gpu1(uint16_t dest, const uint16_t src[4],
+                                      const enum agx3_alu_hint hints[4],
+                                      unsigned condition, bool invert,
+                                      bool dest_cache, uint16_t wait_mask,
+                                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 bool agx3_alu_fcmp_select16_gpu1(const struct agx3_fsel32_gpu1_desc *d,
                                  uint8_t out[AGX3_ALU_MAX_LENGTH],
                                  uint8_t *len);
@@ -1124,6 +1129,12 @@ bool agx3_alu_hadd_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native -src + -0.0h used by half negate and matrix inverse lowering. */
+/* Native G17G/G18G f16add abs/negabs with a negative-zero immediate. */
+bool agx3_alu_hadd_abs_negzero(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   enum agx3_alu_hint hint, bool src_neg, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 bool agx3_alu_hadd_neg_negzero(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,

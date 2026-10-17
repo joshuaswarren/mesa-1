@@ -259,6 +259,15 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
     * addend is witnessed only with two half inputs. Keep immediate-addend,
     * narrow-result and 64-bit forms closed. G18G's packer uses the G17G form
     * before transcoding, preserving the same operand field vector. */
+   /* Native902 G17G/G18G ushort/short a*b and a*b+c use this same
+    * width-one field vector. A narrow result sign-extends no operand.
+    * Keep immediate and negated addends outside the witnessed domain. */
+   const bool g17_narrow_product = m5 && d->dest_16 && !d->dest_64 &&
+      d->src_a_16 && d->multiplier_is_register && d->multiplier_16 &&
+      !d->src_a_sign_extend && !d->multiplier_sign_extend &&
+      !d->src_c_64 && !d->src_c_sign_extend &&
+      !d->addend_is_immediate && !d->negate_addend &&
+      (d->no_addend || d->src_c_16);
    const bool g17_half_product = m5 &&
       !d->dest_16 && !d->dest_64 && (d->src_a_16 || d->no_addend) &&
       d->multiplier_is_register && d->multiplier_16 &&
@@ -276,7 +285,8 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
     *
     * The addend-free product is the immediate form adding #0 (identical
     * bytes); a product signed on one side only has no witness. */
-   if (m5 && !g17_half_product && (d->dest_16 || d->src_a_16 ||
+   if (m5 && !g17_half_product && !g17_narrow_product &&
+       (d->dest_16 || d->src_a_16 ||
               d->multiplier_16 || d->src_c_16 ||
               (d->src_c_64 && !d->dest_64) ||
               (d->dest_64 && (!d->multiplier_is_register || d->no_addend)) ||

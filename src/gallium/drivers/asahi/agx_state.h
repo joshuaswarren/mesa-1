@@ -323,6 +323,10 @@ struct agx_fast_link_key {
 struct agx_uncompiled_shader {
    struct pipe_shader_state base;
    mesa_shader_stage type;
+   /* An application shader: API NIR that is not marked internal. Only these
+    * report compiler statistics through the GL debug callback (see
+    * agx_compile_variant). */
+   bool report_shader_info;
    struct blob early_serialized_nir;
    struct blob serialized_nir;
    uint8_t nir_blake3[BLAKE3_KEY_LEN];
@@ -589,6 +593,14 @@ struct agx_batch {
    bool fs_scratch;
    bool cs_scratch;
 
+   /* G18: program demand of every vertex/fragment/tile program this render
+    * generated, reported in drm_asahi_g18_render_resources when any API
+    * program carries a static TPS frame. */
+   struct {
+      struct drm_asahi_g18_render_resources resources;
+      bool scratch;
+   } g18;
+
    /* Whether each stage has preambles using scratch, and if so which bucket.
     * This just needs to be zero/nonzero for correctness, the magnitude in
     * buckets is for statistics.
@@ -622,6 +634,8 @@ struct asahi_vs_shader_key {
    bool custom_borders;
    /* G18's native line state has no rasterizer point-size output. */
    bool omit_point_size;
+   /* Export Layer as a flat input only when the fragment shader reads it. */
+   bool layer_as_varying;
 };
 
 struct agx_vertex_elements {
@@ -1382,6 +1396,38 @@ struct asahi_bg_eot {
    uint64_t usc;
    uint64_t rsrc_spec;
 };
+
+/* Per-field maxima. Page-count descriptor words are exact under this merge;
+ * the per-warp KiB words are an upper bound when different programs supply
+ * the register, frame and staging maxima (graphics-scratch-design-1077). */
+static inline void
+agx_g18_note_program(struct agx_batch *batch, bool fragment,
+                     unsigned registers_16, unsigned scratch_bytes,
+                     unsigned staging_16)
+{
+   struct drm_asahi_g18_render_resources *r = &batch->g18.resources;
+   if (fragment) {
+      r->fragment_registers_16 = MAX2(r->fragment_registers_16, registers_16);
+      r->fragment_scratch_bytes = MAX2(r->fragment_scratch_bytes, scratch_bytes);
+      r->fragment_staging_16 = MAX2(r->fragment_staging_16, staging_16);
+   } else {
+      r->vertex_registers_16 = MAX2(r->vertex_registers_16, registers_16);
+      r->vertex_scratch_bytes = MAX2(r->vertex_scratch_bytes, scratch_bytes);
+      r->vertex_staging_16 = MAX2(r->vertex_staging_16, staging_16);
+   }
+   batch->g18.scratch |= scratch_bytes != 0;
+}
+
+/* Tile programs: slot 0 background (including partial), slot 1 EOT. */
+static inline void
+agx_g18_note_tile(struct agx_batch *batch, bool store, unsigned registers_16,
+                  unsigned staging_16)
+{
+   struct drm_asahi_g18_render_resources *r = &batch->g18.resources;
+   const unsigned slot = store ? 1 : 0;
+   r->tile_registers_16[slot] = MAX2(r->tile_registers_16[slot], registers_16);
+   r->tile_staging_16[slot] = MAX2(r->tile_staging_16[slot], staging_16);
+}
 
 struct asahi_bg_eot agx_build_bg_eot(struct agx_batch *batch, bool store,
                                      bool partial_render);

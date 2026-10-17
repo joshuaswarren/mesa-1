@@ -215,7 +215,7 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
           I->dest[d].size == AGX_SIZE_16 &&
           (I->format == AGX_FORMAT_U8NORM || I->format == AGX_FORMAT_S8NORM ||
            (I->format == AGX_FORMAT_I8 &&
-            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)))
+            agx_encoding_is_agx3(ctx->key->dev.encoding))))
          return DIV_ROUND_UP(util_bitcount(I->mask), 2);
 
       /* Can write 16-bit or 32-bit. Anything logically 64-bit is already

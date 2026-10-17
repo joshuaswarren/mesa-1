@@ -175,10 +175,16 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    /* Native R8/RG8 Unorm/Snorm framebuffer fetches also use this immediate
     * form, with f26=1/3 and the same G18 f79=2 transcode. Those witnesses
     * address the first attachment; retain the offset restriction for them. */
+   /* Native844: matched G17G/G18G framebuffer-fetch profiles also ground
+    * R16I/UI, RG16I/UI, RG32I/UI and B5G6R5 at offset zero. The register
+    * sample and multisample paths below retain their existing restrictions. */
    bool narrow_pixel = enc == AGX_ISA_ENCODING_AGX3C &&
                        !sample.reg && !sample.kill && sample.value == 1 &&
-                       ((width == AGX3_TILE_W32 && chan_mask == 1 &&
-                         !(tile_off % 4)) ||
+                       ((width == AGX3_TILE_W32 &&
+                         ((chan_mask == 1 && !(tile_off % 4)) ||
+                          (chan_mask == 3 && tile_off == 0))) ||
+                        (width == AGX3_TILE_W16 && tile_off == 0 &&
+                         (chan_mask == 1 || chan_mask == 3 || chan_mask == 7)) ||
                         (width == AGX3_TILE_W8 &&
                          (chan_mask == 1 || chan_mask == 3) && tile_off == 0));
    if (sample.g17_register &&

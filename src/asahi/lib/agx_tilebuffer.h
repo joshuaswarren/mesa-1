@@ -287,6 +287,7 @@ unsigned agx_g18g_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib);
 unsigned agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
 /* Resident RGBA32 or scalar R32I/U multisample attachments on G18. */
+unsigned agx_g18g_raw32_mrt_mask(const struct agx_tilebuffer_layout *tib);
 unsigned agx_g18g_ms_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
 /* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */

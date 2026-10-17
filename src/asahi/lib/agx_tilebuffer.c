@@ -9,6 +9,7 @@
 #include "util/format/u_format.h"
 #include "util/u_debug.h"
 #include "agx_bg_eot_key.h"
+#include "agx_debug.h"
 #include "layout.h"
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
@@ -104,7 +105,8 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
    };
    const unsigned max_bytes_per_sample =
       MIN2(max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE,
-           MAX_ENCODABLE_BYTES_PER_SAMPLE);
+           /* Larger Ioto allocations do not use USC_SHARED's stride. */
+           max_bytes_per_tile > 65536 ? 248 : MAX_ENCODABLE_BYTES_PER_SAMPLE);
    const unsigned tile_capacity =
       max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE;
 
@@ -250,7 +252,7 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
 
 static unsigned
 agx_word_mrt_mask(const struct agx_tilebuffer_layout *tib,
-                  unsigned max_bytes_per_tile, bool raw32, bool layered)
+                  unsigned max_bytes_per_tile, bool raw32, bool layered, bool srgb)
 {
    if (!tib || (tib->layered && !layered) || tib->nr_samples != 1 ||
        (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16))
@@ -265,6 +267,11 @@ agx_word_mrt_mask(const struct agx_tilebuffer_layout *tib,
            format != PIPE_FORMAT_B8G8R8A8_UNORM &&
            format != PIPE_FORMAT_R8G8B8X8_UNORM &&
            format != PIPE_FORMAT_B8G8R8X8_UNORM &&
+           !(srgb && !tib->layered &&
+             (format == PIPE_FORMAT_R8G8B8A8_SRGB ||
+              format == PIPE_FORMAT_B8G8R8A8_SRGB ||
+              format == PIPE_FORMAT_R8G8B8X8_SRGB ||
+              format == PIPE_FORMAT_B8G8R8X8_SRGB)) &&
            !(raw32 && !tib->layered && (format == PIPE_FORMAT_R32_UINT ||
                        format == PIPE_FORMAT_R32_SINT ||
                        format == PIPE_FORMAT_R32_FLOAT))) ||
@@ -280,7 +287,7 @@ agx_word_mrt_mask(const struct agx_tilebuffer_layout *tib,
 unsigned
 agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
 {
-   return agx_word_mrt_mask(tib, 32767, false, false);
+   return agx_word_mrt_mask(tib, 32767, false, false, false);
 }
 
 unsigned
@@ -289,19 +296,89 @@ agx_g18g_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
    /* Native G18 clear/load/mixed/sparse capture308 binds 32-byte samples
     * in a 32x32 single-sample tile. Keep this separate from G17P's budget. */
    return tib && tib->tile_size == 32 * 32
-             ? agx_word_mrt_mask(tib, 32768, false, true) : 0;
+             ? agx_word_mrt_mask(tib, 32768, false, true, true) : 0;
 }
 
 unsigned
 agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib)
 {
-   /* R32 occupies the same four-byte tile slot as RGBA8. Native426/427
+   /* Native1068's two-target sRGB clear/load/mixed renders use the same
+    * four-byte packed slots and sample state. Keep logical sRGB conversion
+    * in each fragment/background shader and linear byte stores in the EOT.
+    * R32 occupies the same four-byte tile slot as RGBA8. Native426/427
     * ground scalar word tile operations and the EOT argument/store ABI.
     * Logical conversion remains in the per-attachment shader/descriptor.
     * Layered G18 layouts admit only the RGBA8 family: native array MRT EOT
     * programs cover two through eight targets, with the same compact offsets. */
    return tib && tib->tile_size == 32 * 32
-             ? agx_word_mrt_mask(tib, 32768, true, true) : 0;
+             ? agx_word_mrt_mask(tib, 32768, true, true, true) : 0;
+}
+
+static bool
+agx_g18g_rg32_format(enum pipe_format f)
+{
+   return f == PIPE_FORMAT_R32G32_FLOAT || f == PIPE_FORMAT_R32G32_SINT ||
+          f == PIPE_FORMAT_R32G32_UINT;
+}
+
+/* Native1094 rg32 (Apple M6, verified capture): two RG32 Uint/Sint/Float
+ * targets in slots 0 and 1, homogeneous or Float+Sint, sit at compact
+ * eight-byte offsets 0/8 of a sixteen-byte single-sample sample. Their
+ * fragment stores are lstcol W32 mask 3 (f10=2, f26=3, f57=0/8) with the
+ * RGBA32 pixel classes, the load background stores the same form, and the
+ * end-of-tile text is byte-identical to the two-target R32-word program
+ * (native427) already emitted for two RGBA32 targets. The fragment, load
+ * background and end-of-tile bytes do not depend on the RG32 type. The
+ * sparse {0,2} capture used Apple's generic clear programs only, so it is
+ * not admitted. */
+static unsigned
+agx_g18g_rg32_pair_mask(const struct agx_tilebuffer_layout *tib)
+{
+   unsigned mask = 0, count = 0;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      const enum pipe_format f = tib->logical_format[rt];
+      if (f == PIPE_FORMAT_NONE)
+         continue;
+      if (!agx_g18g_rg32_format(f) || tib->_offset_B[rt] != 8 * count)
+         return 0;
+      mask |= BITFIELD_BIT(rt);
+      count++;
+   }
+   return count == 2 && mask == 0x3 && tib->sample_size_B == 16 ? mask : 0;
+}
+
+unsigned
+agx_g18g_raw32_mrt_mask(const struct agx_tilebuffer_layout *tib)
+{
+   if (!tib || tib->nr_samples != 1 || tib->tile_size != 32 * 32 ||
+       tib->layered || agx_tilebuffer_spills(tib))
+      return 0;
+
+   if (agx_g18_native1109_enabled()) {
+      const unsigned rg32 = agx_g18g_rg32_pair_mask(tib);
+      if (rg32)
+         return rg32;
+   }
+
+   /* Native855 four-target clear/load/mixed/sparse renders keep the same
+    * compact sixteen-byte slots, fragment stores and BG/EOT programs for
+    * Uint, Sint and Float: the type lives only in each target's descriptor.
+    * Every target must still be a resident RGBA32 slot in compact order. */
+   unsigned mask = 0, count = 0;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      enum pipe_format f = tib->logical_format[rt];
+      if (f == PIPE_FORMAT_NONE)
+         continue;
+      if ((f != PIPE_FORMAT_R32G32B32A32_FLOAT &&
+           f != PIPE_FORMAT_R32G32B32A32_SINT &&
+           f != PIPE_FORMAT_R32G32B32A32_UINT) ||
+          tib->_offset_B[rt] != 16 * count)
+         return 0;
+      mask |= BITFIELD_BIT(rt);
+      count++;
+   }
+   return count >= 2 && count <= 8 && tib->sample_size_B == 16 * count
+             ? mask : 0;
 }
 
 unsigned

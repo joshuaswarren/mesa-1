@@ -2247,6 +2247,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->glsl_tess_levels_as_inputs = true;
    caps->doubles = true;
 
+   /* Every G18G stage, compute included, publishes its own native texture
+    * and sampler tables (agx_upload_textures/agx_upload_samplers), so GL's
+    * combined unit count is their sum, as GLES already reports. No stage
+    * binds more than max_texture_samplers.
+    */
+   caps->combined_texture_units_all_stages =
+      agx_device(pscreen)->chip == AGX_CHIP_G18G;
+
    caps->max_render_targets = caps->fbfetch = 8;
    caps->fbfetch_coherent = true;
 

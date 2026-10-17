@@ -102,12 +102,19 @@ nir_fsat_to_format(nir_builder *b, nir_def *x, enum pipe_format format)
 }
 
 static nir_def *
-load_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
+load_tilebuffer(nir_builder *b, struct ctx *ctx,
                 uint8_t load_comps, uint8_t bit_size, unsigned rt,
                 enum pipe_format format, enum pipe_format logical_format)
 {
+   struct agx_tilebuffer_layout *tib = ctx->tib;
    unsigned comps = util_format_get_nr_components(logical_format);
    bool f16 = (format == PIPE_FORMAT_R16_FLOAT);
+   /* The G18 native-format path already selects lower_r11g11b10. Native844
+    * shows that its integer16 fetches return consecutive half-width lanes;
+    * widening the load itself would read the next component as high bits. */
+   const bool integer16 = ctx->lower_r11g11b10 &&
+                          format == PIPE_FORMAT_R16_UINT &&
+                          util_format_is_pure_integer(logical_format);
 
    /* Don't load with F16 */
    if (f16)
@@ -115,9 +122,16 @@ load_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
 
    uint8_t offset_B = agx_tilebuffer_offset_B(tib, rt);
    nir_def *res = nir_load_local_pixel_agx(
-      b, MIN2(load_comps, comps), f16 ? 16 : bit_size,
+      b, MIN2(load_comps, comps), (f16 || integer16) ? 16 : bit_size,
       nir_imm_intN_t(b, ALL_SAMPLES, 16), .base = offset_B, .format = format,
       .target = rt);
+
+   /* Keep the raw unsigned bits before the existing logical signed
+    * extension below (including formats with fewer than16 significant bits). */
+   if (integer16 && bit_size != 16) {
+      assert(bit_size == 32);
+      res = nir_u2u32(b, res);
+   }
 
    /* Extend floats */
    if (f16 && bit_size != 16) {
@@ -377,7 +391,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       if (!write_mask) {
          if (ctx->preserve_zero_mask && !tib->spilled[rt]) {
             nir_def *value = load_tilebuffer(
-               b, tib, raw_r11g11b10 ? 1 : comps,
+               b, ctx, raw_r11g11b10 ? 1 : comps,
                (raw_r11g11b10 || raw_srgb)
                   ? 32
                   : intr->src[0].ssa->bit_size,
@@ -459,7 +473,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       } else if (lower_r11g11b10 || lower_srgb) {
          /* G17G/G18 keep their qualified explicit format conversions. */
          def = load_tilebuffer(
-            b, tib, lower_r11g11b10 ? 1 : intr->num_components,
+            b, ctx, lower_r11g11b10 ? 1 : intr->num_components,
             32, rt, lowered_format, logical_format);
          if (lower_r11g11b10)
             def = nir_trim_vector(
@@ -478,7 +492,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
             ctx->lower_g17p_formats && bit_size != 32 &&
             (enum ail_isa_format)format == AIL_ISA_FORMAT_RGB10A2;
 
-         def = load_tilebuffer(b, tib, intr->num_components,
+         def = load_tilebuffer(b, ctx, intr->num_components,
                                (native_r11g11b10 || widen_rgb10a2) ? 32
                                                                   : bit_size,
                                rt, format, logical_format);
@@ -579,7 +593,7 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
                ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
                : agx_tilebuffer_physical_format(tib, i);
          unsigned comps = raw_r11g11b10 ? 1 : util_format_get_nr_components(logical);
-         nir_def *value = load_tilebuffer(&b, tib, comps, 32, i, format, logical);
+         nir_def *value = load_tilebuffer(&b, &ctx, comps, 32, i, format, logical);
          store_tilebuffer(&b, tib, format, logical, i, value, write_samples,
                           BITFIELD_MASK(comps));
          nir_progress(true, impl, nir_metadata_control_flow);

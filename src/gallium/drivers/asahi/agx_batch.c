@@ -244,6 +244,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->vs_scratch = false;
    batch->fs_scratch = false;
    batch->cs_scratch = false;
+   memset(&batch->g18, 0, sizeof(batch->g18));
    batch->vs_preamble_scratch = 0;
    batch->fs_preamble_scratch = 0;
    batch->cs_preamble_scratch = 0;
@@ -1173,6 +1174,17 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
     * reset: the draws simply never executed, which the application (and a
     * conformance run) observes as wrong output for exactly those commands.
     */
+   /* A G18 render whose programs carry a TPS frame needs both API stages in
+    * its resource suffix; the kernel sizes the shared TA/3D pool from it. */
+   if (render && batch->g18.scratch && !batch->native_rejected &&
+       (!batch->g18.resources.vertex_registers_16 ||
+        !batch->g18.resources.fragment_registers_16)) {
+      mesa_loge("asahi: a G18 render with a TPS frame has no recorded %s "
+                "program on %s", batch->g18.resources.vertex_registers_16
+                ? "fragment" : "vertex", agx_chip_name(dev->chip));
+      batch->native_rejected = true;
+   }
+
    /* A compute batch on AGX3c is submitted one dispatch at a time (see the
     * prepass loop below). A batch that carries compute work with no recorded
     * dispatches has nothing the profile covers, so drop it rather than send a
@@ -1727,8 +1739,26 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
          false, compute_here ? DRM_ASAHI_BARRIER_NONE : 0,
          compute_here ? 1 : 0);
 
-      util_dynarray_append(&cmdbuf, header);
-      util_dynarray_append(&cmdbuf, *render);
+      if (batch->g18.scratch) {
+         /* The complete kernel render payload (prior fields zero = absent)
+          * plus the suffix; see DRM_ASAHI_RENDER_G18_RESOURCES. */
+         struct drm_asahi_cmd_render_g18 extended = {
+            .legacy = *render,
+            .resources = batch->g18.resources,
+         };
+         STATIC_ASSERT(sizeof(struct drm_asahi_cmd_render) == 256);
+         STATIC_ASSERT(sizeof(extended) == 352);
+         STATIC_ASSERT(offsetof(struct drm_asahi_cmd_render_g18, resources) == 272);
+         extended.legacy.flags |= DRM_ASAHI_RENDER_G18_RESOURCES;
+         extended.resources.version = 1;
+         extended.resources.flags = 3;
+         header.size = sizeof(extended);
+         util_dynarray_append(&cmdbuf, header);
+         util_dynarray_append(&cmdbuf, extended);
+      } else {
+         util_dynarray_append(&cmdbuf, header);
+         util_dynarray_append(&cmdbuf, *render);
+      }
    }
 
    struct drm_asahi_submit submit = {
