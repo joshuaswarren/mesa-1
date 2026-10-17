@@ -8443,6 +8443,9 @@ struct agx3_g17p_mrt_protocol {
    bool valid;
    bool raw32_store;
    bool has_loads;
+   /* A G18 single-sample mixed-format fragment of native1130 forms
+    * (agx3_g18_native_mixed_shader, run 1139). */
+   bool native_mixed;
    /* Stores carry the coverage register. When every partition is stored,
     * all of their classes are acquired and released once, around all the
     * stores. */
@@ -8977,6 +8980,158 @@ agx3_g18_native1130_mixed_stores(const agx_context *ctx)
    return false;
 }
 
+/* Native1130 (Apple M6, verified capture 1130; run 1139): the tile operation
+ * forms of Apple's single-sample mixed-format fragments and backgrounds, all
+ * at the whole-pixel immediate sample with no explicit coordinate, each at its
+ * attachment's offset (aligned to the lane width):
+ *
+ *  - lstcol: any lane mask of the attachment at 8-, 16- and 32-bit lanes (41
+ *    width/mask pairs among the 169 fragment stores, full masks in the 208
+ *    background stores), and one word (mask 1) for a packed RGB10A2 target
+ *    (R11G11B10F reaches the tile as its raw W32 word);
+ *  - lldcol: the four forms of the 26 fragment reads -- 8-bit lanes mask 15,
+ *    16-bit lanes mask 7 or 15, one 32-bit word (mask 1).
+ *
+ * Signed or 16-bit normalized tile formats and sRGB bytes have no witness. */
+static bool
+agx3_g18_native_mixed_tile_form(const agx_instr *I)
+{
+   const bool load = I->op == AGX_OPCODE_LD_TILE;
+   if ((!load && I->op != AGX_OPCODE_ST_TILE) ||
+       I->nr_dests != (load ? 1 : 0) || I->nr_srcs != (load ? 2 : 3) ||
+       I->explicit_coords || I->pixel_offset > UINT8_MAX || I->mask < 1 ||
+       I->mask > 15)
+      return false;
+
+   const agx_index sample = load ? I->src[0] : I->src[1];
+   if (sample.type != AGX_INDEX_IMMEDIATE ||
+       sample.value != AGX3_TILE_ALL_SAMPLES ||
+       !agx_is_null(load ? I->src[1] : I->src[2]))
+      return false;
+
+   const int width = agx3_tile_format_width(I->format);
+   if (width < 0 || (I->pixel_offset % (1u << width)))
+      return false;
+
+   switch (I->format) {
+   case AGX_FORMAT_RGB10A2:
+      return I->mask == 1;
+   case AGX_FORMAT_I8:
+   case AGX_FORMAT_U8NORM:
+   case AGX_FORMAT_I16:
+   case AGX_FORMAT_F16:
+   case AGX_FORMAT_I32:
+      break;
+   default:
+      return false;
+   }
+
+   return !load || (width == AGX3_TILE_W8 && I->mask == 15) ||
+          (width == AGX3_TILE_W16 && (I->mask == 7 || I->mask == 15)) ||
+          (width == AGX3_TILE_W32 && I->mask == 1);
+}
+
+/* A fragment epilog or background of a G18 single-sample mixed-format tile
+ * (the driver's key; agx_g18g_native_mixed_mask) whose every tile operation is
+ * a native1130 form, a background reading nothing. */
+static bool
+agx3_g18_native_mixed_shader(const agx_context *ctx)
+{
+   if (!ctx->key->g18_native_mixed || !agx_g18_native_mixed_enabled() ||
+       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       !ctx->key->dev.emit_agx3d || ctx->stage != MESA_SHADER_FRAGMENT ||
+       ctx->is_preamble || ctx->key->fs.nr_samples > 1)
+      return false;
+
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+         continue;
+      if (!agx3_g18_native_mixed_tile_form(I) ||
+          (I->op == AGX_OPCODE_LD_TILE && ctx->key->fs.ignore_tib_dependencies))
+         return false;
+   }
+   return true;
+}
+
+/* Native1130 (run 1139): lstcol f13 is the payload's last-use bit. Of the 169
+ * stores of the 39 fragments, the two with f13 = 0 are exactly the two whose
+ * payload registers a later store of the same fragment reads again (impl4's
+ * RGBA16Sint pair sharing one payload, impl6's RG32Uint payload under a later
+ * RGB10A2Uint store); every other store has f13 = 1. Claiming a last use that is
+ * not one lets the register file drop a value still to be read. The payloads
+ * are compared as the registers each store reads. */
+static bool
+agx3_g18_store_payload_read_later(const agx_context *ctx, const agx_instr *S)
+{
+   const agx_index value = S->src[0];
+   if (!agx3_src_is_register(value))
+      return true;
+   const unsigned lo = value.value, hi = lo + agx_index_size_16(value);
+   bool after = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (I == S) {
+         after = true;
+         continue;
+      }
+      if (!after || I->op != AGX_OPCODE_ST_TILE)
+         continue;
+      const agx_index other = I->src[0];
+      if (!agx3_src_is_register(other))
+         continue;
+      const unsigned olo = other.value, ohi = olo + agx_index_size_16(other);
+      if (olo < hi && lo < ohi)
+         return true;
+   }
+   return false;
+}
+
+/* One tile access of a native1130 mixed-format fragment: the whole-pixel
+ * immediate sample (Apple's 1x immediate 1), the read forms of
+ * agx3_g18_native_mixed_tile_form() at their target's offset with the
+ * first/last read markers and slot of the scoreboard (f78/f74/f12), and the
+ * store's last-use bit (f13). The pixel classes around it are the MRT
+ * protocol's. A read waiting for an earlier result retires that wait first:
+ * no lldcol witness carries one. */
+static bool
+agx3_emit_g18_mixed_tile(struct util_dynarray *emission,
+                         enum agx_isa_encoding enc, const agx_context *ctx,
+                         const agx_instr *I, uint8_t slot, uint16_t wait_mask,
+                         bool first_load, bool last_load)
+{
+   const bool load = I->op == AGX_OPCODE_LD_TILE;
+   if (enc != AGX_ISA_ENCODING_AGX3C || !agx3_g18_native_mixed_tile_form(I))
+      return false;
+
+   const agx_index value = load ? I->dest[0] : I->src[0];
+   const int width = agx3_tile_format_width(I->format);
+   struct agx3_tile_sample sample_op;
+   if ((I->format == AGX_FORMAT_RGB10A2 && value.size != AGX_SIZE_32) ||
+       !agx3_tile_value_ok(value, I->mask, width) ||
+       !agx3_tile_sample_operand(load ? I->src[0] : I->src[1], &sample_op) ||
+       sample_op.reg)
+      return false;
+
+   uint16_t tile_wait = wait_mask;
+   if (load && tile_wait) {
+      if (!agx3_retire_result_wait(emission, enc, I, tile_wait))
+         return false;
+      tile_wait = 0;
+   }
+
+   uint8_t bytes[AGX3_TILE_MAX_LENGTH];
+   uint8_t length = 0;
+   const bool ok =
+      load ? agx3_tile_load_g18_mixed(enc, value.value,
+                                      (enum agx3_tile_width)width, slot,
+                                      I->mask, I->pixel_offset, sample_op,
+                                      first_load, last_load, bytes, &length)
+           : agx3_tile_store_lifetime(
+                enc, value.value, (enum agx3_tile_width)width, I->mask,
+                I->pixel_offset, sample_op, tile_wait,
+                !agx3_g18_store_payload_read_later(ctx, I), bytes, &length);
+   return ok && agx3_append(emission, bytes, length);
+}
+
 static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_refused(unsigned line)
 {
@@ -8997,9 +9152,16 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
     * the fixed, unrolled resident sample groups. They do not use the G17P
     * native-spill descriptor ABI. */
    const bool multi_block = ctx->key->g17p_emrt || g18_ms;
+   /* Native1130 (run 1139): a fragment of a G18 single-sample mixed-format
+    * tile whose every tile operation is a native1130 form. It replaces the
+    * run-1130 rows, which are two of its layouts. */
+   const bool g18_native_mixed =
+      g18 && !g18_ms && agx3_g18_native_mixed_shader(ctx);
    /* Native1130: an admitted single-sample mixed-format store set. */
    const bool g18_mixed = g18 && !g18_ms &&
-                          agx3_g18_native1130_mixed_stores(ctx);
+                          (agx_g18_native_mixed_enabled()
+                              ? g18_native_mixed
+                              : agx3_g18_native1130_mixed_stores(ctx));
    agx_block *tail = g18 ? NULL : agx_reconverged_mrt_tail(ctx);
    if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
@@ -9139,8 +9301,10 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       return agx3_g17p_mrt_refused(__LINE__);
 
    /* Only the witnessed partial-mask shapes: native1094 mask2 reloads and
-    * stores two targets; 1076's masks3 stores three with no reload. */
-   if (partial_stores &&
+    * stores two targets; 1076's masks3 stores three with no reload. A
+    * native1130 mixed fragment has partial masks of every format with and
+    * without reads (36 of the 39 workloads). */
+   if (partial_stores && !g18_native_mixed &&
        !((p.count == 2 && tile_loads) || (p.count == 3 && !tile_loads)))
       return agx3_g17p_mrt_refused(__LINE__);
 
@@ -9161,7 +9325,10 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          }
       }
    }
-   if (p.offsets[0] != 0)
+   /* Native1130: a mixed fragment touches no byte of a target whose write
+    * mask is empty, attachment zero's included: in five of the 39 fragments
+    * the lowest stored offset is 2..8. Each target keeps its own classes. */
+   if (p.offsets[0] != 0 && !g18_native_mixed)
        return agx3_g17p_mrt_refused(__LINE__);
 
    /* G18's native two-to-eight-target RGBA8 fragments use class 12 for
@@ -9356,6 +9523,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
                           partition >= 0 && I->pixel_offset == 16u * partition;
       }
    }
+   p.native_mixed = g18_native_mixed;
    p.valid = stopped && stores_started;
    return p;
 }
@@ -9384,8 +9552,16 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
     * forms and no pixel transaction (clear 0/8/24/32, reload 0/8/16, resume
     * reload 8/0/24/32: disjoint bytes, so no order is implied). Mesa's own
     * backgrounds store them in ascending offset order; require that. */
+   /* Native1130 (run 1139): the 39 clear and reload backgrounds of capture
+    * 1130 have the same shape for every mixed layout: each attachment stored
+    * once with its full lane form (masks 1, 3, 15, and 7 for B5G6R5's three
+    * 16-bit lanes), disjoint, no pixel transaction and no read. */
+   const bool g18_native_mixed =
+      g18 && ctx->key->g17p_mrt_bg && agx3_g18_native_mixed_shader(ctx);
    const bool g18_mixed = g18 && ctx->key->g17p_mrt_bg &&
-                          agx3_g18_native1130_mixed_stores(ctx);
+                          (agx_g18_native_mixed_enabled()
+                              ? g18_native_mixed
+                              : agx3_g18_native1130_mixed_stores(ctx));
    int previous_offset = -1;
    agx_foreach_instr_global(ctx, I) {
       if (stopped || agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
@@ -9399,7 +9575,11 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
              I->nr_srcs != 3 || I->nr_dests != 0 || I->explicit_coords ||
              I->src[1].type != AGX_INDEX_IMMEDIATE ||
              I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
-             !agx_is_null(I->src[2]))
+             !agx_is_null(I->src[2]) ||
+             (g18_native_mixed &&
+              I->mask != 1 && I->mask != 3 && I->mask != 15 &&
+              !(I->mask == 7 &&
+                agx3_tile_format_width(I->format) == AGX3_TILE_W16)))
             return false;
          previous_offset = I->pixel_offset;
          stores++;
@@ -9620,12 +9800,17 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
          return false;
       for (unsigned rt = 0; rt < mixed_count; ++rt) {
          /* Native1121 (run 1130): 16-bit-lane targets store with IMGWBLK
-          * f29 = 1 in every mixed end-of-tile program of the capture. */
+          * f29 = 1 in every mixed end-of-tile program of the capture.
+          * Native1130 (run 1139): 8-bit integer lanes store with f29 = 0 in
+          * every end of tile of a mixed-format tile of capture 1130. */
          if (ctx->key->g17p_mrt_eot_selectors[rt] != 0x75 &&
              ctx->key->g17p_mrt_eot_selectors[rt] != 0x35 &&
              !(ctx->key->g17p_mrt_eot_selectors[rt] == 0x15 &&
                !ctx->key->g17p_rt0_eot_multisample &&
-               agx_g18_native1130_enabled()))
+               agx_g18_native1130_enabled()) &&
+             !(ctx->key->g17p_mrt_eot_selectors[rt] == 0x55 &&
+               !ctx->key->g17p_rt0_eot_multisample &&
+               ctx->key->g18_native_mixed && agx_g18_native_mixed_enabled()))
             return false;
          if (ctx->key->g17p_rt0_eot_multisample &&
              ctx->key->g17p_mrt_eot_selectors[rt] != 0x35)
@@ -10451,11 +10636,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          const int32_t form =
             agx3_decode(&agx3c_table, program + offset, 12, "imgwblk", fields);
          const uint8_t selector = ctx->key->g17p_mrt_eot_selectors[rt];
+         /* Native1130 (run 1139): 8-bit integer lanes (selector 0x55) store
+          * with f29 = 0 in the 39 workloads' end-of-tile programs, which are
+          * otherwise these programs byte for byte. */
+         const bool native_mixed_i8 = selector == 0x55 &&
+                                      ctx->key->g18_native_mixed &&
+                                      agx_g18_native_mixed_enabled();
          if (form < 0 || fields[29] != 3 || fields[30] != 1 ||
-             (selector != 0x35 &&
+             (selector != 0x35 && !native_mixed_i8 &&
               !(selector == 0x15 && agx_g18_native1130_enabled())))
             return false;
-         fields[29] = selector == 0x15 ? 1 : 2;
+         fields[29] = selector == 0x15 ? 1 : native_mixed_i8 ? 0 : 2;
          if (ctx->key->g17p_rt0_eot_multisample)
             fields[30] = 2;
          if (!agx3_compose(&agx3c_table, form, fields, program + offset))
@@ -11275,6 +11466,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * partition and release each partition in descending order. */
    const struct agx3_g17p_mrt_protocol g17p_mrt =
       agx3_g17p_mrt_protocol(ctx);
+   ctx->agx3_g18_mixed_protocol = g17p_mrt.valid && g17p_mrt.native_mixed;
    const bool g17p_multi_background = agx3_g17p_multi_background_protocol(ctx);
    const unsigned g17p_msaa_background_targets =
       agx3_g17p_sample_store_protocol(ctx, false);
@@ -13440,18 +13632,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   (I->src[0].kill || I->src[0].discard);
                /* A multisample store keeps its own coverage dependency. */
                const bool store_waits = !acquire_class || g17p_mrt.multisample;
-               if ((acquire_class &&
-                    (!agx3_pixel_wait(enc, acquire, store_waits ? 0 : wait,
-                                      bytes, &len) ||
-                     !agx3_append(emission, bytes, len))) ||
-                   !agx3_emit_tile(emission, enc, I, slot,
-                                   store_waits ? wait : 0,
-                                   enc == AGX_ISA_ENCODING_AGX3C && load && first,
-                                   enc == AGX_ISA_ENCODING_AGX3C && load && last,
-                                   g17p_mrt.raw32_store,
-                                   g17p_mrt.count >= 3,
-                                   store_f13,
-                                   agx3_g18_msaa4_tile_shader(ctx)) ||
+               if (acquire_class &&
+                   (!agx3_pixel_wait(enc, acquire, store_waits ? 0 : wait,
+                                     bytes, &len) ||
+                    !agx3_append(emission, bytes, len)))
+                  AGX3_REFUSE(I);
+               /* Native1130 (run 1139): a mixed-format fragment's reads and
+                * stores take their native1130 forms (agx3_emit_g18_mixed_tile);
+                * the classes around them are this protocol's. */
+               if (!(g17p_mrt.native_mixed
+                        ? agx3_emit_g18_mixed_tile(emission, enc, ctx, I, slot,
+                                                   store_waits ? wait : 0,
+                                                   load && first, load && last)
+                        : agx3_emit_tile(emission, enc, I, slot,
+                                         store_waits ? wait : 0,
+                                         enc == AGX_ISA_ENCODING_AGX3C &&
+                                            load && first,
+                                         enc == AGX_ISA_ENCODING_AGX3C &&
+                                            load && last,
+                                         g17p_mrt.raw32_store,
+                                         g17p_mrt.count >= 3,
+                                         store_f13,
+                                         agx3_g18_msaa4_tile_shader(ctx))) ||
                    (!load && release_class &&
                     (!agx3_pixel_release(enc, combined_class, last, 0, bytes,
                                         &len) ||

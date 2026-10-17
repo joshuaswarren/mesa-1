@@ -27,6 +27,15 @@ bool agx3_transcode_agx3d_with_offsets(struct util_dynarray *binary,
                                       const char **why,
                                       unsigned *fail_offset);
 
+/* As agx3_transcode_agx3d_with_offsets(). long_tile_reads: the program is a
+ * G18 single-sample mixed-format fragment part (run 1139) whose whole-pixel
+ * lldcol reads take Apple's long form (f79 = 2). */
+bool agx3_transcode_agx3d_tile_reads(struct util_dynarray *binary,
+                                     unsigned start, unsigned *offsets,
+                                     unsigned count, bool fragment_stage,
+                                     bool long_tile_reads, const char **why,
+                                     unsigned *fail_offset);
+
 /*
  * An Ioto (per-shader resource) program, as the M5 generators emit it, rather
  * than shader code: it may contain ldshdr, specTPR and the helper cndcall,

@@ -1482,16 +1482,26 @@ agx_gallium_tilebuffer_layout(const struct agx_device *dev,
       active++;
    }
    raw32 &= active >= 2 && active <= 8;
+   const bool kernel_native_samples =
+      !!(dev->params.features & DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES);
+   /* Native1130 (run 1139): Apple packs a single-sample mixed-format layout
+    * in index order, each attachment aligned to its lane width, in a 32x32
+    * tile of its whole sample -- the background stores of all 39 workloads of
+    * capture 1130 sit at exactly those offsets. The fragment epilog builds
+    * the same layout from the same formats (agx_nir_fs_epilog). */
+   if (g18_native && !raw32 &&
+       agx_g18g_native_mixed_tile_bytes(formats, nr_cbufs, nr_samples, layered,
+                                        kernel_native_samples))
+      return agx_build_tilebuffer_layout_g18_mixed(formats, nr_cbufs);
+
    /* Native1121 (run 1130): Apple keeps an admitted mixed-format layout in a
     * 32x32 tile of its whole sample (req2-clear: specLM f19 = f20 = 5,
     * f22 = 40, i.e. 40 KiB). Budget exactly that allocation where the kernel
     * admits it (agx_g18g_mixed_tile_bytes); the offsets do not move. */
    const unsigned mixed_bytes =
       g18_native && !raw32
-         ? agx_g18g_mixed_tile_bytes(
-              formats, nr_cbufs, nr_samples, layered,
-              !!(dev->params.features &
-                 DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES))
+         ? agx_g18g_mixed_tile_bytes(formats, nr_cbufs, nr_samples, layered,
+                                     kernel_native_samples)
          : 0;
    return agx_build_tilebuffer_layout_with_limits(
       formats, nr_cbufs, nr_samples, layered, raw32 ? 128 : 0,
@@ -2365,11 +2375,34 @@ agx_nir_lower_g18_image_index(nir_builder *b, nir_intrinsic_instr *intr,
  * this multiple times if there are auxiliary shaders.
  */
 static struct agx_compiled_shader *
+agx_compile_nir_tile(struct agx_device *dev, nir_shader *nir,
+                     struct util_debug_callback *debug, mesa_shader_stage stage,
+                     bool internal_kernel, bool terminal, bool secondary,
+                     unsigned cf_base, unsigned nr_samples,
+                     BITSET_WORD *attrib_components_read,
+                     bool g18_native_mixed);
+
+static struct agx_compiled_shader *
 agx_compile_nir(struct agx_device *dev, nir_shader *nir,
                 struct util_debug_callback *debug, mesa_shader_stage stage,
                 bool internal_kernel, bool terminal, bool secondary,
                 unsigned cf_base, unsigned nr_samples,
                 BITSET_WORD *attrib_components_read)
+{
+   return agx_compile_nir_tile(dev, nir, debug, stage, internal_kernel,
+                               terminal, secondary, cf_base, nr_samples,
+                               attrib_components_read, false);
+}
+
+/* As agx_compile_nir(); g18_native_mixed marks a fragment epilog of a G18
+ * single-sample mixed-format tile (run 1139) for the backend's tile protocol. */
+static struct agx_compiled_shader *
+agx_compile_nir_tile(struct agx_device *dev, nir_shader *nir,
+                     struct util_debug_callback *debug, mesa_shader_stage stage,
+                     bool internal_kernel, bool terminal, bool secondary,
+                     unsigned cf_base, unsigned nr_samples,
+                     BITSET_WORD *attrib_components_read,
+                     bool g18_native_mixed)
 {
    struct agx_compiled_shader *compiled = CALLOC_STRUCT(agx_compiled_shader);
    compiled->stage = stage;
@@ -2408,6 +2441,7 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
                        (agx_chip_m5_paths(dev->chip) &&
                         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_FRAGMENT ||
                          stage == MESA_SHADER_COMPUTE)),
+      .g18_native_mixed = g18_native_mixed && dev->chip == AGX_CHIP_G18G,
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -4148,6 +4182,11 @@ agx_update_fs(struct agx_batch *batch)
       link_key.epilog.fs.remap[i] =
          link_key.epilog.fs.link.broadcast_rt0 ? 0 : i;
    }
+   /* Run 1139: the epilog builds the same index-order layout and stores
+    * exactly what Apple's mixed-format fragments store. */
+   link_key.epilog.fs.g18_native_mixed =
+      dev->chip == AGX_CHIP_G18G &&
+      agx_g18g_native_mixed_mask(&batch->tilebuffer_layout) != 0;
 
    memcpy(&link_key.epilog.fs.blend, &ctx->blend->key,
           sizeof(link_key.epilog.fs.blend));
@@ -4441,11 +4480,17 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
       NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
    }
 
-   struct agx_compiled_shader *shader = agx_compile_nir(
+   /* Run 1139: a fragment epilog's key carries the mixed-format tile flag;
+    * other meta shaders never set it. */
+   const bool g18_native_mixed =
+      epilog && b.shader->info.stage == MESA_SHADER_FRAGMENT &&
+      data_size == sizeof(struct agx_fs_epilog_key) &&
+      ((const struct agx_fs_epilog_key *)data)->g18_native_mixed;
+   struct agx_compiled_shader *shader = agx_compile_nir_tile(
       dev, b.shader, NULL, MESA_SHADER_COMPUTE, internal_kernel,
       !prolog && !(b.shader->info.stage == MESA_SHADER_FRAGMENT &&
                    b.shader->info.fs.uses_sample_shading),
-      prolog || epilog, cf_base, nr_samples, NULL);
+      prolog || epilog, cf_base, nr_samples, NULL, g18_native_mixed);
 
    ralloc_free(b.shader);
 
@@ -7037,10 +7082,17 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
        * packed imageblock. Store those bytes without a second conversion. */
       unsigned pbe_index = 0;
       uint64_t arguments[1 + PIPE_MAX_COLOR_BUFS] = {pbe.gpu};
+      /* Native1130 (run 1139): a mixed-format end of tile stores a packed
+       * R11G11B10F word with IMGWBLK f29 = 3, the class of tiles held in the
+       * attachment's own encoding (RGBA8 Unorm, RGB10A2 Unorm), so its PBE
+       * names the attachment format, as RGB10A2's does. Other G18 layouts keep
+       * the raw-word R32_UINT PBE that pairs with their W32 store. */
+      const bool native_mixed =
+         dev->chip == AGX_CHIP_G18G && agx_g18g_native_mixed_mask(&key->tib);
       u_foreach_bit(rt, target_mask) {
          struct pipe_image_view view = image_view_for_surface(
             resolve_store ? &resolve_surf : &batch->key.cbufs[rt]);
-         view.format = dev->chip == AGX_CHIP_G18G &&
+         view.format = dev->chip == AGX_CHIP_G18G && !native_mixed &&
                              view.format == PIPE_FORMAT_R11G11B10_FLOAT
                           ? PIPE_FORMAT_R32_UINT
                           : util_format_linear(view.format);

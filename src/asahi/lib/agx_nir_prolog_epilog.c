@@ -662,9 +662,14 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    b->shader->info.stage = MESA_SHADER_FRAGMENT;
    b->shader->info.name = "FS epilog";
 
-   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_with_limits(
-      key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true,
-      key->max_sample_size_B, key->max_bytes_per_tile, key->max_samples_per_tile);
+   struct agx_tilebuffer_layout tib =
+      key->g18_native_mixed
+         ? agx_build_tilebuffer_layout_g18_mixed(key->rt_formats,
+                                                 ARRAY_SIZE(key->rt_formats))
+         : agx_build_tilebuffer_layout_with_limits(
+              key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples,
+              true, key->max_sample_size_B, key->max_bytes_per_tile,
+              key->max_samples_per_tile);
 
    unsigned rt_order[AGX_MAX_RENDER_TARGETS];
    for (unsigned rt = 0; rt < ARRAY_SIZE(rt_order); ++rt)
@@ -973,9 +978,19 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    nir_shader_intrinsics_pass(b->shader, pad_blended_output,
                               nir_metadata_control_flow, (void *)key);
 
+   /* Native1130 (run 1139): Apple's fragments for a G18 mixed-format tile
+    * neither load nor store a target whose write mask selects none of its
+    * channels -- 39 such targets in 16 of the 39 workloads; the fragment of
+    * the one whose four targets are all masked is the 512 entry and its final
+    * release alone, which is what an empty epilog emits. The tile keeps the
+    * background's value. (A packed R11G11B10F target with an alpha-only mask
+    * still reaches lower_tilebuffer with a nonzero mask and keeps its
+    * read-modify-write, as Apple's does.) */
+   const bool preserve_zero_mask =
+      key->preserve_zero_mask && !key->g18_native_mixed;
    unsigned rt_spill = key->link.rt_spill_base;
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,
-            write_samples, &force_translucent, key->preserve_zero_mask,
+            write_samples, &force_translucent, preserve_zero_mask,
             key->lower_srgb, key->lower_r11g11b10, key->g17p_tile_formats);
    const bool native_spills = key->native_spills && agx_tilebuffer_spills(&tib);
    const unsigned spill_generation = native_spills

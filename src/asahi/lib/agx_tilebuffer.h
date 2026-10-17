@@ -306,6 +306,31 @@ bool agx_g18g_mixed_bg_witnessed(const struct agx_tilebuffer_layout *tib,
 unsigned
 agx_g18g_mixed_compact_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
+/* Native-1130 general single-sample mixed-format G18 layouts (run 1139).
+ * Apple packs the attachments in index order, each at the next offset aligned
+ * to its tile lane width (holes take no space), in a 32x32 tile of an
+ * eight-byte-aligned sample. agx_g18g_native_mixed_tile_bytes() returns that
+ * tile's bytes when the format list takes this layout -- two to eight
+ * attachments of witnessed formats, not owned by the RGBA8/R32 word or
+ * RGBA32/RG32 paths, and a tile the kernel admits -- and zero otherwise.
+ * agx_build_tilebuffer_layout_g18_mixed() builds it; the gallium layout and the
+ * fragment epilog both use it, so both compute the same offsets. */
+unsigned
+agx_g18g_native_mixed_tile_bytes(const enum pipe_format *formats,
+                                 unsigned nr_cbufs, unsigned nr_samples,
+                                 bool layered, bool kernel_native_samples);
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_g18_mixed(const enum pipe_format *formats,
+                                      uint8_t nr_cbufs);
+/* The attachment mask of a layout built that way (zero otherwise). */
+unsigned
+agx_g18g_native_mixed_mask(const struct agx_tilebuffer_layout *tib);
+
+/* The IMGWBLK f29 tile class Apple's end of tile uses for a witnessed format:
+ * 0 8-bit integer lanes, 1 16-bit lanes, 2 32-bit lanes, 3 tile bytes in the
+ * attachment's own encoding (8-bit normalized, RGB10A2, R11G11B10F). */
+int agx_g18g_native_mixed_eot_class(enum pipe_format format);
+
 /* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */
 unsigned
 agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib);

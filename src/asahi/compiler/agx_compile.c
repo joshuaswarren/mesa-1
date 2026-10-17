@@ -162,18 +162,17 @@ agx_g18_native1130_enabled(void)
    return debug_get_option_agx_g18_native1130();
 }
 
-/* Native req2-clear keeps a 40-byte sample in a 32x32 single-sample tile
- * (40 KiB), which module 1120's render translator refuses (TilebufferSize:
- * only <= 32 KiB or 48..128-byte samples in steps of 16). Off by default so no
- * submission can fail; AGX_G18_NATIVE1130_TILE40=1 asserts a kernel that
- * admits it, and has no effect when AGX_G18_NATIVE1130=0. */
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g18_native1130_tile40,
-                           "AGX_G18_NATIVE1130_TILE40", false)
+/* The general G18 single-sample mixed-format tile path grounded on the
+ * verified native capture 1130 by run 1139 is on unless AGX_G18_NATIVE1139=0,
+ * which restores the run-1134 behaviour for A/B. Whether the kernel admits a
+ * 40-, 56- or 72-byte 32x32 tile is the uAPI feature bit
+ * DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES, never an environment variable. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g18_native1139, "AGX_G18_NATIVE1139", true)
 
 bool
-agx_g18_native1130_tile40_enabled(void)
+agx_g18_native1139_enabled(void)
 {
-   return debug_get_option_agx_g18_native1130_tile40();
+   return debug_get_option_agx_g18_native1139();
 }
 
 static agx_index
@@ -9977,7 +9976,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
             return false;
       }
    }
-   if (stores[store_count - 1]->pixel_offset != 0 && !subset)
+   /* Native1130 (run 1139): a G18 mixed-format fragment stores nothing for a
+    * target whose write mask is empty, so its lowest store may sit above
+    * byte zero (five of the 39 fragments). */
+   if (stores[store_count - 1]->pixel_offset != 0 && !subset &&
+       !(g18 && ctx->key->g18_native_mixed && agx_g18_native_mixed_enabled()))
       return false;
 
    if (unrolled_samples) {
@@ -10914,11 +10917,15 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       unsigned at;
       unsigned *entry = ctx->agx3_colour_link.entry_emitted
                            ? &ctx->agx3_colour_link.entry_offset : NULL;
+      /* Run 1139: a G18 mixed-format fragment epilog's reads take the long
+       * form when the packer emitted them through the native1130 protocol,
+       * inside the 0x200 entry and final release. */
+      const bool long_tile_reads = ctx->agx3_g18_mixed_protocol;
       if (ctx->key->dev.emit_agx3d &&
-          !agx3_transcode_agx3d_with_offsets(binary, offset, entry,
-                                            entry ? 1 : 0,
-                                            ctx->stage == MESA_SHADER_FRAGMENT,
-                                            &why, &at)) {
+          !agx3_transcode_agx3d_tile_reads(binary, offset, entry,
+                                          entry ? 1 : 0,
+                                          ctx->stage == MESA_SHADER_FRAGMENT,
+                                          long_tile_reads, &why, &at)) {
          if (agx_compiler_debug & AGX_DBG_REFUSE)
             fprintf(stderr, "G18G refused shader: %s at agx3c +0x%x\n", why,
                     at);

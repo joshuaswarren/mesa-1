@@ -56,9 +56,18 @@ bool agx_g18_native1128_enabled(void);
  * AGX_G18_NATIVE1130=0 opts out. */
 bool agx_g18_native1130_enabled(void);
 
-/* Assert a kernel that admits a 40-byte single-sample sample in a 32x32 G18
- * tile (module 1120 does not); AGX_G18_NATIVE1130_TILE40=1, default off. */
-bool agx_g18_native1130_tile40_enabled(void);
+/* Native-1130 grounded general G18 single-sample mixed-format tile path of
+ * run 1139 (index-order layout, partial masks, blend reads, zero masks);
+ * AGX_G18_NATIVE1139=0 restores the run-1134 behaviour for A/B. */
+bool agx_g18_native1139_enabled(void);
+
+/* The run-1139 path builds on run 1130's: AGX_G18_NATIVE1130=0 restores the
+ * run-1128 behaviour whatever AGX_G18_NATIVE1139 says. */
+static inline bool
+agx_g18_native_mixed_enabled(void)
+{
+   return agx_g18_native1130_enabled() && agx_g18_native1139_enabled();
+}
 
 /* Fragment-structure code generation choices that remain selectable. */
 enum agx_fs_structure_flag {

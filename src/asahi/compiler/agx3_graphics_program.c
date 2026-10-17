@@ -902,6 +902,14 @@ g17g_graphics_program_generate(
            !(target_chip == AGX_CHIP_G18G &&
              desc->imageblock.sample_size_B == 40 &&
              agx_g18_native1130_enabled()) &&
+           /* Native1130 (run 1139): the fragment, background and
+            * end-of-tile SPECLM of the mixed-format workloads spell 56-byte
+            * samples the same way (f22 = 56; capture 1121 also 72). The
+            * layout admits a sample only where the kernel admits its tile. */
+           !(target_chip == AGX_CHIP_G18G &&
+             (desc->imageblock.sample_size_B == 56 ||
+              desc->imageblock.sample_size_B == 72) &&
+             agx_g18_native_mixed_enabled()) &&
            !(target_chip == AGX_CHIP_G18G &&
              desc->imageblock.sample_size_B >= 48 &&
              desc->imageblock.sample_size_B <= 128 &&

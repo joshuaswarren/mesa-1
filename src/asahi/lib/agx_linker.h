@@ -375,6 +375,13 @@ struct agx_fs_epilog_key {
     * source clamp nir_lower_blend inserts for UNORM targets is an identity
     * and is dropped. Occupies the key's former tail padding byte. */
    uint8_t colour_unit_range;
+
+   /* The render pass uses a G18 single-sample mixed-format tile
+    * (agx_build_tilebuffer_layout_g18_mixed, run 1139): build the epilog's
+    * layout the same way and store exactly what Apple's fragments store -- a
+    * target whose write mask selects none of its channels is neither loaded
+    * nor stored. Set by the driver; zero elsewhere. */
+   uint8_t g18_native_mixed;
 };
 
 /* Apply framebuffer rules which are properties of the hardware generation,

@@ -237,3 +237,92 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    }
    return true;
 }
+
+bool
+agx3_tile_store_lifetime(enum agx_isa_encoding enc, uint16_t data,
+                         enum agx3_tile_width width, uint8_t chan_mask,
+                         uint16_t tile_off, struct agx3_tile_sample sample,
+                         uint16_t wait_mask, bool last_use,
+                         uint8_t out[AGX3_TILE_MAX_LENGTH], uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_TILE_MAX_LENGTH);
+   *len = 0;
+
+   /* Native1130: 167 of the 169 mixed fragment stores carry f13 = 1 and the
+    * two whose payload a later store reads carry f13 = 0; all other fields
+    * are the whole-pixel form below. */
+   if (enc != AGX_ISA_ENCODING_AGX3C || sample.reg || sample.kill ||
+       sample.value != 1 ||
+       !common_ok(data, width, chan_mask, sample, enc, wait_mask, tile_off) ||
+       (tile_off % (1u << width)))
+      return false;
+
+   const struct agx3_field_kv base_c[] = {
+      KV(9, 2),  KV(17, 111), KV(35, 9), KV(37, 7), KV(38, 1),
+      KV(52, 1), KV(65, 1),   KV(66, 1)};
+   struct agx3_field_kv ov[16];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, data);
+   if (last_use)
+      ov[n++] = (struct agx3_field_kv)KV(13, 1);
+   ov[n++] = (struct agx3_field_kv)KV(10, width);
+   ov[n++] = (struct agx3_field_kv)KV(26, chan_mask);
+   ov[n++] = (struct agx3_field_kv)KV(57, tile_off);
+   n = sample_overrides(sample, ov, n);
+   n = wait_overrides(enc, wait_mask, ov, n);
+   if (!agx3_bind_compose(enc, "lstcol", agx3_bind_ep(enc, 0), base_c, 8, ov,
+                          n, out, len)) {
+      memset(out, 0, AGX3_TILE_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+   return true;
+}
+
+bool
+agx3_tile_load_g18_mixed(enum agx_isa_encoding enc, uint16_t dest,
+                         enum agx3_tile_width width, uint8_t slot,
+                         uint8_t chan_mask, uint16_t tile_off,
+                         struct agx3_tile_sample sample, bool first, bool last,
+                         uint8_t out[AGX3_TILE_MAX_LENGTH], uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_TILE_MAX_LENGTH);
+   *len = 0;
+
+   /* Native1130: the 26 reads of the 39 mixed fragments, at offsets 0..36,
+    * are these four forms with the whole-pixel immediate 1, slot f12 counting
+    * the reads from 1, f78 on the first and f74 = 2 on the last. */
+   const bool form = (width == AGX3_TILE_W8 && chan_mask == 15) ||
+                     (width == AGX3_TILE_W16 &&
+                      (chan_mask == 7 || chan_mask == 15)) ||
+                     (width == AGX3_TILE_W32 && chan_mask == 1);
+   if (enc != AGX_ISA_ENCODING_AGX3C || !form || sample.reg || sample.kill ||
+       sample.value != 1 || slot < 1 || slot > 8 ||
+       !common_ok(dest, width, chan_mask, sample, enc, 0, tile_off) ||
+       (tile_off % (1u << width)))
+      return false;
+
+   const struct agx3_field_kv base_c[] = {KV(9, 2),  KV(17, 110), KV(35, 9),
+                                          KV(37, 7), KV(38, 1),   KV(52, 1),
+                                          KV(65, 1), KV(66, 1)};
+   struct agx3_field_kv ov[16];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
+   ov[n++] = (struct agx3_field_kv)KV(10, width);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(26, chan_mask);
+   ov[n++] = (struct agx3_field_kv)KV(57, tile_off);
+   n = sample_overrides(sample, ov, n);
+   ov[n++] = (struct agx3_field_kv)KV(78, first ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(74, last ? 2 : 0);
+   if (!agx3_bind_compose(enc, "lldcol", 0, base_c, 8, ov, n, out, len)) {
+      memset(out, 0, AGX3_TILE_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+   return true;
+}

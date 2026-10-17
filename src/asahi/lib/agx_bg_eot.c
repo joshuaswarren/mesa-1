@@ -389,6 +389,11 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
       has_load |= key->op[rt] == AGX_BG_LOAD;
    compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
+   /* Run 1139: a G18 single-sample mixed-format tile's background stores each
+    * attachment once with its lane form (agx3_g17p_multi_background_protocol). */
+   compiler_key.g18_native_mixed =
+      cache->dev->chip == AGX_CHIP_G18G &&
+      agx_g18g_native_mixed_mask(&key->tib) != 0;
    /* Native464's resident three-target MS background owns a combined
     * class252 transaction. The packer validates every sample/partition and
     * emits its single acquire, without generic per-store class12 releases.
@@ -653,11 +658,15 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          .explicit_coord = explicit);
    }
 
+   /* Run 1139: the compacted key of a G18 single-sample mixed-format tile. */
+   const bool g18_native_mixed = cache->dev->chip == AGX_CHIP_G18G &&
+                                 agx_g18g_native_mixed_mask(&key->tib) != 0;
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P || g17g,
       .g17g_rt0_eot = g17g,
+      .g18_native_mixed = g18_native_mixed,
    };
 
    if (cache->dev->chip == AGX_CHIP_G17P || g17g) {
@@ -681,11 +690,23 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 
       if (stores > 1 &&
           stores <= ARRAY_SIZE(compiler_key.g17p_mrt_eot_selectors)) {
+         /* Native1130 (run 1139): Apple's mixed-format end of tile stores
+          * each target with IMGWBLK f29 by its tile class (0 8-bit integer,
+          * 1 16-bit, 2 32-bit, 3 attachment-encoded: 8-bit normalized,
+          * RGB10A2 and R11G11B10F) in all 39 workloads. Each class has its
+          * IMGWBLK selector; only R11G11B10F differs from the G17P selector
+          * table, whose W32 raw-word choice (0x35) is f29 = 2. */
+         static const uint8_t class_selector[] = {0x55, 0x15, 0x35, 0x75};
          for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
             if (key->op[rt] == AGX_EOT_STORE) {
+               const enum pipe_format format = key->tib.logical_format[rt];
+               const int class =
+                  g18_native_mixed ? agx_g18g_native_mixed_eot_class(format)
+                                   : -1;
                compiler_key.g17p_mrt_eot_selectors
                   [compiler_key.g17p_mrt_eot_count++] =
-                  agx_g17p_mrt_eot_selector(key->tib.logical_format[rt]);
+                  class >= 0 ? class_selector[class]
+                             : agx_g17p_mrt_eot_selector(format);
             }
          }
       }

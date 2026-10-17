@@ -618,7 +618,7 @@ static bool
 transcode(struct util_dynarray *binary, unsigned start,
           const struct agx3_transcode_ioto *ioto,
           unsigned *offsets, unsigned offset_count,
-          const bool *fragment_stage, const char **why,
+          const bool *fragment_stage, bool long_tile_reads, const char **why,
           unsigned *fail_offset)
 {
    const char *unused_why;
@@ -685,6 +685,13 @@ transcode(struct util_dynarray *binary, unsigned start,
       if (!apply_g18g_rules(name, fields, ioto, fragment_stage, why) ||
           !apply_flag_slot_rule(name, fields, &flags, why))
          goto fail;
+      /* Native1130 (run 1139): 22 of the 26 whole-pixel reads of Apple's
+       * single-sample mixed-format fragments take the long LLDCol form with
+       * f79 = 2, inside the fragment's 0x200 entry and final release; the
+       * packer validated every read of such a program. */
+      if (long_tile_reads && !strcmp(name, "lldcol") && fields[51] == 1 &&
+          fields[43] == 1)
+         fields[79] = 2;
 
       util_dynarray_append(&map, ((struct offset_pair){i, out.size}));
 
@@ -777,7 +784,8 @@ bool
 agx3_transcode_agx3d(struct util_dynarray *binary, unsigned start,
                      const char **why, unsigned *fail_offset)
 {
-   return transcode(binary, start, NULL, NULL, 0, NULL, why, fail_offset);
+   return transcode(binary, start, NULL, NULL, 0, NULL, false, why,
+                    fail_offset);
 }
 
 bool
@@ -787,7 +795,17 @@ agx3_transcode_agx3d_with_offsets(struct util_dynarray *binary, unsigned start,
                                   const char **why, unsigned *fail_offset)
 {
    return transcode(binary, start, NULL, offsets, count, &fragment_stage,
-                    why, fail_offset);
+                    false, why, fail_offset);
+}
+
+bool
+agx3_transcode_agx3d_tile_reads(struct util_dynarray *binary, unsigned start,
+                                unsigned *offsets, unsigned count,
+                                bool fragment_stage, bool long_tile_reads,
+                                const char **why, unsigned *fail_offset)
+{
+   return transcode(binary, start, NULL, offsets, count, &fragment_stage,
+                    long_tile_reads, why, fail_offset);
 }
 
 bool
@@ -795,5 +813,6 @@ agx3_transcode_agx3d_ioto(struct util_dynarray *binary, unsigned start,
                           const struct agx3_transcode_ioto *ioto,
                           const char **why, unsigned *fail_offset)
 {
-   return ioto && transcode(binary, start, ioto, NULL, 0, NULL, why, fail_offset);
+   return ioto && transcode(binary, start, ioto, NULL, 0, NULL, false, why,
+                            fail_offset);
 }

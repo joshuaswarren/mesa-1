@@ -600,6 +600,13 @@ struct agx_shader_key {
     * into blocks, but tile operations retain the per-sample partition order. */
    bool g17p_emrt;
 
+   /* A fragment epilog, background or end-of-tile program of a G18
+    * single-sample mixed-format tile (agx_g18g_native_mixed_mask, run 1139).
+    * Selects the native1130 tile forms: partial masks of every witnessed
+    * format, blend reads, lstcol's lifetime bit by last use, the long lldcol
+    * form, and the 8-bit-integer and R11G11B10 end-of-tile classes. */
+   bool g18_native_mixed;
+
    /* A Honeykrisp hardware vertex binary adjacent to software geometry or
     * transform feedback. The API VS hardware variant may expose only values
     * consumed by GS/XFB, while the generated post-GS raster VS may expose only
