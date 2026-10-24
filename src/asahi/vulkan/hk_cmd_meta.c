@@ -36,6 +36,21 @@
 #define TILE_WIDTH  32
 #define TILE_HEIGHT 32
 
+/* The block-based copy kernel stages the destination tile in the workgroup
+ * imageblock (st_tile). G18G has no compute imageblock encoding, so it copies
+ * through plain image stores; only non-1D, single-sample images qualify
+ * either way. */
+static bool
+hk_meta_copy_block_based(struct vk_command_buffer *vk_cmd,
+                         const struct vk_image *image)
+{
+   struct hk_cmd_buffer *cmd = container_of(vk_cmd, struct hk_cmd_buffer, vk);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   return dev->dev.chip != AGX_CHIP_G18G &&
+          image->image_type != VK_IMAGE_TYPE_1D && image->samples == 1;
+}
+
 static VkResult
 hk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
                        struct vk_meta_device *meta, VkBuffer _buffer,
@@ -1070,7 +1085,13 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key,
 
    image->data.descriptor_set = 0;
    image->data.binding = BINDING_OUTPUT;
-   image->data.access = ACCESS_NON_READABLE;
+   /* The block-based variant reads the destination back (the else branch's
+    * nir_image_deref_load). Declaring the image write-only makes nir_opt_access
+    * stamp ACCESS_NON_READABLE on that load, which the G17P/G18G indexed-image
+    * lowering declines by design (agx_nir_lower_g17p_combined_sampler.c,
+    * g17p_indexed_image_fetch_shape); the pass is all-or-nothing per shader, so
+    * the load kept its AGX2 bindless handle and the packer refused it. */
+   image->data.access = key->block_based ? 0 : ACCESS_NON_READABLE;
 
    texture->data.descriptor_set = 0;
    texture->data.binding = BINDING_INPUT;
@@ -1170,7 +1191,11 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key,
             nir_image_deref_store(b, image_deref, nir_pad_vec4(b, dst_coord),
                                   ms_index, value1, nir_imm_int(b, 0),
                                   .image_dim = dim_dst,
-                                  .image_array = !dst_is_buf);
+                                  .image_array = !dst_is_buf,
+                                  /* G18G derives the imgwci format from the
+                                   * stored type; this kernel always writes
+                                   * the canonical 4x32 uint texel. */
+                                  .src_type = nir_type_uint);
          }
       }
       nir_push_else(b, NULL);
@@ -1534,7 +1559,8 @@ hk_meta_dispatch_to_image(struct vk_command_buffer *cmd,
                           VkPipelineLayout pipeline_layout,
                           struct vk_meta_push_data *push, VkOffset3D offset,
                           VkExtent3D extent, bool per_layer, unsigned layers,
-                          enum pipe_format p_dst_fmt, enum pipe_format p_format)
+                          enum pipe_format p_dst_fmt, enum pipe_format p_format,
+                          bool block_based)
 {
    push->dst_offset_el[0] = util_format_get_nblocksx(p_dst_fmt, offset.x);
    push->dst_offset_el[1] = util_format_get_nblocksy(p_dst_fmt, offset.y);
@@ -1543,6 +1569,19 @@ hk_meta_dispatch_to_image(struct vk_command_buffer *cmd,
    push->grid_el[0] = util_format_get_nblocksx(p_format, extent.width);
    push->grid_el[1] = util_format_get_nblocksy(p_format, extent.height);
    push->grid_el[2] = per_layer ? 1 : layers;
+
+   if (!block_based) {
+      /* Plain image stores index the destination by global invocation id plus
+       * dst_offset_el in the kernel: no tile expansion, just cover the grid. */
+      disp->CmdPushConstants(vk_command_buffer_to_handle(cmd), pipeline_layout,
+                             VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(*push),
+                             push);
+      disp->CmdDispatch(vk_command_buffer_to_handle(cmd),
+                        DIV_ROUND_UP(push->grid_el[0], TILE_WIDTH),
+                        DIV_ROUND_UP(push->grid_el[1], TILE_HEIGHT),
+                        push->grid_el[2]);
+      return;
+   }
 
    unsigned w_el = util_format_get_nblocksx(p_format, extent.width);
    unsigned h_el = util_format_get_nblocksy(p_format, extent.height);
@@ -1611,8 +1650,7 @@ hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
                hk_format_to_pipe_format(aspect_format(image->format, aspect))),
 
             /* TODO: MSAA path */
-            .block_based =
-               (image->image_type != VK_IMAGE_TYPE_1D) && image->samples == 1,
+            .block_based = hk_meta_copy_block_based(cmd, image),
          };
 
          VkPipelineLayout pipeline_layout;
@@ -1714,7 +1752,8 @@ hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
 
          hk_meta_dispatch_to_image(cmd, disp, pipeline_layout, &push,
                                    region->imageOffset, region->imageExtent,
-                                   per_layer, layers, p_format, p_format);
+                                   per_layer, layers, p_format, p_format,
+                                   key.block_based);
       }
    }
 }
@@ -1779,8 +1818,7 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
                   aspect_format(dst_image->format, dst_aspect_mask))),
 
                /* TODO: MSAA path */
-               .block_based = (dst_image->image_type != VK_IMAGE_TYPE_1D) &&
-                              dst_image->samples == 1,
+               .block_based = hk_meta_copy_block_based(cmd, dst_image),
             };
 
             assert(key.nr_samples == src_image->samples);
@@ -1918,7 +1956,8 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
 
             hk_meta_dispatch_to_image(cmd, disp, pipeline_layout, &push,
                                       region->dstOffset, region->extent,
-                                      per_layer, layers, p_dst_fmt, p_format);
+                                      per_layer, layers, p_dst_fmt, p_format,
+                                      key.block_based);
          }
       }
    }

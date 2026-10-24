@@ -319,7 +319,7 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_write_u64") ||
           /* Query batches use the same native pointer loads/global stores as
            * the existing copy-query helpers; qualify their batch launch too. */
-          !strcmp(func->name, "libagx_write_u32s") ||
+         !strcmp(func->name, "libagx_write_u32") ||
           !strcmp(func->name, "libagx_reset_query") ||
           !strcmp(func->name, "libagx_copy_uchar") ||
           !strcmp(func->name, "libagx_copy_uint4") ||
@@ -360,10 +360,17 @@ target_supports_program(const char *target, const nir_function *func)
            * per-topology sequences for all four adjacency primitives. */
           !strcmp(func->name, "libagx_write_adj_indices") ||
           /* Its indirect form.  Same mapping and the same index load, plus a
-           * heap allocation and one barrier -- both already qualified here by
-           * libagx_unroll_restart, which allocates from the same heap with the
-           * same printf-free poly_heap_try_alloc_offs(). */
-          !strcmp(func->name, "libagx_write_adj_indices_indirect");
+          * heap allocation and one barrier -- both already qualified here by
+          * libagx_unroll_restart, which allocates from the same heap with the
+          * same printf-free poly_heap_try_alloc_offs(). */
+          !strcmp(func->name, "libagx_write_adj_indices_indirect") ||
+          /* The hardware tessellator main program: called by the Vulkan
+          * driver on every chip; qualified so the compile-omission list
+          * (not a runtime refusal) names any shape the G18G encoders cannot
+          * take yet. libagx_decompress is NOT qualified: it fails to compile
+          * even for strict g17p (spilling decoder), so it stays AGX2-only. */
+          !strcmp(func->name, "libagx_tessellate");
+
 }
 
 /* AGX3 has no grounded INTL instruction encoding. Expand the 16-bit Morton

@@ -361,7 +361,8 @@ agx_g17p_vertex_program_info(
           : compiler_info->nr_preamble_gprs == 0 &&
                compiler_info->preamble_scratch_size == 0);
 
-   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G) ||
+   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G &&
+        chip != AGX_CHIP_G18G) ||
        !compiler_info || !program ||
        !compiler_info->hardware_vertex || !preamble_ok ||
        compiler_info->position_off != 0 || compiler_info->varyings_off != 4 ||

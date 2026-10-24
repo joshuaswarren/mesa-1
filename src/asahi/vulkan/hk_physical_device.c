@@ -903,7 +903,10 @@ hk_get_device_properties(const struct agx_device *dev,
 
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      dev->chip == AGX_CHIP_G18G
+         ? VK_SAMPLE_COUNT_1_BIT
+         : (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT |
+            VK_SAMPLE_COUNT_4_BIT);
 
    /* G17P renders, resolves and stores multisample colour and depth: on an
     * A18 Pro the g17p-vulkan-msaa-resolve2/4, -store-fetch4 and -depth4

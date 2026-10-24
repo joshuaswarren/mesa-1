@@ -8503,7 +8503,8 @@ agx_nir_lower_g18_subgroups(nir_shader *nir)
 
 static void
 agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
-                 bool byte_indices, bool discard_word, bool g18_scans,
+                 bool byte_indices, bool state_store_encoding,
+                 bool discard_word, bool g18_scans,
                  uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count,
                  const struct agx_shader_key *dma_key,
                  struct agx_shader_info *dma_info)
@@ -8665,15 +8666,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
     */
    if (preamble_size &&
        (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE) || nir->info.internal)) {
-      /* AGX3 (byte_indices: the AGX3B encoding) has no texture/sampler
-       * state-store encoding: its descriptor lowering uses immediate native
-       * state slots, so a bindless handle hoisted into the image/sampler
-       * preamble class becomes a tex_state_store/sampler_state_store that
-       * the AGX3 packer refuses (an internal meta fragment shader storing
-       * through a bindless image failed vkCreateGraphicsPipelines). Keep
-       * bindless handles in the main shader there; nothing that compiles
-       * today hoists either class. */
-      const bool state_promotion = !byte_indices;
+      const bool state_promotion = state_store_encoding;
       unsigned sizes[] = {
          *preamble_size,
          (ts_count && state_promotion) ? *ts_count : 1000 /* large finite */,
@@ -13097,7 +13090,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    agx_optimize_nir(
       nir, key->dev.soft_fault, uniform_atomics,
-      key->dev.encoding == AGX_ISA_ENCODING_AGX3B, discard_word,
+      key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
+      key->dev.encoding == AGX_ISA_ENCODING_AGX2, discard_word,
       key->dev.emit_agx3d,
       form_preamble ? &info->push_count : NULL,
       (form_preamble && key->promote_textures) ? &info->texture_state_count

@@ -198,8 +198,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    static_assert(sizeof(c->zls_ctrl) == sizeof(cs->cr.zls_control));
    memcpy(&c->zls_ctrl, &cs->cr.zls_control, sizeof(cs->cr.zls_control));
 
-   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
-      c->isp_zls_pixels = dev->dev.chip == AGX_CHIP_G17G
+   if (dev->dev.chip == AGX_CHIP_G17P || agx_chip_hal300_records(dev->dev.chip)) {
+      c->isp_zls_pixels = agx_chip_hal300_records(dev->dev.chip)
          ? hk_drm_m5_zls_pixels(cs->cr.zls_width, cs->cr.zls_height,
                                cs->cr.depth.buffer, cs->cr.depth.meta,
                                cs->cr.stencil.buffer, cs->cr.stencil.meta)
@@ -1212,6 +1212,23 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                cmd.prior_vdm = cs->sync.prior[HK_SYNC_VDM];
                cmd.prior_cdm = cs->sync.prior[HK_SYNC_CDM];
             }
+            if (dev->dev.chip == AGX_CHIP_G18G) {
+               /* G18 kernels consume the versioned resource suffix on
+                * every compute command (agx_batch.c's extended payload). */
+               struct drm_asahi_cmd_compute_g18 g18 = {
+                  .base = cmd.legacy,
+                  .resources = cs->g18_compute_resources,
+               };
+               g18.base.flags |= DRM_ASAHI_COMPUTE_G18_RESOURCES;
+               g18.resources.version = 1;
+               struct drm_asahi_cmd_header g18_header = header;
+               g18_header.size = sizeof(g18);
+               util_dynarray_append(&payload, g18_header);
+               util_dynarray_append_array(&payload, uint8_t, &g18,
+                                          sizeof(g18));
+               nr_cdm++;
+               continue;
+            }
             util_dynarray_append(&payload, header);
             util_dynarray_append_array(&payload, uint8_t, &cmd, header.size);
             nr_cdm++;
@@ -1241,7 +1258,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                  cs->sync.prior[HK_SYNC_VDM] != 0))
                cmd.legacy.flags |= DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
             header.size = hk_drm_render_command_size(
-               dev->dev.chip == AGX_CHIP_G17P, queue->sync.exact_prior);
+               dev->dev.chip == AGX_CHIP_G17P ||
+                  dev->dev.chip == AGX_CHIP_G18G,
+               queue->sync.exact_prior);
             if (queue->sync.exact_prior) {
                cmd.prior_vdm = cs->sync.prior[HK_SYNC_VDM];
                cmd.prior_cdm = cs->sync.prior[HK_SYNC_CDM];
