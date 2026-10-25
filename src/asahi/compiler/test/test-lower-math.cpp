@@ -10,7 +10,9 @@ extern "C" {
 }
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <map>
+#include <vector>
 
 /*
  * Behavioral pins for the float-control keying in agx_nir_lower_math.c.
@@ -201,4 +203,77 @@ TEST_F(LowerMathTest, SinZeroPathNumericalArtifact)
    const uint32_t normal = 0x3f800000u; /* 1.0 */
    const bool zero_compare_normal = false;
    EXPECT_EQ(zero_compare_normal ? 0x80000000u : normal, normal);
+}
+
+/* The shared-memory offset fold must keep the sign of a constant addend. A
+ * 16-bit add of 0xfff0 is x - 16: the group {x, x - 16} must come out as
+ * constant offsets {0, -16} from x, never {0, +65520}, which the hardware
+ * index add (it does not wrap) would turn into a different address. */
+TEST_F(LowerMathTest, SharedFoldKeepsNegativeAddends)
+{
+   nir_def *x = nir_undef(&b, 1, 16);
+   nir_def *lo = nir_iadd_imm(&b, x, 0xfff0);
+   nir_load_shared(&b, 1, 32, x, .base = 0, .align_mul = 4);
+   nir_load_shared(&b, 1, 32, lo, .base = 0, .align_mul = 4);
+
+   EXPECT_TRUE(agx_nir_fold_shared_offsets(b.shader));
+
+   std::vector<int64_t> totals;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_load_shared)
+               continue;
+
+            int64_t total = nir_intrinsic_base(intr);
+            nir_scalar a = nir_scalar_resolved(intr->src[0].ssa, 0);
+            if (nir_scalar_is_alu(a) && nir_scalar_alu_op(a) == nir_op_iadd) {
+               nir_scalar k = nir_scalar_chase_alu_src(a, 1);
+               if (nir_scalar_is_const(k))
+                  total += nir_scalar_as_int(k);
+            }
+            totals.push_back(total);
+         }
+      }
+   }
+
+   ASSERT_EQ(totals.size(), 2u);
+   std::sort(totals.begin(), totals.end());
+   EXPECT_EQ(totals[0], -16);
+   EXPECT_EQ(totals[1], 0);
+}
+
+/* The sub-format address fold indexes by the byte offset scaled down, which
+ * equals the byte offset only when the offset is a multiple of the element
+ * size. An offset that is not provably aligned must keep the 64-bit sum (no
+ * shift of the offset); a provably aligned one is folded. */
+static void
+subformat_shader(nir_builder *b, nir_def *off)
+{
+   nir_def *base = nir_load_push_constant(b, 1, 64, nir_imm_int(b, 0));
+   nir_def *addr = nir_ulea_agx(b, base, off, nir_imm_int(b, 0));
+   nir_def *v = nir_load_global(b, 1, 32, addr, .align_mul = 4);
+   nir_store_global(b, v, nir_imm_int64(b, 0x200000), .align_mul = 4);
+}
+
+TEST_F(LowerMathTest, SubformatFoldNeedsProvablyAlignedOffset)
+{
+   /* an offset loaded from memory is not provably a multiple of 4 */
+   subformat_shader(&b, nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 8)));
+
+   agx_nir_lower_address(b.shader, true);
+   EXPECT_EQ(count_alu(nir_op_ushr), 0u);
+}
+
+TEST_F(LowerMathTest, SubformatFoldKeepsProvablyAlignedOffset)
+{
+   nir_def *off = nir_ishl_imm(
+      &b, nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 8)), 2);
+   subformat_shader(&b, off);
+
+   agx_nir_lower_address(b.shader, true);
+   EXPECT_EQ(count_alu(nir_op_ushr), 1u);
 }

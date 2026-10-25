@@ -31,6 +31,63 @@ format_for_bitsize(unsigned bitsize)
    }
 }
 
+/* True when the scalar is provably a multiple of 2^k. The sub-format fold
+ * indexes by the byte offset scaled down, which equals the byte offset only
+ * when its low bits are zero; an access that is aligned as a whole does not
+ * say that the offset alone is (base P + 2 with offset 2 for a 32-bit access
+ * is aligned, and scaling the offset down drops the 2). Unknown means no fold.
+ */
+static bool
+scalar_multiple_of(nir_scalar s, unsigned k, unsigned depth)
+{
+   if (k == 0)
+      return true;
+
+   s = nir_scalar_resolved(s.def, s.comp);
+   if (nir_scalar_is_const(s))
+      return (nir_scalar_as_uint(s) & BITFIELD64_MASK(k)) == 0;
+
+   if (!nir_scalar_is_alu(s) || depth == 0)
+      return false;
+
+   switch (nir_scalar_alu_op(s)) {
+   case nir_op_ishl: {
+      nir_scalar amount = nir_scalar_chase_alu_src(s, 1);
+      nir_scalar value = nir_scalar_chase_alu_src(s, 0);
+      if (nir_scalar_is_const(amount)) {
+         unsigned a = nir_scalar_as_uint(amount);
+         if (a >= k)
+            return true;
+         return scalar_multiple_of(value, k - a, depth - 1);
+      }
+      return scalar_multiple_of(value, k, depth - 1);
+   }
+   case nir_op_imul:
+      return scalar_multiple_of(nir_scalar_chase_alu_src(s, 0), k, depth - 1) ||
+             scalar_multiple_of(nir_scalar_chase_alu_src(s, 1), k, depth - 1);
+   case nir_op_iadd:
+   case nir_op_isub:
+      return scalar_multiple_of(nir_scalar_chase_alu_src(s, 0), k, depth - 1) &&
+             scalar_multiple_of(nir_scalar_chase_alu_src(s, 1), k, depth - 1);
+   case nir_op_iand: {
+      nir_scalar mask = nir_scalar_chase_alu_src(s, 1);
+      if (nir_scalar_is_const(mask) &&
+          (nir_scalar_as_uint(mask) & BITFIELD64_MASK(k)) == 0)
+         return true;
+      return scalar_multiple_of(nir_scalar_chase_alu_src(s, 0), k, depth - 1) ||
+             scalar_multiple_of(nir_scalar_chase_alu_src(s, 1), k, depth - 1);
+   }
+   case nir_op_u2u32:
+   case nir_op_i2i32:
+   case nir_op_u2u64:
+   case nir_op_i2i64:
+   case nir_op_mov:
+      return scalar_multiple_of(nir_scalar_chase_alu_src(s, 0), k, depth - 1);
+   default:
+      return false;
+   }
+}
+
 static bool
 pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -69,12 +126,15 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
                .shift = shift - format_shift,
                .sign_extend = sign_extend,
             };
-         } else if (shift < format_shift && *(const bool *)data) {
+         } else if (shift < format_shift && *(const bool *)data &&
+                    scalar_multiple_of(nir_scalar_chase_alu_src(base, 1),
+                                       format_shift - shift, 4)) {
             /* A byte (or half-element) offset, as the cooperative matrix
-             * loads produce. The access is format-aligned and so is the base,
-             * so the offset is a multiple of the element size: index by the
-             * offset scaled down instead of materializing the 64-bit sum (a
-             * 64-bit add plus the moves that build its operands). Per device
+             * loads produce. The offset is provably a multiple of the element
+             * size (scalar_multiple_of; an aligned access does not imply it):
+             * index by the offset scaled down instead of materializing the
+             * 64-bit sum (a 64-bit add plus the moves that build its
+             * operands). Per device
              * (agx_device_key::fold_subformat_address): measured +15 % on
              * dense f16 GEMM on the single-cluster M1, -13..17 % on the M1
              * Max, bit-identical on both.
