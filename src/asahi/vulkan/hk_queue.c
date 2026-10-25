@@ -1214,7 +1214,12 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             }
             if (dev->dev.chip == AGX_CHIP_G18G) {
                /* G18 kernels consume the versioned resource suffix on
-                * every compute command (agx_batch.c's extended payload). */
+                * every compute command (agx_batch.c's extended payload).
+                * The G18 kernel never advertises
+                * DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS, so
+                * queue->sync.exact_prior is always false here and the
+                * legacy (non-prior) command carries everything the G18
+                * UAPI accepts (w7Q PR-10 finding 4). */
                struct drm_asahi_cmd_compute_g18 g18 = {
                   .base = cmd.legacy,
                   .resources = cs->g18_compute_resources,

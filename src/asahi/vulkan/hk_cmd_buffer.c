@@ -789,10 +789,17 @@ hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 static void
 merge_control_streams(struct hk_cmd_buffer *cmd)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const bool g18 = dev->dev.chip == AGX_CHIP_G18G;
    struct hk_cs *last = NULL;
-
    list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
-      if (cs->type == HK_CS_CDM && last && last->type == HK_CS_CDM &&
+      /* G18G CDM streams never merge: launches would add past the
+       * HK_G18_BATCH cap (the >9-launch firmware ceiling) and
+       * hk_cs_merge_cdm does not combine g18_compute_resources, so the
+       * merged command would keep only the first stream's registers,
+       * staging and local size. */
+      if (cs->type == HK_CS_CDM && last && last->type == HK_CS_CDM && !g18 &&
+
           !last->g18_dispatch_sealed && !cs->g18_dispatch_sealed &&
           !last->timestamp.end.handle &&
           !(last->timestamp.start.handle && cs->g17p_timestamp_query) &&
@@ -3326,7 +3333,13 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                                      VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
-
+      /* w7C/w7P: the helper's identity and size, for the stream decodes. */
+      mesa_logi("hk: G18G precomp helper %u dispatch: main_size=%u "
+                "generated=%u grid=%ux%ux%u wg=%ux%ux%u",
+                idx, prog->info.main_size, (unsigned)generated.length,
+                grid.count[0], grid.count[1], grid.count[2],
+                prog->b.workgroup.x, prog->b.workgroup.y,
+                prog->b.workgroup.z);
       hk_ensure_cs_has_space(cmd, cs, 0x200);
       struct agx3_compute_dispatch_sink sink = {
          .data = cs->current,
@@ -3345,8 +3358,14 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                                 ? 2
                                 : 1),
       };
+      /* rel29: the helper joins an open batch with the SAME strong (flags=5)
+       * barrier the user launches use — the stall signature had the helper's
+       * weak 0x60000160 as the Nth (>=10th) launch's tail word, and user
+       * batches of 16 pass when the helper is sealed away (rel28b), so the
+       * weak barrier mid-batch at position >=10 is the suspect, not the
+       * launch count. */
       const bool launched = agx3_g17g_native_compute_dispatch_append(
-         &launch, &direct, 0, &sink);
+         &launch, &direct, 5, &sink);
       uint8_t terminate[AGX3_CDM_STREAM_TERMINATE_SIZE];
       if (!launched ||
           !agx3_cdm_stream_terminate_pack(dev->dev.chip, terminate) ||
@@ -3362,6 +3381,10 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       cs->current = sink.data + sink.length;
       cs->stats.cmds++;
       cs->g18_dispatch_sealed = true;
+      /* Overwrite (last-wins) as in the admitted shape: this branch seals
+       * the stream, so it ends a batch rather than joining one; the
+       * validator-safe cross-launch merge is the rel28 work (per-bit flag
+       * OR, largest-product local dims). */
       cs->g18_compute_resources = (struct drm_asahi_g18_compute_resources){
          .version = 1,
          .flags = 1,

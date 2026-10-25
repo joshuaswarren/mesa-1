@@ -1843,6 +1843,9 @@ hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (s->b.info.rodata.size_16)
       hk_cmd_buffer_retain_bo(cmd, s->bo);
 
+   /* (rel28b: the native-path homogeneity seal is REVERTED — batching mixed
+ * descriptors is where the 3.4x came from; only the precomp helper is
+ * sealed away now, in hk_dispatch_precomp.) */
    hk_ensure_cs_has_space(cmd, cs, 0x2000);
    struct agx3_compute_dispatch_sink sink = {
       .data = (uint8_t *)cs->current,
@@ -1857,7 +1860,10 @@ hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    };
    /* flags=5 (strong flush) between dependent launches: the weak 0x60000160
     * tail barrier does not give write visibility on G18G (hk_cdm_cache_flush
-    * notes), and flag-free chained launches hung the CDM (rel24 run 1). */
+    * notes), and flag-free chained launches hung the CDM (rel24 run 1).
+    * The flags=5 chaining is grounded on hardware (rel24b+), unlike the
+    * standalone flush word in hk_cdm_cache_flush, whose only grounded G18G
+    * encoding is the flag-free tail. */
    if (!agx3_g17g_native_compute_dispatch_append(&launch, &direct, 5, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
@@ -1876,18 +1882,48 @@ hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        * (G18_RECOVERY_PB restart loop -> G18_APP_JOB_FAILED EIO), while
        * small grids survive any batch. Raise the default only after that
        * stall is root-caused. */
+      /* Clamped to 1400 so the stream stays under the kernel's 64 KiB
+       * g18_compute_stream_max even with an oversized user value
+       * (w7Q PR-10 smaller finding). */
       const uint32_t batch_limit =
-         debug_get_num_option("HK_G18_BATCH", 8);
-      cs->g18_compute_resources = (struct drm_asahi_g18_compute_resources){
-         .version = 1,
-         .flags = 1,
-         .registers_16 = MAX2(cs->g18_compute_resources.registers_16,
-                              linked->b.nr_gprs),
-         .staging_16 = MAX2(cs->g18_compute_resources.staging_16,
-                            s->b.info.agx3_staging_halfs),
-         .imageblock_stride = s->b.info.imageblock_stride,
-         .local_size = {local_size.x, local_size.y, local_size.z},
-      };
+         MIN2(debug_get_num_option("HK_G18_BATCH", 8), 1400);
+      /* rel31 (w7C's plan rule + w7P's validator semantics): the kernel
+       * sizes the stream's compute plan (pool/SMA/counters) from these
+       * resource words alone, and last-wins under-sizes a stream whose
+       * big launches precede a small last launch (job 131: 1024-thread
+       * launches + the small helper last = small plan = stall). Every
+       * scalar field takes the running max; local dims and local_bytes
+       * come from the launch with the LARGEST x*y*z product (a per-axis
+       * max can exceed the validator's 1024-thread bound, w7P check c). */
+      const uint32_t prod =
+         local_size.x * local_size.y * local_size.z;
+      const uint32_t prev_prod = cs->g18_compute_resources.local_size[0] *
+                                 cs->g18_compute_resources.local_size[1] *
+                                 cs->g18_compute_resources.local_size[2];
+      const uint32_t regs = MAX2(cs->g18_compute_resources.registers_16,
+                                 linked->b.nr_gprs);
+      const uint32_t staging =
+         MAX2(cs->g18_compute_resources.staging_16,
+              s->b.info.agx3_staging_halfs);
+      const uint32_t stride =
+         MAX2(cs->g18_compute_resources.imageblock_stride,
+              s->b.info.imageblock_stride);
+      if (prod >= prev_prod || cs->stats.cmds == 0) {
+         cs->g18_compute_resources = (struct drm_asahi_g18_compute_resources){
+            .version = 1,
+            .flags = 1,
+            .registers_16 = regs,
+            .staging_16 = staging,
+            .imageblock_stride = stride,
+            .local_size = {local_size.x, local_size.y, local_size.z},
+         };
+      } else {
+         cs->g18_compute_resources.registers_16 = regs;
+         cs->g18_compute_resources.staging_16 = staging;
+         cs->g18_compute_resources.imageblock_stride = stride;
+      }
+      /* Launch-count cap only (the rel30 code cap is retired: the gate
+       * showed generation streams never approach the code boundary). */
       if (cs->stats.cmds + 1 >= batch_limit) {
          uint8_t terminate[AGX3_CDM_STREAM_TERMINATE_SIZE];
          if (!agx3_cdm_stream_terminate_pack(dev->dev.chip, terminate) ||
