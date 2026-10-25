@@ -123,6 +123,48 @@ TEST_F(LowerMathTest, FrcpFtzModeUnchanged)
    EXPECT_EQ(ftz, lowered_division(0, true));
 }
 
+/* Division introduced after preprocessing (nir_lower_int64 float-to-int64
+ * conversions, smooth offset interpolation) must not reach the backend, which
+ * has no fdiv. The late pass lowers fdiv exactly like the first pass and
+ * leaves every reciprocal alone, so none is refined twice.
+ */
+TEST_F(LowerMathTest, LateFdivLowersLikeFirstPass)
+{
+   nir_def *x = nir_undef(&b, 1, 32);
+   nir_fdiv(&b, nir_undef(&b, 1, 32), x);
+
+   EXPECT_TRUE(agx_nir_lower_fdiv_late(b.shader));
+   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
+
+   auto first = lowered_division(0, false);
+   unsigned expect_ffma = first.count(nir_op_ffma) ? first[nir_op_ffma] : 0;
+   EXPECT_EQ(count_alu(nir_op_ffma), expect_ffma);
+}
+
+TEST_F(LowerMathTest, LateFdivLeavesFrcpAlone)
+{
+   nir_frcp(&b, nir_undef(&b, 1, 32));
+
+   EXPECT_FALSE(agx_nir_lower_fdiv_late(b.shader));
+   EXPECT_EQ(count_alu(nir_op_frcp), 1u);
+   EXPECT_EQ(count_alu(nir_op_ffma), 0u);
+}
+
+TEST_F(LowerMathTest, LateFdivDoesNotRefineExistingFrcp)
+{
+   nir_frcp(&b, nir_undef(&b, 1, 32));
+   nir_fdiv(&b, nir_undef(&b, 1, 32), nir_undef(&b, 1, 32));
+
+   EXPECT_TRUE(agx_nir_lower_fdiv_late(b.shader));
+   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
+
+   /* the fdiv alone lowers to F ffma ops; the untouched frcp adds none */
+   auto first = lowered_division(0, false);
+   unsigned expect_ffma = first.count(nir_op_ffma) ? first[nir_op_ffma] : 0;
+   EXPECT_EQ(count_alu(nir_op_ffma), expect_ffma);
+   EXPECT_EQ(count_alu(nir_op_frcp), 1u + (first.count(nir_op_frcp) ? first[nir_op_frcp] : 0));
+}
+
 TEST_F(LowerMathTest, SinDefaultKeepsSelect)
 {
    set_mode(0);
