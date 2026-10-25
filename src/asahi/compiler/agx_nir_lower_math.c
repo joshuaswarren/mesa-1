@@ -97,12 +97,13 @@ lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *data)
    if (alu->def.bit_size == 64)
       return false;
 
-   /* Graphics shaders keep the hardware reciprocal and the cheap quotient.
-    * The exact sequences below are for compute (MLX and kernels), where
-    * the rounding contract matters. A late fdiv (int64 lowering, perspective
-    * divide) still has to be lowered, because the backend has no fdiv.
+   /* Only an exact (precise or NoContraction) division or reciprocal gets the
+    * correctly rounded sequences below. Everything else keeps the hardware
+    * reciprocal and the cheap quotient, which the Vulkan table allows. A late
+    * fdiv (int64 lowering, perspective divide) still has to be lowered,
+    * because the backend has no fdiv.
     */
-   if (!mesa_shader_stage_is_compute(b->shader->info.stage)) {
+   if (!nir_alu_instr_is_exact(alu)) {
       if (alu->op != nir_op_fdiv || alu->def.bit_size != 32)
          return false;
 
