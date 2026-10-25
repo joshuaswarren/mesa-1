@@ -18,45 +18,6 @@ import sys
 import tempfile
 import numpy as np
 
-def ulp_distance(got, want):
-    """Distance in float32 ULPs from want, in float64 arithmetic.
-
-    The spacing is the float32 spacing of the reference, as an absolute value:
-    np.spacing is negative for a negative reference, which would turn the
-    distance negative and let any error through the > 2.5 test.
-    """
-    want32 = np.asarray(want, dtype=np.float32)
-    with np.errstate(all="ignore"):
-        return (np.abs(np.asarray(got, dtype=np.float64) - want32.astype(np.float64)) /
-                np.abs(np.spacing(want32)).astype(np.float64))
-
-
-def self_test():
-    one = np.float32(1.5)
-    for ref in (one, -one, np.float32(3.0e-5), np.float32(-3.0e-5)):
-        for k, expect in ((0, 0.0), (1, 1.0), (3, 3.0), (-3, 3.0)):
-            got = ref
-            for _ in range(abs(k)):
-                got = np.nextafter(got, np.float32(np.inf if k > 0 else -np.inf))
-            d = float(ulp_distance(np.float64(got), ref))
-            assert d == expect, (float(ref), k, d)
-    # A three ULP error on a negative reference must exceed the 2.5 budget.
-    neg = np.float32(-1.5)
-    bad = neg
-    for _ in range(3):
-        bad = np.nextafter(bad, np.float32(-np.inf))
-    assert float(ulp_distance(np.float64(bad), neg)) > 2.5
-    # The old expression divided by the float64 spacing of the float64 value,
-    # which is negative here, so the same error looked like a negative distance.
-    old = abs(float(bad) - float(neg)) / float(np.spacing(np.float64(neg)))
-    assert old < 0
-    print("ulp_bound self test: PASS")
-
-
-if sys.argv[1:] == ["--self-test"]:
-    self_test()
-    sys.exit(0)
-
 icd, runner = map(os.path.abspath, sys.argv[1:])
 here = Path(__file__).resolve().parent
 
@@ -112,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix="mesa-ulp-") as td:
                     "-o", str(td / "probe.spv")], check=True)
     env = dict(os.environ, VK_DRIVER_FILES=icd, VK_ICD_FILENAMES=icd,
                MESA_SHADER_CACHE_DISABLE="true")
-    subprocess.run(["flock", "-w", "30", "/tmp/gpu.lock", runner,
+    subprocess.run(["flock", "-w", "30", "/tmp/m1-gpu.lock", runner,
                     str(td / "probe.spv"), str(td / "in.bin"), str(td / "out.bin"),
                     str(ntot * 6 * 4), str(ntot // 64)], env=env, check=True,
                    timeout=120)
@@ -127,11 +88,22 @@ def check(col, a_bits, b_bits):
     special = ~np.isfinite(wf) | (wf == 0.0)
     spec_bad = np.flatnonzero(special & (got != want) & ~both_nan)
     normal = np.flatnonzero(~special)
+    finite_result = np.isfinite(gf[normal])
     with np.errstate(all="ignore"):
-        dist = ulp_distance(gf[normal], want[normal].view(np.float32))
-    over = normal[dist > 2.5]
-    return {"max_ulp": float(dist.max()) if len(normal) else 0.0,
+        # A binary32 ULP is positive for both signs. Derive its exponent
+        # before measuring in binary64; spacing(float64) measures the wrong
+        # format and spacing(negative) would hide errors. ldexp also handles
+        # FLT_MAX without overflowing to infinity like float32 spacing does.
+        exponent = np.frexp(np.abs(wf[normal]))[1]
+        ulp = np.ldexp(np.ones(len(normal)), np.maximum(exponent - 24, -149))
+        dist = np.abs(gf[normal] - wf[normal]) / ulp
+    # NaN comparisons are false, so reject non-finite results explicitly when
+    # the oracle expected a finite value.
+    over = normal[(dist > 2.5) | ~finite_result]
+    finite_dist = dist[finite_result]
+    return {"max_ulp": float(finite_dist.max()) if len(finite_dist) else 0.0,
             "over_2p5": len(over),
+            "nonfinite_mismatch": int(np.count_nonzero(~finite_result)),
             "special_mismatch": len(spec_bad),
             "examples": [[hex(int(v)) for v in inp[i][:2]] for i in over[:5]][:5]}
 
