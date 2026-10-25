@@ -38,10 +38,20 @@ hk_g18_merge_compute_resources(struct drm_asahi_g18_compute_resources *acc,
    HK_G18_MAX_FIELD(constant_registers_16);
    HK_G18_MAX_FIELD(constant_scratch_bytes);
    HK_G18_MAX_FIELD(constant_staging_16);
-   HK_G18_MAX_FIELD(local_bytes);
    HK_G18_MAX_FIELD(imageblock_stride);
-   HK_G18_MAX_FIELD(variable_shared_bytes);
 #undef HK_G18_MAX_FIELD
+
+   /* local_bytes and variable_shared_bytes move as a PAIR selected by their
+    * SUM: the kernel's shared check (w7P check i) bounds
+    * (local_bytes + variable_shared) * scale <= 32768, so separate maxima
+    * can sum past the limit although every launch alone fits (the op-8
+    * regression: 120832 > 32768). The launch with the largest sum
+    * contributes both words. */
+   if ((uint64_t)launch->local_bytes + launch->variable_shared_bytes >
+       (uint64_t)acc->local_bytes + acc->variable_shared_bytes) {
+      acc->local_bytes = launch->local_bytes;
+      acc->variable_shared_bytes = launch->variable_shared_bytes;
+   }
 
    acc->flags |= launch->flags;
 

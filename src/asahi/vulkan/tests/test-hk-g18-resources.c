@@ -75,6 +75,24 @@ main(void)
       CHECK(acc.imageblock_stride == 90 && acc.variable_shared_bytes == 100);
    }
 
+   /* Shared bytes fold as a PAIR by sum (kernel check i bounds
+    * (local_bytes + variable_shared) * scale <= 32768; separate maxima summed
+    * to 120832 on the op-8 attention shapes and were rejected). The launch
+    * with the largest SUM contributes BOTH words; a losing launch's larger
+    * single field never leaks into the pair. */
+   struct drm_asahi_g18_compute_resources lb_big = launch(1, 1, 0, 30000, 8, 1, 1);
+   lb_big.variable_shared_bytes = 0;
+   struct drm_asahi_g18_compute_resources vs_big = launch(1, 1, 0, 1000, 8, 1, 1);
+   vs_big.variable_shared_bytes = 4000;
+   hk_g18_merge_compute_resources(&acc, &lb_big, true);
+   hk_g18_merge_compute_resources(&acc, &vs_big, false);
+   CHECK(acc.local_bytes == 30000 && acc.variable_shared_bytes == 0);
+   /* Control: separate maxima would give 30000 + 4000 = 34000 > 32768
+    * (v1 scale x4: 136000) — the measured op-8 rejection class. */
+   struct drm_asahi_g18_compute_resources pair2 = launch(1, 1, 0, 6000, 8, 1, 1);
+   pair2.variable_shared_bytes = 100;
+   hk_g18_merge_compute_resources(&acc, &pair2, false);
+   CHECK(acc.local_bytes == 30000 && acc.variable_shared_bytes == 0);
    /* Local size comes from the launch with the largest x*y*z, never a per-axis maximum
     * (256x1x1 and 1x256x1 would give 256x256x1 = 65536 threads, over the validator bound). */
    struct drm_asahi_g18_compute_resources wide = launch(1, 1, 0, 0, 256, 1, 1);
