@@ -14,6 +14,7 @@
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_sampler_index.h"
+#include "hk_g18_resources.h"
 #include "hk_g17p_patch.h"
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
@@ -1887,41 +1888,27 @@ hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        * (w7Q PR-10 smaller finding). */
       const uint32_t batch_limit =
          MIN2(debug_get_num_option("HK_G18_BATCH", 8), 1400);
-      /* rel31 (w7C's plan rule + w7P's validator semantics): the kernel
-       * sizes the stream's compute plan (pool/SMA/counters) from these
-       * resource words alone, and last-wins under-sizes a stream whose
+      /* The kernel sizes the stream's compute plan (pool/SMA/counters) from
+       * these resource words alone, and last-wins under-sizes a stream whose
        * big launches precede a small last launch (job 131: 1024-thread
-       * launches + the small helper last = small plan = stall). Every
-       * scalar field takes the running max; local dims and local_bytes
-       * come from the launch with the LARGEST x*y*z product (a per-axis
-       * max can exceed the validator's 1024-thread bound, w7P check c). */
-      const uint32_t prod =
-         local_size.x * local_size.y * local_size.z;
-      const uint32_t prev_prod = cs->g18_compute_resources.local_size[0] *
-                                 cs->g18_compute_resources.local_size[1] *
-                                 cs->g18_compute_resources.local_size[2];
-      const uint32_t regs = MAX2(cs->g18_compute_resources.registers_16,
-                                 linked->b.nr_gprs);
-      const uint32_t staging =
-         MAX2(cs->g18_compute_resources.staging_16,
-              s->b.info.agx3_staging_halfs);
-      const uint32_t stride =
-         MAX2(cs->g18_compute_resources.imageblock_stride,
-              s->b.info.imageblock_stride);
-      if (prod >= prev_prod || cs->stats.cmds == 0) {
-         cs->g18_compute_resources = (struct drm_asahi_g18_compute_resources){
-            .version = 1,
-            .flags = 1,
-            .registers_16 = regs,
-            .staging_16 = staging,
-            .imageblock_stride = stride,
-            .local_size = {local_size.x, local_size.y, local_size.z},
-         };
-      } else {
-         cs->g18_compute_resources.registers_16 = regs;
-         cs->g18_compute_resources.staging_16 = staging;
-         cs->g18_compute_resources.imageblock_stride = stride;
-      }
+       * launches + the small helper last = small plan = stall). Every launch
+       * of the stream, this one and the precompiled helper, merges through
+       * hk_g18_merge_compute_resources: scalars (registers, staging,
+       * imageblock stride, local_bytes) take the running max, local dims
+       * come from the launch with the LARGEST x*y*z product (a per-axis max
+       * can exceed the validator's 1024-thread bound). local_bytes is the
+       * shader's shared memory (up to 32 KiB is admitted above). */
+      const struct drm_asahi_g18_compute_resources launch_resources = {
+         .version = 1,
+         .flags = 1,
+         .registers_16 = linked->b.nr_gprs,
+         .staging_16 = s->b.info.agx3_staging_halfs,
+         .local_bytes = s->b.info.local_size,
+         .imageblock_stride = s->b.info.imageblock_stride,
+         .local_size = {local_size.x, local_size.y, local_size.z},
+      };
+      hk_g18_merge_compute_resources(&cs->g18_compute_resources,
+                                     &launch_resources, cs->stats.cmds == 0);
       /* Launch-count cap only (the rel30 code cap is retired: the gate
        * showed generation streams never approach the code boundary). */
       if (cs->stats.cmds + 1 >= batch_limit) {

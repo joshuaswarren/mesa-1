@@ -6,6 +6,7 @@
  */
 #include "hk_cmd_buffer.h"
 #include "hk_sampler_index.h"
+#include "hk_g18_resources.h"
 #include "hk_ppp_state.h"
 #include "hk_g17p_patch.h"
 
@@ -3381,11 +3382,12 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       cs->current = sink.data + sink.length;
       cs->stats.cmds++;
       cs->g18_dispatch_sealed = true;
-      /* Overwrite (last-wins) as in the admitted shape: this branch seals
-       * the stream, so it ends a batch rather than joining one; the
-       * validator-safe cross-launch merge is the rel28 work (per-bit flag
-       * OR, largest-product local dims). */
-      cs->g18_compute_resources = (struct drm_asahi_g18_compute_resources){
+      /* The helper may have joined an open batch (get_cs_general reuses an
+       * unsealed stream): merge into the stream's resource words so a larger
+       * earlier launch keeps its register, staging, shared-memory and
+       * local-size requirements. cs->stats.cmds was incremented above, so
+       * 1 means this launch is the first of the stream. */
+      const struct drm_asahi_g18_compute_resources helper_resources = {
          .version = 1,
          .flags = 1,
          .registers_16 = prog->info.nr_gprs,
@@ -3397,6 +3399,8 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
          .local_size = {prog->b.workgroup.x, prog->b.workgroup.y,
                         prog->b.workgroup.z},
       };
+      hk_g18_merge_compute_resources(&cs->g18_compute_resources,
+                                     &helper_resources, cs->stats.cmds == 1);
       hk_cmd_buffer_retain_bo(cmd, prog->bo);
       return;
    }
