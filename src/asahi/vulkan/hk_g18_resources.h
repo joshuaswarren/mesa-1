@@ -46,7 +46,10 @@ hk_g18_merge_compute_resources(struct drm_asahi_g18_compute_resources *acc,
     * (local_bytes + variable_shared) * scale <= 32768, so separate maxima
     * can sum past the limit although every launch alone fits (the op-8
     * regression: 120832 > 32768). The launch with the largest sum
-    * contributes both words. */
+    * contributes both words — which can LOWER one of them: a later launch
+    * whose sum wins runs with the pair's own variable_shared, even if it is
+    * smaller than an earlier launch's. This rests on the kernel sizing the
+    * plan from the pair TOTAL, not the individual fields. */
    if ((uint64_t)launch->local_bytes + launch->variable_shared_bytes >
        (uint64_t)acc->local_bytes + acc->variable_shared_bytes) {
       acc->local_bytes = launch->local_bytes;

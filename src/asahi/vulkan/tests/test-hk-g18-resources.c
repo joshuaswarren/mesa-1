@@ -89,10 +89,17 @@ main(void)
    CHECK(acc.local_bytes == 30000 && acc.variable_shared_bytes == 0);
    /* Control: separate maxima would give 30000 + 4000 = 34000 > 32768
     * (v1 scale x4: 136000) — the measured op-8 rejection class. */
+   /* The SUM decides, not local_bytes alone: a launch with small local and
+    * large variable (sum 41000) beats the (30000, 0) accumulator — the
+    * local-only mutant would keep (30000, 0) and fail here. */
+   struct drm_asahi_g18_compute_resources vs_wins = launch(1, 1, 0, 1000, 8, 1, 1);
+   vs_wins.variable_shared_bytes = 40000;
+   hk_g18_merge_compute_resources(&acc, &vs_wins, false);
+   CHECK(acc.local_bytes == 1000 && acc.variable_shared_bytes == 40000);
    struct drm_asahi_g18_compute_resources pair2 = launch(1, 1, 0, 6000, 8, 1, 1);
    pair2.variable_shared_bytes = 100;
    hk_g18_merge_compute_resources(&acc, &pair2, false);
-   CHECK(acc.local_bytes == 30000 && acc.variable_shared_bytes == 0);
+   CHECK(acc.local_bytes == 1000 && acc.variable_shared_bytes == 40000);
    /* Local size comes from the launch with the largest x*y*z, never a per-axis maximum
     * (256x1x1 and 1x256x1 would give 256x256x1 = 65536 threads, over the validator bound). */
    struct drm_asahi_g18_compute_resources wide = launch(1, 1, 0, 0, 256, 1, 1);
