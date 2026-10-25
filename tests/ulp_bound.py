@@ -73,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix="mesa-ulp-") as td:
                     "-o", str(td / "probe.spv")], check=True)
     env = dict(os.environ, VK_DRIVER_FILES=icd, VK_ICD_FILENAMES=icd,
                MESA_SHADER_CACHE_DISABLE="true")
-    subprocess.run(["flock", "-w", "30", "/tmp/m1-gpu.lock", runner,
+    subprocess.run(["flock", "-w", "30", "/tmp/gpu.lock", runner,
                     str(td / "probe.spv"), str(td / "in.bin"), str(td / "out.bin"),
                     str(ntot * 6 * 4), str(ntot // 64)], env=env, check=True,
                    timeout=120)
