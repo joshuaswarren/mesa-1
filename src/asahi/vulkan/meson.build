@@ -419,6 +419,12 @@ if with_tests
       '-Wl,--wrap=agx_bo_export',
       '-Wl,--wrap=hk_get_cgroup_memory_available', '-Wl,--wrap=__vk_errorf']),
     suite : ['asahi'])
+  test('hk_va', executable('hk_va_test',
+    files('tests/test-hk-va.c'),
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include, inc_src,
+      inc_asahi, inc_virtio_gpu, inc_virtio_vdrm, include_directories('.')],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : [ld_args_gc_sections]), suite : ['asahi'])
   test('hk_tes_query', executable('hk_tes_query_test', files('tests/test-hk-tes-query.c'),
     include_directories : [inc_gallium, inc_gallium_aux, inc_include, inc_src,
       inc_asahi, inc_virtio_gpu, inc_virtio_vdrm, include_directories('.')],
