@@ -976,7 +976,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis);
 }
 
-static void
+static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
@@ -986,6 +986,9 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 
       shader->bo = agx_bo_create(&dev->dev, size, 0,
                                  AGX_BO_EXEC | AGX_BO_LOW_VA, "Preamble");
+      if (!shader->bo)
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
       memcpy(agx_bo_map(shader->bo), shader->b.binary, size);
       shader->preamble_addr =
          shader->bo->va->addr + shader->b.info.preamble_offset;
@@ -994,6 +997,9 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
    if (shader->data_size) {
       shader->data_bo =
          agx_bo_create(&dev->dev, shader->data_size, 0, 0, "Shader constants");
+      if (!shader->data_bo)
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
       memcpy(agx_bo_map(shader->data_bo), shader->data_ptr, shader->data_size);
       shader->data_addr = shader->data_bo->va->addr;
    }
@@ -1014,6 +1020,7 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          shader->b.info.sampler_state_count, false);
       cfg.texture_state_register_count = shader->b.info.texture_state_count;
    }
+   return VK_SUCCESS;
 }
 
 DERIVE_HASH_TABLE(hk_fast_link_key_vs);
@@ -1286,9 +1293,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    VkResult result = hk_init_link_ht(shader, sw_stage);
    if (result != VK_SUCCESS)
       return vk_error(dev, result);
-
-   hk_upload_shader(dev, shader);
-   return VK_SUCCESS;
+   return hk_upload_shader(dev, shader);
 }
 
 static const struct vk_shader_ops hk_shader_ops;
@@ -1682,8 +1687,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    shader->b.binary = (void *)shader->code_ptr;
-   hk_upload_shader(dev, shader);
-   return VK_SUCCESS;
+   return hk_upload_shader(dev, shader);
 }
 
 static VkResult
