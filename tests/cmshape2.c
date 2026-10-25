@@ -149,6 +149,8 @@ int main(int argc, char **argv) {
    f12.shaderFloat16 = VK_TRUE;
    f12.vulkanMemoryModel = VK_TRUE;
    f12.vulkanMemoryModelDeviceScope = VK_TRUE;
+   if (vbytes == 1)
+      f12.storageBuffer8BitAccess = VK_TRUE; /* the u8 case uses uint8_t storage buffers */
    VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &f12};
    f11.storageBuffer16BitAccess = VK_TRUE;
    const char *devext[] = {VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME};
