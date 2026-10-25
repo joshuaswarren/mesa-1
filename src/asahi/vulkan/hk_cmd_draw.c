@@ -40,6 +40,7 @@
 #include "hk_g17p_full_frame_scissor.h"
 #include "hk_g17p_draw_state_upload.h"
 #include "hk_agx3_vdm_decode.h"
+#include "hk_zls_stride.h"
 #include "hk_physical_device.h"
 #include "hk_private.h"
 #include "hk_ppp_state.h"
@@ -47,6 +48,7 @@
 #include "util/disk_cache.h"
 #include "agx_debug.h"
 #include "asahi/lib/agx3_g17p_grid_helper_core.h"
+#include "asahi/compiler/agx3_transcode.h"
 
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/libagx/compression.h"
@@ -1622,6 +1624,8 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
                      const VkRenderingInfo *info, bool store)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const bool g18 = dev->dev.chip == AGX_CHIP_G18G;
+   const enum agx_chip ioto_chip = g18 ? AGX_CHIP_G17G : dev->dev.chip;
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    /* DONT_CARE allows arbitrary initial tile contents. Reuse the qualified
     * zero-clear program until an empty background program is available.
@@ -1657,7 +1661,8 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
    struct agx3_ioto_uniform_range ranges[2];
    unsigned range_count = 1;
    if (store) {
-      if (!view->planes[0].eot_pbe_valid || shader->info.binary_size != 78 ||
+      if (!view->planes[0].eot_pbe_valid ||
+          shader->info.binary_size != (g18 ? 68 : 78) ||
           shader->info.nr_gprs != 8 || shader->info.agx3_staging_halfs != 8)
          goto unsupported;
       const uint64_t pbe = hk_pool_upload(cmd, &view->planes[0].eot,
@@ -1707,9 +1712,10 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
       range_count = 2;
    }
    size_t capacity;
-   if (!agx3_g17g_graphics_program_bound(dev->dev.chip, ranges, range_count,
-                                          &capacity))
+   if (!agx3_g17g_graphics_program_bound(ioto_chip, ranges, range_count, &capacity))
       goto unsupported;
+   if (g18)
+      capacity *= 2;
    struct hk_ioto_reservation reservation;
    if (!hk_cmd_reserve_ioto_program(cmd, capacity, "M5 native tile Ioto",
                                     &reservation))
@@ -1729,8 +1735,33 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
       .uniform_range_count = range_count,
    };
    struct agx3_g17p_graphics_program program;
-   if (!agx3_g17g_tile_program_generate(dev->dev.chip, &desc, store, &program) ||
-       program.length > capacity)
+   if (!agx3_g17g_tile_program_generate(ioto_chip, &desc, store, &program))
+      goto unsupported;
+   if (g18) {
+      struct util_dynarray code;
+      util_dynarray_init(&code, NULL);
+      memcpy(util_dynarray_grow_bytes(&code, 1, program.length), program.bytes,
+             program.length);
+      const struct agx3_transcode_ioto ioto = {
+         .api_program = false,
+         .shader_gprs = shader->info.nr_gprs,
+      };
+      const char *why = NULL;
+      unsigned at = 0;
+      const bool ok = agx3_transcode_agx3d_ioto(&code, 0, &ioto, &why, &at) &&
+                      code.size <= capacity && code.size <= sizeof(program.bytes);
+      if (ok) {
+         memcpy(program.bytes, code.data, code.size);
+         program.length = code.size;
+      } else {
+         mesa_loge("hk: G18G tile Ioto not re-encoded: %s at +0x%x",
+                   why ? why : "longer than the reservation", at);
+      }
+      util_dynarray_fini(&code);
+      if (!ok)
+         goto unsupported;
+   }
+   if (program.length > capacity)
       goto unsupported;
    memcpy(map, program.bytes, program.length);
    hk_cmd_buffer_retain_bo(cmd, shader->bo);
@@ -1921,7 +1952,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
       }
       return program;
    }
-   if (dev->dev.chip == AGX_CHIP_G17G)
+   if (agx_chip_m5_paths(dev->dev.chip))
       return hk_build_g17g_bg_eot(cmd, &key, info, store);
 
    const unsigned descriptor_generation =
@@ -2535,6 +2566,22 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       render->cr.depth.stride =
          (dev->dev.chip == AGX_CHIP_G17G && z_layout->depth_px == 1)
             ? 0 : ((stride_pages - 1) << 14) | 1;
+      if (dev->dev.chip == AGX_CHIP_G18G &&
+          z_layout->policy == AIL_LAYOUT_POLICY_M5) {
+         /* Gallium agx_zls_layer_stride(): an M5-policy layout rendered as one
+          * layer has no array stride on G18G either (the M6 vkcube frame sent
+          * ((120 - 1) << 14) | 1 for a single-layer D16), and a layered one
+          * uses pages or 128-byte cachelines. */
+         if (!hk_zls_m5_layer_stride(
+                true,
+                hk_agx3_g17p_single_layer_rendering(render->view_mask,
+                                                    layer_count),
+                z_layout->layer_stride_B, &render->cr.depth.stride)) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+      }
 
       /* A compressed single-layer image is not page padded, so a small one
        * has a zero-page layer stride and the expression above underflows.
@@ -2596,6 +2643,16 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
              "Page aligned S layers");
       unsigned stride_pages = s_layout->layer_stride_B / AIL_PAGESIZE;
       render->cr.stencil.stride = ((stride_pages - 1) << 14) | 1;
+      if (dev->dev.chip == AGX_CHIP_G18G &&
+          s_layout->policy == AIL_LAYOUT_POLICY_M5 &&
+          !hk_zls_m5_layer_stride(
+             true,
+             hk_agx3_g17p_single_layer_rendering(render->view_mask,
+                                                 layer_count),
+             s_layout->layer_stride_B, &render->cr.stencil.stride)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
       if (dev->dev.chip == AGX_CHIP_G17P && stride_pages == 0) {
          assert(s_layout->depth_px == 1);
          render->cr.stencil.stride = 0;
@@ -6230,6 +6287,144 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
    struct hk_shader *fs = hk_bound_fs(cmd);
+   if (dev->dev.chip == AGX_CHIP_G18G) {
+      /* General HAL300 fragment state, following the M5 GL path: one
+       * graphics-core payload with the fragment program and varying table,
+       * pointer-recorded beside the viewport/scissor/bias block that
+       * hk_flush_vp_state() emits. */
+      struct hk_linked_shader *linked = gfx->linked[MESA_SHADER_FRAGMENT];
+      if (!hw_vs || !fs || !linked) {
+         mesa_loge("G18G draw without linked shaders (vs=%u fs=%u linked=%u)",
+                   hw_vs != NULL, fs != NULL, linked != NULL);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+      const uint64_t fragment_program = hk_upload_usc_words(cmd, fs, linked);
+      if (!fragment_program || fragment_program >= (UINT64_C(1) << 48) ||
+          (fragment_program & 0x3f)) {
+         mesa_loge("G18G fragment program publish failed va=%llx",
+                   (unsigned long long)fragment_program);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+      const struct agx_varyings_fs *cf = &linked->b.cf;
+      const bool color_varying =
+         cf->nr_bindings >= 1 &&
+         cf->bindings[cf->nr_bindings - 1].slot == VARYING_SLOT_VAR0;
+      const bool general_varyings =
+         cf->nr_bindings != 0 || cf->nr_cf != 0 || cf->reads_z;
+      const unsigned clip_dist_words =
+         hw_vs->info.uvs.size > hw_vs->info.uvs.group_offs[UVS_CLIP_DIST]
+            ? hw_vs->info.uvs.size - hw_vs->info.uvs.group_offs[UVS_CLIP_DIST]
+            : 0;
+      const bool depth_active =
+         dyn->ds.depth.test_enable && render->depth_att.iview != NULL;
+      const bool stencil_active =
+         dyn->ds.stencil.test_enable && render->stencil_att.iview != NULL;
+      const bool bias_active = dyn->rs.depth_bias.enable &&
+         gfx->object_type == AGX_OBJECT_TYPE_TRIANGLE &&
+         (dyn->rs.depth_bias.constant_factor != 0.0f ||
+          dyn->rs.depth_bias.slope_factor != 0.0f);
+      const struct agx_ppp_hal300_graphics_fields fields = {
+         .fragment_program = fragment_program,
+         .varying_table = gfx->varyings,
+         .cf_binding_count = cf->nr_bindings,
+         .cull_mode = (unsigned)dyn->rs.cull_mode,
+         .scissor_enable = true,
+         .depth_bias_enable = bias_active,
+         .occlusion_query_mode = gfx->occlusion.mode,
+         .occlusion_query_index = gfx->occlusion.index,
+         .no_color_attachment = render->color_att_count == 0,
+         .fragment_pass = linked->b.fragment_control.opaque[0] >> 29,
+         .disable_tri_merging =
+            (linked->b.fragment_control.opaque[0] & BITFIELD_BIT(26)) != 0,
+         .front_face_ccw =
+            dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
+         .point_size_output =
+            (hw_vs->info.uvs.osel.opaque[0] & 0x40000) != 0,
+         .clip_distance_words = clip_dist_words,
+         .object_type =
+            gfx->object_type == AGX_OBJECT_TYPE_POINT_SPRITE_UV01
+               ? AGX_PPP_HAL300_POINTS
+               : gfx->object_type == AGX_OBJECT_TYPE_LINE
+                  ? AGX_PPP_HAL300_LINES
+                  : AGX_PPP_HAL300_TRIANGLES,
+         .vertex_varying_components = hw_vs->info.uvs.user_size,
+         .fragment_varying_components =
+            color_varying ? hw_vs->info.uvs.user_size : 0,
+         .interpolation =
+            !color_varying ? AGX_PPP_HAL300_SMOOTH
+            : cf->bindings[cf->nr_bindings - 1].perspective
+               ? AGX_PPP_HAL300_SMOOTH
+               : cf->bindings[cf->nr_bindings - 1].smooth
+                  ? AGX_PPP_HAL300_LINEAR
+                  : AGX_PPP_HAL300_FLAT,
+         .depth_active = depth_active,
+         .depth_compare = depth_active ? (unsigned)dyn->ds.depth.compare_op : 0,
+         .depth_write = depth_active && dyn->ds.depth.write_enable,
+         .stencil_active = stencil_active,
+         .front_stencil_reference =
+            stencil_active ? dyn->ds.stencil.front.reference : 0,
+         .back_stencil_reference =
+            stencil_active ? dyn->ds.stencil.back.reference : 0,
+         .front_stencil =
+            hk_pack_stencil_face(dyn->ds.stencil.front, stencil_active).opaque[0],
+         .back_stencil =
+            hk_pack_stencil_face(dyn->ds.stencil.back, stencil_active).opaque[0],
+         .rasterizer_discard = hk_rast_discard(cmd),
+         .general_varyings = general_varyings,
+         .varying_counts_32 = gfx->linked_varyings.counts_32.opaque[0],
+         .varying_counts_16 = gfx->linked_varyings.counts_16.opaque[0],
+         .output_select = hw_vs->info.uvs.osel.opaque[0] |
+                          linked->b.osel.opaque[0],
+         .uvs_words = hw_vs->info.uvs.size,
+         .needs_primitive_id = general_varyings && gfx->generate_primitive_id,
+         .flat_shading_vertex =
+            gfx->provoking != 0 ? 2 : 0,
+      };
+      struct agx_ppp_hal300_graphics_core state;
+      if (!agx_ppp_hal300_graphics_core_pack(dev->dev.chip, &fields, &state)) {
+         mesa_loge("no grounded HAL300 graphics core for G18G");
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+      const uint64_t graphics_gpu = hk_pool_upload(
+         cmd, state.bytes, sizeof(state.bytes), 64);
+      if (!graphics_gpu) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return;
+      }
+      uint8_t records[AGX_PPP_HAL300_GRAPHICS_RECORDS * AGX_PPP_STATE_LENGTH];
+      uint8_t *record = records;
+      for (unsigned i = 0; i < AGX_PPP_HAL300_GRAPHICS_RECORDS; ++i) {
+         /* The M5 PPP pointer record names a compact address; every other
+          * HAL300 pool address is compactable (agx_m5_vdm_compact). */
+         uint64_t compacted = graphics_gpu + state.offsets[i];
+         if (!agx_m5_vdm_compact(compacted, &compacted)) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+         struct agx_vdm_ppp_state_core packed;
+         if (!agx_vdm_ppp_state_core_pack(dev->dev.chip, compacted,
+                                          state.lengths[i] / 4, &packed)) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+         memcpy(record, packed.bytes, packed.length);
+         record += packed.length;
+      }
+      if (record != records + sizeof(records)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+      memcpy(*out, records, sizeof(records));
+      *out += sizeof(records);
+      return;
+   }
+
+
 
    if (dev->dev.chip == AGX_CHIP_G17G) {
       struct hk_linked_shader *linked = gfx->linked[MESA_SHADER_FRAGMENT];
@@ -7732,7 +7927,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
 
          const bool native_vit = dev->dev.chip == AGX_CHIP_G17P ||
-                                 dev->dev.chip == AGX_CHIP_G17G;
+                                 agx_chip_m5_paths(dev->dev.chip);
          struct agx_ptr t =
             hk_pool_usc_alloc(cmd, linkage_size, native_vit ? 64 : 16);
          if (!t.cpu)

@@ -14549,7 +14549,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * data commonly feeds a full-precision divide in GTK's colour
           * conversion shaders. f10/f26 select the result/source widths, while
           * f30/f31 carry source ABS/NEG without a separate move. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_RCP &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) && I->op == AGX_OPCODE_RCP &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest=I->dest[0], src=I->src[0];
             if (!agx3_src_is_register(dest) || dest.memory ||

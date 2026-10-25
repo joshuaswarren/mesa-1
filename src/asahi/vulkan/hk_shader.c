@@ -329,6 +329,8 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    /* Optimize but allow copies because we haven't lowered them yet */
    if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P)
       agx_preprocess_nir_g17p(nir);
+   else if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G18G)
+      agx_preprocess_nir_g18g(nir);
    else
       agx_preprocess_nir(nir);
 
@@ -2137,6 +2139,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    if (dev->dev.chip == AGX_CHIP_G17P)
       agx_preprocess_nir_g17p(nir);
+   else if (dev->dev.chip == AGX_CHIP_G18G)
+      agx_preprocess_nir_g18g(nir);
    else
       agx_preprocess_nir(nir);
 
@@ -2834,7 +2838,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       if (agx_nir_lower_g17p_indexed_samplers(nir))
          shader->info.agx3_indexed_sampler_valid = true;
    } else if ((dev->dev.chip == AGX_CHIP_G17P ||
-               dev->dev.chip == AGX_CHIP_G17G) &&
+               dev->dev.chip == AGX_CHIP_G17G ||
+               dev->dev.chip == AGX_CHIP_G18G) &&
               nir->info.stage == MESA_SHADER_FRAGMENT) {
       /* The combined-sampler lowering can refuse after changing the shader,
        * so it works on a copy -- made only for a shader it may apply to. */
@@ -2872,6 +2877,16 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
             }
          } else if (agx_nir_lower_g17p_indexed_samplers(nir))
             shader->info.agx3_indexed_sampler_valid = true;
+      }
+   } else if (dev->dev.chip == AGX_CHIP_G18G &&
+              nir->info.stage == MESA_SHADER_COMPUTE) {
+      nir_shader *candidate = nir_shader_clone(NULL, nir);
+      if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
+         ralloc_free(nir);
+         nir = candidate;
+         shader->info.agx3_indexed_sampler_valid = true;
+      } else {
+         ralloc_free(candidate);
       }
    } else if (dev->dev.chip == AGX_CHIP_G17G &&
               nir->info.stage == MESA_SHADER_COMPUTE) {
@@ -3224,6 +3239,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        * lowering above uses immediate native state slots, never the AGX2
        * texture/sampler-state-store protocol. */
       .no_preamble = dev->dev.chip == AGX_CHIP_G17G ||
+         dev->dev.chip == AGX_CHIP_G18G ||
          (dev->dev.chip == AGX_CHIP_G17P &&
          !(nir->info.stage == MESA_SHADER_FRAGMENT &&
            (nir->info.num_ubos || nir->info.num_ssbos ||
@@ -3369,11 +3385,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * geometry only changes how its input vertices were produced.  Build the
     * same byte-grounded VertexProgramVariant payload from the final UVS
     * layout, while leaving compute-only GS variants untouched. */
-   if ((dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) && hw &&
+   if ((dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G ||
+        dev->dev.chip == AGX_CHIP_G18G) && hw &&
        shader->b.info.stage == MESA_SHADER_VERTEX) {
       struct hk_agx3_g17p_vertex_compile_info compiler_info;
       hk_g17p_vertex_compile_info_init(shader, vs_cprog, &compiler_info);
-      const bool state_ok = dev->dev.chip == AGX_CHIP_G17G
+      const bool state_ok = (dev->dev.chip == AGX_CHIP_G17G ||
+                             dev->dev.chip == AGX_CHIP_G18G)
          ? hk_agx3_g17g_vertex_program_info(
               dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update)
          : hk_agx3_g17p_vertex_program_info(

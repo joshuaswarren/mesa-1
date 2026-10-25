@@ -717,7 +717,8 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       if (!textures_valid)
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-      if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
+      if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G ||
+          dev->dev.chip == AGX_CHIP_G18G) {
          VkResult result = hk_descriptor_table_add(
             dev, &dev->sampled_images, &view->planes[p].sampled, 32,
             &view->planes[p].sampled_heap_index);
@@ -800,7 +801,8 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
    if (!view)
       return;
 
-   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
+   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G ||
+       dev->dev.chip == AGX_CHIP_G18G) {
       for (unsigned p = 0; p < view->plane_count; ++p) {
          if (view->planes[p].emrt_read_heap_index)
             hk_descriptor_table_remove(dev, &dev->sampled_images,
