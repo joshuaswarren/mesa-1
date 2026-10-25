@@ -97,6 +97,22 @@ lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *data)
    if (alu->def.bit_size == 64)
       return false;
 
+   /* Graphics shaders keep the hardware reciprocal and the cheap quotient.
+    * The exact sequences below are for compute (MLX and kernels), where
+    * the rounding contract matters. A late fdiv (int64 lowering, perspective
+    * divide) still has to be lowered, because the backend has no fdiv.
+    */
+   if (!mesa_shader_stage_is_compute(b->shader->info.stage)) {
+      if (alu->op != nir_op_fdiv || alu->def.bit_size != 32)
+         return false;
+
+      b->cursor = nir_before_instr(&alu->instr);
+      nir_def *q = nir_fmul(b, nir_ssa_for_alu_src(b, alu, 0),
+                            nir_frcp(b, nir_ssa_for_alu_src(b, alu, 1)));
+      nir_def_replace(&alu->def, q);
+      return true;
+   }
+
    b->cursor = nir_before_instr(&alu->instr);
    b->fp_math_ctrl = nir_fp_no_fast_math;
 
@@ -373,6 +389,9 @@ lower_log2(nir_builder *b, nir_alu_instr *alu, void *_)
 bool
 agx_nir_lower_log(nir_shader *s)
 {
+   if (!mesa_shader_stage_is_compute(s->info.stage))
+      return false;
+
    bool progress =
       nir_shader_alu_pass(s, lower_log, nir_metadata_control_flow, NULL);
    progress |=
@@ -631,5 +650,8 @@ lower_sincos(nir_builder *b, nir_instr *instr, UNUSED void *_)
 bool
 agx_nir_lower_sincos(nir_shader *s)
 {
+   if (!mesa_shader_stage_is_compute(s->info.stage))
+      return false;
+
    return nir_shader_lower_instructions(s, sincos_filter, lower_sincos, NULL);
 }

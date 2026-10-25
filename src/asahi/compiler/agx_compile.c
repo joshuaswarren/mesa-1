@@ -7543,11 +7543,9 @@ agx_calc_stats(agx_context *ctx, unsigned size, struct agx2_stats *stats)
 }
 
 static bool
-agx_lower_sincos_filter(const nir_instr *instr, const void *g17p)
+agx_lower_sincos_filter(const nir_instr *instr, UNUSED const void *g17p)
 {
-   /* Only the native G17P sequence is lowered here; every other target goes
-    * through agx_nir_lower_sincos, the exact reduction. */
-   if (!(uintptr_t)g17p || instr->type != nir_instr_type_alu)
+   if (instr->type != nir_instr_type_alu)
       return false;
 
    nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -7663,6 +7661,11 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
 static bool
 agx_lower_sincos(nir_shader *shader, unsigned native)
 {
+   /* Compute on every target but G17P goes through agx_nir_lower_sincos, the
+    * exact reduction. Graphics keeps the base sequence. */
+   if (!g17p && mesa_shader_stage_is_compute(shader->info.stage))
+      return false;
+
    return nir_shader_lower_instructions(shader, agx_lower_sincos_filter,
                                         agx_lower_sincos_impl,
                                         (void *)(uintptr_t)native);
