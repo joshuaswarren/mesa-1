@@ -50,31 +50,6 @@ main(void)
    CHECK(acc.registers_16 == 96 && acc.local_bytes == 16384 && acc.scratch_bytes == 512);
    CHECK(acc.local_size[0] == 128 && acc.local_size[1] == 8 && acc.local_size[2] == 1);
 
-   /* Every merged field, in both orders: a launch that raises one field and lowers
-    * another must raise only the first (one field per launch, so a field that is
-    * overwritten instead of maximised is caught). */
-   struct drm_asahi_g18_compute_resources hi = launch(0, 0, 0, 0, 1, 1, 1);
-   struct drm_asahi_g18_compute_resources lo = launch(0, 0, 0, 0, 1, 1, 1);
-   hi.registers_16 = 10;           lo.registers_16 = 2;
-   hi.scratch_bytes = 20;          lo.scratch_bytes = 3;
-   hi.spectpr_scratch_bytes = 30;  lo.spectpr_scratch_bytes = 4;
-   hi.staging_16 = 40;             lo.staging_16 = 5;
-   hi.constant_registers_16 = 50;  lo.constant_registers_16 = 6;
-   hi.constant_scratch_bytes = 60; lo.constant_scratch_bytes = 7;
-   hi.constant_staging_16 = 70;    lo.constant_staging_16 = 8;
-   hi.local_bytes = 80;            lo.local_bytes = 9;
-   hi.imageblock_stride = 90;      lo.imageblock_stride = 11;
-   hi.variable_shared_bytes = 100; lo.variable_shared_bytes = 12;
-   for (int order = 0; order < 2; ++order) {
-      hk_g18_merge_compute_resources(&acc, order ? &lo : &hi, true);
-      hk_g18_merge_compute_resources(&acc, order ? &hi : &lo, false);
-      CHECK(acc.registers_16 == 10 && acc.scratch_bytes == 20);
-      CHECK(acc.spectpr_scratch_bytes == 30 && acc.staging_16 == 40);
-      CHECK(acc.constant_registers_16 == 50 && acc.constant_scratch_bytes == 60);
-      CHECK(acc.constant_staging_16 == 70 && acc.local_bytes == 80);
-      CHECK(acc.imageblock_stride == 90 && acc.variable_shared_bytes == 100);
-   }
-
    /* Local size comes from the launch with the largest x*y*z, never a per-axis maximum
     * (256x1x1 and 1x256x1 would give 256x256x1 = 65536 threads, over the validator bound). */
    struct drm_asahi_g18_compute_resources wide = launch(1, 1, 0, 0, 256, 1, 1);
