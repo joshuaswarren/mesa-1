@@ -342,10 +342,12 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
    const uint64_t poll_budget_ns =
       (uint64_t)device->sync_wait_poll_us * 1000;
    uint64_t poll_deadline_ns = 0;
-   if (poll_budget_ns &&
-       os_time_get_nano() >=
-       p_atomic_read(&device->sync_poll_miss_expire_ns))
-      poll_deadline_ns = os_time_get_nano() + poll_budget_ns;
+   /* Never poll past the caller's deadline: a zero or already expired
+    * deadline (vkGetFenceStatus, short waits) skips the poll entirely. */
+   const uint64_t poll_now_ns = os_time_get_nano();
+   if (poll_budget_ns && poll_now_ns < abs_timeout_ns &&
+       poll_now_ns >= p_atomic_read(&device->sync_poll_miss_expire_ns))
+      poll_deadline_ns = MIN2(poll_now_ns + poll_budget_ns, abs_timeout_ns);
 
    while (wait_count > 0) {
       const bool poll =
