@@ -1319,17 +1319,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
       goto fail;
    }
 
-   /* Keep captured addresses unavailable to ordinary allocations between
-    * capture and replay. Reserve after all fixed firmware/alias holes, and
-    * for native AGX3 and M5 using the common allocator; other winsyses own their VA. */
-   if (agx_chip_native_agx3(dev->chip) || agx_chip_g17_m5(dev->chip)) {
-      dev->replay_heap_initialized = agx_capture_replay_heap_init(
-         &dev->main_heap, &dev->replay_heap, user_size, &dev->replay_start,
-         &dev->replay_size);
-      if (!dev->replay_heap_initialized) {
-         fprintf(stderr, "Failed to reserve capture/replay GPU VA\n");
-         goto fail;
-      }
+   /* Reserve captured addresses after fixed firmware/alias holes so ordinary
+    * allocations cannot take them between capture and replay. */
+   dev->replay_heap_initialized = agx_capture_replay_heap_init(
+      &dev->main_heap, &dev->replay_heap, user_size, &dev->replay_start,
+      &dev->replay_size);
+   if (!dev->replay_heap_initialized) {
+      fprintf(stderr, "Failed to reserve capture/replay GPU VA\n");
+      goto fail;
    }
 
    dev->vm_id = vm_create.vm_id;
