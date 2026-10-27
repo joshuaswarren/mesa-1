@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_query_pool.h"
+#include "hk_query_oq.h"
 
 #include <errno.h>
 #include <xf86drm.h>
@@ -331,31 +332,6 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
    libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL, address, value);
 }
 
-/*
- * Native AGX3 occlusion availability.
- *
- * A render's retirement record carries four timestamp slots (vertex start
- * and end, fragment start and end). The kernel writes every requested slot
- * when it retires the render, which is after the end-of-render cache
- * maintenance that makes the render's occlusion counts visible, and before
- * it signals the submission. A nonzero timestamp in a query's 64-bit
- * availability slot is therefore exactly "available".
- *
- * The queued post-graphics store remains the general mechanism: it is
- * recorded as usual, and the stream that would carry it is kept empty until
- * the end of the command buffer. Only then is it known whether any later
- * compute work in this command buffer depends on the render; such work would
- * have to wait for the render's host-side retirement once the render writes
- * timestamps, where it now waits in firmware. When nothing does and the
- * render has free slots, the render carries the availability and the extra
- * compute command is dropped. Otherwise the store is emitted as before.
- */
-struct hk_oq_stamp {
-   uint32_t handle;
-   uint32_t offset_B;
-   uint32_t render_seq;
-};
-
 static void
 hk_cmd_end_query_stamped(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
                          uint32_t query)
@@ -376,164 +352,6 @@ hk_cmd_end_query_stamped(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       .render_seq = render_seq,
    };
    util_dynarray_append(&cs->oq_stamps, stamp);
-}
-
-bool
-hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
-{
-   const unsigned writes =
-      util_dynarray_num_elements(&cs->imm_writes, struct libagx_imm_write);
-   const unsigned stamps =
-      util_dynarray_num_elements(&cs->oq_stamps, struct hk_oq_stamp);
-
-   if (!stamps || stamps != writes || cs->stats.cmds ||
-       cs->stats.flushes || cs->timestamp.start.handle ||
-       cs->timestamp.end.handle || cs->query_reset_pending)
-      return false;
-
-   const struct hk_oq_stamp *s = cs->oq_stamps.data;
-   for (unsigned i = 1; i < stamps; ++i) {
-      if (s[i].render_seq != s[0].render_seq)
-         return false;
-   }
-
-   cs->oq_avail_deferred = true;
-   return true;
-}
-
-static bool
-hk_dep_reaches(const struct hk_sync_dep *dep, const struct hk_cs *cs)
-{
-   return dep->cut && dep->cut->sync.seq >= cs->sync.seq;
-}
-
-enum hk_oq_resolution {
-   /* Emit the store in place. */
-   HK_OQ_KEEP,
-   /* The render carries the availability; drop the stream. */
-   HK_OQ_STAMPED,
-   /* Nothing depends on the stream or (from compute) on its render, but the
-    * render has too few free slots: the store may move to a later deferred
-    * stream that waits on a later render. */
-   HK_OQ_MOVABLE,
-};
-
-/* Whether the render can carry the availability of the deferred stream post:
- * nothing later in the command buffer waits on post, no compute waits on the
- * render (or anything after it on the render subqueue), the command buffer's
- * tail requirement does not name it, and enough timestamp slots are free.
- */
-static enum hk_oq_resolution
-hk_stamp_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *post)
-{
-   const struct hk_oq_stamp *stamps = post->oq_stamps.data;
-   const unsigned count =
-      util_dynarray_num_elements(&post->oq_stamps, struct hk_oq_stamp);
-
-   /* While deferred, the stream may have become the tail an API timestamp
-    * rides on (hk_sync_write_timestamp()). It then stays, with its store. */
-   if (post->timestamp.start.handle || post->timestamp.end.handle ||
-       post->stats.cmds || post->stats.flushes)
-      return HK_OQ_KEEP;
-
-   struct hk_cs *render = NULL;
-   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
-      if (it == post)
-         break;
-      if (it->type == HK_CS_VDM && it->sync.seq == stamps[0].render_seq)
-         render = it;
-   }
-   if (!render || post->sync.dep[HK_SYNC_VDM].cut != render)
-      return HK_OQ_KEEP;
-
-   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
-      if (it == post || it == render)
-         continue;
-      if (hk_dep_reaches(&it->sync.dep[HK_SYNC_CDM], post) ||
-          hk_dep_reaches(&it->sync.dep_ta[HK_SYNC_CDM], post))
-         return HK_OQ_KEEP;
-      if (it->type == HK_CS_CDM &&
-          (hk_dep_reaches(&it->sync.dep[HK_SYNC_VDM], render) ||
-           hk_dep_reaches(&it->sync.dep_ta[HK_SYNC_VDM], render)))
-         return HK_OQ_KEEP;
-   }
-
-   for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
-      if (hk_dep_reaches(&cmd->sync.req[k][HK_SYNC_VDM], render) ||
-          hk_dep_reaches(&cmd->sync.req[k][HK_SYNC_CDM], post))
-         return HK_OQ_KEEP;
-   }
-
-   /* Fragment end first, then the slots no API timestamp uses, then vertex
-    * start. A slot an API timestamp rides on stays with it. */
-   const unsigned order[] = {3, 1, 2, 0};
-   unsigned free_slots[4], nfree = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(order); ++i) {
-      const unsigned slot = order[i];
-      if ((slot == 0 && render->timestamp.start.handle) ||
-          (slot == 3 && render->timestamp.end.handle) ||
-          render->oq_stamp[slot].handle)
-         continue;
-      free_slots[nfree++] = slot;
-   }
-   if (nfree < count)
-      return HK_OQ_MOVABLE;
-
-   for (unsigned i = 0; i < count; ++i) {
-      render->oq_stamp[free_slots[i]] = (struct agx_timestamp_req){
-         .handle = stamps[i].handle,
-         .offset_B = stamps[i].offset_B,
-      };
-   }
-   return HK_OQ_STAMPED;
-}
-
-static void
-hk_drop_oq_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
-{
-   hk_sync_forget_stream(cmd, cs);
-   list_del(&cs->node);
-   hk_cs_destroy(cs);
-}
-
-void
-hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
-{
-   /* Stores that could not ride on their render but that nothing waits on
-    * collect in the latest such stream: it waits on a render that completes
-    * after theirs, so one compute command serves the whole command buffer. */
-   struct hk_cs *movable = NULL;
-
-   list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
-      if (cs->type != HK_CS_CDM || !cs->oq_avail_deferred)
-         continue;
-
-      cs->oq_avail_deferred = false;
-      switch (hk_stamp_oq_available(cmd, cs)) {
-      case HK_OQ_STAMPED:
-         hk_drop_oq_stream(cmd, cs);
-         break;
-      case HK_OQ_MOVABLE:
-         /* The later stream's render wait covers every earlier render. */
-         if (movable && movable->sync.dep[HK_SYNC_VDM].cut->sync.seq >
-                           cs->sync.dep[HK_SYNC_VDM].cut->sync.seq) {
-            hk_dispatch_imm_writes(cmd, movable);
-            movable = NULL;
-         }
-         if (movable) {
-            util_dynarray_append_dynarray(&cs->imm_writes, &movable->imm_writes);
-            hk_drop_oq_stream(cmd, movable);
-         }
-         movable = cs;
-         break;
-      case HK_OQ_KEEP:
-         hk_dispatch_imm_writes(cmd, cs);
-         break;
-      }
-   }
-
-   if (movable)
-      hk_dispatch_imm_writes(cmd, movable);
 }
 
 static void
