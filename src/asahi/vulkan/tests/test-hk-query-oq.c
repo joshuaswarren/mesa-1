@@ -7,6 +7,7 @@
 #include <string.h>
 #include "util/ralloc.h"
 #include "hk_cmd_buffer.h"
+#include "hk_device.h"
 #include "hk_query_oq.h"
 #include "asahi/libagx/query.h"
 
@@ -100,12 +101,18 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    abort();
 }
 
+/* The resolver reads only the chip from the device. */
+static enum agx_chip test_chip = AGX_CHIP_G17P;
+
 static struct hk_cmd_buffer *
 new_cmd(void)
 {
    struct hk_cmd_buffer *c = rzalloc_size(test_context, sizeof(*c));
-   if (!c)
+   struct hk_device *dev = rzalloc_size(test_context, sizeof(*dev));
+   if (!c || !dev)
       abort();
+   dev->dev.chip = test_chip;
+   c->vk.base.device = &dev->vk;
    list_inithead(&c->control_streams);
    util_dynarray_init(&c->sync_pass_records, NULL);
    ndispatched = 0;
@@ -342,11 +349,9 @@ test_movable(void)
      ndispatched == 1 && dispatched[0].cs == p1 && dispatched[0].writes == 3 &&
         r1->oq_stamp[2].handle == 0 && r1->oq_stamp[0].handle == 0);
 
-   /* Two full renders in order. While the earlier stream resolves, the later
-    * deferred stream still waits on a later render, so the earlier one is
-    * kept (dispatched in place); the later one is MOVABLE and dispatched at
-    * the end. This documents the current resolution order: a later deferred
-    * stream counts as compute waiting on the render subqueue. */
+   /* Two full renders in order. The later stream is MOVABLE and stays, a
+    * compute stream waiting on a later render, so the earlier one is kept
+    * (dispatched in place); the movable one is dispatched last. */
    c = new_cmd();
    r1 = add(c, false);
    fill_slots(r1, 100);
@@ -356,7 +361,7 @@ test_movable(void)
    struct hk_cs *p2 = add_post(c, r2, 1, 2);
    T("in-order movable fixtures defer", deferred(c, p1) && deferred(c, p2));
    hk_resolve_deferred_oq_available(c);
-   T("movable in order: the earlier stream is kept, the later dispatched last",
+   T("movable in order: the earlier stream is kept, the movable one last",
      ndispatched == 2 && dispatched[0].cs == p1 && dispatched[0].writes == 1 &&
         dispatched[1].cs == p2 && dispatched[1].writes == 1 && listed(c, p1) &&
         listed(c, p2));
@@ -393,6 +398,91 @@ test_movable(void)
         dispatched[1].cs == p2);
 }
 
+/* Resolution runs from the end of the command buffer: a later stream whose
+ * render carries its stores is gone before earlier streams are judged. */
+static void
+test_order(void)
+{
+   struct hk_cmd_buffer *c = new_cmd();
+   struct hk_cs *r[3], *p[3];
+   for (unsigned i = 0; i < 3; ++i) {
+      r[i] = add(c, false);
+      p[i] = add_post(c, r[i], 1, 1 + i);
+   }
+   T("three passes defer", deferred(c, p[0]) && deferred(c, p[1]) && deferred(c, p[2]));
+   const unsigned before = nstreams(c);
+   hk_resolve_deferred_oq_available(c);
+   T("order: every render carries its own store",
+     slot_is(r[0], 3, 1) && slot_is(r[1], 3, 2) && slot_is(r[2], 3, 3));
+   T("order: all three streams dropped, nothing dispatched",
+     nstreams(c) == before - 3 && ndispatched == 0);
+
+   /* The last render is full: its stream stays as compute waiting on that
+    * render, so the earlier render may not carry its store. */
+   c = new_cmd();
+   r[0] = add(c, false);
+   p[0] = add_post(c, r[0], 1, 1);
+   r[1] = add(c, false);
+   fill_slots(r[1], 200);
+   p[1] = add_post(c, r[1], 1, 2);
+   T("free-then-full fixtures defer", deferred(c, p[0]) && deferred(c, p[1]));
+   hk_resolve_deferred_oq_available(c);
+   T("order: a remaining later stream still keeps the earlier store",
+     r[0]->oq_stamp[3].handle == 0 && ndispatched == 2 && dispatched[0].cs == p[0] &&
+        dispatched[1].cs == p[1]);
+
+   /* A later query reset waits on the last stream: both stores stay. */
+   c = new_cmd();
+   r[0] = add(c, false);
+   p[0] = add_post(c, r[0], 1, 1);
+   r[1] = add(c, false);
+   p[1] = add_post(c, r[1], 1, 2);
+   T("reset-after-two fixtures defer", deferred(c, p[0]) && deferred(c, p[1]));
+   struct hk_cs *reset = add(c, true);
+   reset->sync.dep[HK_SYNC_CDM].cut = p[1];
+   hk_resolve_deferred_oq_available(c);
+   T("order: a later reset keeps both stores in place",
+     ndispatched == 2 && dispatched[0].cs == p[1] && dispatched[1].cs == p[0] &&
+        r[0]->oq_stamp[3].handle == 0 && r[1]->oq_stamp[3].handle == 0);
+
+   /* A later reset of the first query only: the later render still carries its
+    * store, the first stays. */
+   c = new_cmd();
+   r[0] = add(c, false);
+   p[0] = add_post(c, r[0], 1, 1);
+   r[1] = add(c, false);
+   p[1] = add_post(c, r[1], 1, 2);
+   T("reset-first fixtures defer", deferred(c, p[0]) && deferred(c, p[1]));
+   reset = add(c, true);
+   reset->sync.dep[HK_SYNC_CDM].cut = p[0];
+   hk_resolve_deferred_oq_available(c);
+   T("order: a reset of the first query keeps only the first store",
+     slot_is(r[1], 3, 2) && !listed(c, p[1]) && ndispatched == 1 &&
+        dispatched[0].cs == p[0]);
+}
+
+/* The other native AGX3 chips keep recording order: while an earlier stream is
+ * judged, the later deferred stream still waits on its later render. */
+static void
+test_order_forward(void)
+{
+   test_chip = AGX_CHIP_G16G;
+   struct hk_cmd_buffer *c = new_cmd();
+   struct hk_cs *r[3], *p[3];
+   for (unsigned i = 0; i < 3; ++i) {
+      r[i] = add(c, false);
+      p[i] = add_post(c, r[i], 1, 1 + i);
+   }
+   T("forward: three passes defer", deferred(c, p[0]) && deferred(c, p[1]) && deferred(c, p[2]));
+   hk_resolve_deferred_oq_available(c);
+   T("forward: only the last render carries its store",
+     r[0]->oq_stamp[3].handle == 0 && r[1]->oq_stamp[3].handle == 0 &&
+        slot_is(r[2], 3, 3) && !listed(c, p[2]));
+   T("forward: the earlier stores are dispatched in order",
+     ndispatched == 2 && dispatched[0].cs == p[0] && dispatched[1].cs == p[1]);
+   test_chip = AGX_CHIP_G17P;
+}
+
 int
 main(void)
 {
@@ -401,6 +491,8 @@ main(void)
    test_stamped();
    test_keep();
    test_movable();
+   test_order();
+   test_order_forward();
    ralloc_free(test_context);
    printf("%u tests, %u failures\n", tests, failures);
    return failures ? EXIT_FAILURE : EXIT_SUCCESS;

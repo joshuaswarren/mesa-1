@@ -12,6 +12,7 @@
 #include "hk_query_oq.h"
 
 #include "hk_cmd_buffer.h"
+#include "hk_device.h"
 #include "hk_sync.h"
 #include "asahi/libagx/query.h"
 #include "util/list.h"
@@ -135,12 +136,11 @@ hk_drop_oq_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    hk_cs_destroy(cs);
 }
 
-void
-hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
+/* Recording order: while an earlier stream is judged, later deferred streams
+ * still wait on later renders, so only the last can ride on its render. */
+static void
+hk_resolve_oq_forward(struct hk_cmd_buffer *cmd)
 {
-   /* Stores that could not ride on their render but that nothing waits on
-    * collect in the latest such stream: it waits on a render that completes
-    * after theirs, so one compute command serves the whole command buffer. */
    struct hk_cs *movable = NULL;
 
    list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
@@ -173,4 +173,57 @@ hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
 
    if (movable)
       hk_dispatch_imm_writes(cmd, movable);
+}
+
+/* From the end of the command buffer. A later stream whose render carries its
+ * stores is dropped before earlier streams are judged, so it no longer counts
+ * as compute waiting on the render subqueue, and an earlier render can carry
+ * its own stores too. A stream that stays (kept, or movable) still counts.
+ * Movable stores collect into the latest movable stream when it waits on a
+ * render that completes after theirs. */
+static void
+hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
+{
+   struct hk_cs *movable = NULL;
+
+   list_for_each_entry_safe_rev(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs->type != HK_CS_CDM || !cs->oq_avail_deferred)
+         continue;
+
+      cs->oq_avail_deferred = false;
+      switch (hk_stamp_oq_available(cmd, cs)) {
+      case HK_OQ_STAMPED:
+         hk_drop_oq_stream(cmd, cs);
+         break;
+      case HK_OQ_MOVABLE:
+         /* The later stream's render wait covers this stream's render. */
+         if (movable && movable->sync.dep[HK_SYNC_VDM].cut->sync.seq >=
+                           cs->sync.dep[HK_SYNC_VDM].cut->sync.seq) {
+            util_dynarray_append_dynarray(&movable->imm_writes, &cs->imm_writes);
+            hk_drop_oq_stream(cmd, cs);
+            break;
+         }
+         if (movable)
+            hk_dispatch_imm_writes(cmd, movable);
+         movable = cs;
+         break;
+      case HK_OQ_KEEP:
+         hk_dispatch_imm_writes(cmd, cs);
+         break;
+      }
+   }
+
+   if (movable)
+      hk_dispatch_imm_writes(cmd, movable);
+}
+
+void
+hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
+{
+   /* The reverse order is qualified on G17P; the other native AGX3 chips keep
+    * recording order until it is measured there. */
+   if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P)
+      hk_resolve_oq_reverse(cmd);
+   else
+      hk_resolve_oq_forward(cmd);
 }
