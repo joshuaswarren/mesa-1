@@ -563,10 +563,10 @@ vk_accel_struct_cmd_begin_debug_marker_formatted(VkCommandBuffer commandBuffer, 
    va_list ap;
    va_start(ap, format);
    char *name = NULL;
-   vasprintf(&name, format, ap);
+   int ret = vasprintf(&name, format, ap);
    va_end(ap);
 
-   if (!name)
+   if (ret < 0)
       return;
 
    VkDebugMarkerMarkerInfoEXT marker_info = {
@@ -726,9 +726,12 @@ vk_cmd_build_as_leaves(VkCommandBuffer commandBuffer, struct vk_device *device,
 {
    struct vk_acceleration_structure_build_state leaves = *state;
    leaves.config.internal_type = VK_INTERNAL_BUILD_TYPE_LBVH;
+   /* Only the update path calls this: the retained topology needs leaf nodes
+    * and the active count, not the scene bounds that feed Morton codes. */
+   leaves.config.build_flags |= VK_BUILD_FLAG_NO_HEADER_BOUNDS;
    leaves.leaf_node_count = 0;
    return build_leaves(commandBuffer, device, meta, args, &leaves, 1,
-                       state->config.build_flags & VK_LEAF_BUILD_FLAGS);
+                       leaves.config.build_flags & VK_LEAF_BUILD_FLAGS);
 }
 
 static VkResult

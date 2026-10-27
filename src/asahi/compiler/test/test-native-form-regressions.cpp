@@ -568,8 +568,9 @@ TEST(NativeForms, PhiEdgeAffinityRespectsTileBankAndLiveValues)
       ASSERT_FALSE(b->shader->ra_failed);
       EXPECT_LT(use->src[0].value, agx3_tile_store_bank(b->shader));
       EXPECT_EQ(use->src[0].value, mode == 0 ? 10u : 1u);
-      if (held_use)
+      if (held_use) {
          EXPECT_EQ(held_use->src[0].value, 10u);
+      }
       unsigned copies = 0;
       agx_foreach_instr_global(b->shader, I)
          copies += I->op == AGX_OPCODE_MOV;
@@ -1030,8 +1031,17 @@ TEST(NativeForms, ImageStoreUsesDataTypeAcrossChipsAndFormats)
       {nir_type_float32, PIPE_FORMAT_R32G32B32A32_FLOAT},
       {nir_type_invalid, PIPE_FORMAT_R32_UINT},
    };
+   agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   /* The store is the program's last instruction before its end. Code around
+    * it may differ by chip (G17P runs its own uniform-copy CSE, which changes
+    * register allocation), so compare only the store. Integer and float data
+    * each select one encoding whatever the format; a typeless store takes its
+    * type from the format. */
+   std::vector<uint8_t> reference[2];
    for (const auto &c : cases) {
-      std::vector<uint8_t> reference;
+      const bool is_float =
+         nir_alu_type_get_base_type(c.type) == nir_type_float;
       for (agx_chip chip : {AGX_CHIP_G17P, AGX_CHIP_G16G}) {
          SCOPED_TRACE(::testing::Message() << chip << " " << c.type << " "
                                           << c.format);
@@ -1055,31 +1065,21 @@ TEST(NativeForms, ImageStoreUsesDataTypeAcrossChipsAndFormats)
          ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
          ASSERT_GT(part.info.binary_size, 0u);
          const uint8_t *code = static_cast<const uint8_t *>(part.binary);
-         /* Compare the image-write packet, not unrelated register copies
-          * and scheduling in the two chip profiles. imgwci.ep0 is 16 bytes;
-          * its fixed opcode bytes are pinned by agx3_tex_encode_image_write_2d.
-          * This small shader must contain exactly one such instruction. */
-         std::vector<uint8_t> write;
-         for (unsigned i = 0; i + AGX3_IMAGE_WRITE_LENGTH <= part.info.binary_size;
-              i += 2) {
-            if (code[i] == 0xd7 && code[i + 2] == 0x54) {
-               ASSERT_TRUE(write.empty());
-               write.assign(code + i, code + i + AGX3_IMAGE_WRITE_LENGTH);
-            }
-         }
-         ASSERT_EQ(write.size(), AGX3_IMAGE_WRITE_LENGTH);
-         /* f70 is the float-versus-integer data bit, encoded at byte 13 bit 5.
-          * Check the expected type independently of cross-chip equivalence. */
-         EXPECT_EQ((write[13] >> 5) & 1,
-                   nir_alu_type_get_base_type(c.type) == nir_type_float);
-         if (reference.empty())
-            reference = write;
+         const unsigned size = part.info.binary_size;
+         ASSERT_GE(size, AGX3_IMAGE_WRITE_LENGTH + end.length);
+         EXPECT_EQ(memcmp(code + size - end.length, end.bytes, end.length), 0);
+         const uint8_t *write =
+            code + size - end.length - AGX3_IMAGE_WRITE_LENGTH;
+         std::vector<uint8_t> encoded(write, write + AGX3_IMAGE_WRITE_LENGTH);
+         if (reference[is_float].empty())
+            reference[is_float] = encoded;
          else
-            EXPECT_EQ(write, reference);
+            EXPECT_EQ(encoded, reference[is_float]);
          free(part.binary);
          ralloc_free(b.shader);
       }
    }
+   EXPECT_NE(reference[0], reference[1]);
 }
 
 TEST(NativeForms, VertexImageLoadRegisterLod)
@@ -1729,10 +1729,12 @@ TEST(NativeForms, ScalarCubeAllocationPreservesSharedInputs)
             EXPECT_TRUE(I->dest[0].value + 8 <= keep->src[0].value ||
                         I->dest[0].value >= keep->src[0].value + 2);
          }
-         if (mode == 2)
+         if (mode == 2) {
             EXPECT_EQ(I->src[6].value, I->src[7].value);
-         if (mode == 0 || mode == 4)
+         }
+         if (mode == 0 || mode == 4) {
             EXPECT_EQ(I->dest[0].value, 8u);
+         }
       }
       EXPECT_EQ(samples, mode == 3 ? 2u : 1u);
       ralloc_free(mem);
@@ -2432,8 +2434,9 @@ TEST(NativeForms, TextureFmaStagingAdmission)
       const bool supported =
          invalid == 0 || invalid == 9 || invalid == 12 || invalid == 13;
       EXPECT_FALSE(sample->agx3_tex_coords_staged);
-      if (publication)
+      if (publication) {
          EXPECT_EQ(publication->agx3_tex_coords_staged, supported);
+      }
       if (supported) {
          ASSERT_NE(publication, nullptr);
          EXPECT_TRUE(first->agx3_tex_coord_start);
@@ -2516,8 +2519,9 @@ TEST(NativeForms, TextureFmaStagingPreservesDemand)
    unsigned index = 0;
    agx_foreach_instr_global(b->shader, I) {
       EXPECT_FALSE(I->agx3_tex_coords_staged);
-      if (I->op == AGX_OPCODE_FFMA)
+      if (I->op == AGX_OPCODE_FFMA) {
          EXPECT_EQ(I->dest[0].type, AGX_INDEX_NORMAL);
+      }
       if (agx_is_texture_publication(I)) {
          EXPECT_EQ(I->src[0].type, AGX_INDEX_NORMAL);
          EXPECT_EQ(I->src[1].type, AGX_INDEX_NORMAL);
@@ -2571,8 +2575,9 @@ TEST(NativeForms, MultipleTextureFmaPublications)
    unsigned stages = 0, publications = 0;
    agx_foreach_instr_global(b->shader, I) {
       stages += I->agx3_tex_coord_stage;
-      if (I->agx3_tex_coord_stage)
+      if (I->agx3_tex_coord_stage) {
          EXPECT_TRUE(agx_is_null(I->dest[0]));
+      }
       if (agx_is_texture_publication(I)) {
          publications++;
          EXPECT_TRUE(I->agx3_tex_coords_staged);
@@ -2631,8 +2636,9 @@ TEST(NativeForms, TextureFmaPublicationPrecedesEarlierSamples)
          EXPECT_TRUE(I->agx3_tex_coords_staged);
          published = true;
       }
-      if (I == samples[0])
+      if (I == samples[0]) {
          EXPECT_TRUE(published);
+      }
    }
    EXPECT_TRUE(published);
    ralloc_free(mem);
@@ -3312,8 +3318,9 @@ TEST(LegacySamplers, UnpromotedIndexNeedsHeap)
          agx_shader_part part = {};
          bool ok = agx_compile_shader_nir(b.shader, &key, &part);
          EXPECT_TRUE(ok);
-         if (ok)
+         if (ok) {
             EXPECT_TRUE(part.info.uses_sampler_heap);
+         }
          free(part.binary);
          ralloc_free(b.shader);
       }

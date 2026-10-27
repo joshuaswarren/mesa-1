@@ -103,15 +103,16 @@ publish_metadata(hk_agx3_envelope_job job, uint64_t image_bytes)
    live.retained_offset = 0ul;
    live.retained_bytes = 0ul;
    if (args.keep_retained != 0u) {
-      /* In-place UPDATE did not re-save IR at the build-bound offset. */
+      /* An in-place update keeps the retained jobs where they are. */
       libagx_gen1_as_metadata previous =
          DEREF(REF(libagx_gen1_as_metadata)(args.metadata));
       live.retained_offset = previous.retained_offset;
       live.retained_bytes = previous.retained_bytes;
    } else if ((args.build_flags & 1u) != 0u) { /* Vulkan ALLOW_UPDATE */
+      /* The retained jobs (refit save, or an update's copy of them). */
       live.retained_offset = args.retained_offset;
-      live.retained_bytes = uint64_t(SIZEOF(vk_ir_header)) +
-         uint64_t(DEREF(args.ir_header).ir_internal_node_count) * uint64_t(SIZEOF(vk_ir_box_node));
+      live.retained_bytes =
+         uint64_t(HK_AGX3_RETAINED_BYTES(job.node_count, job.leaf_bound));
    }
    live.storage_bytes = max(image_bytes, live.retained_offset + live.retained_bytes);
    live.build_flags = args.build_flags;
@@ -144,7 +145,8 @@ clear_instance_pointers(uint job_index, uint lane)
 void
 main()
 {
-   for (uint i = gl_WorkGroupID.x; i < args.job_count; i += gl_NumWorkGroups.x)
+   for (uint i = gl_WorkGroupID.x; i < args.job_count && args.refit == 0u;
+        i += gl_NumWorkGroups.x)
       clear_instance_pointers(i, gl_LocalInvocationID.x);
    uint id = gl_GlobalInvocationID.x;
    if (id >= args.job_count)
@@ -157,9 +159,12 @@ main()
          DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_RANGE;
          return;
       }
-      for (uint i = 0; i < 28; ++i)
-         store32(job.output_bvh + 64ul + uint64_t(i) * 4ul,
-                 i >= 4 && i < 10 ? 0x7fc00000u : 0u);
+      for (uint i = 0; i < 48; ++i)
+         store32(job.output_bvh + uint64_t(i) * 4ul,
+                 i >= 20 && i < 26 ? 0x7fc00000u : 0u);
+      store64(job.output_bvh + 144ul, job.output_bvh);
+      store32(job.output_bvh + 176ul,
+              job.resource_id != 0 ? job.resource_id : 1);
       publish_metadata(job, 192ul);
       DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_SUCCESS;
       return;

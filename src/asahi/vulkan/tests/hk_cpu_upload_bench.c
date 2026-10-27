@@ -192,7 +192,7 @@ reuse_correctness(struct fixture *f)
    struct hk_descriptor_state *cd = &cmd->state.cs.descriptors;
    const size_t small_B = 64;
    cs->variants[0].root_descriptor_size = small_B;
-   cd->root.push[0] = 0x12345678;
+   cd->root.push[0] = 0x78;
    uint64_t small = hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_COMPUTE);
    CHECK(small != compute && cd->uploaded_root_size == small_B);
    CHECK(memcmp(cd->uploaded_root.cpu, &cd->root, small_B) == 0);

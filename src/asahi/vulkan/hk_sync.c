@@ -1053,12 +1053,32 @@ hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
  * earlier work orders that command's completion: for a render, its fragment
  * half alone. */
 static void
-stamp_wait(struct hk_cs *cs, const struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
+stamp_wait(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+           const struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
 {
-   if (cs->type == HK_CS_CDM)
-      hk_sync_stream_wait(cs, dep);
-   else
+   if (cs->type == HK_CS_CDM) {
+      const struct hk_device *dev = hk_cmd_buffer_device(cmd);
+      if (agx_native_graphics(&dev->dev) && dev->dev.chip == AGX_CHIP_G17P &&
+          (dev->dev.params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS)) {
+         /* The logical compute queue already orders these GPU commands by
+          * their mandatory kick parents. Adding the timestamp's same-CDM
+          * prefix also waits for earlier CPU timestamp publication, which
+          * serializes otherwise independent timed dispatches. Keep genuine
+          * query-memory requirements already present on the stream, and the
+          * timestamp's cross-engine scope, unchanged. Exact priors also carry
+          * standalone barrier requirements across submissions; legacy kernels
+          * retain the original conservative timestamp prefix.
+          */
+         struct hk_sync_dep timestamp_dep[HK_SYNC_NUM_SQ];
+         memcpy(timestamp_dep, dep, sizeof(timestamp_dep));
+         timestamp_dep[HK_SYNC_CDM] = (struct hk_sync_dep){0};
+         hk_sync_stream_wait(cs, timestamp_dep);
+      } else {
+         hk_sync_stream_wait(cs, dep);
+      }
+   } else {
       stream_wait_frag(cs, dep);
+   }
 }
 
 static struct hk_cs *
@@ -1141,7 +1161,7 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
              dep[sq].cut->sync.seq > gfx->sync.seq)
             dep[sq].cut = latest_before(cmd, sq, gfx);
       }
-      stamp_wait(gfx, dep);
+      stamp_wait(cmd, gfx, dep);
 
       if (gfx->timestamp.end.handle) {
          libagx_copy_timestamp(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_POSTGFX,
@@ -1166,7 +1186,7 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
 
    if (tail && !tail->timestamp.end.handle) {
       tail->timestamp.end = req;
-      stamp_wait(tail, dep);
+      stamp_wait(cmd, tail, dep);
 
       /* Later compute would move the stamp past itself; keep the stream
        * boundary so the stamp stays at the recorded position. */

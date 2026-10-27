@@ -427,6 +427,9 @@ hk_pool_alloc_from_slow(struct hk_cmd_buffer *cmd,
       vk_command_buffer_set_error(&cmd->vk, result);
       return (struct agx_ptr){0};
    }
+   bo->stream_only = type == HK_CMD_BO_MAIN &&
+                     uploader == &cmd->uploader.streams;
+
    /* Pick whichever of the current upload BO and the new BO will have more
     * room left to be the BO for the next upload.  If our upload size is
     * bigger than the old offset, we're better off burning the whole new
@@ -750,6 +753,35 @@ hk_cmd_buffer_publish_root_uploads(struct hk_cmd_buffer *cmd)
    }
 }
 
+/* A dedicated stream BO can reserve much more space than the stream wrote.
+ * For an unlinked stream, its current pointer and end delimit the written
+ * records plus the existing prefetch padding. Removed inline-merged streams
+ * are no longer referenced. Linked layouts retain the conservative path. */
+static bool
+hk_cmd_bo_clean_unlinked_streams(struct hk_cmd_buffer *cmd,
+                                 const struct hk_cmd_bo *bo)
+{
+   const uintptr_t base = (uintptr_t)bo->map;
+   if (bo->bo->size > UINTPTR_MAX - base)
+      return false;
+   const uintptr_t limit = base + bo->bo->size;
+
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      const uintptr_t start = (uintptr_t)cs->start;
+      if (start < base || start >= limit)
+         continue;
+      const uintptr_t current = (uintptr_t)cs->current;
+      const uintptr_t end = (uintptr_t)cs->end;
+      if (current < start || current > end || end > limit)
+         return false;
+      const size_t padding = MIN2(end - current, HK_CS_SPACE_PADDING);
+      const size_t bytes = current - start + padding;
+      if (bytes)
+         util_flush_range_no_fence((void *)start, bytes);
+   }
+   return true;
+}
+
 /* Clean everything recording wrote to CPU-cached command memory (see
  * hk_g17p_cached_cmd_memory()); hk_cmd_buffer_publish_root_uploads() and
  * queue submission fence the cleans. */
@@ -760,8 +792,13 @@ hk_cmd_buffer_publish_cached_uploads(struct hk_cmd_buffer *cmd)
    if (!hk_g17p_cached_cmd_memory(&dev->dev))
       return;
 
+   bool linked_stream = false;
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node)
+      linked_stream |= cs->stream_linked;
+
    /* An uploader's current BO is written up to its offset; a BO it moved
-    * on from may have been written anywhere. */
+    * on from may have been written anywhere. Dedicated unlinked stream BOs
+    * instead have exact written extents, independent of reserved capacity. */
    const struct hk_uploader *current[] = {
       &cmd->uploader.main, &cmd->uploader.streams, &cmd->uploader.usc,
    };
@@ -769,6 +806,9 @@ hk_cmd_buffer_publish_cached_uploads(struct hk_cmd_buffer *cmd)
       struct list_head *bos =
          l == 0 ? &cmd->uploader.main.bos : &cmd->uploader.usc.bos;
       list_for_each_entry(struct hk_cmd_bo, bo, bos, link) {
+         if (bo->stream_only && !linked_stream &&
+             hk_cmd_bo_clean_unlinked_streams(cmd, bo))
+            continue;
          size_t size = bo->bo->size;
          for (unsigned u = 0; u < ARRAY_SIZE(current); ++u) {
             if (current[u]->map == bo->map)
@@ -798,6 +838,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    hk_sync_flush_pending_timestamp(cmd);
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
+   hk_resolve_deferred_oq_available(cmd);
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    if (likely(!(dev->dev.debug & AGX_DBG_NOMERGE))) {
@@ -1911,10 +1952,9 @@ hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
  * (agx_shader_key::g17p_dma_static_set_mask), so its contents cannot change
  * before the launch runs. An unbound set reads as a null buffer. */
 static bool
-hk_g17p_dma_buffer(const struct hk_cmd_buffer *cmd, int set,
-                   unsigned descriptor_B, struct hk_buffer_address *buffer)
+hk_g17p_dma_buffer_in(const struct hk_descriptor_state *desc, int set,
+                      unsigned descriptor_B, struct hk_buffer_address *buffer)
 {
-   const struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    const void *table;
    size_t table_B;
    if (set < 0) {
@@ -1939,6 +1979,122 @@ hk_g17p_dma_buffer(const struct hk_cmd_buffer *cmd, int set,
    if (descriptor_B + sizeof(*buffer) > table_B)
       return false;
    memcpy(buffer, (const uint8_t *)table + descriptor_B, sizeof(*buffer));
+   return true;
+}
+
+static bool
+hk_g17p_dma_buffer(const struct hk_cmd_buffer *cmd, int set,
+                   unsigned descriptor_B, struct hk_buffer_address *buffer)
+{
+   return hk_g17p_dma_buffer_in(&cmd->state.gfx.descriptors, set, descriptor_B,
+                                buffer);
+}
+
+/*
+ * Publish the uniform DMA spans of `s` (agx_shader_info::agx3_uniform_dma)
+ * after the *count_io ranges already collected: root-relative spans from
+ * root_ptr, set-pointer spans from the set addresses of `desc`, buffer spans
+ * from the root's or a static set's buffer descriptor (zero page past the
+ * buffer's end). Shared by graphics stages and compute kernels; the launch
+ * reads the memory when it runs, as the loads did. sources may be NULL.
+ */
+bool
+hk_g17p_dma_ranges(const struct hk_descriptor_state *desc,
+                   const struct hk_shader *s, uint64_t root_ptr,
+                   struct agx3_ioto_uniform_range *ranges, size_t max_ranges,
+                   size_t *count_io, uint8_t *sources)
+{
+   uint8_t ignored_sources[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   if (!sources)
+      sources = ignored_sources;
+   if (max_ranges > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
+      return false;
+   const unsigned root_uniform = s->info.agx3_root_uniform;
+   for (unsigned i = 0; i < s->b.info.agx3_uniform_dma_count; ++i) {
+      const struct agx3_uniform_dma_span *span =
+         &s->b.info.agx3_uniform_dma[i];
+      const unsigned pointer = span->pointer;
+      const int set = pointer == root_uniform ? -1
+                      : pointer >= root_uniform + 4 &&
+                            (pointer - root_uniform - 4) % 4 == 0 &&
+                            (pointer - root_uniform - 4) / 4 < HK_MAX_SETS
+                         ? (int)(pointer - root_uniform - 4) / 4
+                         : -2;
+      if (*count_io >= max_ranges || set == -2 ||
+          (span->dest & 1) || (span->halfs & 1) || (span->offset_B & 3))
+         return false;
+
+      if (span->source == AGX3_UNIFORM_DMA_BUFFER) {
+         struct hk_buffer_address buffer;
+         if (!hk_g17p_dma_buffer_in(desc, set, span->descriptor_B, &buffer))
+            return false;
+
+         /* Dwords below the size rounded up to 4 bytes come from the buffer,
+          * later ones from the zero page (AGX3_UNIFORM_DMA_BUFFER). A buffer
+          * holding none of the span, such as a null one, is all zero page.
+          * Both addresses come from the root's or a static set's contents.
+          * A launch replays the buffer address of a span the buffer covers
+          * (hk_g17p_launch_replay()); a split or zero-page span depends on
+          * the buffer's size, so it is collected again for every draw. */
+         const uint64_t size_B = ALIGN_POT((uint64_t)buffer.size, 4);
+         const unsigned buffer_halfs =
+            size_B > span->offset_B
+               ? MIN2(span->halfs, (size_B - span->offset_B) / 2)
+               : 0;
+         if (buffer_halfs) {
+            const uint64_t address = buffer.base_addr + span->offset_B;
+            if (address & 3)
+               return false;
+            sources[*count_io] = buffer_halfs == span->halfs
+                                ? HK_G17P_RANGE_SOURCE_BUFFER
+                                : HK_G17P_RANGE_SOURCE_UPLOADED;
+            ranges[(*count_io)++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = span->dest,
+               .size_halfs = buffer_halfs,
+               .address = address,
+            };
+         }
+         if (buffer_halfs < span->halfs) {
+            if (*count_io >= max_ranges)
+               return false;
+            sources[*count_io] = HK_G17P_RANGE_SOURCE_UPLOADED;
+            ranges[(*count_io)++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = span->dest + buffer_halfs,
+               .size_halfs = span->halfs - buffer_halfs,
+               .address = AGX_ZERO_PAGE_ADDRESS,
+            };
+         }
+         continue;
+      }
+
+      uint64_t base;
+      if (set < 0) {
+         base = root_ptr;
+         if (!base)
+            return false;
+      } else {
+         base = desc->root.sets[set];
+      }
+      /* A set the draw never binds is only read on statically dead paths
+       * (reading it is invalid usage); give the launch a mapped zero page
+       * instead of a fault. */
+      const uint64_t address =
+         base ? base + span->offset_B : AGX_ZERO_PAGE_ADDRESS;
+      if (address & 3)
+         return false;
+
+      /* A root-relative span follows the root, a set-pointer span the set's
+       * address (hk_g17p_dma_set_base(), which every reuse of a published
+       * launcher still compares). */
+      sources[*count_io] = set < 0 ? HK_G17P_RANGE_SOURCE_ROOT
+                               : HK_G17P_RANGE_SOURCE_SET;
+      ranges[(*count_io)++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = span->dest,
+         .size_halfs = span->halfs,
+         .address = address,
+      };
+   }
+
    return true;
 }
 
@@ -2235,90 +2391,9 @@ hk_g17p_graphics_uniform_ranges(
     * uniform spans (agx_shader_info::agx3_uniform_dma). Publish each from the
     * address this draw gives it; the launch reads the memory when it runs,
     * as the loads did. */
-   for (unsigned i = 0; i < s->b.info.agx3_uniform_dma_count; ++i) {
-      const struct agx3_uniform_dma_span *span =
-         &s->b.info.agx3_uniform_dma[i];
-      const unsigned pointer = span->pointer;
-      const int set = pointer == root_uniform ? -1
-                      : pointer >= root_uniform + 4 &&
-                            (pointer - root_uniform - 4) % 4 == 0 &&
-                            (pointer - root_uniform - 4) / 4 < HK_MAX_SETS
-                         ? (int)(pointer - root_uniform - 4) / 4
-                         : -2;
-      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || set == -2 ||
-          (span->dest & 1) || (span->halfs & 1) || (span->offset_B & 3))
-         return hk_g17p_graphics_ranges_refused(range_count, count);
-
-      if (span->source == AGX3_UNIFORM_DMA_BUFFER) {
-         struct hk_buffer_address buffer;
-         if (!hk_g17p_dma_buffer(cmd, set, span->descriptor_B, &buffer))
-            return hk_g17p_graphics_ranges_refused(range_count, count);
-
-         /* Dwords below the size rounded up to 4 bytes come from the buffer,
-          * later ones from the zero page (AGX3_UNIFORM_DMA_BUFFER). A buffer
-          * holding none of the span, such as a null one, is all zero page.
-          * Both addresses come from the root's or a static set's contents.
-          * A launch replays the buffer address of a span the buffer covers
-          * (hk_g17p_launch_replay()); a split or zero-page span depends on
-          * the buffer's size, so it is collected again for every draw. */
-         const uint64_t size_B = ALIGN_POT((uint64_t)buffer.size, 4);
-         const unsigned buffer_halfs =
-            size_B > span->offset_B
-               ? MIN2(span->halfs, (size_B - span->offset_B) / 2)
-               : 0;
-         if (buffer_halfs) {
-            const uint64_t address = buffer.base_addr + span->offset_B;
-            if (address & 3)
-               return hk_g17p_graphics_ranges_refused(range_count, count);
-            sources[count] = buffer_halfs == span->halfs
-                                ? HK_G17P_RANGE_SOURCE_BUFFER
-                                : HK_G17P_RANGE_SOURCE_UPLOADED;
-            ranges[count++] = (struct agx3_ioto_uniform_range){
-               .start_halfs = span->dest,
-               .size_halfs = buffer_halfs,
-               .address = address,
-            };
-         }
-         if (buffer_halfs < span->halfs) {
-            if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
-               return hk_g17p_graphics_ranges_refused(range_count, count);
-            sources[count] = HK_G17P_RANGE_SOURCE_UPLOADED;
-            ranges[count++] = (struct agx3_ioto_uniform_range){
-               .start_halfs = span->dest + buffer_halfs,
-               .size_halfs = span->halfs - buffer_halfs,
-               .address = AGX_ZERO_PAGE_ADDRESS,
-            };
-         }
-         continue;
-      }
-
-      uint64_t base;
-      if (set < 0) {
-         base = root_ptr;
-         if (!base)
-            return hk_g17p_graphics_ranges_refused(range_count, count);
-      } else {
-         base = cmd->state.gfx.descriptors.root.sets[set];
-      }
-      /* A set the draw never binds is only read on statically dead paths
-       * (reading it is invalid usage); give the launch a mapped zero page
-       * instead of a fault. */
-      const uint64_t address =
-         base ? base + span->offset_B : AGX_ZERO_PAGE_ADDRESS;
-      if (address & 3)
-         return hk_g17p_graphics_ranges_refused(range_count, count);
-
-      /* A root-relative span follows the root, a set-pointer span the set's
-       * address (hk_g17p_dma_set_base(), which every reuse of a published
-       * launcher still compares). */
-      sources[count] = set < 0 ? HK_G17P_RANGE_SOURCE_ROOT
-                               : HK_G17P_RANGE_SOURCE_SET;
-      ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = span->dest,
-         .size_halfs = span->halfs,
-         .address = address,
-      };
-   }
+   if (!hk_g17p_dma_ranges(&cmd->state.gfx.descriptors, s, root_ptr, ranges,
+                           HK_AGX3_G17P_GRAPHICS_MAX_RANGES, &count, sources))
+      return hk_g17p_graphics_ranges_refused(range_count, count);
 
    *range_count = count;
    return count <= HK_AGX3_G17P_GRAPHICS_MAX_RANGES;
@@ -3110,6 +3185,10 @@ uint64_t
 hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                     struct hk_linked_shader *linked)
 {
+   /* An inline-blend program with its own constant program launches with
+    * its own uniform layout (hk_linked_shader::g17p_layout). */
+   if (linked && linked->g17p_layout)
+      s = linked->g17p_layout;
    return hk_upload_usc_words_internal(cmd, s, linked);
 }
 

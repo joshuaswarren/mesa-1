@@ -7341,16 +7341,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /*
     * Rewrites a uniform-address atomic into "one lane of the subgroup performs
     * the whole operation", which needs ACTIVE_THREAD_INDEX_IN_SUBGROUP and
-    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. Their AGX3 numbers (SR 34/36) are now
-    * witnessed and grounded in agx3_map_sr(), but the optimized form is kept
-    * off on AGX3 until a CTS campaign validates it; before the witness every
-    * shader containing a uniform-address atomic failed to compile.
-    *
-    * Skipping the optimization keeps atomics CORRECT -- each lane performs its
-    * own atomic, which is what the unoptimized program means -- at the cost of
-    * one atomic per lane instead of one per subgroup on uniform addresses.
-    * Re-enable once those two SR numbers are witnessed rather than guessed; a
-    * wrong SR number would silently elect the wrong lane.
+    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. On AGX3 the caller enables it only in
+    * the stages where the packer admits those (SR 34/36). Skipping it keeps
+    * atomics correct, at one atomic per lane instead of one per subgroup.
     */
    NIR_PASS(_, nir, agx_nir_lower_atomics, byte_indices);
 
@@ -9214,16 +9207,19 @@ static bool
 agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
                          struct util_dynarray *binary,
-                         struct agx_shader_info *out, unsigned *offset_out)
+                         struct agx_shader_info *out, unsigned *offset_out,
+                         unsigned ra_budget_cut)
 {
    const unsigned initial_binary_size = binary->size;
+   const struct agx_shader_info initial_out = *out;
+   /* A retry reuses the NIR these passes already rewrote. */
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       !impl->function->is_preamble)
+       !impl->function->is_preamble && !ra_budget_cut)
       NIR_PASS(_, nir, agx_nir_fragment_output_temporaries);
 
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        nir->info.stage == MESA_SHADER_VERTEX && !impl->function->is_preamble &&
-       exec_list_length(&impl->body) > 1)
+       exec_list_length(&impl->body) > 1 && !ra_budget_cut)
       NIR_PASS(_, nir, nir_move_output_stores_to_end);
 
    nir_index_blocks(impl);
@@ -9231,6 +9227,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    agx_context *ctx = rzalloc(NULL, agx_context);
    ctx->nir = nir;
+   ctx->ra_budget_cut = ra_budget_cut;
    ctx->is_preamble = impl->function->is_preamble;
    if (ctx->is_preamble)
       out->agx3_preamble_static_spill_version = 0;
@@ -9454,6 +9451,17 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    const bool imports_only_before_ra = agx3_cprog_spill_provenance(ctx);
    AGX_PASS(ctx, agx_ra);
    if (ctx->ra_failed) {
+      /* Spilling only targets total demand; pinned values can still leave the
+       * shuffle no room. Recompile with an ever smaller spill budget. */
+      if (key->has_scratch && !key->is_helper && ra_budget_cut < 64) {
+         ralloc_free(ctx);
+         binary->size = initial_binary_size;
+         /* Constant promotion and others accumulate into out. */
+         *out = initial_out;
+         return agx_compile_function_nir(nir, impl, key, binary, out,
+                                         offset_out,
+                                         ra_budget_cut ? ra_budget_cut * 2 : 16);
+      }
       agx_set_refusal(ctx, "register allocation found no legal placement",
                       __LINE__);
       ralloc_free(ctx);
@@ -11816,7 +11824,17 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
          NIR_PASS(_, nir, agx_nir_lower_imul64);
    }
 
-   const bool uniform_atomics = !is_agx3;
+   /* The AGX3 packer admits SR 34/36 only on AGX3B and in these stages
+    * (agx3_pack_binary.c, GET_SR_COVERAGE); a geometry or tessellation
+    * evaluation shader with a uniform-address atomic would fail to compile.
+    */
+   const mesa_shader_stage stage = nir->info.stage;
+   const bool uniform_atomics =
+      !is_agx3 ||
+      (is_g17p && (stage == MESA_SHADER_COMPUTE ||
+                   stage == MESA_SHADER_VERTEX ||
+                   stage == MESA_SHADER_TESS_CTRL ||
+                   stage == MESA_SHADER_FRAGMENT));
 
    /* Apple's G17P loops are a
     * guard plus a bottom-tested body (fs/cs-apple.bin: the backedge target
@@ -11937,7 +11955,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    nir_foreach_function_with_impl(func, impl, nir) {
       unsigned offset;
       if (!agx_compile_function_nir(nir, impl, key, &binary, &out->info,
-                                    &offset)) {
+                                    &offset, 0)) {
          util_dynarray_fini(&binary);
          memset(out, 0, sizeof(*out));
          return false;

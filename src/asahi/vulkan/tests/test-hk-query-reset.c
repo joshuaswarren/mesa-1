@@ -92,6 +92,14 @@ hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    abort();
 }
 
+bool
+hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
 void
 hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {

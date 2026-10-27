@@ -457,6 +457,12 @@ vk_prefix_scan(uvec4 ballot, REF(vk_prefix_scan_partition) partitions, uint32_t 
 #define VK_TEST_BUILD_FLAG_64BIT_KEYS ((BUILD_FLAGS & VK_BUILD_FLAG_64BIT_KEYS) != 0)
 #endif
 
+#if ((VK_USED_BUILD_FLAGS & VK_BUILD_FLAG_NO_HEADER_BOUNDS) != 0)
+#define VK_TEST_BUILD_FLAG_NO_HEADER_BOUNDS ((BUILD_FLAGS & VK_BUILD_FLAG_NO_HEADER_BOUNDS) != 0)
+#else
+#define VK_TEST_BUILD_FLAG_NO_HEADER_BOUNDS false
+#endif
+
 REF(vk_ir_triangle_node_quad)
 vk_ir_triangle_node_get_quad_ref(REF(vk_ir_triangle_node) node)
 {

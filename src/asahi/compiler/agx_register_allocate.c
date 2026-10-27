@@ -433,6 +433,22 @@ ssa_has_bank_constraint(const struct ra_ctx *rctx, unsigned ssa)
           BITSET_TEST(rctx->high_gpr, ssa);
 }
 
+/* The interval a bank-constrained value may live in: the same bounds
+ * dest_limit() and dest_minimum() gave it when it was defined. */
+static void
+ssa_bank_range(const struct ra_ctx *rctx, unsigned ssa, unsigned *floor,
+               unsigned *limit)
+{
+   *floor = BITSET_TEST(rctx->high_gpr, ssa) ? 16 : 0;
+   *limit = ~0u;
+   if (BITSET_TEST(rctx->low_gpr, ssa))
+      *limit = MIN2(*limit, rctx->tile_gpr_limit);
+   if (BITSET_TEST(rctx->texture_gpr, ssa))
+      *limit = MIN2(*limit, 128);
+   if (BITSET_TEST(rctx->log2_gpr, ssa))
+      *limit = MIN2(*limit, 192);
+}
+
 static bool
 region_has_bank_constrained_value(const struct ra_ctx *rctx, unsigned base,
                                   unsigned size)
@@ -471,8 +487,9 @@ region_has_bank_constrained_value(const struct ra_ctx *rctx, unsigned base,
  * Postcondition: at least one register in the returned region is already free.
  */
 static unsigned
-find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
-                          BITSET_WORD *already_evicted, unsigned cap)
+find_best_region_to_evict_impl(struct ra_ctx *rctx, unsigned size,
+                               BITSET_WORD *already_evicted, unsigned cap,
+                               unsigned floor, bool honor_banks, bool strict)
 {
    assert(util_is_power_of_two_or_zero(size) && "precondition");
    assert((rctx->bound[RA_GPR] % size) == 0 &&
@@ -500,7 +517,7 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
        * descending. So, we do not need extra registers to handle "single
        * region" unevictability.
        */
-      if (base < reserved_size(rctx->shader))
+      if (base < reserved_size(rctx->shader) || base < floor)
          continue;
 
       /* Do not evict the same register multiple times. It's not necessary since
@@ -512,7 +529,7 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
       /* Keep constrained values in their assigned bank across live-range
        * splitting. Otherwise a later destination can relocate a valid TEX
        * coordinate above the seven-bit COPY source range. */
-      if (region_has_bank_constrained_value(rctx, base, size))
+      if (honor_banks && region_has_bank_constrained_value(rctx, base, size))
          continue;
 
       /* Estimate the number of moves required if we pick this region */
@@ -543,12 +560,48 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
     * narrows the file so a half victim's relocation stays inside the seven-bit
     * COPY destination.  If nothing fits down there, fall back to the whole
     * file rather than failing allocation outright. */
-   if (best_base == ~0u && bound < rctx->bound[RA_GPR])
-      return find_best_region_to_evict(rctx, size, already_evicted, ~0u);
+   if (best_base == ~0u && bound < rctx->bound[RA_GPR] && !strict)
+      return find_best_region_to_evict_impl(rctx, size, already_evicted, ~0u,
+                                            floor, honor_banks, strict);
 
-   assert(best_base < rctx->bound[RA_GPR] &&
-          "not enough registers (should have spilled already)");
    return best_base;
+}
+
+/*
+ * `cap` and `floor` bound where the region may start; with `strict` they are
+ * requirements (a bank-constrained value's interval), otherwise a preference.
+ */
+static unsigned
+find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
+                          BITSET_WORD *already_evicted, unsigned cap,
+                          unsigned floor, bool strict)
+{
+   /* Prefer not to disturb bank-constrained values. */
+   unsigned base = find_best_region_to_evict_impl(
+      rctx, size, already_evicted, cap, floor, true, strict);
+
+   /* They are not immovable, though: the free halves around them can all be
+    * unreachable even though demand fits the file (CS2 fills G17P's low bank
+    * with alternating pinned 32-bit scalars and the high bank solid). Evict
+    * them too; the caller re-places each one inside its own bank. */
+   if (base == ~0u) {
+      base = find_best_region_to_evict_impl(rctx, size, already_evicted, cap,
+                                            floor, false, strict);
+   }
+
+   /* Still nothing legal: finish allocation consistently anywhere and refuse
+    * the result, so agx_compile_function_nir() recompiles with spill headroom.
+    * Returning ~0 here used to index the used-register bitset half a gigabyte
+    * out of bounds in release builds. */
+   if (base == ~0u) {
+      rctx->shader->ra_failed = true;
+      base = find_best_region_to_evict_impl(rctx, size, already_evicted, ~0u, 0,
+                                            false, false);
+   }
+
+   assert(base < rctx->bound[RA_GPR] &&
+          "not enough registers (should have spilled already)");
+   return base;
 }
 
 static void
@@ -781,7 +834,17 @@ unconstrained:
           rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
          cap = AGX3_COPY_REG16_DEST_HALVES;
 
-      unsigned new_reg = find_best_region_to_evict(rctx, nr, clobbered, cap);
+      /* An evicted bank-constrained value must land back inside its bank. */
+      unsigned floor = 0;
+      bool strict = ssa != dest.value && ssa_has_bank_constraint(rctx, ssa);
+      if (strict) {
+         unsigned bank_limit;
+         ssa_bank_range(rctx, ssa, &floor, &bank_limit);
+         cap = MIN2(cap, bank_limit);
+      }
+
+      unsigned new_reg =
+         find_best_region_to_evict(rctx, nr, clobbered, cap, floor, strict);
 
       /* Blocked registers need to get reassigned. Add them to the worklist. */
       for (unsigned i = 0; i < nr; ++i) {
@@ -2773,6 +2836,16 @@ agx_ra(agx_context *ctx)
       max_possible_regs = 32;
    }
 
+   /* A retry after a failed allocation spills down to a smaller file, leaving
+    * the rest free for live-range splitting around bank-constrained values. */
+   const unsigned uncut_regs = max_possible_regs;
+   const bool budget_cut =
+      ctx->ra_budget_cut && ctx->key->has_scratch && !ctx->key->is_helper;
+   if (budget_cut)
+      max_possible_regs =
+         ROUND_DOWN_TO(max_possible_regs - MIN2(ctx->ra_budget_cut,
+                                                max_possible_regs / 2), 16);
+
    /* Calculate the demand. We'll use it to determine if we need to spill and to
     * bound register assignment.
     */
@@ -2835,6 +2908,10 @@ agx_ra(agx_context *ctx)
       /* The resulting program can now be assigned registers */
       assert(effective_demand <= max_possible_regs && "spiller post-condition");
    }
+
+   /* The cut only lowers the spill target; assignment gets the whole file. */
+   if (budget_cut)
+      max_possible_regs = uncut_regs;
 
    unsigned original_hints =
       util_dynarray_num_elements(&ctx->collect_split_hints, agx_instr *);

@@ -142,8 +142,18 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 
    /* Free the VA. No need to unmap the BO or unbind the VA, as the kernel will
     * take care of that when we close it.
+    *
+    * Under virtio the host closes the GEM handle, and with it the mapping,
+    * only when it gets to the resource unref. Another thread can recycle the
+    * VA before that, and the host then refuses the new BO's bind: its blob is
+    * never created and every later map of it fails with EINVAL. Unbind first;
+    * vdrm_bo_create() flushes this ahead of any blob that reuses the VA. Keep
+    * (leak) the VA if the unbind cannot be queued.
     */
-   agx_va_free(dev, bo->va, false);
+   if (!dev->is_virtio || !bo->va ||
+       !agx_bo_bind(dev, NULL, bo->va->addr, bo->size, 0,
+                    DRM_ASAHI_BIND_UNBIND))
+      agx_va_free(dev, bo->va, false);
 
    if (bo->prime_fd != -1)
       close(bo->prime_fd);

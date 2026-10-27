@@ -240,7 +240,7 @@ agx3_cdm_launch_pack(const struct agx3_cdm_launch_info *info,
    struct AGX_CDM_LAUNCH_AGX3 header = {
       .word_0_payload = info->word0_payload,
       .word_1_payload = info->word1_payload,
-      .pipeline_hi = info->pipeline >> 38,
+      .pipeline_hi = (uint32_t)(info->pipeline >> 38),
       .pipeline_lo = (uint32_t)(info->pipeline >> 6),
       .opaque_word_3 = info->opaque_word3,
    };
@@ -360,7 +360,7 @@ agx3_cdm_indirect_launch_unpack(
       .pipeline = ((uint64_t)(word1 >> 22) << 38) |
                   ((uint64_t)agx3_cmdstream_load_le32(bytes + 8) << 6),
       .opaque_word3 = agx3_cmdstream_load_le32(bytes + 12),
-      .indirect_word4_payload = word4 >> 16,
+      .indirect_word4_payload = (uint16_t)(word4 >> 16),
       .indirect_parameters = ((uint64_t)(word4 & 0xffff) << 32) |
                              agx3_cmdstream_load_le32(bytes + 20),
    };
@@ -437,7 +437,7 @@ agx3_cdm_indirect_launch_36_unpack(
       .pipeline = ((uint64_t)(word1 >> 22) << 38) |
                   ((uint64_t)agx3_cmdstream_load_le32(bytes + 8) << 6),
       .opaque_word3 = agx3_cmdstream_load_le32(bytes + 12),
-      .indirect_word4_payload = word4 >> 16,
+      .indirect_word4_payload = (uint16_t)(word4 >> 16),
       .indirect_parameters = ((uint64_t)(word4 & 0xffff) << 32) |
                              agx3_cmdstream_load_le32(bytes + 20),
    };
@@ -467,7 +467,7 @@ agx3_cdm_stream_link_pack(
       return false;
 
    struct AGX_CDM_STREAM_LINK_AGX3 link = {
-      .target_hi = info->target >> 32,
+      .target_hi = (uint32_t)(info->target >> 32),
       .with_return = info->with_return,
       .target_lo = (uint32_t)info->target,
    };

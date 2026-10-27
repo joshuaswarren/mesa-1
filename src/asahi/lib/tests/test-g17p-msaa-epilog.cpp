@@ -300,8 +300,9 @@ TEST(LegacyFragments, EpilogUsesUpstreamDepthCoverage)
          if (intr->intrinsic != nir_intrinsic_store_zs_agx) continue;
          zs++;
          EXPECT_TRUE(nir_src_is_const(intr->src[0]));
-         if (nir_src_is_const(intr->src[0]))
+         if (nir_src_is_const(intr->src[0])) {
             EXPECT_EQ(nir_src_as_uint(intr->src[0]), 0xffu);
+         }
       }
    }
    EXPECT_EQ(zs, 1u);

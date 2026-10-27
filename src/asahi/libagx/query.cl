@@ -57,27 +57,34 @@ KERNEL(32)
 libagx_copy_query_g17p(global uint32_t *availability, global uint64_t *results,
                        global uint16_t *oq_index, uint64_t dst_addr,
                        uint64_t dst_stride, uint32_t first_query,
-                       VkQueryResultFlagBits flags, uint16_t reports_per_query)
+                       VkQueryResultFlagBits flags, uint16_t reports_per_query,
+                       uint16_t availability_shift)
 {
    libagx_copy_query_g17p_result(availability, results, oq_index, dst_addr,
                                 dst_stride, first_query, flags,
-                                reports_per_query, cl_global_id.x);
+                                reports_per_query, availability_shift,
+                                cl_global_id.x);
 }
 
 /**
  * Goes through a series of consecutive query indices in the given pool,
- * setting all element values to 0 and emitting them as available.
+ * setting all element values to 0 and emitting them as available. With
+ * availability_shift 1, each availability slot is 64 bits wide.
  */
 KERNEL(32)
 libagx_reset_query(global uint32_t *availability, global uint64_t *results,
                    global uint16_t *oq_index, uint32_t first_query,
-                   uint16_t reports_per_query, int set_available)
+                   uint16_t reports_per_query, int set_available,
+                   uint16_t availability_shift)
 {
    uint32_t query = first_query + cl_global_id.x;
 
    uint64_t value = 0;
    if (availability) {
-      availability[query] = set_available;
+      uint32_t word = query << availability_shift;
+      availability[word] = set_available;
+      if (availability_shift)
+         availability[word + 1] = 0;
    } else {
       value = set_available ? 0 : LIBAGX_QUERY_UNAVAILABLE;
    }

@@ -3204,7 +3204,6 @@ hk_m5_ordered_draw_hazard(struct hk_cmd_buffer *cmd)
 static bool
 hk_m5_pass_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_pass_merge_candidate *m = &cmd->state.pass_merge;
    struct hk_cs *cs = m->cs;
    const struct hk_rendering_state *prev = &m->render;
@@ -3245,19 +3244,15 @@ hk_m5_pass_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       return false;
    }
 
-   const char *slot = NULL;
    if (!why) {
-      slot = "depth";
       why = hk_m5_attachment_continues(info->pDepthAttachment,
                                        &prev->depth_att);
    }
    if (!why) {
-      slot = "stencil";
       why = hk_m5_attachment_continues(info->pStencilAttachment,
                                        &prev->stencil_att);
    }
    for (uint32_t i = 0; !why && i < info->colorAttachmentCount; ++i) {
-      slot = "color";
       why = hk_m5_attachment_continues(&info->pColorAttachments[i],
                                        &prev->color_att[i]);
    }
@@ -4600,7 +4595,7 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
 
 static struct hk_api_shader *
 hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
-                            hk_internal_builder_t builder)
+                            hk_internal_builder_t builder, VkResult *result)
 {
    /* Try to get the cached shader */
    struct hash_entry *ent = _mesa_hash_table_search(dev->kernels.ht, key);
@@ -4627,7 +4622,8 @@ hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
    hk_preprocess_nir_internal(dev->vk.physical, b.shader);
 
    struct hk_api_shader *s;
-   if (hk_compile_shader(dev, &info, NULL, NULL, NULL, &s) != VK_SUCCESS)
+   *result = hk_compile_shader(dev, &info, NULL, NULL, NULL, &s);
+   if (*result != VK_SUCCESS)
       return NULL;
 
    /* ..and cache it before we return. The key is on the stack right now, so
@@ -4641,10 +4637,14 @@ hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
    return s;
 }
 
+/* On failure returns NULL and sets *result to the compile error, which can be
+ * an out-of-memory error under memory pressure.
+ */
 struct hk_api_shader *
 hk_meta_shader(struct hk_device *dev, hk_internal_builder_t builder, void *data,
-               size_t data_size)
+               size_t data_size, VkResult *result)
 {
+   *result = VK_SUCCESS;
    size_t total_key_size = sizeof(struct hk_internal_key) + data_size;
 
    struct hk_internal_key *key = alloca(total_key_size);
@@ -4656,7 +4656,8 @@ hk_meta_shader(struct hk_device *dev, hk_internal_builder_t builder, void *data,
       memcpy(key->key, data, data_size);
 
    simple_mtx_lock(&dev->kernels.lock);
-   struct hk_api_shader *s = hk_build_meta_shader_locked(dev, key, builder);
+   struct hk_api_shader *s =
+      hk_build_meta_shader_locked(dev, key, builder, result);
    simple_mtx_unlock(&dev->kernels.lock);
 
    return s;
@@ -5534,11 +5535,16 @@ build_g17p_fs_epilog(nir_builder *b, const void *key)
  */
 static const char *
 hk_g17p_mono_layout_mismatch(const struct agx_shader_part *a,
-                             const struct agx_shader_part *m)
+                             const struct agx_shader_part *m, bool own_layout)
 {
 #define HK_MONO_FIELD(x)                                                       \
    if (a->info.x != m->info.x)                                                 \
       return #x;
+   /* A program with its own constant program launches with its own uniform
+    * layout (hk_linked_shader::g17p_layout): only the resources and varyings
+    * the draw still takes from the API shader must agree. */
+   if (own_layout)
+      goto resources;
    /* The draw loads the main's whole uniform window, so the monolithic
     * program may use a prefix of it: every uniform it reads must mean the
     * same thing. Two parts of the window are placed by the compile itself:
@@ -5603,6 +5609,7 @@ hk_g17p_mono_layout_mismatch(const struct agx_shader_part *a,
                  a->info.preamble_size))
          return "preamble code";
    }
+resources:
    HK_MONO_FIELD(texture_state_count)
    HK_MONO_FIELD(sampler_state_count)
    HK_MONO_FIELD(uses_txf)
@@ -5672,6 +5679,15 @@ hk_g17p_mono_resolve_exports(nir_shader *nir)
    return true;
 }
 
+/* Whether an inline-blend program carries its own constant program, which
+ * only a program built for an API shader without one does. */
+static bool
+hk_g17p_mono_own_layout(const struct hk_shader *shader,
+                        const struct agx_shader_part *part)
+{
+   return part->info.has_preamble && !shader->b.info.has_preamble;
+}
+
 /* Every G17P fragment program that touches the tile opens the pixel
  * transaction with the entry gate and ends it with a final release
  * (PIXREL with 0x200) just before END. The packer only emits that
@@ -5693,7 +5709,10 @@ hk_g17p_mono_part_refusal(const struct hk_shader *shader,
    if (!has_gate || !final_release)
       return "pixel protocol not proven";
 
-   return hk_g17p_mono_layout_mismatch(&shader->b, part);
+   const bool own_layout = hk_g17p_mono_own_layout(shader, part);
+   if (own_layout && !hk_g17p_native_cprog_qualified(&part->info))
+      return "constant program outside the native protocol";
+   return hk_g17p_mono_layout_mismatch(&shader->b, part, own_layout);
 }
 
 /* An inline-blend program is a function of the main's NIR and compile key,
@@ -5712,7 +5731,7 @@ hk_g17p_mono_disk_key(struct hk_device *dev, const struct hk_shader *shader,
    if (partitions)
       memcpy(parts, partitions, sizeof(parts));
 
-   const char magic[8] = "hkmono2";
+   const char magic[8] = "hkmono3";
    const size_t rodata_size =
       shader->b.binary ? shader->b.info.rodata.size_16 * 2 : 0;
    const size_t size = sizeof(magic) + sizeof(shader->g17p_mono_key) +
@@ -5807,6 +5826,29 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
       }
    }
 
+   /* A main that exports only uniform values (say, a colour from push
+    * constants) leaves every source term of the blend uniform: its
+    * clamps and factor products are the same for every pixel. Compute them
+    * once in the constant program and blend with one FMA per channel by
+    * letting this program form its own
+    * constant program when the API shader has none (a push-constant-only
+    * fragment main forms none, see hk_compile_nir()). Only chips whose
+    * native constant program is qualified form one. */
+   bool uniform_exports = agx_chip_native_preamble(dev->dev.chip) &&
+                          shader->g17p_mono_key.no_preamble;
+   if (uniform_exports) {
+      nir_divergence_analysis(nir);
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_export_agx &&
+                nir_instr_as_intrinsic(instr)->src[0].ssa->divergent)
+               uniform_exports = false;
+         }
+      }
+   }
+
    /* The epilog, exactly as the split path builds it. */
    eb = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
    build_g17p_fs_epilog(&eb, ekey);
@@ -5871,17 +5913,39 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
       memcpy(key.g17p_tile_partitions, partitions,
              sizeof(key.g17p_tile_partitions));
 
-   part = rzalloc(NULL, struct agx_shader_part);
-   if (!part)
-      HK_MONO_FAIL("oom");
-   if (!agx_compile_shader_nir(nir, &key, part)) {
-      /* agx_compile_shader_nir frees nothing it did not allocate. */
-      nir = NULL;
-      HK_MONO_REFUSE("backend refused the monolithic program");
+   /* With uniform exports, first try the program with its own constant
+    * program; if the backend or the native protocol refuses it, build the
+    * program exactly as without. */
+   nir_shader *without = NULL;
+   if (uniform_exports) {
+      without = nir_shader_clone(mem, nir);
+      if (!without)
+         HK_MONO_FAIL("oom");
+      key.no_preamble = false;
+      key.g17p_native_uniforms = true;
    }
-   nir = NULL; /* consumed */
 
-   const char *why = hk_g17p_mono_part_refusal(shader, part);
+   const char *why;
+   for (;;) {
+      part = rzalloc(NULL, struct agx_shader_part);
+      if (!part)
+         HK_MONO_FAIL("oom");
+      /* agx_compile_shader_nir frees nothing it did not allocate. */
+      const bool compiled = agx_compile_shader_nir(nir, &key, part);
+      nir = NULL; /* consumed */
+      why = compiled ? hk_g17p_mono_part_refusal(shader, part)
+                     : "backend refused the monolithic program";
+      if (!why || !without)
+         break;
+
+      free(part->binary);
+      ralloc_free(part);
+      part = NULL;
+      nir = without;
+      without = NULL;
+      key.no_preamble = shader->g17p_mono_key.no_preamble;
+      key.g17p_native_uniforms = shader->g17p_mono_key.g17p_native_uniforms;
+   }
    if (why)
       HK_MONO_REFUSE(why);
 
@@ -5963,12 +6027,28 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
       if (mono) {
          struct hk_fast_link_key *mono_key_clone =
             ralloc_memdup(shader->linked.ht, key, sizeof(*key));
-         struct hk_linked_shader *mono_linked =
-            mono_key_clone ? hk_fast_link_part(dev, true, shader, mono, NULL,
-                                               NULL, 0)
-                           : NULL;
+         /* A program with its own constant program brings its own uniform
+          * layout; link it as the main of a shader describing that layout. */
+         struct hk_shader *layout =
+            mono_key_clone && hk_g17p_mono_own_layout(shader, mono)
+               ? hk_g17p_layout_shader_create(dev, shader, mono)
+               : NULL;
+         struct hk_linked_shader *mono_linked = NULL;
+         if (layout)
+            mono_linked = hk_fast_link_part(dev, true, layout, NULL, NULL,
+                                            NULL, 0);
+         else if (mono_key_clone && !hk_g17p_mono_own_layout(shader, mono))
+            mono_linked = hk_fast_link_part(dev, true, shader, mono, NULL,
+                                            NULL, 0);
          free(mono->binary);
          ralloc_free(mono);
+         if (mono_linked)
+            mono_linked->g17p_layout = layout;
+         else if (layout) {
+            free(layout->b.binary);
+            agx_bo_unreference(&dev->dev, layout->bo);
+            free(layout);
+         }
          if (mono_linked) {
             mono_linked->g17p_blend_constant_base =
                key->epilog.blend_constant_base;
@@ -6696,6 +6776,9 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
    if (!fs || !linked_fs)
       return hk_g17p_bind_tail_refused(__LINE__);
+   /* The launch follows the linked program's own layout, if it has one. */
+   if (linked_fs->g17p_layout)
+      fs = linked_fs->g17p_layout;
 
    const uint64_t fragment_program = hk_upload_usc_words(cmd, fs, linked_fs);
    if (!fragment_program)
@@ -7531,6 +7614,9 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
 
    struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
    bool linked_fs_dirty = IS_LINKED_DIRTY(FRAGMENT);
+   /* The launch follows the linked program's own layout, if it has one. */
+   if (linked_fs && linked_fs->g17p_layout)
+      fs = linked_fs->g17p_layout;
 
    bool varyings_dirty = gfx->dirty & HK_DIRTY_VARYINGS;
 
@@ -9349,9 +9435,11 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    perf_debug(cmd, "Binding passthrough GS for%s\n", xfb_outputs ? " XFB" : "");
 
-   gs = hk_meta_shader(dev, hk_nir_passthrough_gs_native, key, key_size);
+   VkResult result;
+   gs = hk_meta_shader(dev, hk_nir_passthrough_gs_native, key, key_size,
+                       &result);
    if (!gs) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      vk_command_buffer_set_error(&cmd->vk, result);
       return;
    }
    gs->is_passthrough = true;

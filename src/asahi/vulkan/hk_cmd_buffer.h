@@ -660,6 +660,11 @@ struct hk_graphics_state {
        * There can only be one active at a time (hardware contraint).
        */
       uint16_t index;
+
+      /* Recording order (hk_sync_stream::seq) of the render the active query
+       * began in, 0 if none: only a query that also ends there may become
+       * available with that render's retirement. */
+      uint32_t begin_render_seq;
    } occlusion;
 
    /* Fast linked shader data structures */
@@ -901,6 +906,14 @@ struct hk_cs {
     */
    struct util_dynarray imm_writes;
 
+   /* Native AGX3: struct hk_oq_stamp for each immediate write that makes an
+    * occlusion query available and could instead ride on the retirement
+    * timestamp of the render that ended the query. While oq_avail_deferred,
+    * the writes are not emitted yet: the end of the command buffer decides
+    * (hk_resolve_deferred_oq_available()). Implies CDM. */
+   struct util_dynarray oq_stamps;
+   bool oq_avail_deferred;
+
    /* Number of successfully emitted draws whose last raster producer is
     * positively known to export only the default Layer=0, without multiview.
     * Compare with stats.cmds: untracked emitters conservatively disqualify.
@@ -941,6 +954,11 @@ struct hk_cs {
       struct agx_timestamp_req start;
       struct agx_timestamp_req end;
    } timestamp;
+
+   /* Render only: occlusion availability slots written by the kernel at
+    * retirement, indexed vertex start, vertex end, fragment start, fragment
+    * end. Slots 0 and 3 are only used when timestamp.start/end are not. */
+   struct agx_timestamp_req oq_stamp[4];
 
    /* G17P query commands observe timestamp writes from earlier streams.
     * Firmware start timestamps reach query memory only at retirement, so a
@@ -1875,12 +1893,15 @@ hk_cs_destroy(struct hk_cs *cs)
       util_dynarray_fini(&cs->depth_bias);
    } else {
       util_dynarray_fini(&cs->imm_writes);
+      util_dynarray_fini(&cs->oq_stamps);
    }
 
    free(cs);
 }
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+bool hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+void hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd);
 
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
@@ -1898,9 +1919,15 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
          hk_flush_query_resets(cmd, cs);
 
       /* This control stream may write immediates as it ends. Queue the writes
-       * now that we're done emitting everything else.
+       * now that we're done emitting everything else. Occlusion availability
+       * alone may instead wait for the end of the command buffer, which
+       * keeps the (still empty) stream in the list.
        */
       if (cs->imm_writes.size) {
+         if (hk_defer_oq_available(cmd, cs)) {
+            *ptr = NULL;
+            return;
+         }
          hk_dispatch_imm_writes(cmd, cs);
       }
 
@@ -2118,6 +2145,13 @@ hk_sync_image_class(const struct hk_cmd_buffer *cmd)
  * 48-bit Ioto program VA consumed by HAL200 VDM state. */
 uint64_t hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
                               const struct hk_shader *s);
+
+struct agx3_ioto_uniform_range;
+bool hk_g17p_dma_ranges(const struct hk_descriptor_state *desc,
+                        const struct hk_shader *s, uint64_t root_ptr,
+                        struct agx3_ioto_uniform_range *ranges,
+                        size_t max_ranges, size_t *count_io,
+                        uint8_t *sources);
 
 uint64_t hk_upload_native_mesh_program(struct hk_cmd_buffer *cmd,
                                       struct hk_shader *s,

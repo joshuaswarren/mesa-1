@@ -298,6 +298,11 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_fill_uint4") ||
           !strcmp(func->name, "libagx_gen1_as_property") ||
           !strcmp(func->name, "libagx_gen1_as_copy") ||
+          /* Native G17P AS copies relocate child slots and then restore the
+           * instance-record slots which can resemble node markers. */
+          (!strcmp(target, "g17p") &&
+           (!strcmp(func->name, "libagx_gen1_as_rebase") ||
+            !strcmp(func->name, "libagx_gen1_as_restore_records"))) ||
           !strcmp(func->name, "libagx_gen1_as_serialize") ||
           !strcmp(func->name, "libagx_gen1_as_deserialize") ||
           !strcmp(func->name, "libagx_gen1_as_deserialize_references") ||

@@ -94,9 +94,142 @@ submit(struct hk_queue *q, struct hk_cmd_buffer *c)
    struct hk_cmd_buffer *cs[] = {c};
    return hk_sync_resolve_submit(q, cs, 1, false, false, 0);
 }
+
+static struct hk_cmd_buffer *
+timestamp_cmd(enum agx_chip chip, bool exact)
+{
+   struct hk_cmd_buffer *cmd = new_cmd();
+   struct hk_device *dev = test_alloc(sizeof(*dev));
+   dev->dev.chip = chip;
+   dev->dev.params.features = exact ? DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS : 0;
+   cmd->vk.base.device = &dev->vk;
+   return cmd;
+}
+
+static void
+end_timestamp(struct hk_cmd_buffer *cmd, uint32_t query)
+{
+   const struct agx_timestamp_req req = {
+      .handle = 1, .addr = 0x10000 + 8 * query, .offset_B = 8 * query};
+   hk_sync_write_timestamp(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, req);
+}
+
+/* Exercise actual timestamp placement, barriers and the submission resolver.
+ * Existing query-command scopes are not removed by the timestamp scope's
+ * redundant same-engine execution edge. No command payload or GPU is needed.
+ */
+static void
+test_timestamp_execution_scopes(void)
+{
+   for (unsigned exact = 0; exact < 2; ++exact) {
+      struct hk_queue *queue = new_queue(exact);
+      struct hk_cmd_buffer *first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, true);
+      end_timestamp(first, 0);
+      T("first timed compute resolves", submit(queue, first));
+      struct hk_cmd_buffer *second = timestamp_cmd(AGX_CHIP_G17P, exact);
+      struct hk_cs *timed = add(second, true);
+      end_timestamp(second, 1);
+      T("next timed compute resolves", submit(queue, second));
+      T("timestamp execution scope follows the exact-prior capability",
+        exact ? timed->sync.barrier[HK_SYNC_CDM] == DRM_ASAHI_BARRIER_NONE &&
+                   timed->sync.prior[HK_SYNC_CDM] == 0
+              : timed->sync.barrier[HK_SYNC_CDM] == 0);
+
+      /* Query copy/reset commands use an ALL earlier-work scope. Record
+       * that genuine scope through the production barrier entry point before
+       * the consumer, then add a timestamp to it and resolve both submissions.
+       */
+      struct hk_cmd_buffer *query = timestamp_cmd(AGX_CHIP_G17P, exact);
+      hk_sync_barrier(query, HK_SYNC_ALL, HK_SYNC_ALL);
+      struct hk_cs *copy = add(query, true);
+      copy->g17p_timestamp_query = true;
+      end_timestamp(query, 2);
+      T("query consumer plus timestamp resolves", submit(queue, query));
+      T("query memory consumer retains the completed producer prefix",
+        exact ? copy->sync.prior[HK_SYNC_CDM] == 2
+              : copy->sync.barrier[HK_SYNC_CDM] == 0);
+
+      struct hk_cmd_buffer *barrier = timestamp_cmd(AGX_CHIP_G17P, exact);
+      hk_sync_barrier(barrier, HK_SYNC_ALL, HK_SYNC_ALL);
+      T("standalone query ordering resolves", submit(queue, barrier));
+      struct hk_cmd_buffer *after = timestamp_cmd(AGX_CHIP_G17P, exact);
+      struct hk_cs *inherited = add(after, true);
+      end_timestamp(after, 3);
+      T("later timestamp with carried requirements resolves", submit(queue, after));
+      T("timestamp preserves a carried query-memory requirement",
+        exact ? inherited->sync.prior[HK_SYNC_CDM] == 3
+              : inherited->sync.barrier[HK_SYNC_CDM] == 0);
+
+      queue = new_queue(exact);
+      first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, false);
+      T("earlier render resolves", submit(queue, first));
+      second = timestamp_cmd(AGX_CHIP_G17P, exact);
+      timed = add(second, true);
+      end_timestamp(second, 4);
+      T("timestamp after render resolves", submit(queue, second));
+      T("timestamp cross-engine scope is preserved",
+        exact ? timed->sync.prior[HK_SYNC_VDM] == 1
+              : timed->sync.barrier[HK_SYNC_VDM] == 0);
+
+      queue = new_queue(exact);
+      first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, true);
+      end_timestamp(first, 5);
+      T("reset producer timestamp resolves", submit(queue, first));
+      struct hk_cmd_buffer *reset_cmd = timestamp_cmd(AGX_CHIP_G17P, exact);
+      hk_sync_barrier(reset_cmd, HK_SYNC_ALL, HK_SYNC_ALL);
+      struct hk_cs *reset = add(reset_cmd, true);
+      reset->g17p_timestamp_query = true;
+      hk_sync_after_stream(reset_cmd, reset, HK_SYNC_ALL);
+      struct hk_cs *later = add(reset_cmd, true);
+      end_timestamp(reset_cmd, 6);
+      T("reset then later stamped stream resolves", submit(queue, reset_cmd));
+      T("reset keeps the earlier timestamp publication requirement",
+        exact ? reset->sync.prior[HK_SYNC_CDM] == 1
+              : reset->sync.barrier[HK_SYNC_CDM] == 0);
+      T("later stamp keeps reset stream ordering",
+        later->sync.barrier[HK_SYNC_CDM] == 1);
+
+      queue = new_queue(exact);
+      first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, true);
+      T("render timestamp compute source resolves", submit(queue, first));
+      second = timestamp_cmd(AGX_CHIP_G17P, exact);
+      struct hk_cs *render = add(second, false);
+      end_timestamp(second, 7);
+      T("render end timestamp resolves", submit(queue, second));
+      T("render timestamp keeps the original compute scope",
+        exact ? render->sync.prior[HK_SYNC_CDM] == 1
+              : render->sync.barrier[HK_SYNC_CDM] == 0);
+   }
+
+   for (unsigned chip = 0; chip < 2; ++chip) {
+      const enum agx_chip target = chip ? AGX_CHIP_G16G : AGX_CHIP_G13G;
+      struct hk_queue *queue = new_queue(true);
+      struct hk_cmd_buffer *first = timestamp_cmd(target, true);
+      add(first, true);
+      T("other target source resolves", submit(queue, first));
+      struct hk_cmd_buffer *second = timestamp_cmd(target, true);
+      struct hk_cs *timed = add(second, true);
+      end_timestamp(second, 0);
+      T("other target timestamp resolves", submit(queue, second));
+      T("unqualified target retains the original timestamp prefix",
+        timed->sync.prior[HK_SYNC_CDM] == 1);
+   }
+}
 /* The fixture has no open compute stream. A request to close one is a bug. */
 void
 hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+bool
+hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    (void)cmd;
    (void)cs;
@@ -110,6 +243,57 @@ hk_flush_query_resets(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    (void)cmd;
    if (cs->query_reset_pending)
       abort();
+}
+
+/* Timestamp recording references payload/allocation entry points for other
+ * branches. These tests attach end stamps to already-created closed streams;
+ * reaching a payload emission branch would invalidate that fixture contract.
+ */
+void
+hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
+                       uint64_t address, uint64_t size, uint32_t value)
+{
+   (void)cmd; (void)target; (void)address; (void)size; (void)value;
+   abort();
+}
+
+struct agx_ptr
+hk_pool_alloc_from_slow(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
+                         uint32_t size, uint32_t alignment,
+                         enum hk_cmd_bo_type type)
+{
+   (void)cmd; (void)uploader; (void)size; (void)alignment; (void)type;
+   abort();
+}
+
+struct agx_ptr
+hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
+{
+   (void)cmd; (void)size; (void)alignment;
+   abort();
+}
+
+void
+hk_drm_attachment_set_init(struct hk_drm_attachment_set *set)
+{
+   (void)set;
+   abort();
+}
+
+void
+hk_flush_deferred_clears(struct hk_cmd_buffer *cmd)
+{
+   (void)cmd;
+   abort();
+}
+
+void
+hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                     enum agx_barrier barrier, enum libagx_program idx,
+                     void *data, size_t data_size)
+{
+   (void)cmd; (void)grid; (void)barrier; (void)idx; (void)data; (void)data_size;
+   abort();
 }
 
 /* Record a real full-frame pass with a sparse-mask preservation footprint.
@@ -895,6 +1079,7 @@ main(void)
    test_image_barrier_vertex_class();
    test_chain_first_skips_empty_buffers();
    test_rt_kernel_gate();
+   test_timestamp_execution_scopes();
    /* Each matching destination retains the exact old source prefix, including
     * reuse of a recording and independent physical destinations on the queue. */
    struct hk_queue *q = new_queue(true);

@@ -120,19 +120,48 @@ hk_query_command_cs(struct hk_cmd_buffer *cmd)
 }
 
 static uint64_t
-hk_query_available_addr(struct hk_query_pool *pool, uint32_t query)
+hk_query_available_size(const struct hk_query_pool *pool)
 {
-   assert(hk_has_available(pool));
-   assert(query < pool->vk.query_count);
-   return pool->bo->va->addr + query * sizeof(uint32_t);
+   return sizeof(uint32_t) << pool->avail_shift;
 }
 
-static uint32_t *
-hk_query_available_map(struct hk_query_pool *pool, uint32_t query)
+static uint64_t
+hk_query_available_offset(struct hk_query_pool *pool, uint32_t query)
 {
    assert(hk_has_available(pool));
    assert(query < pool->vk.query_count);
-   return (uint32_t *)agx_bo_map(pool->bo) + query;
+   return (uint64_t)query * hk_query_available_size(pool);
+}
+
+static uint64_t
+hk_query_available_addr(struct hk_query_pool *pool, uint32_t query)
+{
+   return pool->bo->va->addr + hk_query_available_offset(pool, query);
+}
+
+/* The availability slot of a query, nonzero once available. A 64-bit slot
+ * holds 1 when a queued store made the query available and a retirement
+ * timestamp when the kernel did (hk_cmd_end_query_stamped()). */
+static uint64_t
+hk_query_available_value(struct hk_query_pool *pool, uint32_t query)
+{
+   void *slot = (char *)agx_bo_map(pool->bo) +
+                hk_query_available_offset(pool, query);
+   if (pool->avail_shift)
+      return p_atomic_read((uint64_t *)slot);
+   return p_atomic_read((uint32_t *)slot);
+}
+
+static void
+hk_query_set_available_host(struct hk_query_pool *pool, uint32_t query,
+                            bool available)
+{
+   void *slot = (char *)agx_bo_map(pool->bo) +
+                hk_query_available_offset(pool, query);
+   if (pool->avail_shift)
+      *(uint64_t *)slot = available;
+   else
+      *(uint32_t *)slot = available;
 }
 
 static uint64_t
@@ -302,6 +331,211 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
    libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL, address, value);
 }
 
+/*
+ * Native AGX3 occlusion availability.
+ *
+ * A render's retirement record carries four timestamp slots (vertex start
+ * and end, fragment start and end). The kernel writes every requested slot
+ * when it retires the render, which is after the end-of-render cache
+ * maintenance that makes the render's occlusion counts visible, and before
+ * it signals the submission. A nonzero timestamp in a query's 64-bit
+ * availability slot is therefore exactly "available".
+ *
+ * The queued post-graphics store remains the general mechanism: it is
+ * recorded as usual, and the stream that would carry it is kept empty until
+ * the end of the command buffer. Only then is it known whether any later
+ * compute work in this command buffer depends on the render; such work would
+ * have to wait for the render's host-side retirement once the render writes
+ * timestamps, where it now waits in firmware. When nothing does and the
+ * render has free slots, the render carries the availability and the extra
+ * compute command is dropped. Otherwise the store is emitted as before.
+ */
+struct hk_oq_stamp {
+   uint32_t handle;
+   uint32_t offset_B;
+   uint32_t render_seq;
+};
+
+static void
+hk_cmd_end_query_stamped(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
+                         uint32_t query)
+{
+   const uint32_t render_seq = cmd->current_cs.gfx->sync.seq;
+   hk_queue_write(cmd, hk_query_available_addr(pool, query), 1, true);
+
+   struct hk_cs *cs = cmd->current_cs.post_gfx;
+   if (!cs || vk_command_buffer_has_error(&cmd->vk))
+      return;
+
+   if (!cs->oq_stamps.data)
+      cs->oq_stamps = UTIL_DYNARRAY_INIT;
+
+   const struct hk_oq_stamp stamp = {
+      .handle = pool->handle,
+      .offset_B = hk_query_available_offset(pool, query),
+      .render_seq = render_seq,
+   };
+   util_dynarray_append(&cs->oq_stamps, stamp);
+}
+
+bool
+hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   const unsigned writes =
+      util_dynarray_num_elements(&cs->imm_writes, struct libagx_imm_write);
+   const unsigned stamps =
+      util_dynarray_num_elements(&cs->oq_stamps, struct hk_oq_stamp);
+
+   if (!stamps || stamps != writes || cs->stats.cmds ||
+       cs->stats.flushes || cs->timestamp.start.handle ||
+       cs->timestamp.end.handle || cs->query_reset_pending)
+      return false;
+
+   const struct hk_oq_stamp *s = cs->oq_stamps.data;
+   for (unsigned i = 1; i < stamps; ++i) {
+      if (s[i].render_seq != s[0].render_seq)
+         return false;
+   }
+
+   cs->oq_avail_deferred = true;
+   return true;
+}
+
+static bool
+hk_dep_reaches(const struct hk_sync_dep *dep, const struct hk_cs *cs)
+{
+   return dep->cut && dep->cut->sync.seq >= cs->sync.seq;
+}
+
+enum hk_oq_resolution {
+   /* Emit the store in place. */
+   HK_OQ_KEEP,
+   /* The render carries the availability; drop the stream. */
+   HK_OQ_STAMPED,
+   /* Nothing depends on the stream or (from compute) on its render, but the
+    * render has too few free slots: the store may move to a later deferred
+    * stream that waits on a later render. */
+   HK_OQ_MOVABLE,
+};
+
+/* Whether the render can carry the availability of the deferred stream post:
+ * nothing later in the command buffer waits on post, no compute waits on the
+ * render (or anything after it on the render subqueue), the command buffer's
+ * tail requirement does not name it, and enough timestamp slots are free.
+ */
+static enum hk_oq_resolution
+hk_stamp_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *post)
+{
+   const struct hk_oq_stamp *stamps = post->oq_stamps.data;
+   const unsigned count =
+      util_dynarray_num_elements(&post->oq_stamps, struct hk_oq_stamp);
+
+   /* While deferred, the stream may have become the tail an API timestamp
+    * rides on (hk_sync_write_timestamp()). It then stays, with its store. */
+   if (post->timestamp.start.handle || post->timestamp.end.handle ||
+       post->stats.cmds || post->stats.flushes)
+      return HK_OQ_KEEP;
+
+   struct hk_cs *render = NULL;
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+      if (it == post)
+         break;
+      if (it->type == HK_CS_VDM && it->sync.seq == stamps[0].render_seq)
+         render = it;
+   }
+   if (!render || post->sync.dep[HK_SYNC_VDM].cut != render)
+      return HK_OQ_KEEP;
+
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+      if (it == post || it == render)
+         continue;
+      if (hk_dep_reaches(&it->sync.dep[HK_SYNC_CDM], post) ||
+          hk_dep_reaches(&it->sync.dep_ta[HK_SYNC_CDM], post))
+         return HK_OQ_KEEP;
+      if (it->type == HK_CS_CDM &&
+          (hk_dep_reaches(&it->sync.dep[HK_SYNC_VDM], render) ||
+           hk_dep_reaches(&it->sync.dep_ta[HK_SYNC_VDM], render)))
+         return HK_OQ_KEEP;
+   }
+
+   for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+      if (hk_dep_reaches(&cmd->sync.req[k][HK_SYNC_VDM], render) ||
+          hk_dep_reaches(&cmd->sync.req[k][HK_SYNC_CDM], post))
+         return HK_OQ_KEEP;
+   }
+
+   /* Fragment end first, then the slots no API timestamp uses, then vertex
+    * start. A slot an API timestamp rides on stays with it. */
+   const unsigned order[] = {3, 1, 2, 0};
+   unsigned free_slots[4], nfree = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(order); ++i) {
+      const unsigned slot = order[i];
+      if ((slot == 0 && render->timestamp.start.handle) ||
+          (slot == 3 && render->timestamp.end.handle) ||
+          render->oq_stamp[slot].handle)
+         continue;
+      free_slots[nfree++] = slot;
+   }
+   if (nfree < count)
+      return HK_OQ_MOVABLE;
+
+   for (unsigned i = 0; i < count; ++i) {
+      render->oq_stamp[free_slots[i]] = (struct agx_timestamp_req){
+         .handle = stamps[i].handle,
+         .offset_B = stamps[i].offset_B,
+      };
+   }
+   return HK_OQ_STAMPED;
+}
+
+static void
+hk_drop_oq_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   hk_sync_forget_stream(cmd, cs);
+   list_del(&cs->node);
+   hk_cs_destroy(cs);
+}
+
+void
+hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
+{
+   /* Stores that could not ride on their render but that nothing waits on
+    * collect in the latest such stream: it waits on a render that completes
+    * after theirs, so one compute command serves the whole command buffer. */
+   struct hk_cs *movable = NULL;
+
+   list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs->type != HK_CS_CDM || !cs->oq_avail_deferred)
+         continue;
+
+      cs->oq_avail_deferred = false;
+      switch (hk_stamp_oq_available(cmd, cs)) {
+      case HK_OQ_STAMPED:
+         hk_drop_oq_stream(cmd, cs);
+         break;
+      case HK_OQ_MOVABLE:
+         /* The later stream's render wait covers every earlier render. */
+         if (movable && movable->sync.dep[HK_SYNC_VDM].cut->sync.seq >
+                           cs->sync.dep[HK_SYNC_VDM].cut->sync.seq) {
+            hk_dispatch_imm_writes(cmd, movable);
+            movable = NULL;
+         }
+         if (movable) {
+            util_dynarray_append_dynarray(&cs->imm_writes, &movable->imm_writes);
+            hk_drop_oq_stream(cmd, movable);
+         }
+         movable = cs;
+         break;
+      case HK_OQ_KEEP:
+         hk_dispatch_imm_writes(cmd, cs);
+         break;
+      }
+   }
+
+   if (movable)
+      hk_dispatch_imm_writes(cmd, movable);
+}
+
 static void
 emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
                        uint32_t first_index, uint32_t num_queries,
@@ -350,6 +584,7 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       .first_query = first_index,
       .reports_per_query = reports,
       .set_available = set_available && !publish_available,
+      .availability_shift = pool->avail_shift,
    };
    struct hk_cs *cs = cmd->current_cs.cs;
    assert(set_available || cs);
@@ -376,7 +611,7 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    if (hk_has_available(pool)) {
       hk_drm_attachment_set_add(&cs->compute_attachments,
          hk_query_available_addr(pool, first_index),
-         (uint64_t)num_queries * sizeof(uint32_t));
+         (uint64_t)num_queries * hk_query_available_size(pool));
    }
    if (pool->oq_queries) {
       for (uint32_t i = 0; i < num_queries; ++i) {
@@ -392,7 +627,7 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    if (publish_available) {
       hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
          hk_query_available_addr(pool, first_index),
-         (uint64_t)num_queries * sizeof(uint32_t), 1);
+         (uint64_t)num_queries * hk_query_available_size(pool), 1);
    }
 }
 
@@ -419,6 +654,7 @@ emit_zero_queries(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       .first_query = first_index,
       .reports_per_query = hk_reports_per_query(pool),
       .set_available = set_available,
+      .availability_shift = pool->avail_shift,
    };
 
    libagx_reset_query_struct(cmd, agx_1d(num_queries), AGX_BARRIER_ALL, info);
@@ -450,8 +686,7 @@ host_zero_queries(struct hk_device *dev, struct hk_query_pool *pool,
 
       uint64_t value = 0;
       if (hk_has_available(pool)) {
-         uint32_t *available = hk_query_available_map(pool, first_index + i);
-         *available = set_available;
+         hk_query_set_available_host(pool, first_index + i, set_available);
       } else {
          value = set_available ? 0 : LIBAGX_QUERY_UNAVAILABLE;
       }
@@ -479,6 +714,11 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    if (!pool)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   /* Native AGX3 occlusion availability lives in 64-bit slots of a bound
+    * timestamp buffer (hk_cmd_end_query_stamped()). */
+   const bool stamped = occlusion && agx_native_graphics(&dev->dev);
+   pool->avail_shift = stamped ? 1 : 0;
+
    /* We place the availability first and then data. Pipeline-statistics pools
     * use the independently tested 64-bit layout path so large query counts
     * cannot wrap a 32-bit BO size. */
@@ -499,7 +739,8 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       pool->query_start = 0;
       if (hk_has_available(pool)) {
          pool->query_start =
-            align64((uint64_t)pool->vk.query_count * sizeof(uint32_t),
+            align64((uint64_t)pool->vk.query_count *
+                       hk_query_available_size(pool),
                     sizeof(struct hk_query_report));
       }
 
@@ -521,7 +762,7 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
 
       /* The kernel requires that timestamp buffers are SHARED */
       enum agx_bo_flags flags = AGX_BO_WRITEBACK;
-      if (timestamp)
+      if (timestamp || stamped)
          flags |= AGX_BO_SHARED;
 
       pool->bo = agx_bo_create(&dev->dev, bo_size, 0, flags, "Query pool");
@@ -543,6 +784,10 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
 
          assert(pool->handle && "handles are nonzero");
       }
+
+      /* Without a binding, every query end keeps the queued store. */
+      if (stamped && agx_bind_timestamps(&dev->dev, pool->bo, &pool->handle))
+         pool->handle = 0;
    }
 
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
@@ -719,6 +964,8 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
          cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
                                             ? AGX_VISIBILITY_MODE_COUNTING
                                             : AGX_VISIBILITY_MODE_BOOLEAN;
+         cmd->state.gfx.occlusion.begin_render_seq =
+            cmd->current_cs.gfx ? cmd->current_cs.gfx->sync.seq : 0;
       }
 
       uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
@@ -773,7 +1020,16 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    /* We need to set available=1 after the graphics work finishes. */
    if (end) {
       perf_debug(cmd, "Query ending, type %u", pool->vk.query_type);
-      hk_queue_write(cmd, hk_query_available_addr(pool, query), 1, graphics);
+      /* Renders of one queue may finish out of order: a query that spans
+       * renders keeps the store, which waits on every render before it. */
+      if (pool->vk.query_type == VK_QUERY_TYPE_OCCLUSION && pool->handle &&
+          cmd->current_cs.gfx &&
+          cmd->current_cs.gfx->sync.seq ==
+             cmd->state.gfx.occlusion.begin_render_seq)
+         hk_cmd_end_query_stamped(cmd, pool, query);
+      else
+         hk_queue_write(cmd, hk_query_available_addr(pool, query), 1,
+                        graphics);
    }
 }
 
@@ -828,8 +1084,7 @@ hk_query_is_available(struct hk_device *dev, struct hk_query_pool *pool,
                       uint32_t query)
 {
    if (hk_has_available(pool)) {
-      uint32_t *available = hk_query_available_map(pool, query);
-      return p_atomic_read(available) != 0;
+      return hk_query_available_value(pool, query) != 0;
    } else {
       const struct hk_query_report *report =
          hk_query_report_map(dev, pool, query);
@@ -976,7 +1231,10 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
          available = true;
       }
 
-      if (available) {
+      /* A retirement timestamp (any value but the queued store's 1) was
+       * written after the end-of-render maintenance: no submission wait. */
+      if (available &&
+          !(pool->avail_shift && hk_query_available_value(pool, query) > 1)) {
          VkResult done = hk_oq_submission_done(
             dev, pool, query, flags & VK_QUERY_RESULT_WAIT_BIT, &available);
          if (done != VK_SUCCESS)
@@ -1065,6 +1323,7 @@ hk_cmd_copy_query_pool_results(struct hk_cmd_buffer *cmd,
          .dst_stride = stride,
          .reports_per_query = reports,
          .flags = flags,
+         .availability_shift = pool->avail_shift,
       };
 
       struct hk_cs *cs = cmd->current_cs.cs;

@@ -88,9 +88,11 @@ libagx_gen1_as_relocate_word(uint64_t value, uint64_t word,
                            uint64_t header_size, uint64_t destination,
                            uint32_t destination_id)
 {
-   if (header_size && word == LIBAGX_GEN1_AS_BASE_WORD)
+   /* Empty structures also retain their identity when used as instances. */
+   (void)header_size;
+   if (word == LIBAGX_GEN1_AS_BASE_WORD)
       return destination;
-   if (header_size && word == LIBAGX_GEN1_AS_ID_WORD)
+   if (word == LIBAGX_GEN1_AS_ID_WORD)
       return (value & UINT64_C(0xffffffff00000000)) | destination_id;
    return value;
 }

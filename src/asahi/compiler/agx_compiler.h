@@ -692,6 +692,9 @@ typedef struct {
    /* Register allocation found no legal placement for a constrained value
     * (agx_register_allocate.c); the compile is refused after agx_ra(). */
    bool ra_failed;
+   /* Halves taken off the spill budget after a failed allocation, so the
+    * live-range shuffle gets free room (agx_compile_function_nir retries). */
+   unsigned ra_budget_cut;
 } agx_context;
 
 static inline void

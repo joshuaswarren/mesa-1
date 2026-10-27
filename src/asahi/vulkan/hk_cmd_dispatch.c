@@ -46,7 +46,10 @@ static const uint8_t hk_g17p_native_write_control[32] = {
    0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
 };
 
-#define HK_G17P_COMPUTE_MAX_RANGES 8u
+/* Root, texture pointers, promoted constants and the ray-query range, plus
+ * the uniform DMA spans of an application kernel (each at most a buffer part
+ * and a zero-page tail; hk_g17p_dma_ranges()). */
+#define HK_G17P_COMPUTE_MAX_RANGES (4u + 2u * AGX3_UNIFORM_DMA_MAX_SPANS)
 #define HK_G17P_LOADER_MAX_SHAPES  4u
 static_assert(HK_G17P_COMPUTE_MAX_RANGES <= HK_G17P_PATCH_MAX_RANGES,
               "patch plan capacity");
@@ -584,8 +587,10 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
  * the uniform file before launching the compute-stage binary. */
 static bool
 hk_g17p_compute_uniform_ranges(
-   struct hk_shader *s, uint64_t root_ptr, uint64_t texture_pointers,
-   struct agx3_ioto_uniform_range ranges[3], size_t *range_count);
+   struct hk_cmd_buffer *cmd, struct hk_shader *s, uint64_t root_ptr,
+   uint64_t texture_pointers,
+   struct agx3_ioto_uniform_range ranges[HK_G17P_COMPUTE_MAX_RANGES],
+   size_t *range_count);
 
 static bool
 hk_g17p_internal_graphics_uniform_ranges(
@@ -602,8 +607,9 @@ hk_g17p_internal_graphics_uniform_ranges(
       return false;
 
    if (s->info.stage != MESA_SHADER_VERTEX)
-      return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
-                                             ranges, range_count);
+      return hk_g17p_compute_uniform_ranges(cmd, s, root_ptr,
+                                             texture_pointers, ranges,
+                                             range_count);
 
    if (!!texture_pointers != s->info.agx3_indexed_sampler_valid)
       return false;
@@ -682,10 +688,15 @@ hk_g17p_internal_graphics_uniform_ranges(
    return true;
 }
 
+/* The uniform ranges of a compute-stage launch. cmd is NULL when a loader
+ * is prepared ahead of recording: the span addresses are then placeholders,
+ * which only the loader's layout and address shape retain. */
 static bool
 hk_g17p_compute_uniform_ranges(
-   struct hk_shader *s, uint64_t root_ptr, uint64_t texture_pointers,
-   struct agx3_ioto_uniform_range ranges[3], size_t *range_count)
+   struct hk_cmd_buffer *cmd, struct hk_shader *s, uint64_t root_ptr,
+   uint64_t texture_pointers,
+   struct agx3_ioto_uniform_range ranges[HK_G17P_COMPUTE_MAX_RANGES],
+   size_t *range_count)
 {
    if (!s || !ranges || !range_count ||
        (!!texture_pointers != (s->info.agx3_txf_texture_valid ||
@@ -695,17 +706,20 @@ hk_g17p_compute_uniform_ranges(
                                s->info.agx3_indexed_sampler_valid)))
       return false;
 
+   /* Ordinary compute pipelines, including meta, publish their uniform DMA
+    * spans here. Geometry, tessellation and other compute-stage programs of
+    * graphics never carry spans. */
+   const unsigned dma_count = s->b.info.agx3_uniform_dma_count;
+   if (dma_count && s->info.stage != MESA_SHADER_COMPUTE)
+      return false;
+
    /* A shader that reads neither the root descriptor nor any descriptor set
     * needs no preamble loads at all: agx3_uses_root records whether the
     * compiler emitted load_root_agx, and the program generator composes a
     * no-resource program when range_count == 0. */
-   /* Uniform DMA is never enabled for compute (see hk_shader.c). */
-   if (s->b.info.agx3_uniform_dma_count)
-      return false;
-
    const struct agx_rodata *rodata_probe = &s->b.info.rodata;
    if (!texture_pointers && !s->info.agx3_uses_root && s->info.set_count == 0 &&
-       rodata_probe->size_16 == 0) {
+       rodata_probe->size_16 == 0 && dma_count == 0) {
       *range_count = 0;
       return true;
    }
@@ -731,6 +745,29 @@ hk_g17p_compute_uniform_ranges(
              rodata->offset, s->b.info.binary_size, &ranges[count]))
          return false;
       count++;
+   }
+
+   if (dma_count) {
+      if (cmd) {
+         if (!hk_g17p_dma_ranges(&cmd->state.cs.descriptors, s, root_ptr,
+                                 ranges, HK_G17P_COMPUTE_MAX_RANGES, &count,
+                                 NULL))
+            return false;
+      } else {
+         /* Placeholder addresses with the alignment of real ones; a buffer
+          * span is assumed to be covered by its buffer. */
+         for (unsigned i = 0; i < dma_count; ++i) {
+            const struct agx3_uniform_dma_span *span =
+               &s->b.info.agx3_uniform_dma[i];
+            if (count >= HK_G17P_COMPUTE_MAX_RANGES)
+               return false;
+            ranges[count++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = span->dest,
+               .size_halfs = span->halfs,
+               .address = root_ptr + 0x4000 + span->offset_B,
+            };
+         }
+      }
    }
 
    *range_count = count;
@@ -810,8 +847,8 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const bool ranges_ok = internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
-      : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,
-                                        &range_count);
+      : hk_g17p_compute_uniform_ranges(cmd, s, root_ptr, texture_pointers,
+                                        ranges, &range_count);
    if (!ranges_ok) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return false;
@@ -947,7 +984,7 @@ hk_g17p_prewarm_linked_compute_program_kind(
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, dummy_root, dummy_texture_pointers, ranges,
            &range_count)
-      : hk_g17p_compute_uniform_ranges(s, dummy_root,
+      : hk_g17p_compute_uniform_ranges(NULL, s, dummy_root,
                                         dummy_texture_pointers, ranges,
                                         &range_count);
    struct agx3_g17p_compute_program_desc desc;

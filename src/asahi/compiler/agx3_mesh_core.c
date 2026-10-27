@@ -82,7 +82,8 @@ agx3_mesh_passthrough_object(uint16_t grid_uniform, uint8_t out[64],
    const struct agx3_field_kv fields[]={__VA_ARGS__}; \
    if(!agx3_bind_compose(AGX_ISA_ENCODING_AGX3C,name,ep,fields, \
                          sizeof(fields)/sizeof(fields[0]),NULL,0,temp+n,&size)) \
-      return false; n+=size; \
+      return false; \
+   n+=size; \
 } while(0)
    EMIT("rld",1,KV(9,2),KV(10,1),KV(11,1),KV(12,1),KV(21,13),
         KV(23,7),KV(24,1),KV(28,4),KV(29,144),KV(38,1));

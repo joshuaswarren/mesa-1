@@ -1290,8 +1290,9 @@ TEST_F(Optimizer, G17PRangeSelectImmediateBoundary)
       agx_optimize_and_dce(after->shader);
       agx_foreach_instr_global(after->shader, I) {
          agx_foreach_src(I, s) {
-            if (I->src[s].type == AGX_INDEX_IMMEDIATE)
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE) {
                ASSERT_LT(I->src[s].value, 256u);
+            }
          }
       }
       for (uint32_t input : {0u, 254u, 255u, 256u, 257u, 65535u})

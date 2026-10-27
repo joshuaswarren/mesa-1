@@ -585,6 +585,13 @@ struct hk_linked_shader {
     * the descriptor root even when the application fragment shader does not. */
    bool g17p_prolog_uses_root;
 
+   /* An inline-blend fragment program that forms its own constant program
+    * (hk_g17p_inline_epilog_part()) has its own uniform layout: this shader
+    * describes it, and the draw takes the program's launch (uniform ranges,
+    * constant program, scratch) from it instead of the API shader. Owned by
+    * this linked shader; NULL when the API shader's layout applies. */
+   struct hk_shader *g17p_layout;
+
    /* Distinct from hk_shader::counts due to addition of cf_binding_count, which
     * is delayed since it depends on cull distance.
     */
@@ -606,6 +613,13 @@ struct hk_linked_shader *hk_fast_link_part(struct hk_device *dev, bool fragment,
                                            struct agx_shader_part *prolog,
                                            struct agx_shader_part *epilog,
                                            unsigned nr_samples_shaded);
+/* A copy of `api` whose code, uniform layout and constant program are
+ * `part`'s (an inline-blend program with its own constant program); takes
+ * ownership of part->binary. */
+struct hk_shader *hk_g17p_layout_shader_create(struct hk_device *dev,
+                                               const struct hk_shader *api,
+                                               struct agx_shader_part *part);
+
 struct hk_linked_shader *hk_fast_link(struct hk_device *dev, bool fragment,
                                       struct hk_shader *main,
                                       struct agx_shader_part *prolog,
@@ -699,7 +713,7 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
 
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      hk_internal_builder_t builder, void *data,
-                                     size_t data_size);
+                                     size_t data_size, VkResult *result);
 struct spirv_to_nir_options
 hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      UNUSED mesa_shader_stage stage,
