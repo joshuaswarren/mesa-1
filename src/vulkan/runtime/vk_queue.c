@@ -726,8 +726,18 @@ vk_queue_submit_final(struct vk_queue *queue,
    }
 
    if (unlikely(result != VK_SUCCESS)) {
-      /* Callers mark the queue lost; nothing of this submission will run. */
-      vk_queue_submit_signal_dropped(queue, submit);
+      /* Nothing of this submission will run. Its signal operations are
+       * published below so that waiters wake up, and those waiters must then
+       * see the loss through check_status, so record it first. An immediate
+       * submission that failed without losing the device (out of memory)
+       * returns its error with the semaphores untouched, as vkQueueSubmit
+       * requires; the deferred and threaded callers lose the queue anyway.
+       */
+      if (result == VK_ERROR_DEVICE_LOST || vk_queue_is_lost(queue) ||
+          queue->submit.mode != VK_QUEUE_SUBMIT_MODE_IMMEDIATE) {
+         result = vk_queue_set_lost(queue, "queue::driver_submit failed");
+         vk_queue_submit_signal_dropped(queue, submit);
+      }
       return result;
    }
 

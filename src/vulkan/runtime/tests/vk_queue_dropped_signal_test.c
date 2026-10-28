@@ -17,6 +17,7 @@ struct test_sync {
 
 static unsigned signal_calls;
 static unsigned fail_call;
+static VkResult unmarked_failure;
 static int wait_entered;
 static VkResult (*real_timeline_wait)(struct vk_device *, struct vk_sync *,
                                      uint64_t, enum vk_sync_wait_flags, uint64_t);
@@ -134,14 +135,17 @@ fail_submit(struct vk_queue *queue, struct vk_queue_submit *submit)
    /* The submit thread normally records loss after submit_final returns.
     * Exercise that interval when the best-effort signal itself fails: loss
     * must be recorded before publishing the point and waking its waiters.
+    * unmarked_failure returns an error without recording loss at all.
     */
    if (fail_call)
       return VK_ERROR_DEVICE_LOST;
+   if (unmarked_failure != VK_SUCCESS)
+      return unmarked_failure;
    return vk_queue_set_lost(queue, "injected submission failure");
 }
 
 static void
-run(bool timeline, unsigned fail)
+run(bool timeline, unsigned fail, VkResult unmarked)
 {
    struct vk_device device = {
       .alloc = *vk_default_allocator(),
@@ -193,36 +197,54 @@ run(bool timeline, unsigned fail)
    };
    signal_calls = 0;
    fail_call = fail;
+   unmarked_failure = unmarked;
+   /* An out-of-memory failure leaves the device usable and must not touch
+    * the semaphores, so nothing would ever wake a waiter: don't start one.
+    */
+   const bool oom = unmarked == VK_ERROR_OUT_OF_HOST_MEMORY;
    struct wait_context wait = {
       .device = &device,
       .semaphores = {signals[0].semaphore, signals[1].semaphore},
    };
    thrd_t thread;
-   if (timeline) {
+   if (timeline && !oom) {
       p_atomic_set(&wait_entered, 0);
       require(thrd_create(&thread, wait_thread, &wait) == thrd_success,
               "wait thread creation failed");
       wait_for(&wait_entered, "wait did not enter the timeline implementation");
    }
-   require(vk_common_QueueSubmit2(vk_queue_to_handle(&queue), 1, &submit,
-                                  VK_NULL_HANDLE) == VK_ERROR_DEVICE_LOST,
-           "submission failure was not propagated");
-   require(signal_calls == 2, "a failed signal prevented later signals");
-   require(vk_device_is_lost_no_report(&device),
-           "signal failure was not recorded before waking waiters");
-   if (timeline) {
+   const VkResult submitted =
+      vk_common_QueueSubmit2(vk_queue_to_handle(&queue), 1, &submit,
+                             VK_NULL_HANDLE);
+   if (oom) {
+      require(submitted == VK_ERROR_OUT_OF_HOST_MEMORY,
+              "out-of-memory failure was not propagated");
+      require(signal_calls == 0, "out-of-memory failure signalled semaphores");
+      require(!vk_device_is_lost_no_report(&device),
+              "out-of-memory failure lost the device");
+   } else {
+      require(submitted == VK_ERROR_DEVICE_LOST,
+              "submission failure was not propagated");
+      require(signal_calls == 2, "a failed signal prevented later signals");
+      require(vk_device_is_lost_no_report(&device),
+              "submission failure was not recorded before waking waiters");
+   }
+   if (timeline && !oom) {
       wait_for(&wait.done, "device loss stranded an existing timeline waiter");
       require(thrd_join(thread, NULL) == thrd_success, "wait thread join failed");
       require(wait.result == VK_ERROR_DEVICE_LOST,
               "waiter trusted a payload after device loss");
    }
    for (unsigned i = 0; i < 2; ++i) {
-      const bool expected = fail != i + 1;
+      const bool expected = !oom && fail != i + 1;
       struct vk_sync *sync = &semaphores[i]->permanent;
       if (timeline) {
          struct vk_sync_timeline *tl = vk_sync_as_timeline(sync);
-         require(tl->state->highest_pending == 5 && tl->state->highest_past == 5,
-                 "timeline did not release its pending wait");
+         const uint64_t value = oom ? 0 : 5;
+         require(tl->state->highest_pending == value &&
+                 tl->state->highest_past == value,
+                 oom ? "out-of-memory failure installed a time point" :
+                       "timeline did not release its pending wait");
          require(tl->state->refcount == 1,
                  "dropped submission leaked its time point reference");
       } else {
@@ -235,15 +257,22 @@ run(bool timeline, unsigned fail)
    }
    vk_queue_finish(&queue);
    vk_object_base_finish(&device.base);
-   printf("%s, failed signal %u: PASS\n", timeline ? "timeline" : "binary", fail);
+   printf("%s, failed signal %u, unmarked %d: PASS\n",
+          timeline ? "timeline" : "binary", fail, unmarked);
 }
 
 int
 main(void)
 {
    for (unsigned fail = 0; fail <= 2; ++fail) {
-      run(false, fail);
-      run(true, fail);
+      run(false, fail, VK_SUCCESS);
+      run(true, fail, VK_SUCCESS);
    }
+   /* The driver fails without recording loss and every signal succeeds:
+    * waiters woken by the dropped signals must still see the loss. */
+   run(false, 0, VK_ERROR_DEVICE_LOST);
+   run(true, 0, VK_ERROR_DEVICE_LOST);
+   run(false, 0, VK_ERROR_OUT_OF_HOST_MEMORY);
+   run(true, 0, VK_ERROR_OUT_OF_HOST_MEMORY);
    return EXIT_SUCCESS;
 }
