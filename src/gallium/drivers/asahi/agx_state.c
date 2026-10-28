@@ -7163,6 +7163,16 @@ agx_batch_geometry_params(struct agx_batch *batch, uint64_t input_index_buffer,
          agx_get_query_address(batch, batch->ctx->prims_generated[i]);
    }
 
+   /* The pre-GS kernel also adds to query_prims_generated_counter, which
+    * backs Vulkan's VK_EXT_primitives_generated_query. GL's primitives
+    * generated query already counts through prims_generated_counter, so
+    * point this one at the scratch page rather than leaving it zero.
+    */
+   for (unsigned i = 0; i < ARRAY_SIZE(params.query_prims_generated_counter);
+        ++i) {
+      params.query_prims_generated_counter[i] = AGX_SCRATCH_PAGE_ADDRESS;
+   }
+
    for (unsigned i = 0; i < ARRAY_SIZE(batch->ctx->tf_prims_generated); ++i) {
       params.xfb_prims_generated_counter[i] =
          agx_get_query_address(batch, batch->ctx->tf_prims_generated[i]);
