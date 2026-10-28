@@ -4324,6 +4324,7 @@ hk_m5_ordered_draw_hazard(struct hk_cmd_buffer *cmd)
 static bool
 hk_m5_pass_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_pass_merge_candidate *m = &cmd->state.pass_merge;
    struct hk_cs *cs = m->cs;
    const struct hk_rendering_state *prev = &m->render;
@@ -4374,17 +4375,21 @@ hk_m5_pass_merge_begin(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info)
       return false;
    }
 
+   const char *slot = NULL;
    if (!why) {
+      slot = "depth";
       why = hk_m5_attachment_continues(info->pDepthAttachment,
                                        &prev->depth_att,
                                        prev->tilebuffer.nr_samples);
    }
    if (!why) {
+      slot = "stencil";
       why = hk_m5_attachment_continues(info->pStencilAttachment,
                                        &prev->stencil_att,
                                        prev->tilebuffer.nr_samples);
    }
    for (uint32_t i = 0; !why && i < info->colorAttachmentCount; ++i) {
+      slot = "color";
       why = hk_m5_attachment_continues(&info->pColorAttachments[i],
                                        &prev->color_att[i],
                                        prev->tilebuffer.nr_samples);
