@@ -262,6 +262,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
              DIV_ROUND_UP(entries, 32) >
                 (SIZE_MAX - sizeof(struct hk_sparse_buffer_map_header)) /
                    sizeof(uint32_t)) {
+            hk_release_sparse_scratch(dev, buffer->sparse_scratch_B);
             agx_va_free(&dev->dev, buffer->va, true);
             buffer->va = NULL;
             vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
@@ -281,6 +282,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          if (!buffer->sparse_map || !agx_bo_map(buffer->sparse_map)) {
             agx_bo_unreference(&dev->dev, buffer->sparse_map);
             buffer->sparse_map = NULL;
+            hk_release_sparse_scratch(dev, buffer->sparse_scratch_B);
             agx_va_free(&dev->dev, buffer->va, true);
             buffer->va = NULL;
             vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
@@ -306,6 +308,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          hk_update_physical_sparse_map(dev, buffer->va->addr,
             align64(buffer->vk.size, AIL_PAGESIZE), false);
          agx_bo_unreference(&dev->dev, buffer->sparse_map);
+         hk_release_sparse_scratch(dev, buffer->sparse_scratch_B);
          agx_va_free(&dev->dev, buffer->va, true);
          vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
          return result;
