@@ -185,3 +185,44 @@ the real `poly_heap` declaration. Twelve real XML-parser-to-callback checks
 covered negative, zero, in-range and oversized values, including 4096/5000 MiB;
 all allocated and published the same bounded size. Removing the clamp fails
 the maintained regression. These are host checks, without GPU qualification.
+
+## October 26 M3 Pro qualification
+
+The last local packed-GS-output and select-guard fixes are already covered
+by `d4b6840f` and `ae035d59`; no duplicate production patches are imported.
+Jonathan Goyvaerts's public `141481c` warning/build fixes are replayed with
+original attribution and `-x` provenance. They resolve Clang's enabled-test
+build failures in the command-stream header.
+
+Restore the conditional-rendering, unified-image-layouts, memory-budget and
+sixteen-set profile on hardware-tested G15S only. Other G15 profiles and the
+FMA/rounding and kernel/device admission checks retain their existing policy.
+The actual-driver shim probe rejects the previous G15S profile and verifies
+both the restored profile and the unchanged profiles.
+
+[The J514S receipt](OMACOM-M3PRO-20261026.json) pins built source `eaf69705c3`,
+Arch package/library hashes and the initial kernel. GPU readbacks through
+set 15, 139 host suites, the sixteen-set graphics/compute group and
+Settings/theme cycles pass.
+
+The seven-case regression group has six passes and one intermittent failure
+that passes retry. Geometry-shader output sometimes remains at the clear
+colour; this was also observed with the earlier Mesa and kernel. The receipt
+records a `uvec3_highp_geometry` failure; the rebased kernel `8824dd6` showed
+the same symptom in `uint_highp_geometry`. This dropped-draw defect remains
+unresolved and is not a clean pass or an established consequence of load.
+
+All 384 conditional-rendering draw cases and all 60 clear-attachment cases
+skip. Exposing conditional rendering does not qualify these skipped paths;
+the current full suite will not validate paths it also skips. Skips and
+warnings remain in the receipt. Full Vulkan 1.4 CTS on the rebased stack is
+pending the owner's run; the earlier full result belongs to a different Mesa.
+
+Newer shared-native candidates remain separate review work: bank-constrained
+RA recovery (`c7d849e5`), passthrough-GS OOM reporting (`89bb9b98`), uniform
+atomics (`52e35626`), application then internal compute DMA (`a29a074b`,
+`43901729`), and occlusion availability (`e07644ef`, `360a1c91`). The blend
+series `8fc7dc70` also touches shared native paths; its new constant-program
+fast path requires G17P's qualified preamble. None is qualified on M3 by this
+receipt. G17P-only timestamp/cache-range/signal optimizations, RT work and
+virtio-only unbind handling are not direct-DRM M3 prerequisites.
