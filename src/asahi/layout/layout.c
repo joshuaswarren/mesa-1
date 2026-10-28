@@ -176,7 +176,15 @@ ail_initialize_gpu_tiled(struct ail_layout *layout)
       layout->layer_stride_B =
          ail_m5_layer_stride_B(offset_B, layout->depth_px, layout->compressed);
       layout->page_aligned_layers =
-         layout->depth_px > 1 && offset_B > AIL_PAGESIZE;
+         layout->depth_px > 1 && offset_B >= AIL_PAGESIZE;
+      /* ZLS layer strides use page units even when color/texture arrays can
+       * use compact strides. A sub-page depth/stencil layer cannot be
+       * represented by the render submission's ZLS descriptor. */
+      if (layout->depth_px > 1 && layout->renderable &&
+          util_format_is_depth_or_stencil(layout->format)) {
+         layout->page_aligned_layers = true;
+         layout->layer_stride_B = ALIGN_POT(offset_B, AIL_PAGESIZE);
+      }
    } else {
       /* Align layer size if we have mipmaps and one miptree is larger than one
        * page */
@@ -198,6 +206,13 @@ ail_initialize_gpu_tiled(struct ail_layout *layout)
          layout->layer_stride_B = ALIGN_POT(offset_B, AIL_PAGESIZE);
       else
          layout->layer_stride_B = offset_B;
+   }
+
+   /* Each sparse layer has its own page-map range. Include the partial
+    * final page so mip-tail entries cannot be mistaken for the next layer. */
+   if (layout->sparse_residency) {
+      layout->page_aligned_layers = true;
+      layout->layer_stride_B = ALIGN_POT(layout->layer_stride_B, AIL_PAGESIZE);
    }
 
    layout->size_B = (uint64_t)layout->layer_stride_B * layout->depth_px;

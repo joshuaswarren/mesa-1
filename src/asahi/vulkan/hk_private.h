@@ -39,6 +39,15 @@
 #define HK_MAX_MULTIVIEW_VIEW_COUNT    32
 
 #define HK_SPARSE_ADDR_SPACE_SIZE (1ull << 39)
+/* M5 fills unbound sparse VA with scratch through the hypervisor's SPTM
+ * provider, which spends one page-table frame of its own heap per 32 MiB of
+ * filled VA and never returns it to the heap. Bound what one device fills.
+ * Interim capability limit: concurrent 4 x 64 GiB fills still reset the
+ * machine (at >= 7930 live table frames) while x1n1's real headroom is
+ * unknown; 16 GiB keeps one device near 1024 frames under the kernel's
+ * 2048-frame budget.
+ */
+#define HK_M5_SPARSE_ADDR_SPACE_SIZE (1ull << 34)
 #define HK_MAX_BUFFER_SIZE        (1ull << 37)
 #define HK_MAX_SHARED_SIZE        (32 * 1024)
 
@@ -77,6 +86,28 @@ hk_g17p_rt_enabled(const struct agx_device *dev)
           !debug_get_bool_option("ASAHI_G17P_RT_DISABLE", false);
 }
 
+/* T6040's 25G83 firmware does not yet admit intersection/SCS commands. AS
+ * construction, copies and refits are ordinary compute and can use the same
+ * GEN1 node layout without creating a traversal context. Require the bounded
+ * AS execution allowance as well as the exact-prior submission contract.
+ * Do not infer traversal support from this predicate.
+ */
+static inline bool
+hk_g16s_as_enabled(const struct agx_device *dev)
+{
+   const uint64_t required = DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS |
+                             DRM_ASAHI_FEATURE_BOUNDED_AS_BUILD;
+   return agx_is_m4_pro(dev) &&
+          (dev->params.features & required) == required &&
+          !debug_get_bool_option("ASAHI_G17P_RT_DISABLE", false);
+}
+
+static inline bool
+hk_gen1_as_enabled(const struct agx_device *dev)
+{
+   return hk_g17p_rt_enabled(dev) || hk_g16s_as_enabled(dev);
+}
+
 /* Whether a logical device enables any ray-tracing feature. Only such a
  * device sets up the native G17P ray-tracing state: the ray query program
  * image and its fixed code binds, the acceleration-structure tables, and the
@@ -84,7 +115,7 @@ hk_g17p_rt_enabled(const struct agx_device *dev)
  * (hk_device_init_accel_struct_state()). Without one of these features no
  * acceleration structure, ray query or ray-tracing pipeline can exist on the
  * device. Every feature here is advertised only with the ray-tracing
- * extensions, so on any device without hk_g17p_rt_enabled() this is false.
+ * extensions. G16S also admits an AS-only device without traversal state.
  *
  * Shaders compiled for the two kinds of device differ, so this is part of
  * every shader cache key (HK_FEAT_RAY_TRACING). */

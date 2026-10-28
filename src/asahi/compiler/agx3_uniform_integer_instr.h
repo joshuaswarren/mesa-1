@@ -2,11 +2,13 @@
 #pragma once
 #include "agx3_uniform_integer.h"
 #include "agx_compiler.h"
+#include "util/u_debug.h"
 
 /* Shared pre/post-RA domain check: preserve only encodable uniform operands. */
 static inline bool
-agx3_uniform_integer_instruction(const agx_instr *I, bool post_ra,
-                                 struct agx3_uniform_integer_desc *d)
+agx3_uniform_integer_instruction_limit(const agx_instr *I, bool post_ra,
+                                       unsigned gprs,
+                                       struct agx3_uniform_integer_desc *d)
 {
    if ((I->op != AGX_OPCODE_IADD && I->op != AGX_OPCODE_IMAD &&
         I->op != AGX_OPCODE_BITOP) ||
@@ -17,7 +19,7 @@ agx3_uniform_integer_instruction(const agx_instr *I, bool post_ra,
       return false;
 
    if (post_ra &&
-       (I->dest[0].value >= AGX3_UNIFORM_INTEGER_GPRS ||
+       (I->dest[0].value >= gprs ||
         (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1))))
       return false;
 
@@ -90,7 +92,7 @@ agx3_uniform_integer_instruction(const agx_instr *I, bool post_ra,
          d->src[i].value = src.value;
       } else if (src.type ==
                  (post_ra ? AGX_INDEX_REGISTER : AGX_INDEX_NORMAL)) {
-         if (post_ra && (src.value >= AGX3_UNIFORM_INTEGER_GPRS ||
+         if (post_ra && (src.value >= gprs ||
                          (!d->half && (src.value & 1))))
             return false;
          d->src[i].kind = AGX3_UI_REGISTER;
@@ -110,4 +112,36 @@ agx3_uniform_integer_instruction(const agx_instr *I, bool post_ra,
    if ((d->shift || d->op == AGX3_UI_ANDC) && !uniform_first)
       return false;
    return true;
+}
+
+static inline bool
+agx3_uniform_integer_instruction(const agx_instr *I, bool post_ra,
+                                 struct agx3_uniform_integer_desc *d)
+{
+   return agx3_uniform_integer_instruction_limit(
+      I, post_ra, AGX3_UNIFORM_INTEGER_GPRS, d);
+}
+
+/* M5 full-width uniform integer domains: ADD/SUB and native IMADD R/U/U
+ * (cs_loop, ld_constant) or U/R/R (sr_ids). Multiplication commutes. */
+static inline bool
+agx3_uniform_integer_for_encoding(enum agx_isa_encoding enc,
+                                  const agx_instr *I, bool post_ra,
+                                  struct agx3_uniform_integer_desc *d)
+{
+   if (enc == AGX_ISA_ENCODING_AGX3B)
+      return agx3_uniform_integer_instruction(I, post_ra, d);
+   if (enc != AGX_ISA_ENCODING_AGX3C ||
+       !agx3_uniform_integer_instruction_limit(
+          I, post_ra, AGX3_UNIFORM_INTEGER_M5_GPRS, d) ||
+       d->half || d->shift ||
+       (d->op != AGX3_UI_ADD && d->op != AGX3_UI_SUB &&
+        d->op != AGX3_UI_MAD))
+      return false;
+   if (d->op == AGX3_UI_MAD)
+      return d->src[2].kind == AGX3_UI_REGISTER ||
+             d->src[2].kind == AGX3_UI_UNIFORM;
+   return d->op != AGX3_UI_SUB ||
+          (d->src[0].kind == AGX3_UI_REGISTER &&
+           d->src[1].kind == AGX3_UI_UNIFORM);
 }

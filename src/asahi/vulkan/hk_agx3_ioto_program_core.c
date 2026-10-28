@@ -76,7 +76,37 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
        physical.logical_format[0] == PIPE_FORMAT_NONE)
       physical.nr_samples = 1;
 
+   /* M5's native imageblock reserves one eight-byte sample for a layered
+    * colourless pass (agx_build_tilebuffer_layout_for_imageblock). It holds
+    * no target; check the rest of the layout as the unlayered empty one. */
+   bool colourless = true;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt)
+      colourless &= physical.logical_format[rt] == PIPE_FORMAT_NONE;
+   if (tib->native_imageblock && tib->layered && physical.nr_samples <= 1 &&
+       physical.sample_size_B == 8 && colourless) {
+      physical.sample_size_B = 0;
+      if (!physical.nr_samples)
+         physical.nr_samples = 1;
+   }
+
    return agx_g17p_rt0_tile_layout_supported(&physical);
+}
+
+bool
+hk_agx3_format_needs_shader_resolve(enum pipe_format format)
+{
+   /* A 32-bit float target's lane is stored raw, and resolving it on the
+    * way out averages the bit patterns: an R32 or RG32 float view resolved
+    * this way reads back values like 4e22 on an A18 Pro. Keep the samples
+    * and resolve after the pass instead. */
+   if (util_format_is_float(format) &&
+       util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) ==
+          32)
+      return true;
+
+   /* An RGB9E5 tile keeps each sample's packed word, which averages no
+    * better. */
+   return format == PIPE_FORMAT_R9G9B9E5_FLOAT;
 }
 
 bool
@@ -84,22 +114,7 @@ hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source)
 {
-   if (!tib)
-      return false;
-
-   /* A 32-bit float target's lane is stored raw, and resolving it on the
-    * way out averages the bit patterns: an R32 or RG32 float view resolved
-    * this way reads back values like 4e22 on an A18 Pro. Keep the samples
-    * and resolve after the pass instead. */
-   const enum pipe_format format = tib->logical_format[0];
-   if (util_format_is_float(format) &&
-       util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) ==
-          32)
-      return false;
-
-   /* An RGB9E5 tile keeps each sample's packed word, which averages no
-    * better. */
-   if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+   if (!tib || hk_agx3_format_needs_shader_resolve(tib->logical_format[0]))
       return false;
 
    return (tib->nr_samples == 2 || tib->nr_samples == 4) &&
@@ -160,7 +175,10 @@ hk_agx3_g17p_basic_graphics_program_generate(
    const struct agx3_g17p_graphics_program_desc shared_desc =
       hk_agx3_g17p_shared_graphics_desc(desc);
    struct agx3_g17p_graphics_program shared;
-   if (!agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared))
+   const bool generated = agx_chip_g17_m5(chip)
+      ? agx3_g17g_graphics_program_generate(chip, &shared_desc, &shared)
+      : agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared);
+   if (!generated)
       return false;
    memcpy(program->bytes, shared.bytes, shared.length);
    program->length = shared.length;
@@ -177,8 +195,9 @@ hk_agx3_g17p_graphics_program_template_generate(
       return false;
    const struct agx3_g17p_graphics_program_desc shared_desc =
       hk_agx3_g17p_shared_graphics_desc(desc);
-   return agx3_g17p_graphics_program_template_generate(chip, &shared_desc,
-                                                        program);
+   return agx_chip_g17_m5(chip)
+      ? agx3_g17g_graphics_program_template_generate(chip, &shared_desc, program)
+      : agx3_g17p_graphics_program_template_generate(chip, &shared_desc, program);
 }
 
 bool

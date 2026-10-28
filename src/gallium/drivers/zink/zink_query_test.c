@@ -131,6 +131,21 @@ main(void)
    assert(get_num_starts(&q) == 1 && first->vkq[0] == previous);
    teardown();
 
-   puts("zink query allocation failures: PASS");
+   /* One QBO still needs aggregation when a flush splits an active query. */
+   setup(PIPE_QUERY_OCCLUSION_COUNTER, VK_QUERY_TYPE_OCCLUSION);
+   q.buffer_count = 1;
+   struct zink_query_start split = {0};
+   util_dynarray_append(&q.starts, split);
+   assert(can_direct_poll_query_result(&q));
+   util_dynarray_append(&q.starts, split);
+   assert(!can_direct_poll_query_result(&q));
+   uint64_t values[] = {2048, 2048};
+   union pipe_query_result result;
+   util_query_clear_result(&result, q.type);
+   check_query_results(&q, &result, 2, values, NULL);
+   assert(result.u64 == 4096);
+   teardown();
+
+   puts("zink query allocation and aggregation: PASS");
    return 0;
 }

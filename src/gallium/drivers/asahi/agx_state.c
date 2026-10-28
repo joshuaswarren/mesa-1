@@ -7930,7 +7930,7 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
    libagx_tessellate(batch, tess_grid, AGX_BARRIER_ALL, mode,
                      POLY_TESS_MODE_COUNT, state);
    libagx_prefix_sum_tess(batch, agx_1d(1024), AGX_BARRIER_ALL, state, c_prims,
-                          c_invs, c_prims || c_invs);
+                          c_invs, 0, c_prims || c_invs);
    libagx_tessellate(batch, tess_grid, AGX_BARRIER_ALL, mode,
                      POLY_TESS_MODE_WITH_COUNTS, state);
 

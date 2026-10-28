@@ -171,7 +171,8 @@ split_32bit_copy(struct copy_ctx *ctx, struct agx_copy *entry)
 
 static void
 agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
-                                   unsigned num_copies, bool cls)
+                                   unsigned num_copies, bool cls,
+                                   agx_index temp)
 {
    /* First, lower away 64-bit copies to smaller chunks, since we don't have
     * 64-bit ALU so we always want to split.
@@ -281,6 +282,13 @@ agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
       next_copy->done = true;
    }
 
+   /* A GPR temporary lets a cycle be broken with one extra move: save the
+    * value a blocked copy is about to overwrite, retarget the copies that read
+    * it, and the cycle becomes a path for step 1.  Only GPR copies use it;
+    * memory copies keep the swap path. */
+   const bool use_temp = !cls && !agx_is_null(temp) &&
+                         temp.type == AGX_INDEX_REGISTER && !temp.memory;
+
    bool progress = true;
    while (progress) {
       progress = false;
@@ -332,6 +340,75 @@ agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
             split_32bit_copy(ctx, entry);
             progress = true;
          }
+      }
+
+      if (progress || !use_temp)
+         continue;
+
+      /* Step 2b: only cycles remain.  Break one through the temporary: the
+       * value in a blocked copy's destination is saved, the copy is emitted,
+       * and every copy reading that destination now reads the temporary.
+       * The cycle is then a path, so step 1 resumes.  Costs k + 1 moves for a
+       * k-element cycle instead of 3 (k - 1) XORs.
+       */
+      for (unsigned i = 0; i < ctx->entry_count; i++) {
+         struct agx_copy *entry = &ctx->entries[i];
+         if (entry->done)
+            continue;
+
+         assert(is_real(entry));
+         if (entry->dest == entry->src.value) {
+            entry->done = true;
+            progress = true;
+            break;
+         }
+
+         const unsigned width = agx_size_align_16(entry->src.size);
+         agx_index saved = agx_register(temp.value, entry->src.size);
+         agx_index victim = agx_register(entry->dest, entry->src.size);
+         agx_mov_to(b, saved, victim);
+
+         do_copy(b, entry);
+         entry->done = true;
+         for (unsigned j = 0; j < width; j++) {
+            ctx->physreg_use_count[entry->src.value + j]--;
+            ctx->physreg_dest[entry->dest + j] = NULL;
+         }
+
+         /* Copies whose source lay (wholly or partly) inside the destination
+          * now read the saved value.  A 32-bit reader straddling the
+          * destination boundary is split first so each half can be redirected
+          * independently. */
+         if (width == 1) {
+            for (unsigned j = 0; j < ctx->entry_count; j++) {
+               struct agx_copy *blocking = &ctx->entries[j];
+               if (blocking->done || !is_real(blocking))
+                  continue;
+               if (blocking->src.value <= entry->dest &&
+                   blocking->src.value + 1 >= entry->dest &&
+                   agx_size_align_16(blocking->src.size) == 2)
+                  split_32bit_copy(ctx, blocking);
+            }
+         }
+
+         for (unsigned j = 0; j < ctx->entry_count; j++) {
+            struct agx_copy *blocking = &ctx->entries[j];
+            if (blocking->done || !is_real(blocking))
+               continue;
+            if (blocking->src.value >= entry->dest &&
+                blocking->src.value < entry->dest + width) {
+               const unsigned offset = blocking->src.value - entry->dest;
+               /* The temporary is live until the retargeted copies drain,
+                * which step 1 does before the next cycle break: the cycle is
+                * now a path whose every copy becomes unblocked in order. */
+               ctx->physreg_use_count[blocking->src.value]--;
+               blocking->src.value = temp.value + offset;
+               ctx->physreg_use_count[blocking->src.value]++;
+            }
+         }
+
+         progress = true;
+         break;
       }
    }
 
@@ -427,8 +504,8 @@ agx_emit_parallel_copies_for_class(agx_builder *b, struct agx_copy *copies,
 }
 
 void
-agx_emit_parallel_copies(agx_builder *b, struct agx_copy *copies,
-                         unsigned num_copies)
+agx_emit_parallel_copies_temp(agx_builder *b, struct agx_copy *copies,
+                              unsigned num_copies, agx_index temp)
 {
    /* Emit copies fo reach register class separately because we don't have
     * register class awareness in the parallel copy lowering data structure.
@@ -436,6 +513,13 @@ agx_emit_parallel_copies(agx_builder *b, struct agx_copy *copies,
    if (num_copies == 0)
       return;
 
-   agx_emit_parallel_copies_for_class(b, copies, num_copies, false);
-   agx_emit_parallel_copies_for_class(b, copies, num_copies, true);
+   agx_emit_parallel_copies_for_class(b, copies, num_copies, false, temp);
+   agx_emit_parallel_copies_for_class(b, copies, num_copies, true, temp);
+}
+
+void
+agx_emit_parallel_copies(agx_builder *b, struct agx_copy *copies,
+                         unsigned num_copies)
+{
+   agx_emit_parallel_copies_temp(b, copies, num_copies, agx_null());
 }

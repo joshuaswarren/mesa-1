@@ -54,9 +54,45 @@ specialize_sample_count(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 bool
 agx_nir_specialize_sample_count(nir_shader *shader, unsigned samples)
 {
-   assert(samples == 1 || samples == 2 || samples == 4);
+   assert(samples == 1 || samples == 2 || samples == 4 || samples == 8);
    return nir_shader_intrinsics_pass(shader, specialize_sample_count,
                                      nir_metadata_control_flow, &samples);
+}
+
+static bool
+apply_api_mask_to_force_early(nir_builder *b, nir_intrinsic_instr *intr,
+                              void *data)
+{
+   bool *done = data;
+   if (*done || intr->intrinsic != nir_intrinsic_sample_mask_agx)
+      return false;
+
+   /* Fold the API mask into the one forced-early coverage update. A separate
+    * prolog MOVMSK followed by the main shader's forced-early MOVMSK loses the
+    * surviving samples on G17P; Apple's native program performs one combined
+    * update before reading the post-test coverage for fragment side effects.
+    * M5 also suppresses the separate prolog mask for forced-early shaders, so
+    * its per-pixel program must include the API mask in this update. */
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *api = nir_load_api_sample_mask_agx(b);
+   nir_src_rewrite(&intr->src[1],
+                   nir_iand(b, intr->src[1].ssa,
+                            nir_u2uN(b, api, nir_src_bit_size(intr->src[1]))));
+   *done = true;
+   return true;
+}
+
+bool
+agx_nir_apply_api_mask_to_force_early(nir_shader *shader, enum agx_chip chip)
+{
+   const bool supported = agx_chip_native_agx3(chip) ||
+      (agx_chip_g17_m5(chip) && !shader->info.fs.uses_sample_shading);
+   if (!supported || !shader->info.fs.early_fragment_tests)
+      return false;
+
+   bool done = false;
+   return nir_shader_intrinsics_pass(shader, apply_api_mask_to_force_early,
+                                     nir_metadata_control_flow, &done);
 }
 
 static bool
@@ -269,8 +305,8 @@ specialize_g17p_sample_copy(nir_cf_list *copy,
  * it. Conditional depth/stencil writes need phis here: moving their exports
  * directly to the end would move uses outside the defining branch.
  */
-static void
-lower_sample_exports_to_end(nir_shader *shader)
+void
+agx_nir_lower_sample_exports_to_end(nir_shader *shader)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    nir_block *end = nir_cursor_current_block(nir_after_impl(impl));
@@ -349,7 +385,7 @@ agx_nir_unroll_g17p_samples_layout(nir_shader *shader, unsigned nr_samples,
                                    const struct agx_g17p_colour_layout *layout)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
-   assert(nr_samples == 2 || nr_samples == 4);
+   assert(nr_samples == 2 || nr_samples == 4 || nr_samples == 8);
 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
 
@@ -375,7 +411,7 @@ agx_nir_unroll_g17p_samples_layout(nir_shader *shader, unsigned nr_samples,
       }
    }
 
-   lower_sample_exports_to_end(shader);
+   agx_nir_lower_sample_exports_to_end(shader);
 
    nir_cf_list body;
    nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
@@ -411,7 +447,7 @@ agx_nir_unroll_g17p_samples_layout(nir_shader *shader, unsigned nr_samples,
     * end of the function, so gather them all there. */
    struct util_dynarray exports;
    util_dynarray_init(&exports, NULL);
-   nir_def *write_samples[4] = {NULL};
+   nir_def *write_samples[8] = {NULL};
    unsigned write_sample_count = 0;
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
@@ -693,17 +729,252 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
 }
 
 /*
+ * M5 pixel-rate depth-only or stencil-only writes at several samples.
+ *
+ * Native G17G fragments (native G17G compiler zs_depth_{2,4,8}x,
+ * zs_cdepth_4x, zs_depth_only_4x, zs_stencil_{2,4}x) take the depth/coverage
+ * class once, then loop over the covered samples with a single DEPTHF, each
+ * iteration naming one sample. The code is identical at every sample count.
+ * Rewrite a whole-pixel store_zs_agx of that shape, executed once at the top
+ * level, into the same loop; the backend stages one word per iteration
+ * (AGX_ZS_COVERED_SAMPLE). The loop runs at least once, so a lane whose
+ * coverage is already empty still balances the transaction with an empty
+ * word, as the native loop's bottom test does. Whole-pixel depth and stencil
+ * together stay one word, and masked writes stay one word per sample.
+ */
+bool
+agx_nir_lower_m5_zs_sample_loop(nir_shader *shader, unsigned nr_samples)
+{
+   assert(shader->info.stage == MESA_SHADER_FRAGMENT);
+   if (nr_samples < 2)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_intrinsic_instr *store = NULL;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_zs_agx)
+            continue;
+         /* Exactly one write, of a supported shape, or none rewritten. */
+         if (store)
+            return false;
+         store = intr;
+      }
+   }
+
+   if (!store || !agx_block_runs_once(impl, store->instr.block))
+      return false;
+
+   const unsigned base = nir_intrinsic_base(store);
+   const unsigned all = BITFIELD_MASK(nr_samples);
+   if ((base != 1 && base != 2) || !nir_src_is_const(store->src[0]) ||
+       (nir_src_as_uint(store->src[0]) & all) != all)
+      return false;
+
+   nir_builder b = nir_builder_at(nir_before_instr(&store->instr));
+
+   /* Native clamps the depth once, ahead of the loop. The backend does not
+    * clamp a covered-sample word again. */
+   nir_def *depth = store->src[1].ssa;
+   if (base == 1)
+      depth = nir_fmin(&b, nir_fmax(&b, depth, nir_imm_float(&b, 0.0f)),
+                       nir_imm_float(&b, 1.0f));
+   nir_zs_transaction_agx(&b, .flags = 0);
+
+   nir_variable *left =
+      nir_local_variable_create(impl, glsl_uint16_t_type(), "zs_samples");
+   nir_store_var(&b, left,
+                 nir_iand_imm(&b, nir_u2u16(&b, nir_load_sample_mask(&b)), all),
+                 1);
+
+   nir_loop *loop = nir_push_loop(&b);
+   {
+      nir_def *samples = nir_load_var(&b, left);
+      nir_def *sample = nir_iand(&b, samples, nir_ineg(&b, samples));
+      nir_store_zs_agx(&b, sample, depth, store->src[2].ssa,
+                       .base = base | AGX_ZS_COVERED_SAMPLE);
+      nir_def *rest = nir_iand(&b, samples, nir_inot(&b, sample));
+      nir_store_var(&b, left, rest, 1);
+      nir_break_if(&b, nir_ieq_imm(&b, rest, 0));
+   }
+   nir_pop_loop(&b, loop);
+
+   nir_zs_transaction_agx(&b, .flags = 1);
+   nir_instr_remove(&store->instr);
+
+   nir_progress(true, impl, nir_metadata_none);
+   nir_lower_vars_to_ssa(shader);
+   return true;
+}
+
+/* Whether an instruction may run once per pixel ahead of the sample loop:
+ * the coverage update, the depth/stencil write and the pixel-rate values they
+ * are computed from. */
+static bool
+m5_pixel_rate_instr(const nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return instr->type == nir_instr_type_alu ||
+             instr->type == nir_instr_type_load_const ||
+             instr->type == nir_instr_type_undef;
+
+   switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+   case nir_intrinsic_sample_mask_agx:
+   case nir_intrinsic_store_zs_agx:
+   case nir_intrinsic_load_exported_agx:
+   case nir_intrinsic_load_shader_part_tests_zs_agx:
+   /* The coverage dither is per pixel. */
+   case nir_intrinsic_load_frag_coord:
+   case nir_intrinsic_load_pixel_coord:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+m5_coverage_or_zs(const nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+   return op == nir_intrinsic_sample_mask_agx ||
+          op == nir_intrinsic_store_zs_agx;
+}
+
+/* The one top-level depth/stencil write, moved with its pixel-rate sources
+ * to just after the last coverage update, ahead of any tile access. Epilogs
+ * emit it last, after the blend. */
+static void
+m5_hoist_zs_write(nir_function_impl *impl)
+{
+   nir_intrinsic_instr *store = NULL;
+   nir_cf_node *last_update = NULL;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_store_zs_agx) {
+            if (store || !agx_block_runs_once(impl, block))
+               return;
+            store = intr;
+         } else if (intr->intrinsic == nir_intrinsic_sample_mask_agx) {
+            /* A kill must reach the write first. */
+            if (store)
+               return;
+            nir_cf_node *node = &block->cf_node;
+            while (node->parent != &impl->cf_node)
+               node = node->parent;
+            last_update = node;
+         }
+      }
+   }
+   if (!store)
+      return;
+   for (unsigned i = 0; i < nir_intrinsic_infos[store->intrinsic].num_srcs; ++i) {
+      if (!movable_zs_source(store->src[i].ssa))
+         return;
+   }
+   /* Only where the whole part ahead of it stays at pixel rate. */
+   if (last_update) {
+      foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+         nir_foreach_block_in_cf_node(block, node) {
+            nir_foreach_instr(instr, block) {
+               if (!m5_pixel_rate_instr(instr))
+                  return;
+            }
+         }
+         if (node == last_update)
+            break;
+      }
+   }
+
+   struct move_zs_state state = {
+      .cursor = last_update ? nir_after_cf_node(last_update)
+                            : nir_before_impl(impl),
+      .moved = _mesa_pointer_set_create(NULL),
+   };
+   nir_foreach_src(&store->instr, move_zs_source, &state);
+   nir_instr_move(state.cursor, &store->instr);
+   _mesa_set_destroy(state.moved, NULL);
+}
+
+/*
+ * The end of the leading pixel-rate part of a pixel-shaded M5 epilog that
+ * holds all of its coverage updates and depth/stencil writes. False when
+ * there are none, or when other work precedes the last of them.
+ *
+ * Native G17G blended alpha-to-coverage fragments (native G17G compiler
+ * a2cb_pure_{2,4,8}x, with and without a depth attachment) issue one testing
+ * MOVMSK at pixel rate, then blend each covered sample. Wrapping the update
+ * in the sample loop instead issues one per sample, each naming its own
+ * sample. A testing word tests every covered sample, not only the ones it
+ * names: that is how a2c at alpha 0 wrote depth before 911fc231107. So the
+ * first live sample's update would also test, and write depth for, samples
+ * that a later sample's update kills (expected from that result).
+ *
+ * Blended fragments that write depth likewise finish depth before blending:
+ * one DEPTHF per sample with the alpha coverage folded in (a2cb_depth_{2,4,8}x)
+ * or, without alpha-to-coverage, the covered-sample DEPTHF loop
+ * (blend_depth_{2,4,8}x). Leaving the write in the sample loop interleaves a
+ * DEPTHF with each sample's colour instead.
+ */
+static bool
+m5_pixel_rate_prefix(nir_shader *shader, nir_cursor *end)
+{
+   if (shader->info.fs.early_fragment_tests)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   m5_hoist_zs_write(impl);
+
+   unsigned left = 0;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block)
+         left += m5_coverage_or_zs(instr);
+   }
+   if (!left)
+      return false;
+
+   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+      if (node->type == nir_cf_node_loop)
+         return false;
+      nir_foreach_block_in_cf_node(block, node) {
+         nir_foreach_instr(instr, block) {
+            if (!m5_pixel_rate_instr(instr))
+               return false;
+            if (!m5_coverage_or_zs(instr) || --left)
+               continue;
+            /* The last one: end after it, or after the control flow
+             * around it. */
+            *end = node->type == nir_cf_node_block ? nir_after_instr(instr)
+                                                   : nir_after_cf_node(node);
+            return true;
+         }
+      }
+   }
+   UNREACHABLE("every update was counted");
+}
+
+/*
  * Lower a fragment shader into a monolithic pixel shader, with static sample
  * count, blend state, and tilebuffer formats in the shader key. For dynamic,
  * epilogs must be used, which have separate lowerings.
  */
-bool
-agx_nir_lower_monolithic_msaa(nir_shader *shader, uint8_t nr_samples)
+static bool
+lower_monolithic_msaa(nir_shader *shader, uint8_t nr_samples, bool m5)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
-   assert(nr_samples == 1 || nr_samples == 2 || nr_samples == 4);
+   assert(nr_samples == 1 || nr_samples == 2 || nr_samples == 4 || nr_samples == 8);
 
-   agx_nir_lower_sample_mask(shader);
+   if (m5)
+      agx_nir_lower_sample_mask_m5(shader);
+   else
+      agx_nir_lower_sample_mask(shader);
 
    /* In single sampled programs, interpolateAtSample needs to return the
     * center pixel.
@@ -714,8 +985,23 @@ agx_nir_lower_monolithic_msaa(nir_shader *shader, uint8_t nr_samples)
       };
       nir_lower_single_sampled(shader, &lss_opts);
    } else if (shader->info.fs.uses_sample_shading) {
+      /* M5 keeps a pixel-rate coverage update and depth/stencil write ahead
+       * of the sample loop: set them aside while the rest becomes
+       * per-sample, then put them back in front of the loop. */
+      nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+      nir_cursor prefix_end;
+      const bool split = m5 && m5_pixel_rate_prefix(shader, &prefix_end);
+      nir_cf_list prefix;
+      if (split)
+         nir_cf_extract(&prefix, nir_before_impl(impl), prefix_end);
+
       agx_nir_lower_to_per_sample(shader);
       agx_nir_wrap_per_sample_loop(shader, nr_samples);
+
+      if (split) {
+         nir_cf_reinsert(&prefix, nir_before_impl(impl));
+         nir_progress(true, impl, nir_metadata_none);
+      }
    }
 
    return true;
@@ -748,4 +1034,16 @@ agx_nir_lower_monolithic_msaa_agx2(nir_shader *shader, uint8_t nr_samples)
    }
 
    return true;
+}
+
+bool
+agx_nir_lower_monolithic_msaa(nir_shader *shader, uint8_t nr_samples)
+{
+   return lower_monolithic_msaa(shader, nr_samples, false);
+}
+
+bool
+agx_nir_lower_monolithic_msaa_m5(nir_shader *shader, uint8_t nr_samples)
+{
+   return lower_monolithic_msaa(shader, nr_samples, true);
 }

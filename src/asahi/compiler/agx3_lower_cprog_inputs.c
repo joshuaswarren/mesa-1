@@ -36,7 +36,8 @@ bool
 agx3_lower_cprog_inputs(agx_context *ctx)
 {
    if (!ctx->is_preamble || !ctx->out || ctx->agx3_cprog_inputs_lowered ||
-       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+       (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B &&
+        ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C))
       return false;
 
    uint64_t reads[8] = {0}, writes[8] = {0};
@@ -189,6 +190,8 @@ cprog_other_storage(const agx_instr *I)
    case AGX_OPCODE_SCS_STORE_REGISTER_INDEXED_AGX3:
    case AGX_OPCODE_SCS_LOAD_REGISTER_BASE_AGX3:
    case AGX_OPCODE_SCS_STORE_REGISTER_BASE_AGX3:
+   case AGX_OPCODE_INTERSECT_RAY_M5:
+   case AGX_OPCODE_CONTINUE_RAY_M5:
       return true;
    default:
       return false;

@@ -31,6 +31,11 @@ layout(push_constant) uniform CONSTS
    hk_agx3_plan_args args;
 };
 
+/* The common builder's internal node count, final before planning starts:
+ * main() reads it once rather than every source_index() reloading it past
+ * this invocation's own stores and atomics. */
+uint internal_count;
+
 void
 fail(uint flag)
 {
@@ -62,7 +67,7 @@ source_index(uint ir_id)
    if (kind == vk_ir_node_internal && offset >= args.root_offset &&
        (offset - args.root_offset) % SIZEOF(vk_ir_box_node) == 0) {
       uint i = (offset - args.root_offset) / SIZEOF(vk_ir_box_node);
-      if (i < DEREF(args.header).ir_internal_node_count &&
+      if (i < internal_count &&
           i < args.node_bound - args.leaf_bound)
          return args.leaf_bound + i;
    }
@@ -82,7 +87,7 @@ source_offset(uint index)
 uint
 root_index()
 {
-   return args.leaf_bound + DEREF(args.header).ir_internal_node_count - 1;
+   return args.leaf_bound + internal_count - 1;
 }
 
 uvec2
@@ -117,7 +122,7 @@ uint
 pair_flags(uint index)
 {
    if (index < args.leaf_bound ||
-       index - args.leaf_bound >= DEREF(args.header).ir_internal_node_count)
+       index - args.leaf_bound >= internal_count)
       return 0u;
    uvec2 pair = children(index);
    uint t0 = triangle_index(pair[0]), t1 = triangle_index(pair[1]);
@@ -267,7 +272,7 @@ void
 link_and_count(uint id)
 {
    if (id < args.leaf_bound ||
-       id >= args.leaf_bound + DEREF(args.header).ir_internal_node_count)
+       id >= args.leaf_bound + internal_count)
       return;
    uvec2 pair = children(id);
    for (uint c = 0; c < 2; c++)
@@ -469,6 +474,7 @@ void
 main()
 {
    uint id = gl_GlobalInvocationID.x;
+   internal_count = DEREF(args.header).ir_internal_node_count;
    if (args.phase == 0) {
       initialize(id);
       return;

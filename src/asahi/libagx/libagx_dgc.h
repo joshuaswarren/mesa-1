@@ -912,9 +912,10 @@ agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
     * executes and the following CPU-authored command remains the only parser
     * target.
     */
-   if (chip == AGX_CHIP_G17P &&
+   if ((chip == AGX_CHIP_G17P ||
+        agx_vdm_index_list_direct_is_hal300_inline(chip)) &&
        (draw.b.count[0] == 0 || draw.b.count[1] == 0)) {
-      if (render_state_emitted)
+      if (chip == AGX_CHIP_G17P && render_state_emitted)
          *out++ = draw_state_context_offset;
 
       *out++ = 0x80000000u | (uint32_t)(empty_draw_jump >> 32);

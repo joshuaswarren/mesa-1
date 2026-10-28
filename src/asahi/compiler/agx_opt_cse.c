@@ -80,6 +80,8 @@ instrs_equal(const void *_i1, const void *_i2)
       return false;
    if (i1->agx3_cube_scalar_coords != i2->agx3_cube_scalar_coords)
       return false;
+   if (i1->agx3_split_coords != i2->agx3_split_coords)
+      return false;
    if (i1->offset != i2->offset)
       return false;
    /* Two samples that differ only in their coordinate offset are different
@@ -102,6 +104,8 @@ instrs_equal(const void *_i1, const void *_i2)
    if (i1->memory_is_packed != i2->memory_is_packed)
       return false;
    if (i1->memory_index_is_bytes != i2->memory_index_is_bytes)
+      return false;
+   if (i1->no_signed_zero != i2->no_signed_zero)
       return false;
    if (i1->saturate != i2->saturate)
       return false;

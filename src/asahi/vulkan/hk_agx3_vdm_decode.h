@@ -24,7 +24,7 @@ extern "C" {
 /* Bump whenever the Honeykrisp shader payload below changes.  Vulkan shader
  * binaries carry this version outside the driver-private blob, so stale
  * layouts are rejected before any fields are consumed. */
-#define HK_AGX3_SHADER_BINARY_VERSION 35u
+#define HK_AGX3_SHADER_BINARY_VERSION 36u
 #define HK_CLASSIC_SHADER_BINARY_VERSION 34u
 /* AGX2 image-acquire binaries now include memory-to-texture visibility. */
 #define HK_AGX2_SHADER_BINARY_VERSION 36u
@@ -40,6 +40,8 @@ hk_shader_binary_version(enum agx_chip chip)
    case AGX_CHIP_G15P:
       return HK_AGX2_SHADER_BINARY_VERSION;
    case AGX_CHIP_G17P:
+   case AGX_CHIP_G17G:
+   case AGX_CHIP_G17S:
       return HK_AGX3_SHADER_BINARY_VERSION;
    default:
       return HK_CLASSIC_SHADER_BINARY_VERSION;

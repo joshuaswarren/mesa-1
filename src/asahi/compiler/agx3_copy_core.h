@@ -34,14 +34,14 @@
 extern "C" {
 #endif
 
-/* Apple's ordinary `copy` is four bytes; its extended ep1 record is ten. */
+/* Ordinary COPY is four bytes. Extended forms need up to ten bytes. */
 #define AGX3_COPY_MAX_LENGTH 10u
 
 /* The compact COPY's destination field (f2) is seven bits wide at EVERY
  * width, so no four-byte copy can name a destination at or above this half
- * index -- the 16-bit forms refuse there, and the 32-bit uniform form moves
- * to the ten-byte ep1.  Register allocation needs the same number to know
- * when a half victim could become unencodable.  The SOURCE fields are not
+ * index. G17P half copies refuse there; G17S uses its eight-byte ep1 half
+ * copy, and the 32-bit uniform form uses ten-byte ep1. Register allocation
+ * uses this boundary for G17P half-copy restrictions. The SOURCE fields are not
  * narrow this way: Apple's own ep0 copies carry sources well past it. */
 #define AGX3_COPY_REG16_DEST_HALVES 128u
 
@@ -63,7 +63,8 @@ extern "C" {
  * 32-bit `iadd d, s, #0` trick the select core uses is grounded only at 32
  * bits, and booleans live in 16-bit halves. Apple's own corpus carries this
  * form (copy.ep0 with a register source and f24 = 1), including odd
- * destination halves, which need no separate encoding point here.
+ * destination halves. G17S destinations from half 128 use ep1 to preserve
+ * the high destination bit rather than truncating it in compact ep0.
  *
  * Scoreboard waits ride on f30 + slot - 1, the same convention
  * agx3_tex_stage_copy() documents; a corpus copy with f30 set reproduces

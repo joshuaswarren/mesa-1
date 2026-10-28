@@ -64,6 +64,32 @@ agx3_staging_hold(struct agx3_staging_banks *banks, uint16_t base,
    return true;
 }
 
+/* As agx3_staging_plan(), but take a free range at or above `avoid_end`
+ * first: the start of the file belongs to a later fixed-location operand. */
+static inline bool agx3_staging_plan(const struct agx3_staging_banks *banks,
+                                     unsigned span, unsigned alignment,
+                                     unsigned limit, uint16_t *base,
+                                     uint16_t *waits);
+
+static inline bool
+agx3_staging_plan_above(const struct agx3_staging_banks *banks, unsigned span,
+                        unsigned alignment, unsigned limit,
+                        unsigned avoid_end, uint16_t *base, uint16_t *waits)
+{
+   if (avoid_end && alignment && !(alignment & (alignment - 1)) &&
+       limit <= AGX3_STAGING_HALFS && span <= limit) {
+      const unsigned first = (avoid_end + alignment - 1) & ~(alignment - 1);
+      for (unsigned i = first; i + span <= limit; i += alignment) {
+         if (!agx3_staging_conflicts(banks, i, span)) {
+            *base = i;
+            *waits = 0;
+            return true;
+         }
+      }
+   }
+   return agx3_staging_plan(banks, span, alignment, limit, base, waits);
+}
+
 /* Plan an aligned allocation without changing any lifetime. Prefer a free
  * range; otherwise return the range requiring the fewest consumer slots to
  * retire. The caller must emit those waits before overwriting the range and

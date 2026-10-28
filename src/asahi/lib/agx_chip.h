@@ -194,6 +194,15 @@ agx_chip_record_family(enum agx_chip chip)
 
 #include "drm-uapi/asahi_drm.h"
 
+/* The AGX3 ISA family: G17P (AGX3B) and G17S (AGX3C) share instruction forms
+ * and the AGX3 backend. Encoder/packer capability stays per encoding; the
+ * shared compiler policy gates on the family. */
+static inline bool
+agx_isa_is_agx3(enum agx_isa_encoding enc)
+{
+   return enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -545,7 +554,17 @@ const char *agx_chip_exact_product_name(enum agx_chip chip);
 /* libagx_g13{g,x} contains AGX2 machine code and USC records. It must never be
  * selected for an AGX3 device, even when no current draw is expected to call a
  * precompiled helper. */
+bool agx_params_m5_bringup_supported(
+   const struct drm_asahi_params_global *params);
+
 bool agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip);
+
+/* M5 variants sharing the AGX3C instruction and HAL300 command formats. */
+static inline bool
+agx_chip_g17_m5(enum agx_chip chip)
+{
+   return chip == AGX_CHIP_G17G || chip == AGX_CHIP_G17S;
+}
 
 /* Stable name for diagnostics, e.g. "G15X". Never NULL. */
 const char *agx_chip_name(enum agx_chip chip);

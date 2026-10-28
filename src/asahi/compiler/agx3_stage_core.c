@@ -18,11 +18,25 @@ stage_alu(enum agx_isa_encoding enc, bool fma, uint16_t dest, uint8_t slot,
           const bool live[3], const bool discard[3], uint16_t wait_mask,
           uint8_t out[16], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !live || !discard || !out ||
-       !len || dest >= 256 || (dest & 1) || slot < 1 || slot > 6 ||
-       wait_mask > 0x3f || (unsigned)source0 > AGX3_STAGE_FMA_IMMEDIATE ||
-       (source0 != AGX3_STAGE_FMA_REGISTER && !fma))
+   /* M5 (G17G) terrain vertex mains write their outputs the same
+    * way: staged FMUL R*R, FMA U*R+R and FMA R*R+R with f9=5, the same
+    * operand fields, f95=1/f96=55 (FMA) or f78=1/f79=62 (MUL), eight
+    * completion slots and an eight-bit wait set. Native witnesses are
+    * asserted in test-agx3-uniform-alu.cpp. The coordinate FMA with an
+    * immediate stays an AGX3B form. */
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !src || !live || !discard ||
+       !out || !len || dest >= 256 || (dest & 1) || slot < 1 ||
+       slot > (m5 ? 8 : 6) || wait_mask > (m5 ? 0xff : 0x3f) ||
+       (unsigned)source0 > AGX3_STAGE_FMA_IMMEDIATE ||
+       (source0 != AGX3_STAGE_FMA_REGISTER && !fma) ||
+       (m5 && source0 == AGX3_STAGE_FMA_IMMEDIATE))
       return false;
+   for (unsigned s = 0; m5 && s < (fma ? 3 : 2); ++s) {
+      const bool uniform = s == 0 && source0 == AGX3_STAGE_FMA_UNIFORM;
+      if (!uniform && src[s] >= 252)
+         return false;
+   }
    for (unsigned s = 0; s < (fma ? 3 : 2); ++s) {
       const bool immediate = s == 0 && source0 == AGX3_STAGE_FMA_IMMEDIATE;
       if (src[s] >= 256 || (!immediate && (src[s] & 1)) ||
@@ -39,7 +53,9 @@ stage_alu(enum agx_isa_encoding enc, bool fma, uint16_t dest, uint8_t slot,
       KV(9, 5), KV(10, 2), KV(25, 2), KV(26, 2), KV(43, 2),
       KV(60, 2),
    };
-   struct agx3_field_kv fields[24] = {
+   /* Seven base fields, two source hints, six FMA fields, two M5
+    * selectors and eight wait bits: the all-register M5 form needs 25. */
+   struct agx3_field_kv fields[25] = {
       KV(5, dest),
       KV(12, slot),
       KV(18, src[1]),
@@ -68,15 +84,35 @@ stage_alu(enum agx_isa_encoding enc, bool fma, uint16_t dest, uint8_t slot,
    } else {
       fields[n++] = (struct agx3_field_kv)KV(74, 2);
    }
-   for (unsigned s = 0; s < 6; ++s)
+   if (m5) {
+      fields[n++] = (struct agx3_field_kv)KV(fma ? 95 : 78, 1);
+      fields[n++] = (struct agx3_field_kv)KV(fma ? 96 : 79, fma ? 55 : 62);
+   }
+   for (unsigned s = 0; s < (m5 ? 8 : 6); ++s)
       fields[n++] = (struct agx3_field_kv)KV((fma ? 97 : 80) + s,
                                            (wait_mask >> s) & 1);
-   for (unsigned ep = 0; ep <= (fma ? 5 : 3); ++ep) {
+   /* M5 endpoints are not ordered by length: keep the shortest. */
+   uint8_t best[16], best_len = 0;
+   for (unsigned ep = 0; ep <= (m5 ? (fma ? 7 : 5) : fma ? 5 : 3); ++ep) {
+      uint8_t bytes[16], size;
       if (agx3_bind_compose(enc, fma ? "f32fma" : "f32mul", ep,
-                           base, 6, fields, n, out, len))
-         return true;
+                           base, 6, fields, n, bytes, &size)) {
+         if (!m5) {
+            memcpy(out, bytes, size);
+            *len = size;
+            return true;
+         }
+         if (!best_len || size < best_len) {
+            memcpy(best, bytes, size);
+            best_len = size;
+         }
+      }
    }
-   return false;
+   if (!best_len)
+      return false;
+   memcpy(out, best, best_len);
+   *len = best_len;
+   return true;
 }
 
 bool
@@ -227,8 +263,15 @@ clr_common(enum agx_isa_encoding enc, const struct agx3_field_kv *ov,
            unsigned n, uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len)
 {
    const struct agx3_field_kv base[] = {KV(10, 2)};
-   if (agx3_bind_compose(enc, "clr", 0, base, 1, ov, n, out, len))
-      return true;
+   const struct agx3_field_kv m5_base[] = {
+      KV(10, 2), KV(14, 3), KV(15, 25),
+   };
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   for (unsigned ep = 0; ep <= (m5 ? 1 : 0); ++ep) {
+      if (agx3_bind_compose(enc, "clr", ep, m5 ? m5_base : base,
+                           m5 ? 3 : 1, ov, n, out, len))
+         return true;
+   }
    memset(out, 0, AGX3_STAGE_MAX_LENGTH);
    *len = 0;
    return false;
@@ -243,7 +286,8 @@ agx3_clr(enum agx_isa_encoding enc, uint16_t dest, bool half, bool hint,
    memset(out, 0, AGX3_STAGE_MAX_LENGTH);
    *len = 0;
 
-   if (!b_only(enc) || dest >= 256 || (!half && (dest & 1)))
+   if ((!b_only(enc) && enc != AGX_ISA_ENCODING_AGX3C) ||
+       dest >= 256 || (!half && (dest & 1)))
       return false;
 
    struct agx3_field_kv ov[5];

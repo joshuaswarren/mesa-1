@@ -15,6 +15,7 @@
 #include "agx_vdm_index_list_core.h"
 #include "agx_vdm_state_update_core.h"
 #include "agx_vdm_tessellate_core.h"
+#include "agx_vdm_mesh_core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,8 @@ enum agx_vdm_record_kind {
    AGX_VDM_RECORD_TESSELLATE_DIRECT,
    AGX_VDM_RECORD_TESSELLATE_INDIRECT,
    AGX_VDM_RECORD_TESSELLATION_STATE,
+   AGX_VDM_RECORD_MESH_STATE,
+   AGX_VDM_RECORD_MESH_DISPATCH,
 };
 
 struct agx_vdm_decoded_record {
@@ -55,6 +58,8 @@ struct agx_vdm_decoded_record {
       struct agx_vdm_tessellate_direct_info tessellate_direct;
       struct agx_vdm_tessellate_indirect_info tessellate_indirect;
       struct agx_vdm_tessellation_state_info tessellation_state;
+      struct agx_vdm_mesh_state_info mesh_state;
+      struct agx_vdm_mesh_dispatch_info mesh_dispatch;
       struct {
          uint64_t target;
       } stream_link;

@@ -339,6 +339,21 @@ idep_vulkan_runtime = declare_dependency(
   ]
 )
 
+if with_tests
+  test(
+    'vk_queue_dropped_signal',
+    executable(
+      'vk_queue_dropped_signal_test',
+      'tests/vk_queue_dropped_signal_test.c',
+      include_directories : [inc_include, inc_src],
+      dependencies : [vulkan_lite_runtime_deps, idep_vulkan_lite_runtime_headers],
+      link_with : [libvulkan_lite_runtime, libvulkan_lite_instance],
+    ),
+    suite : ['vulkan'],
+    timeout : 10,
+  )
+endif
+
 if with_tests and dep_libdrm.found()
   test(
     'vk_drm_syncobj_pending_wait',

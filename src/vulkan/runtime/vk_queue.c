@@ -231,6 +231,48 @@ vk_queue_submit_cleanup(struct vk_queue *queue,
    }
 }
 
+/* A submission that will never execute on a lost queue still owns its
+ * signal operations. Signal them on the CPU so that host and device waiters
+ * (including WAIT_FOR_SUBMIT waits on timeline points) wake up and observe the
+ * lost device through check_status, instead of waiting forever for a payload
+ * that is never submitted. The device is already lost, so no result produced
+ * after this point is trusted.
+ */
+static void
+vk_queue_submit_signal_dropped(struct vk_queue *queue,
+                               struct vk_queue_submit *submit)
+{
+   if (submit->_signals_dropped)
+      return;
+   submit->_signals_dropped = true;
+
+   for (uint32_t i = 0; i < submit->signal_count; i++) {
+      struct vk_sync *sync = submit->signals[i].sync;
+      if (sync == NULL || !(sync->type->features & VK_SYNC_FEATURE_CPU_SIGNAL))
+         continue;
+
+      /* After vk_sync_signal_unwrap, an emulated timeline signal targets the
+       * binary sync of a new time point that must also be installed.
+       */
+      VkResult result = vk_sync_signal(queue->base.device, sync,
+                                      submit->signals[i].signal_value);
+      if (unlikely(result != VK_SUCCESS))
+         vk_queue_set_lost(queue, "Failed to signal a dropped submission");
+
+      /* Publish the point even if the best-effort CPU signal failed. A
+       * waiter may already be blocked on the timeline's condition variable;
+       * it must reach the underlying sync/device-loss checks. The payload
+       * is untrusted on the lost device, as are all subsequent results.
+       */
+      if (submit->_signal_points != NULL &&
+          submit->_signal_points[i] != NULL) {
+         vk_sync_timeline_point_install(queue->base.device,
+                                        submit->_signal_points[i]);
+         submit->_signal_points[i] = NULL;
+      }
+   }
+}
+
 static void
 vk_queue_submit_free(struct vk_queue *queue,
                      struct vk_queue_submit *submit)
@@ -554,9 +596,37 @@ vk_queue_push_submit(struct vk_queue *queue,
                      struct vk_queue_submit *submit)
 {
    mtx_lock(&queue->submit.mutex);
+   if (queue->submit.mode == VK_QUEUE_SUBMIT_MODE_THREADED &&
+       queue->_lost.lost) {
+      /* The submit thread stopped with the queue lost and drained everything
+       * queued before; this submission would never be processed.
+       */
+      vk_queue_submit_signal_dropped(queue, submit);
+      vk_queue_submit_destroy(queue, submit);
+      mtx_unlock(&queue->submit.mutex);
+      return;
+   }
    list_addtail(&submit->link, &queue->submit.submits);
    cnd_signal(&queue->submit.push);
    mtx_unlock(&queue->submit.mutex);
+}
+
+/* The queue is lost: every queued submission will never be processed. Drop
+ * them, signalling their signal operations. Caller holds submit.mutex.
+ */
+static void
+vk_queue_drop_pending_locked(struct vk_queue *queue)
+{
+   assert(queue->_lost.lost);
+   while (!list_is_empty(&queue->submit.submits)) {
+      struct vk_queue_submit *submit =
+         list_first_entry(&queue->submit.submits,
+                          struct vk_queue_submit, link);
+      list_del(&submit->link);
+      vk_queue_submit_signal_dropped(queue, submit);
+      vk_queue_submit_destroy(queue, submit);
+   }
+   cnd_broadcast(&queue->submit.pop);
 }
 
 static VkResult
@@ -655,8 +725,11 @@ vk_queue_submit_final(struct vk_queue *queue,
       vk_queue_unlock(queue);
    }
 
-   if (unlikely(result != VK_SUCCESS))
+   if (unlikely(result != VK_SUCCESS)) {
+      /* Callers mark the queue lost; nothing of this submission will run. */
+      vk_queue_submit_signal_dropped(queue, submit);
       return result;
+   }
 
    if (submit->_signal_points) {
       for (uint32_t i = 0; i < submit->signal_count; i++) {
@@ -706,6 +779,7 @@ vk_queue_flush(struct vk_queue *queue, uint32_t *submit_count_out)
             goto done;
          } else if (result != VK_SUCCESS) {
             result = vk_queue_set_lost(queue, "Wait for time points failed");
+            vk_queue_drop_pending_locked(queue);
             goto done;
          }
       }
@@ -713,6 +787,7 @@ vk_queue_flush(struct vk_queue *queue, uint32_t *submit_count_out)
       result = vk_queue_submit_final(queue, submit);
       if (unlikely(result != VK_SUCCESS)) {
          result = vk_queue_set_lost(queue, "queue::driver_submit failed");
+         vk_queue_drop_pending_locked(queue);
          goto done;
       }
 
@@ -766,12 +841,18 @@ vk_queue_submit_thread_func(void *_data)
                                  VK_SYNC_WAIT_PENDING, UINT64_MAX);
       if (unlikely(result != VK_SUCCESS)) {
          vk_queue_set_lost(queue, "Wait for time points failed");
+         mtx_lock(&queue->submit.mutex);
+         vk_queue_drop_pending_locked(queue);
+         mtx_unlock(&queue->submit.mutex);
          return 1;
       }
 
       result = vk_queue_submit_final(queue, submit);
       if (unlikely(result != VK_SUCCESS)) {
          vk_queue_set_lost(queue, "queue::driver_submit failed");
+         mtx_lock(&queue->submit.mutex);
+         vk_queue_drop_pending_locked(queue);
+         mtx_unlock(&queue->submit.mutex);
          return 1;
       }
 

@@ -313,7 +313,7 @@ __wrap_vk_common_CreatePipelineBinariesKHR(
    VkDevice d, const VkPipelineBinaryCreateInfoKHR *ci,
    const VkAllocationCallbacks *a, VkPipelineBinaryHandlesInfoKHR *out)
 {
-   if (dev.dev.chip != AGX_CHIP_G17P) {
+   if (dev.dev.chip != AGX_CHIP_G17P && !agx_chip_g17_m5(dev.dev.chip)) {
       classic_delegations++;
       return VK_NOT_READY;
    }
@@ -328,7 +328,7 @@ VkResult
 __wrap_vk_common_GetPipelineKeyKHR(
    VkDevice d, const VkPipelineCreateInfoKHR *ci, VkPipelineBinaryKeyKHR *key)
 {
-   if (dev.dev.chip != AGX_CHIP_G17P) {
+   if (dev.dev.chip != AGX_CHIP_G17P && !agx_chip_g17_m5(dev.dev.chip)) {
       classic_delegations++;
       return VK_NOT_READY;
    }
@@ -362,7 +362,7 @@ main(void)
    pdev.vk.properties.maxSubgroupSize = 32;
    device = hk_device_to_handle(&dev);
    for (enum agx_chip chip = AGX_CHIP_G13G; chip < AGX_CHIP_UNKNOWN; ++chip) {
-      if (chip == AGX_CHIP_G17P)
+      if (chip == AGX_CHIP_G17P || agx_chip_g17_m5(chip))
          continue;
       dev.dev.chip = chip;
       VkRayTracingPipelineCreateInfoKHR rt = {

@@ -4,6 +4,7 @@
  */
 
 #include "agx3_pack.h"
+#include "agx3_binder.h"
 
 #include <string.h>
 
@@ -2252,6 +2253,26 @@ agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
       memset(out, 0, sizeof(*out));
       return true;
    }
+   if (scope == AGX3_BARRIER_SCOPE_MESH_PAYLOAD_ENTRY ||
+       scope == AGX3_BARRIER_SCOPE_OBJECT_PAYLOAD_EXIT) {
+      if (encoding != AGX_ISA_ENCODING_AGX3C || out == NULL) return false;
+      /* mesh_amplified +0xa, before reading SR62/63 and LDDEV payload.
+       * Retain the capture's anonymous selector fields exactly. */
+      const struct agx3_field_kv mesh_fields[] = {
+         {14,3},{15,9},{24,1},{30,3},{40,1},
+      };
+      const struct agx3_field_kv object_fields[] = {
+         {14,3},{15,9},{24,1},{30,4},{39,1},{40,1},
+      };
+      bool object=scope==AGX3_BARRIER_SCOPE_OBJECT_PAYLOAD_EXIT;
+      const struct agx3_field_kv *fields=object ? object_fields : mesh_fields;
+      unsigned count=object ? sizeof(object_fields)/sizeof(object_fields[0])
+                            : sizeof(mesh_fields)/sizeof(mesh_fields[0]);
+      memset(out,0,sizeof(*out));
+      return agx3_bind_compose(encoding,"barrier",0,fields,
+         count,NULL,0,out->bytes,&out->length);
+   }
+
    static const uint8_t canonical_b[][AGX3_SCOPED_BARRIER_MAX_LENGTH] = {
       [AGX3_BARRIER_SCOPE_EXECUTION] =
          {0x07, 0x04, 0x54, 0x41, 0x09, 0x00},
@@ -2279,11 +2300,26 @@ agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
          {0x07, 0x51, 0x00, 0x06, 0x00, 0x00},
       [AGX3_BARRIER_SCOPE_THREADGROUP] =
          {0x27, 0x51, 0x00, 0x06, 0x00, 0x00},
+      /* G17G atomic_thread_fence(mem_device, seq_cst, thread_scope_device).
+       * Unlike the workgroup barrier, this is valid in one active lane. */
+      [AGX3_BARRIER_SCOPE_DEVICE_FENCE] =
+         {0x0f, 0x2b, 0x00, 0x06, 0x00, 0x00},
       [AGX3_BARRIER_SCOPE_DEVICE] =
          {0x0f, 0x69, 0x00, 0x06, 0x00, 0x00},
       [AGX3_BARRIER_SCOPE_TEXTURE] = {
          0x87, 0x67, 0x00, 0x06, 0x00, 0x00,
          0x87, 0x5f, 0x00, 0x06, 0x00, 0x00,
+      },
+      /* G17G texture.fence() and atomic_thread_fence(mem_texture) at device
+       * or simdgroup scope (port/fencewit k_fence, k_atf_dev, k_atf_simd). */
+      [AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT] = {
+         0x87, 0x26, 0x00, 0x06, 0x00, 0x00,
+         0x87, 0x1e, 0x00, 0x06, 0x00, 0x00,
+      },
+      /* atomic_thread_fence(mem_texture, thread_scope_threadgroup). */
+      [AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP] = {
+         0x87, 0x27, 0x00, 0x06, 0x00, 0x00,
+         0x87, 0x1f, 0x00, 0x06, 0x00, 0x00,
       },
    };
    const uint8_t(*canonical)[AGX3_SCOPED_BARRIER_MAX_LENGTH] =
@@ -2292,20 +2328,70 @@ agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
    const uint8_t length =
       scope == AGX3_BARRIER_SCOPE_TEXTURE ||
             scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE ||
-            scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT
+            scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT ||
+            scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP
          ? 12
          : 6;
 
    if (canonical == NULL || out == NULL ||
        scope < AGX3_BARRIER_SCOPE_EXECUTION ||
-       scope > AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT ||
+       scope > AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP ||
+       (encoding == AGX_ISA_ENCODING_AGX3B &&
+        scope > AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT) ||
        (encoding == AGX_ISA_ENCODING_AGX3C &&
-        scope > AGX3_BARRIER_SCOPE_TEXTURE))
+        scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE))
       return false;
 
    memset(out, 0, sizeof(*out));
    memcpy(out->bytes, canonical[scope], length);
    out->length = length;
+   return true;
+}
+
+bool
+agx3_pack_scoped_barrier_wait(enum agx_isa_encoding encoding,
+                              enum agx3_barrier_scope scope,
+                              uint16_t wait_mask,
+                              struct agx3_encoded_scoped_barrier *out)
+{
+   if (!agx3_pack_scoped_barrier(encoding, scope, out))
+      return false;
+   if (!wait_mask)
+      return true;
+
+   /* Field 29 is the threadgroup rendezvous and field 39 the threadgroup
+    * memory scope; the first word is scope 4, the second scope 3. */
+   const bool rendezvous = scope == AGX3_BARRIER_SCOPE_TEXTURE;
+   const bool threadgroup =
+      rendezvous || scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP;
+   if (encoding != AGX_ISA_ENCODING_AGX3C || (wait_mask & ~UINT16_C(0xff)) ||
+       (scope != AGX3_BARRIER_SCOPE_TEXTURE &&
+        scope != AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT &&
+        scope != AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP)) {
+      memset(out, 0, sizeof(*out));
+      return false;
+   }
+
+   const struct agx3_field_kv base[] = {
+      {14, 3}, {15, 9}, {28, 1}, {29, rendezvous}, {30, 4},
+      {39, threadgroup}, {40, 1}, {41, 1},
+   };
+   struct agx3_field_kv wait[8];
+   unsigned n = 0;
+   for (unsigned i = 0; i < 8; ++i) {
+      if (wait_mask & (1u << i))
+         wait[n++] = (struct agx3_field_kv){16 + i, 1};
+   }
+
+   uint8_t first[AGX3_SCOPED_BARRIER_MAX_LENGTH], len = 0;
+   if (!agx3_bind_compose(encoding, "barrier", 0, base,
+                          sizeof(base) / sizeof(base[0]), wait, n, first,
+                          &len) ||
+       len != 6) {
+      memset(out, 0, sizeof(*out));
+      return false;
+   }
+   memcpy(out->bytes, first, 6);
    return true;
 }
 

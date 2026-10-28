@@ -47,11 +47,19 @@ __gen_pack_lod(float f, uint32_t start, uint32_t end)
    return util_bitpack_uint(fixed, start, end);
 }
 
-/* HAL300 raises the sampler maximum LOD clamp from 14.0 to 15.0. */
+/* HAL300 raises the sampler maximum LOD clamp from 14.0 to 15.0.
+ *
+ * The hardware selects the minification filter only for a clamped lambda
+ * above zero, so a positive clamp must not truncate to 0: minLod = 0.01
+ * packed as 0 turned an explicit-LOD-0 lookup into a magnified one, where
+ * Vulkan clamps lambda to 0.01 first and minifies. Clamps below one 1/64
+ * step become one step; every other value packs as before. */
 static inline uint32_t
 __gen_pack_lod15(float f, uint32_t start, uint32_t end)
 {
    uint32_t fixed = CLAMP(f * (1 << 6), 0 /* 0.0 */, 0x3c0 /* 15.0 */);
+   if (fixed == 0 && f > 0.0f)
+      fixed = 1;
    return util_bitpack_uint(fixed, start, end);
 }
 

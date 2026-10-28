@@ -73,17 +73,43 @@ agx3_pixel_colour_entry(enum agx_isa_encoding enc,
 
    /* G17P is AGX3b. The pair below is Apple's normalized composer input for
     * the exact 87 02 54 00 06 00 entry gate. */
-   if (enc != AGX_ISA_ENCODING_AGX3B)
+   if (!enc_ok(enc))
       return false;
 
    const struct agx3_field_kv fields[] = {KV(14, 512), KV(15, 1)};
-   if (!agx3_bind_compose(enc, "pixwait", 0, fields, NELEM(fields), NULL, 0,
+   const struct agx3_field_kv base_c[] = {KV(16, 3), KV(17, 122)};
+   if (!agx3_bind_compose(enc, "pixwait", 0, fields, NELEM(fields),
+                          is_b(enc) ? NULL : base_c,
+                          is_b(enc) ? 0 : NELEM(base_c),
                           out, len)) {
       memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
       *len = 0;
       return false;
    }
 
+   return true;
+}
+
+bool
+agx3_pixel_colour_entry_zs_unreleased(enum agx_isa_encoding enc,
+                                      uint8_t out[AGX3_PIXEL_MAX_LENGTH],
+                                      uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3C)
+      return false;
+
+   const struct agx3_field_kv fields[] = {KV(14, 512), KV(15, 1), KV(34, 1)};
+   const struct agx3_field_kv base_c[] = {KV(16, 3), KV(17, 122)};
+   if (!agx3_bind_compose(enc, "pixwait", 0, fields, NELEM(fields), base_c,
+                          NELEM(base_c), out, len)) {
+      memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
    return true;
 }
 
@@ -104,12 +130,16 @@ agx3_pixel_atomic_acquire(enum agx_isa_encoding enc,
       return false;
    memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B)
+   if (!enc_ok(enc))
       return false;
 
-   const struct agx3_field_kv fields[] = {KV(14, 4)};
-   if (!agx3_bind_compose(enc, "pixwait", 0, fields, NELEM(fields), NULL, 0,
-                          out, len)) {
+   const struct agx3_field_kv fields[] = {KV(14, 4), KV(34, 0)};
+   const struct agx3_field_kv base_c[] = {KV(16, 3), KV(17, 122)};
+   if (!agx3_bind_compose(enc, "pixwait", 0,
+                          is_b(enc) ? fields : base_c,
+                          is_b(enc) ? 1 : NELEM(base_c),
+                          is_b(enc) ? NULL : fields,
+                          is_b(enc) ? 0 : NELEM(fields), out, len)) {
       memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
       *len = 0;
       return false;
@@ -161,6 +191,8 @@ agx3_pixel_wait(enum agx_isa_encoding enc, uint32_t writeout,
                 uint16_t wait_mask, uint8_t out[AGX3_PIXEL_MAX_LENGTH],
                 uint8_t *len)
 {
+   /* G17P/G17G sparse 4x MRT adds 204 (RT0+RT2) and 240 (RT1+RT2),
+    * with matching final releases. Keep their single native instruction. */
    /* Every writeout mask Apple's fragment corpus emitted on pixwait, less the
     * f15-gated shader-entry form (512). */
    static const uint32_t witnessed[] = {1,   4,   8,   12, 16, 32, 48,  60, 64,
@@ -172,7 +204,8 @@ agx3_pixel_wait(enum agx_isa_encoding enc, uint32_t writeout,
    *len = 0;
 
    if (!enc_ok(enc) || !wait_mask_ok(enc, wait_mask) ||
-       !in_set(writeout, witnessed, NELEM(witnessed)))
+       !(in_set(writeout, witnessed, NELEM(witnessed)) ||
+         (writeout == 204 || writeout == 240)))
       return false;
 
    /* f34 separates the colour writeout classes from the depth/coverage class:
@@ -210,7 +243,9 @@ agx3_pixel_release(enum agx_isa_encoding enc, uint32_t writeout, bool last,
    *len = 0;
 
    if (!enc_ok(enc) || !wait_mask_ok(enc, wait_mask) ||
-       !in_set(writeout, witnessed, NELEM(witnessed)))
+       !(in_set(writeout, witnessed, NELEM(witnessed)) ||
+         (enc == AGX_ISA_ENCODING_AGX3C && writeout == 4) ||
+         (writeout == 204 || writeout == 240)))
       return false;
 
    const struct agx3_field_kv base_c[] = {KV(15, 1), KV(16, 121)};

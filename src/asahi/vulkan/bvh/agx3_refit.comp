@@ -375,15 +375,23 @@ void
 main()
 {
    uint id = gl_GlobalInvocationID.x;
-   if (args.phase == HK_AGX3_REFIT_SAVE)
+   /* Built once per update phase that runs per level or per job
+    * (HK_AGX3_REFIT_ONLY_PHASE), so those carry only their own registers,
+    * and once for the other phases. */
+#ifdef HK_AGX3_REFIT_ONLY_PHASE
+   const uint phase = HK_AGX3_REFIT_ONLY_PHASE;
+#else
+   const uint phase = args.phase;
+#endif
+   if (phase == HK_AGX3_REFIT_SAVE)
       save(id);
-   else if (args.phase == HK_AGX3_REFIT_PREPARE)
+   else if (phase == HK_AGX3_REFIT_PREPARE)
       prepare(id);
-   else if (args.phase == HK_AGX3_REFIT_PROPAGATE)
+   else if (phase == HK_AGX3_REFIT_PROPAGATE)
       propagate(id);
-   else if (args.phase == HK_AGX3_REFIT_COUNT_LEVELS)
+   else if (phase == HK_AGX3_REFIT_COUNT_LEVELS)
       count_levels(id);
-   else if (args.phase == HK_AGX3_REFIT_LIST_LEVELS)
+   else if (phase == HK_AGX3_REFIT_LIST_LEVELS)
       list_levels(id);
    else
       inner(id);

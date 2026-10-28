@@ -19,9 +19,15 @@ select_if_msaa_else_0(nir_builder *b, nir_def *x)
    return nir_bcsel(b, msaa, x, nir_imm_intN_t(b, 0, x->bit_size));
 }
 
+struct sample_lowering {
+   bool ignore_sample_mask_without_msaa;
+   bool wide_positions;
+};
+
 static bool
 lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
+   const struct sample_lowering *args = data;
    b->cursor = nir_before_instr(&intr->instr);
 
    switch (intr->intrinsic) {
@@ -45,6 +51,9 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
        *    }
        */
       nir_def *packed = nir_load_sample_positions_agx(b);
+      if (args->wide_positions)
+         packed = nir_pack_64_2x32(b, nir_vec2(
+            b, packed, nir_load_sample_positions_hi_agx(b)));
 
       /* The n'th sample is the in the n'th byte of the register */
       nir_def *shifted = nir_ushr(
@@ -55,6 +64,8 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          /* Get the appropriate nibble */
          nir_def *nibble =
             nir_iand_imm(b, nir_ushr_imm(b, shifted, i * 4), 0xF);
+         if (args->wide_positions)
+            nibble = nir_u2u32(b, nibble);
 
          /* Convert it from fixed point to float */
          xy[i] = nir_fmul_imm(b, nir_u2f16(b, nibble), 1.0 / 16.0);
@@ -140,7 +151,8 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_src *src = &intr->src[0];
       nir_def *sample = src->ssa;
 
-      if (nir_src_is_const(*src) && nir_src_as_uint(*src) >= 4) {
+      if (nir_src_is_const(*src) &&
+          nir_src_as_uint(*src) >= (args->wide_positions ? 8 : 4)) {
          sample = nir_imm_int(b, 0);
       } else {
          sample = select_if_msaa_else_0(b, sample);
@@ -170,9 +182,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          return false;
 
       nir_def *mask = nir_inot(b, nir_u2u16(b, intr->src[0].ssa));
-      bool *ignore_sample_mask_without_msaa = data;
-
-      if (*ignore_sample_mask_without_msaa)
+      if (args->ignore_sample_mask_without_msaa)
          mask = select_if_msaa_else_0(b, mask);
 
       nir_demote_samples(b, mask);
@@ -204,6 +214,21 @@ bool
 agx_nir_lower_sample_intrinsics(nir_shader *shader,
                                 bool ignore_sample_mask_without_msaa)
 {
+   const struct sample_lowering args = {
+      .ignore_sample_mask_without_msaa = ignore_sample_mask_without_msaa,
+   };
    return nir_shader_intrinsics_pass(shader, lower, nir_metadata_control_flow,
-                                     &ignore_sample_mask_without_msaa);
+                                     (void *)&args);
+}
+
+bool
+agx_nir_lower_sample_intrinsics_wide(nir_shader *shader,
+                                     bool ignore_sample_mask_without_msaa)
+{
+   const struct sample_lowering args = {
+      .ignore_sample_mask_without_msaa = ignore_sample_mask_without_msaa,
+      .wide_positions = true,
+   };
+   return nir_shader_intrinsics_pass(shader, lower, nir_metadata_control_flow,
+                                     (void *)&args);
 }

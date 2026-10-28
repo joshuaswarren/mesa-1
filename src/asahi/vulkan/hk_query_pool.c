@@ -6,6 +6,7 @@
  */
 #include "hk_query_pool.h"
 #include "hk_query_oq.h"
+#include "hk_frame_anatomy.h"
 
 #include <errno.h>
 #include <xf86drm.h>
@@ -18,6 +19,7 @@
 #include "hk_entrypoints.h"
 #include "hk_queue.h"
 #include "hk_pipeline_statistics_core.h"
+#include "hk_queue.h"
 #include "hk_shader.h"
 #include "hk_acceleration_structure.h"
 
@@ -115,7 +117,8 @@ hk_query_command_cs(struct hk_cmd_buffer *cmd)
    struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
    hk_sync_src_dep(cmd, HK_SYNC_ALL, cmd->current_cs.cs, dep);
    struct hk_cs *cs = hk_sync_get_cs_after(cmd, dep);
-   if (cs && agx_native_graphics(&hk_cmd_buffer_device(cmd)->dev))
+   if (cs && (agx_native_graphics(&hk_cmd_buffer_device(cmd)->dev) ||
+              agx_chip_g17_m5(hk_cmd_buffer_device(cmd)->dev.chip)))
       cs->g17p_timestamp_query = true;
    return cs;
 }
@@ -193,6 +196,9 @@ hk_query_report_map(struct hk_device *dev, struct hk_query_pool *pool,
       uint64_t *queries = (uint64_t *)agx_bo_map(dev->occlusion_queries.bo);
       uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
 
+      if (oq_index[query] == LIBAGX_QUERY_INDEX_UNUSED)
+         return NULL;
+
       return (struct hk_query_report *)&queries[oq_index[query]];
    } else {
       return (void *)((char *)agx_bo_map(pool->bo) +
@@ -209,12 +215,23 @@ hk_CmdWriteAccelerationStructuresPropertiesKHR(
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
-   /* Live sidecar metadata includes retained update topology. Serialization
-    * requires the matching native serialization format and
-    * relocation path; do not invent a size for an unimplemented format. */
-   if (!dev->g17p_native_as || pool->vk.query_type != queryType ||
-       !hk_is_acceleration_structure_query(queryType) ||
+   uint32_t kind;
+   switch (queryType) {
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
+      kind = 0;
+      break;
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
+      kind = 1;
+      break;
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
+      kind = 2;
+      break;
+   default:
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   if ((!dev->g17p_native_as && !dev->m5_native_as) || pool->vk.query_type != queryType ||
        firstQuery > pool->vk.query_count ||
        accelerationStructureCount > pool->vk.query_count - firstQuery) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -222,24 +239,26 @@ hk_CmdWriteAccelerationStructuresPropertiesKHR(
    }
    if (!accelerationStructureCount || !hk_query_command_cs(cmd))
       return;
-
    for (uint32_t i = 0; i < accelerationStructureCount; ++i) {
       VK_FROM_HANDLE(vk_acceleration_structure, as, pAccelerationStructures[i]);
-      uint64_t metadata = hk_gen1_as_metadata_addr(cmd, as);
-      if (!metadata)
-         return;
-      libagx_gen1_as_property(cmd, agx_1d(1), AGX_BARRIER_ALL,
-         vk_acceleration_structure_get_va(as),
-         metadata, hk_query_report_addr(dev, pool, firstQuery + i),
-         queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR ? 0 :
-         queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR ? 1 :
-         queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR ? 2 : 3);
+      if (dev->g17p_native_as) {
+         uint64_t metadata = hk_gen1_as_metadata_addr(cmd, as);
+         if (!metadata)
+            return;
+         libagx_gen1_as_property(cmd, agx_1d(1), AGX_BARRIER_ALL,
+            vk_acceleration_structure_get_va(as),
+            metadata, hk_query_report_addr(dev, pool, firstQuery + i),
+            queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR ? 0 :
+            queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR ? 1 :
+            queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR ? 2 : 3);
+      } else {
+         libagx_agx3_as_property(cmd, agx_1d(1), AGX_BARRIER_ALL,
+            ALIGN_POT(vk_acceleration_structure_get_va(as), UINT64_C(1024)),
+            hk_query_report_addr(dev, pool, firstQuery + i), kind);
+      }
       if (vk_command_buffer_has_error(&cmd->vk))
          return;
-      /* The helper's strong barrier completes the value before the existing
-       * queue-write path makes availability system-wide coherent. */
-      hk_queue_write(cmd, hk_query_available_addr(pool, firstQuery + i), 1,
-                      false);
+      hk_queue_write(cmd, hk_query_available_addr(pool, firstQuery + i), 1, false);
    }
 }
 
@@ -330,6 +349,24 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
    }
 
    libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL, address, value);
+}
+
+/* Publish @value after the pre-graphics helpers already recorded for the
+ * current render, in the same stream. */
+static void
+hk_queue_write_pre_gfx(struct hk_cmd_buffer *cmd, uint64_t address,
+                       uint32_t value)
+{
+   struct hk_cs *cs =
+      hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
+   if (!cs)
+      return;
+
+   /* Make the producers' counters visible before the availability word, as
+    * hk_queue_write() does. */
+   hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+   libagx_write_u32(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX, address,
+                    value);
 }
 
 static void
@@ -432,10 +469,10 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
          (uint64_t)num_queries * hk_query_available_size(pool));
    }
    if (pool->oq_queries) {
-      for (uint32_t i = 0; i < num_queries; ++i) {
-         hk_drm_attachment_set_add(&cs->compute_attachments,
-            hk_query_report_addr(dev, pool, first_index + i), sizeof(uint64_t));
-      }
+      /* A later-recorded command may assign a counter before this reset runs. */
+      hk_drm_attachment_set_add(&cs->compute_attachments,
+         dev->occlusion_queries.bo->va->addr,
+         (uint64_t)AGX_MAX_OCCLUSION_QUERIES * sizeof(uint64_t));
    } else {
       hk_drm_attachment_set_add(&cs->compute_attachments,
          hk_query_report_addr(dev, pool, first_index),
@@ -509,8 +546,9 @@ host_zero_queries(struct hk_device *dev, struct hk_query_pool *pool,
          value = set_available ? 0 : LIBAGX_QUERY_UNAVAILABLE;
       }
 
-      for (unsigned j = 0; j < hk_reports_per_query(pool); ++j) {
-         reports[j].value = value;
+      if (reports) {
+         for (unsigned j = 0; j < hk_reports_per_query(pool); ++j)
+            reports[j].value = value;
       }
    }
 }
@@ -624,22 +662,12 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       }
    }
 
-   for (unsigned i = 0; i < occlusion_queries; ++i) {
-      uint64_t zero = 0;
-      unsigned index;
-
-      VkResult result = hk_descriptor_table_add(
-         dev, &dev->occlusion_queries, &zero, sizeof(uint64_t), &index);
-
-      if (result != VK_SUCCESS) {
-         hk_DestroyQueryPool(device, hk_query_pool_to_handle(pool), pAllocator);
-         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      }
-
-      /* We increment as we go so we can clean up properly if we run out */
-      assert(pool->oq_queries < occlusion_queries);
-      oq_index[pool->oq_queries++] = index;
-   }
+   /* Applications may reserve far more queries than they use. Keep the pool's
+    * logical indices independent of the finite hardware counter heap, and
+    * assign a counter only when a command needs one. */
+   if (occlusion_queries)
+      memset(oq_index, 0xff, occlusion_queries * sizeof(*oq_index));
+   pool->oq_queries = occlusion_queries;
 
    if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)
       host_zero_queries(dev, pool, 0, pool->vk.query_count, false);
@@ -662,7 +690,8 @@ hk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
 
    for (unsigned i = 0; oq_index && i < pool->oq_queries; ++i) {
-      hk_descriptor_table_remove(dev, &dev->occlusion_queries, oq_index[i]);
+      if (oq_index[i] != LIBAGX_QUERY_INDEX_UNUSED)
+         hk_descriptor_table_remove(dev, &dev->occlusion_queries, oq_index[i]);
    }
 
    if (pool->handle)
@@ -727,6 +756,12 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    hk_flush_deferred_clears(cmd);
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (unlikely(dev->frame_anatomy)) {
+      hk_frame_anatomy_note(dev, "timestamp stage=0x%llx query=%u in_pass=%u",
+                            (unsigned long long)stage, query,
+                            cmd->state.gfx.render.tilebuffer.nr_samples != 0 &&
+                               cmd->current_cs.gfx != NULL);
+   }
 
    const struct agx_timestamp_req req = {
       .addr = hk_query_report_addr(dev, pool, query),
@@ -764,17 +799,78 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    }
 }
 
+static VkResult
+hk_ensure_occlusion_query(struct hk_device *dev, struct hk_query_pool *pool,
+                          uint32_t query)
+{
+   uint16_t *entry = &hk_pool_oq_index_ptr(pool)[query];
+   if (p_atomic_read(entry) != LIBAGX_QUERY_INDEX_UNUSED)
+      return VK_SUCCESS;
+
+   const uint64_t zero = 0;
+   unsigned index;
+   VkResult result = hk_descriptor_table_add(
+      dev, &dev->occlusion_queries, &zero, sizeof(zero), &index);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* Different command buffers may record the same query concurrently. Publish
+    * one initialized counter and return any redundant allocation to the heap. */
+   uint16_t previous =
+      p_atomic_cmpxchg(entry, LIBAGX_QUERY_INDEX_UNUSED, (uint16_t)index);
+   if (previous != LIBAGX_QUERY_INDEX_UNUSED)
+      hk_descriptor_table_remove(dev, &dev->occlusion_queries, index);
+   return VK_SUCCESS;
+}
+
+bool
+hk_ensure_occlusion_query_for_draw(struct hk_cmd_buffer *cmd)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_query_pool *pool = gfx->occlusion.pending_pool;
+   if (!pool || gfx->occlusion.mode == AGX_VISIBILITY_MODE_NONE)
+      return true;
+
+   uint32_t query = gfx->occlusion.pending_query;
+   VkResult result =
+      hk_ensure_occlusion_query(hk_cmd_buffer_device(cmd), pool, query);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return false;
+   }
+
+   gfx->occlusion.index = hk_pool_oq_index_ptr(pool)[query];
+   gfx->occlusion.pending_pool = NULL;
+   gfx->dirty |= HK_DIRTY_OCCLUSION;
+   return true;
+}
+
 static void
 hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
                        uint32_t query, uint32_t index,
                        VkQueryControlFlags flags, bool end)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   bool graphics = false;
+   bool graphics = false, pre_gfx = false;
 
    switch (pool->vk.query_type) {
    case VK_QUERY_TYPE_OCCLUSION: {
       assert(query < pool->oq_queries);
+      if (agx_chip_g17_m5(dev->dev.chip)) {
+         /* A reset precedes each legal query use and zeros any assigned
+          * counter at execution time. An empty Begin/End pair therefore
+          * only needs to publish availability, without reserving a counter. */
+         cmd->state.gfx.occlusion.pending_pool = end ? NULL : pool;
+         cmd->state.gfx.occlusion.pending_query = query;
+      } else {
+         VkResult result = hk_ensure_occlusion_query(dev, pool, query);
+         if (result != VK_SUCCESS) {
+            vk_command_buffer_set_error(&cmd->vk, result);
+            return;
+         }
+         uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
+         cmd->state.gfx.occlusion.index = oq_index[query];
+      }
 
       if (end) {
          cmd->state.gfx.occlusion.mode = AGX_VISIBILITY_MODE_NONE;
@@ -786,8 +882,6 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
             cmd->current_cs.gfx ? cmd->current_cs.gfx->sync.seq : 0;
       }
 
-      uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
-      cmd->state.gfx.occlusion.index = oq_index[query];
       cmd->state.gfx.dirty |= HK_DIRTY_OCCLUSION;
       if (end && pool->oq_submit) {
          const struct hk_oq_end oq_end = {.pool = pool, .query = query};
@@ -800,6 +894,31 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
       uint64_t addr = hk_query_report_addr(dev, pool, query);
       cmd->state.gfx.xfb_query[index] = end ? 0 : addr;
+
+      /* The counters are written by the geometry helpers in the
+       * pre-graphics stream of the render that draws. The general compute
+       * stream is not ordered after that stream: it stays open across
+       * render begins and need not wait on later pre-graphics work. On M5,
+       * publish availability after the helpers in the same pre-graphics
+       * stream, or after the graphics work when the current render has no
+       * such stream (or there is no current render). */
+      if (agx_chip_g17_m5(dev->dev.chip)) {
+         if (cmd->current_cs.gfx && cmd->current_cs.pre_gfx)
+            pre_gfx = true;
+         else
+            graphics = true;
+      }
+      break;
+   }
+
+   case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT: {
+      /* Counted like the transform feedback query's primitives-needed
+       * report: in the pre-graphics helpers of each draw. */
+      uint64_t addr = hk_query_report_addr(dev, pool, query);
+      cmd->state.gfx.prims_generated_query[index] = end ? 0 : addr;
+      /* As for the pipeline statistics written by the same helpers, publish
+       * availability after the graphics work. */
+      graphics = true;
       break;
    }
 
@@ -839,11 +958,16 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
    if (end) {
       perf_debug(cmd, "Query ending, type %u", pool->vk.query_type);
       /* Renders of one queue may finish out of order: a query that spans
-       * renders keeps the store, which waits on every render before it. */
-      if (pool->vk.query_type == VK_QUERY_TYPE_OCCLUSION && pool->handle &&
-          cmd->current_cs.gfx &&
-          cmd->current_cs.gfx->sync.seq ==
-             cmd->state.gfx.occlusion.begin_render_seq)
+       * renders keeps the store, which waits on every render before it.
+       * Only native AGX3 occlusion pools have a bound availability buffer
+       * (pool->handle, see hk_CreateQueryPool()); M5 transform feedback
+       * queries publish after their pre-graphics helpers. */
+      if (pre_gfx)
+         hk_queue_write_pre_gfx(cmd, hk_query_available_addr(pool, query), 1);
+      else if (pool->vk.query_type == VK_QUERY_TYPE_OCCLUSION && pool->handle &&
+               cmd->current_cs.gfx &&
+               cmd->current_cs.gfx->sync.seq ==
+                  cmd->state.gfx.occlusion.begin_render_seq)
          hk_cmd_end_query_stamped(cmd, pool, query);
       else
          hk_queue_write(cmd, hk_query_available_addr(pool, query), 1,
@@ -1005,12 +1129,50 @@ hk_oq_submission_done(struct hk_device *dev, struct hk_query_pool *pool,
    }
 }
 
+/* Whether every queue has completed all the work submitted to it: nothing
+ * waits in a submit thread and each queue timeline reached its last point. */
+static bool
+hk_queues_idle(struct hk_device *dev)
+{
+   vk_foreach_queue(vk_queue, &dev->vk) {
+      struct hk_queue *queue = container_of(vk_queue, struct hk_queue, vk);
+
+      mtx_lock(&vk_queue->submit.mutex);
+      const bool queued = !list_is_empty(&vk_queue->submit.submits);
+      mtx_unlock(&vk_queue->submit.mutex);
+      if (queued)
+         return false;
+
+      const uint64_t submitted = p_atomic_read(&queue->drm.timeline_value);
+      uint64_t point = 0;
+      if (!queue->drm.syncobj ||
+          drmSyncobjQuery(dev->dev.fd, &queue->drm.syncobj, &point, 1) ||
+          point < submitted)
+         return false;
+   }
+   return true;
+}
+
+/* Wait until query becomes available. *never is set, with VK_SUCCESS, for a
+ * query that no submitted work will make available.
+ *
+ * On M5 the kernel fails a command caught in another command's GPU recovery
+ * as a victim: its fence completes with an error, the VM stays usable (its
+ * status word stays zero; hk_check_status() loses the device otherwise),
+ * and the command does not write the queries it would have ended or
+ * timestamped. Vulkan only says a query that never becomes available "may"
+ * lose the device (vkGetQueryPoolResults, VK_QUERY_RESULT_WAIT_BIT); losing
+ * it here would turn the survivable victim into a device loss. So once
+ * every queue is idle with the device intact, report the query unavailable
+ * instead of waiting for the timeout. */
 static VkResult
 hk_query_wait_for_available(struct hk_device *dev, struct hk_query_pool *pool,
-                            uint32_t query)
+                            uint32_t query, bool *never)
 {
    uint64_t abs_timeout_ns = os_time_get_absolute_timeout(HK_QUERY_TIMEOUT);
+   const bool victims = agx_chip_g17_m5(dev->dev.chip);
 
+   *never = false;
    while (os_time_get_nano() < abs_timeout_ns) {
       if (hk_query_is_available(dev, pool, query))
          return VK_SUCCESS;
@@ -1018,6 +1180,21 @@ hk_query_wait_for_available(struct hk_device *dev, struct hk_query_pool *pool,
       VkResult status = vk_device_check_status(&dev->vk);
       if (status != VK_SUCCESS)
          return status;
+
+      if (victims && hk_queues_idle(dev)) {
+         /* The last producer may have retired after the check above. */
+         if (hk_query_is_available(dev, pool, query))
+            return VK_SUCCESS;
+         status = vk_device_check_status(&dev->vk);
+         if (status != VK_SUCCESS)
+            return status;
+
+         mesa_logw_once("query %u became unavailable for good: all submitted "
+                        "work completed without writing it (a command the "
+                        "kernel failed as a recovery victim)", query);
+         *never = true;
+         return VK_SUCCESS;
+      }
    }
 
    return vk_device_set_lost(&dev->vk, "query timeout");
@@ -1041,12 +1218,13 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
 
       bool available = hk_query_is_available(dev, pool, query);
 
+      bool never = false;
       if (!available && (flags & VK_QUERY_RESULT_WAIT_BIT)) {
-         status = hk_query_wait_for_available(dev, pool, query);
+         status = hk_query_wait_for_available(dev, pool, query, &never);
          if (status != VK_SUCCESS)
             return status;
 
-         available = true;
+         available = !never;
       }
 
       /* A retirement timestamp (any value but the queued store's 1) was
@@ -1064,8 +1242,17 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
       void *dst = (char *)pData + i * stride;
 
       uint32_t reports = hk_reports_per_query(pool);
-      if (!hk_query_write_cpu_result(dst, &src[0].value, reports, available,
-                                     flags))
+      if (never) {
+         /* Zero results, reported unavailable: nothing was written. */
+         uint64_t zero[32] = {0};
+         assert(reports <= ARRAY_SIZE(zero));
+         hk_query_write_cpu_result(dst, zero, reports, false,
+                                   flags | VK_QUERY_RESULT_PARTIAL_BIT);
+         continue;
+      }
+      const uint64_t zero = 0;
+      if (!hk_query_write_cpu_result(dst, src ? &src[0].value : &zero,
+                                     reports, available, flags))
          status = VK_NOT_READY;
    }
 
@@ -1129,6 +1316,16 @@ hk_cmd_copy_query_pool_results(struct hk_cmd_buffer *cmd,
                        (queryCount - 1))) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
+      }
+
+      /* The copy reads each counter through the pool's index table. Assign
+       * the counters now even if their producers have not been recorded. */
+      for (uint32_t i = 0; pool->oq_queries && i < queryCount; i++) {
+         VkResult result = hk_ensure_occlusion_query(dev, pool, firstQuery + i);
+         if (result != VK_SUCCESS) {
+            vk_command_buffer_set_error(&cmd->vk, result);
+            return;
+         }
       }
 
       struct libagx_copy_query_g17p_args info = {

@@ -36,9 +36,10 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
  * paths must not allocate, change dependencies, discard a stream or emit
  * unrelated work while draining query resets. */
 void
-hk_flush_deferred_clears(struct hk_cmd_buffer *cmd)
+hk_flush_deferred_clears_why(struct hk_cmd_buffer *cmd, const char *why)
 {
    (void)cmd;
+   (void)why;
    abort();
 }
 

@@ -85,7 +85,7 @@ rewrite_intrinsics(nir_builder *b, nir_intrinsic_instr *intr, void *state_)
 }
 
 static bool
-lower_gs_intrinsics(nir_shader *shader)
+lower_gs_intrinsics(nir_shader *shader, bool main_side_effects)
 {
    struct state state;
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
@@ -124,10 +124,12 @@ lower_gs_intrinsics(nir_shader *shader)
       }
    }
 
-   /* If we have side effects, make sure we run the geometry shader at least
-    * once by outputting a dummy primitive if we wouldn't output anything.
+   /* If the raster variant performs the side effects, make sure we run the
+    * geometry shader at least once by outputting a dummy primitive if we
+    * wouldn't output anything. When the main kernel performs them, no dummy
+    * primitive is needed: it runs for every input primitive.
     */
-   if (shader->info.writes_memory) {
+   if (!main_side_effects && shader->info.writes_memory) {
       unsigned n = nir_verts_in_output_prim(shader);
       shader->info.gs.vertices_out = MAX2(shader->info.gs.vertices_out, n);
 
@@ -241,8 +243,10 @@ collect_output_types(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    unsigned component = nir_intrinsic_component(intr);
    assert(component < ARRAY_SIZE(output->component_types));
    nir_alu_type *type = &output->component_types[component];
-   assert(*type == nir_type_invalid || *type == nir_intrinsic_src_type(intr));
-   *type = nir_intrinsic_src_type(intr);
+   if (*type == nir_type_invalid)
+      *type = nir_intrinsic_src_type(intr);
+   else if (*type != nir_intrinsic_src_type(intr))
+      *type = nir_type_uint | nir_alu_type_get_type_size(*type);
    output->nr_components = MAX2(output->nr_components, component + 1);
 
    return false;
@@ -499,11 +503,20 @@ lower_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  * summed prior to running the real geometry shader. This is skipped if the
  * counts are statically known.
  */
+static void strip_api_side_effects(nir_shader *s,
+                                   poly_nir_remove_dead_fn remove_dead,
+                                   bool eliminate_local_ray_queries);
+
 static nir_shader *
-create_geometry_count_shader(nir_shader *gs, struct lower_gs_state *state)
+create_geometry_count_shader(nir_shader *gs, struct lower_gs_state *state,
+                             bool main_side_effects,
+                             poly_nir_remove_dead_fn remove_dead,
+                             bool eliminate_local_ray_queries)
 {
    /* Don't muck up the original shader */
    nir_shader *shader = nir_shader_clone(NULL, gs);
+   if (main_side_effects)
+      strip_api_side_effects(shader, remove_dead, eliminate_local_ray_queries);
 
    if (shader->info.name) {
       shader->info.name =
@@ -623,9 +636,10 @@ lower_to_gs_rast(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 }
 
+/* Remove an atomic whose result is unused and, with data, an API store or
+ * image store. */
 static bool
-strip_side_effect_from_main(nir_builder *b, nir_intrinsic_instr *intr,
-                            void *data)
+strip_api_side_effect(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    switch (intr->intrinsic) {
    case nir_intrinsic_global_atomic:
@@ -658,6 +672,34 @@ strip_side_effect_from_main(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 /*
+ * A geometry shader invocation's stores and atomics must happen once. The
+ * main kernel runs once per invocation and performs them; the count and
+ * raster variants re-run the shader (the raster one once per output vertex)
+ * and must not repeat them. Strip them there, with everything that only fed
+ * them. remove_dead lets the driver remove work NIR DCE cannot, such as a
+ * lowered ray query, so the side effects it guarded can go too. An atomic
+ * whose result reaches an output stays, because the output depends on it.
+ * eliminate_local_ray_queries is the dead-CF option of
+ * poly_nir_lower_gs_with_options().
+ */
+static void
+strip_api_side_effects(nir_shader *s, poly_nir_remove_dead_fn remove_dead,
+                       bool eliminate_local_ray_queries)
+{
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, s, nir_shader_intrinsics_pass, strip_api_side_effect,
+               nir_metadata_control_flow, (void *)true);
+      NIR_PASS(progress, s, nir_opt_dce);
+      NIR_PASS(progress, s, nir_opt_dead_cf_with_options,
+               eliminate_local_ray_queries);
+      if (remove_dead)
+         NIR_PASS(progress, s, remove_dead);
+   } while (progress);
+}
+
+/*
  * The stream # is encoded into the lower bits of an index. The stream
  * multiplier is the factor to multiply vertex IDs before adding the stream #.
  */
@@ -673,10 +715,15 @@ stream_multiplier(const nir_shader *gs)
  * shades each rasterized output vertex in parallel.
  */
 static nir_shader *
-create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
+create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state,
+                      bool main_side_effects,
+                      poly_nir_remove_dead_fn remove_dead,
+                      bool eliminate_local_ray_queries)
 {
    /* Don't muck up the original shader */
    nir_shader *shader = nir_shader_clone(NULL, gs);
+   if (main_side_effects)
+      strip_api_side_effects(shader, remove_dead, eliminate_local_ray_queries);
 
    /* Turn into a vertex shader run only for rasterization. Transform feedback
     * was handled in the prepass.
@@ -1254,7 +1301,9 @@ bool
 poly_nir_lower_gs_with_options(nir_shader *gs, nir_shader **gs_count,
                                nir_shader **gs_copy, nir_shader **pre_gs,
                                struct poly_gs_info *info,
-                               bool eliminate_local_ray_queries)
+                               bool eliminate_local_ray_queries,
+                               bool main_side_effects,
+                               poly_nir_remove_dead_fn remove_dead)
 {
    /* Lower I/O as assumed by the rest of GS lowering */
    if (gs->xfb_info != NULL) {
@@ -1291,7 +1340,7 @@ poly_nir_lower_gs_with_options(nir_shader *gs, nir_shader **gs_count,
    /* Lower geometry shader writes to contain all of the required counts, so we
     * know where in the various buffers we should write vertices.
     */
-   NIR_PASS(_, gs, lower_gs_intrinsics);
+   NIR_PASS(_, gs, lower_gs_intrinsics, main_side_effects);
 
    /* Clean up after all that lowering we did */
    bool progress = false;
@@ -1361,7 +1410,8 @@ poly_nir_lower_gs_with_options(nir_shader *gs, nir_shader **gs_count,
    /* Ensure that outputs_written is still accurate after DCE. */
    nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
 
-   *gs_copy = create_gs_rast_shader(gs, &gs_state);
+   *gs_copy = create_gs_rast_shader(gs, &gs_state, main_side_effects,
+                                    remove_dead, eliminate_local_ray_queries);
 
    NIR_PASS(_, gs, nir_shader_intrinsics_pass, lower_id,
             nir_metadata_control_flow, NULL);
@@ -1374,21 +1424,27 @@ poly_nir_lower_gs_with_options(nir_shader *gs, nir_shader **gs_count,
 
    /* If there is any unknown count, we need a geometry count shader */
    if (info->count_words > 0)
-      *gs_count = create_geometry_count_shader(gs, &gs_state);
+      *gs_count = create_geometry_count_shader(gs, &gs_state,
+                                               main_side_effects, remove_dead,
+                                               eliminate_local_ray_queries);
    else
       *gs_count = NULL;
 
-   /* Strip stores and atomics */
-   do {
-      progress = false;
-      NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
-               strip_side_effect_from_main, nir_metadata_control_flow,
-               (void *)true);
+   /* With main_side_effects the main kernel keeps the API stores and
+    * atomics: it is the one variant that runs once per invocation (see
+    * strip_api_side_effects). Otherwise strip them here. */
+   if (!main_side_effects) {
+      do {
+         progress = false;
+         NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
+                  strip_api_side_effect, nir_metadata_control_flow,
+                  (void *)true);
 
-      NIR_PASS(progress, gs, nir_opt_dce);
-      NIR_PASS(progress, gs, nir_opt_dead_cf_with_options,
-               eliminate_local_ray_queries);
-   } while (progress);
+         NIR_PASS(progress, gs, nir_opt_dce);
+         NIR_PASS(progress, gs, nir_opt_dead_cf_with_options,
+                  eliminate_local_ray_queries);
+      } while (progress);
+   }
 
    NIR_PASS(_, gs, nir_shader_intrinsics_pass, lower_gs_instr,
             nir_metadata_none, &gs_state);
@@ -1413,16 +1469,18 @@ poly_nir_lower_gs_with_options(nir_shader *gs, nir_shader **gs_count,
    } while (progress);
 
    /* Strip remaining atomics, but not stores - since those are from us */
-   do {
-      progress = false;
-      NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
-               strip_side_effect_from_main, nir_metadata_control_flow,
-               (void *)false);
+   if (!main_side_effects) {
+      do {
+         progress = false;
+         NIR_PASS(progress, gs, nir_shader_intrinsics_pass,
+                  strip_api_side_effect, nir_metadata_control_flow,
+                  (void *)false);
 
-      NIR_PASS(progress, gs, nir_opt_dce);
-      NIR_PASS(progress, gs, nir_opt_dead_cf_with_options,
-               eliminate_local_ray_queries);
-   } while (progress);
+         NIR_PASS(progress, gs, nir_opt_dce);
+         NIR_PASS(progress, gs, nir_opt_dead_cf_with_options,
+                  eliminate_local_ray_queries);
+      } while (progress);
+   }
 
    /* All those variables we created should've gone away by now */
    NIR_PASS(_, gs, nir_remove_dead_variables, nir_var_function_temp, NULL);
@@ -1542,5 +1600,5 @@ poly_nir_lower_gs(nir_shader *gs, nir_shader **gs_count, nir_shader **gs_copy,
                   nir_shader **pre_gs, struct poly_gs_info *info)
 {
    return poly_nir_lower_gs_with_options(gs, gs_count, gs_copy, pre_gs, info,
-                                        false);
+                                        false, false, NULL);
 }

@@ -619,8 +619,9 @@ agx_ioto_load_absolute(struct agx_ioto_load_core *core,
       return false;
 
    if (load->cprog_input_mask &&
-       (!agx_chip_native_preamble(core->chip) || !ops ||
-        !ops->pack_cprog_copy ||
+       ((!agx_chip_native_preamble(core->chip) &&
+         !agx_chip_g17_m5(core->chip)) ||
+        !ops || !ops->pack_cprog_copy ||
         (load->cprog_input_mask & ~load->lane_mask) ||
         (load->cprog_input_mask >> (2 * load->count_dwords)) ||
         load->cprog_input_tps_half < 8 || load->cprog_input_tps_half >= 520))

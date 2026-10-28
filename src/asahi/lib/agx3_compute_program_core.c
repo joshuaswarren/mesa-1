@@ -56,6 +56,29 @@ agx3_g17p_native_compute_program_bind(
    return true;
 }
 
+bool
+agx3_m5_native_compute_program_bind(
+   enum agx_chip chip,
+   const struct agx3_g17p_native_compute_program_desc *desc,
+   struct agx3_compute_program *program)
+{
+   if (!agx_chip_g17_m5(chip) || !program || !desc)
+      return false;
+
+   /* The shared binder validates the AGX3B launch record it builds; the M5
+    * program takes its own chip afterwards. */
+   struct agx3_g17p_native_compute_program_desc record = *desc;
+   record.chip = AGX_CHIP_G17P;
+   struct agx3_compute_program staged;
+   if (!agx3_g17p_native_compute_program_bind(&record, &staged))
+      return false;
+   staged.chip = chip;
+   staged.g17p_native_compute_live_bound = false;
+   staged.m5_native_compute_live_bound = true;
+   *program = staged;
+   return true;
+}
+
 static bool
 agx3_g17p_native_compute_launch_pack(
    const struct agx3_compute_program *program,
@@ -66,7 +89,9 @@ agx3_g17p_native_compute_launch_pack(
       return false;
 
    memset(packed, 0, AGX3_CDM_DIRECT_LAUNCH_SIZE);
-   if (!program || !grid || !agx_chip_native_agx3(program->chip) ||
+   if (!program || !grid ||
+       (!agx_chip_native_agx3(program->chip) &&
+        !agx_chip_g17_m5(program->chip)) ||
        program->program_va == 0 ||
        program->program_va > UINT64_C(0xffffffffffff) ||
        (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
@@ -115,7 +140,8 @@ agx3_g17p_native_compute_launch_pack(
     * carries the upper pointer bits and must be derived from the VA, not
     * hard-coded -- see the note on the store below. */
    uint32_t word0 = program->launch_template.word0;
-   if (global_size[1] < 2 && global_size[2] < 2)
+   if ((program->chip == AGX_CHIP_G17P || program->m5_native_compute_live_bound) &&
+       global_size[1] < 2 && global_size[2] < 2)
       word0 &= UINT32_C(0xfff1ffff);
    agx3_cmdstream_store_le32(packed, word0);
    /* Word 1 bits 22..31 carry program_va[47:38]; the hardware reconstructs
@@ -203,6 +229,30 @@ agx3_g17p_native_compute_dispatch_append(
       program, grid, 0, sink);
 }
 
+bool
+agx3_m5_native_compute_dispatch_append(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   if (!program || !agx_chip_g17_m5(program->chip) ||
+       !program->m5_native_compute_live_bound || !grid || !sink ||
+       !sink->data || sink->length > sink->capacity ||
+       AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE > sink->capacity - sink->length)
+      return false;
+   uint8_t staged[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
+   const struct agx3_cdm_barrier_info barrier = {
+      .chip = program->chip, .flags = barrier_flags,
+      .flush_memory = agx_chip_g17_m5(program->chip) && barrier_flags == 5,
+   };
+   if (!agx3_g17p_native_compute_launch_pack(program, grid, staged) ||
+       !agx3_cdm_barrier_pack(&barrier, staged + AGX3_CDM_DIRECT_LAUNCH_SIZE))
+      return false;
+   memcpy(sink->data + sink->length, staged, sizeof(staged));
+   sink->length += sizeof(staged);
+   return true;
+}
+
 static void
 agx3_g17p_store_native_program_pointer(uint8_t *packed, uint64_t program_va)
 {
@@ -215,6 +265,52 @@ agx3_g17p_store_native_program_pointer(uint8_t *packed, uint64_t program_va)
    agx3_cmdstream_store_le32(
       packed + 4,
       UINT32_C(0x40000000) | (uint32_t)((program_va >> 40) & 0xff));
+}
+
+/* M5 indirect groups retain the direct program header and append local
+ * sizes after the grid address. Indirect-local reads both counts and local
+ * sizes from memory instead. */
+bool
+agx3_m5_native_indirect_dispatch_append(
+   const struct agx3_compute_program *program, uint64_t grid_va,
+   const uint32_t local_size[3], uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   const unsigned launch_size = local_size ? 36 : 24;
+   uint8_t bytes[36 + AGX3_CDM_BARRIER_SIZE] = {0};
+   if (!program || !agx_chip_g17_m5(program->chip) ||
+       !program->m5_native_compute_live_bound || !program->program_va ||
+       program->program_va > UINT64_C(0xffffffffffff) ||
+       (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) ||
+       !grid_va || grid_va >= (UINT64_C(1) << 48) || (grid_va & 3) ||
+       program->launch_template.word0 >= (UINT32_C(1) << 27) ||
+       program->launch_template.word1 >= (UINT32_C(1) << 22) ||
+       !sink || !sink->data || sink->length > sink->capacity ||
+       launch_size + AGX3_CDM_BARRIER_SIZE > sink->capacity - sink->length)
+      return false;
+
+   agx3_cmdstream_store_le32(bytes, program->launch_template.word0 |
+      (local_size ? UINT32_C(0x08000000) : UINT32_C(0x10000000)));
+   agx3_cmdstream_store_le32(bytes + 4,
+      (uint32_t)(((program->program_va >> 38) & 0x3ff) << 22) |
+      program->launch_template.word1);
+   agx3_g17p_store_native_program_pointer(bytes + 8, program->program_va);
+   agx3_cmdstream_store_le32(bytes + 16, grid_va >> 32);
+   agx3_cmdstream_store_le32(bytes + 20, grid_va);
+   for (unsigned i = 0; local_size && i < 3; ++i) {
+      if (!local_size[i] || local_size[i] > 0x7ff)
+         return false;
+      agx3_cmdstream_store_le32(bytes + 24 + 4*i, local_size[i]);
+   }
+   const struct agx3_cdm_barrier_info barrier = {
+      .chip=program->chip, .flags=barrier_flags,
+      .flush_memory = agx_chip_g17_m5(program->chip) && barrier_flags == 5,
+   };
+   if (!agx3_cdm_barrier_pack(&barrier, bytes + launch_size))
+      return false;
+   memcpy(sink->data + sink->length, bytes, launch_size + AGX3_CDM_BARRIER_SIZE);
+   sink->length += launch_size + AGX3_CDM_BARRIER_SIZE;
+   return true;
 }
 
 /* The six-word indirect launch.  Words 0..3 are the same program header the

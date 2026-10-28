@@ -88,17 +88,18 @@ agx3_falu_add_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src0,
 /* Keep subtraction and other modified adds fused while preserving both live
  * operands and their producer slots. The native forms grow from4 to10bytes
  * only when modifiers or wait combinations require it. */
-bool
-agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
+static bool
+add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                          uint16_t src0, uint16_t src1,
-                         const struct agx3_falu_mods *m,
+                         bool dest_half, const struct agx3_falu_mods *m,
                          const struct agx3_falu_runtime *runtime,
                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !m || !runtime || !out || !len ||
-       (dest & 1) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !m5) || !m || !runtime || !out || !len ||
+       (!dest_half && (dest & 1)) || (dest_half && !m5) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
        !slot_ok(src1, m->src1_16) || m->addend_abs || m->addend_neg ||
-       runtime->wait_mask > 0x3f)
+       runtime->wait_mask > (m5 ? 0xff : 0x3f))
       return false;
    for (unsigned i = 0; i < 2; ++i)
       if (runtime->cache[i] && runtime->discard[i])
@@ -121,17 +122,18 @@ agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
       struct agx3_field_kv ov[32];
       unsigned n = common_mods(dest, swap ? src1 : src0, swap ? src0 : src1,
                                &mods, ov);
+      ov[n++] = (struct agx3_field_kv)KV(10, dest_half ? 1 : 2);
       ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
       ov[n++] = (struct agx3_field_kv)KV(44, runtime->cache[swap]);
       ov[n++] = (struct agx3_field_kv)KV(46, runtime->discard[swap]);
       ov[n++] = (struct agx3_field_kv)KV(27, runtime->cache[1 - swap]);
       ov[n++] = (struct agx3_field_kv)KV(29, runtime->discard[1 - swap]);
-      for (unsigned i = 0; i < 6; ++i)
+      for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
          ov[n++] = (struct agx3_field_kv)KV(52 + i,
                                           (runtime->wait_mask >> i) & 1);
       for (unsigned ep = 0; ep <= 3; ++ep) {
          uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-         if (agx3_bind_compose(enc, "f32add", ep, add_b, 9, ov, n, bytes, &size)) {
+         if (agx3_bind_compose(enc, "f32add", ep, m5 ? add_c : add_b, m5 ? 11 : 9, ov, n, bytes, &size)) {
             if (!best_size || size < best_size) {
                for (unsigned i = 0; i < size; ++i)
                   best[i] = bytes[i];
@@ -149,32 +151,67 @@ agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
    return true;
 }
 
+bool
+agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t src0, uint16_t src1,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return add_mod_runtime(enc, dest, src0, src1, false, m, runtime, out, len);
+}
+
+bool
+agx3_falu_add_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+                         const struct agx3_falu_mods *m,
+                         const struct agx3_falu_runtime *runtime,
+                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return add_mod_runtime(AGX_ISA_ENCODING_AGX3C, dest, src0, src1, true,
+                           m, runtime, out, len);
+}
+
 /* Apple lowers float-to-half conversion to f32add with a16-bit destination
  * and the exact negative-zero minifloat in the other input. This preserves
  * signed zero and rounds only once; half4 witnesses include odd halves. */
-bool
-agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+static bool
+add_immediate(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     bool half, uint8_t immediate, bool src_abs, bool src_neg,
                      bool saturate, const struct agx3_falu_runtime *runtime,
                      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !runtime || !out || !len ||
-       dest >= 256 || src >= 256 || (src & 1) || runtime->wait_mask > 0x3f ||
+   const bool agx3c = enc == AGX_ISA_ENCODING_AGX3C;
+   const unsigned slots = agx3c ? 8 : 6;
+   if ((!b(enc) && !agx3c) || !runtime || !out || !len ||
+       dest >= 256 || (!half && (dest & 1)) || src >= 256 || (src & 1) ||
+       runtime->wait_mask >= (1u << slots) ||
        (runtime->cache[0] && runtime->discard[0]))
       return false;
    const struct agx3_field_kv base[] = {
-      KV(9, 2), KV(10, 1), KV(25, 2), KV(26, 2), KV(42, 1), KV(43, 2),
+      KV(9, 2), KV(10, half ? 1 : 2), KV(25, 2), KV(26, 2), KV(42, 1), KV(43, 2),
+   };
+   /* G17S cvt_f2h, r_mrt and tx_cube_sample witness this narrowing
+    * operation, with f50=3/f51=48 and an eight-slot wait bank. The native
+    * r_fragcoord variants set f15=1; its meaning is not established here
+    * and that variant is not modeled by this API.
+    * Saturating narrowing remains separate from the full-width add. */
+   const struct agx3_field_kv base_c[] = {
+      KV(9, 2), KV(10, half ? 1 : 2), KV(25, 2), KV(26, 2), KV(42, 1), KV(43, 2),
+      KV(50, 3), KV(51, 48),
    };
    struct agx3_field_kv ov[32] = {
-      KV(2, dest), KV(18, src), KV(34, 0x80), KV(11, runtime->dest_cache),
+      KV(2, dest), KV(18, src), KV(34, immediate), KV(11, runtime->dest_cache),
       KV(27, runtime->cache[0]), KV(29, runtime->discard[0]), KV(14, saturate),
+      KV(30, src_abs), KV(31, src_neg),
    };
-   unsigned n = 7;
-   for (unsigned i = 0; i < 6; ++i)
+   unsigned n = 9;
+   for (unsigned i = 0; i < slots; ++i)
       ov[n++] = (struct agx3_field_kv)KV(52 + i,
                                        (runtime->wait_mask >> i) & 1);
    for (unsigned ep = 0; ep <= 3; ++ep) {
       uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-      if (agx3_bind_compose(enc, "f32add", ep, base, 6, ov, n, bytes, &size)) {
+      if (agx3_bind_compose(enc, "f32add", ep, agx3c ? base_c : base,
+                           agx3c ? 8 : 6, ov, n, bytes, &size)) {
          for (unsigned i = 0; i < size; ++i)
             out[i] = bytes[i];
          *len = size;
@@ -182,6 +219,25 @@ agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
       }
    }
    return false;
+}
+
+bool
+agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     bool saturate, const struct agx3_falu_runtime *runtime,
+                     uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return add_immediate(enc, dest, src, true, 0x80, false, false, saturate,
+                         runtime, out, len);
+}
+
+bool
+agx3_falu_add_imm_m5(uint16_t dest, uint16_t src, uint8_t immediate,
+                     bool src_abs, bool src_neg, bool saturate,
+                     const struct agx3_falu_runtime *runtime,
+                     uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return add_immediate(AGX_ISA_ENCODING_AGX3C, dest, src, false, immediate,
+                         src_abs, src_neg, saturate, runtime, out, len);
 }
 
 /* Half of a minifloat minus a register: f32add with a 16-bit destination,
@@ -238,17 +294,18 @@ agx3_falu_mul_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src0,
 /* Saturation and source modifiers stay fused with the multiply. Native
  * live/dead witnesses carry independent hints and the same six dependency
  * slots as plain FMUL; select the shortest encoding that fits them. */
-bool
-agx3_falu_mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
+static bool
+mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t src0, uint16_t src1,
-                          const struct agx3_falu_mods *m,
+                          bool dest_half, const struct agx3_falu_mods *m,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !m || !runtime || !out || !len ||
-       (dest & 1) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !m5) || !m || !runtime || !out || !len ||
+       (!dest_half && (dest & 1)) || (dest_half && !m5) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
        !slot_ok(src1, m->src1_16) || m->addend_abs || m->addend_neg ||
-       runtime->wait_mask > 0x3f)
+       runtime->wait_mask > (m5 ? 0xff : 0x3f))
       return false;
    for (unsigned i = 0; i < 2; ++i)
       if (runtime->cache[i] && runtime->discard[i])
@@ -256,17 +313,18 @@ agx3_falu_mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
 
    struct agx3_field_kv ov[32];
    unsigned n = common_mods(dest, src0, src1, m, ov);
+   ov[n++] = (struct agx3_field_kv)KV(10, dest_half ? 1 : 2);
    ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
    ov[n++] = (struct agx3_field_kv)KV(44, runtime->cache[0]);
    ov[n++] = (struct agx3_field_kv)KV(46, runtime->discard[0]);
    ov[n++] = (struct agx3_field_kv)KV(27, runtime->cache[1]);
    ov[n++] = (struct agx3_field_kv)KV(29, runtime->discard[1]);
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
       ov[n++] = (struct agx3_field_kv)KV(80 + i,
                                        (runtime->wait_mask >> i) & 1);
    for (unsigned ep = 0; ep <= 3; ++ep) {
       uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-      if (agx3_bind_compose(enc, "f32mul", ep, mul_b, 11, ov, n, bytes, &size)) {
+      if (agx3_bind_compose(enc, "f32mul", ep, m5 ? mul_c : mul_b, m5 ? 13 : 11, ov, n, bytes, &size)) {
          for (unsigned i = 0; i < size; ++i)
             out[i] = bytes[i];
          *len = size;
@@ -274,6 +332,26 @@ agx3_falu_mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
       }
    }
    return false;
+}
+
+bool
+agx3_falu_mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t src0, uint16_t src1,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return mul_mod_runtime(enc, dest, src0, src1, false, m, runtime, out, len);
+}
+
+bool
+agx3_falu_mul_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+                         const struct agx3_falu_mods *m,
+                         const struct agx3_falu_runtime *runtime,
+                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return mul_mod_runtime(AGX_ISA_ENCODING_AGX3C, dest, src0, src1, true,
+                           m, runtime, out, len);
 }
 
 bool
@@ -301,17 +379,19 @@ agx3_falu_fma_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src0,
  * modifiers and dependency waits; choose the shortest exact representation.
  * This keeps fog subtraction fused while waiting only on its dependencies.
  */
-bool
-agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
-                          uint16_t src0, uint16_t src1, uint16_t addend,
+static bool
+fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t src0, uint16_t src1, uint16_t addend, bool dest_half,
                           const struct agx3_falu_mods *m,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || m == NULL || runtime == NULL ||
-       out == NULL || len == NULL || (dest & 1) || dest >= 256 ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || m == NULL || runtime == NULL ||
+       out == NULL || len == NULL || (!dest_half && (dest & 1)) ||
+       (dest_half && !m5) || dest >= 256 ||
        !slot_ok(src0, m->src0_16) || !slot_ok(src1, m->src1_16) ||
-       !slot_ok(addend, m->addend_16) || runtime->wait_mask > 0x3f)
+       !slot_ok(addend, m->addend_16) || runtime->wait_mask > (m5 ? 0xff : 0x3f))
       return false;
    for (unsigned i = 0; i < 3; ++i)
       if (runtime->cache[i] && runtime->discard[i])
@@ -319,6 +399,7 @@ agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
 
    struct agx3_field_kv ov[32];
    unsigned n = common_mods(dest, src0, src1, m, ov);
+   ov[n++] = (struct agx3_field_kv)KV(10, dest_half ? 1 : 2);
    ov[n++] = (struct agx3_field_kv)KV(52, addend);
    ov[n++] = (struct agx3_field_kv)KV(64, m->addend_abs);
    ov[n++] = (struct agx3_field_kv)KV(65, m->addend_neg);
@@ -330,12 +411,12 @@ agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
    ov[n++] = (struct agx3_field_kv)KV(29, runtime->discard[1]);
    ov[n++] = (struct agx3_field_kv)KV(61, runtime->cache[2]);
    ov[n++] = (struct agx3_field_kv)KV(63, runtime->discard[2]);
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
       ov[n++] = (struct agx3_field_kv)KV(97 + i,
                                        (runtime->wait_mask >> i) & 1);
-   for (unsigned ep = 2; ep <= 5; ++ep) {
+   for (unsigned ep = m5 ? 0 : 2; ep <= (m5 ? 7 : 5); ++ep) {
       uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-      if (agx3_bind_compose(enc, "f32fma", ep, fma_b, 14, ov, n,
+      if (agx3_bind_compose(enc, "f32fma", ep, m5 ? fma_c : fma_b, m5 ? 16 : 14, ov, n,
                            bytes, &size)) {
          for (unsigned i = 0; i < size; ++i)
             out[i] = bytes[i];
@@ -346,9 +427,95 @@ agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
+bool
+agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t src0, uint16_t src1, uint16_t addend,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_mod_runtime(enc, dest, src0, src1, addend, false, m, runtime,
+                          out, len);
+}
+
+bool
+agx3_falu_fma_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+                        uint16_t addend, const struct agx3_falu_mods *m,
+                        const struct agx3_falu_runtime *runtime,
+                        uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_mod_runtime(AGX_ISA_ENCODING_AGX3C, dest, src0, src1, addend,
+                          true, m, runtime, out, len);
+}
+
 /* Native FMA has a minifloat addend form: keep a*b+c fused without a
  * temporary constant register, including absolute/negated multipliers, and
  * preserve each multiplier's lifetime. */
+static bool
+fma_addend_imm_width_mod(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src0, uint16_t src1, uint8_t immediate,
+                            bool dest_half, const struct agx3_falu_mods *m,
+                            const struct agx3_falu_runtime *runtime,
+                            uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !m || !runtime || !out || !len ||
+       (!dest_half && (dest & 1)) || (dest_half && !m5) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
+       !slot_ok(src1, m->src1_16) || m->addend_abs || m->addend_neg ||
+       m->addend_16 || (!m5 && (m->src0_16 || m->src1_16 || m->saturate)) ||
+       runtime->wait_mask > (m5 ? 0xff : 0x3f))
+      return false;
+   for (unsigned i = 0; i < 2; ++i)
+      if (runtime->cache[i] && runtime->discard[i])
+         return false;
+   const struct agx3_field_kv base[] = {
+      KV(9,2), KV(10,2), KV(25,2), KV(26,2), KV(42,2), KV(43,2),
+      KV(59,1), KV(60,2), KV(77,2), KV(91,2), KV(102,1),
+      KV(95,3), KV(96,55),
+   };
+   struct agx3_field_kv ov[32] = {
+      KV(10,dest_half ? 1 : 2), KV(2,dest), KV(35,src0), KV(18,src1), KV(51,immediate),
+      KV(11,runtime->dest_cache), KV(44,runtime->cache[0]),
+      KV(46,runtime->discard[0]), KV(27,runtime->cache[1]),
+      KV(29,runtime->discard[1]), KV(47,m->src0_abs), KV(48,m->src0_neg),
+      KV(30,m->src1_abs), KV(31,m->src1_neg),
+      KV(43,m->src0_16 ? 1 : 2), KV(26,m->src1_16 ? 1 : 2),
+      KV(14,m->saturate),
+   };
+   unsigned n = 17;
+   /* G17G preserves the operand/modifier fields, but its long endpoint
+    * carries eight dependency slots. Override the G17P template's f102
+    * too, so a specimen's slot-6 wait cannot leak into the instruction. */
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
+      if (m5 || (runtime->wait_mask & (1u << i)))
+         ov[n++] = (struct agx3_field_kv)KV(97+i, !!(runtime->wait_mask & (1u << i)));
+   for (unsigned ep = 0; ep <= (m5 ? 7 : 5); ++ep) {
+      if (agx3_bind_compose(enc,"f32fma",ep,base,m5 ? 13 : 11,ov,n,out,len))
+         return true;
+   }
+   return false;
+}
+
+bool
+agx3_falu_fma_addend_imm_width_mod(enum agx_isa_encoding enc, uint16_t dest,
+   uint16_t src0, uint16_t src1, uint8_t immediate,
+   const struct agx3_falu_mods *m, const struct agx3_falu_runtime *runtime,
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_addend_imm_width_mod(enc, dest, src0, src1, immediate, false,
+                                  m, runtime, out, len);
+}
+
+bool
+agx3_falu_fma_addend_imm_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+   uint8_t immediate, const struct agx3_falu_mods *m,
+   const struct agx3_falu_runtime *runtime,
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_addend_imm_width_mod(AGX_ISA_ENCODING_AGX3C, dest, src0, src1,
+                                  immediate, true, m, runtime, out, len);
+}
+
 bool
 agx3_falu_fma_addend_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t src0, uint16_t src1, uint8_t immediate,
@@ -357,63 +524,74 @@ agx3_falu_fma_addend_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
                             const struct agx3_falu_runtime *runtime,
                             uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !runtime || !out || !len ||
-       !regs_ok(dest, src0, src1) || runtime->wait_mask > 0x3f)
+   const struct agx3_falu_mods m = {
+      .src0_abs = src0_abs, .src0_neg = src0_neg,
+      .src1_abs = src1_abs, .src1_neg = src1_neg,
+   };
+   return agx3_falu_fma_addend_imm_width_mod(
+      enc, dest, src0, src1, immediate, &m, runtime, out, len);
+}
+
+
+static bool
+fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
+            uint16_t src, uint8_t multiplier, uint8_t addend,
+            bool dest_half, bool src_abs, bool saturate,
+            const struct agx3_falu_runtime *runtime,
+            uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !m5) || !runtime || !out || !len ||
+       dest >= 256 || src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
+       (!m5 && (dest_half || src_abs || saturate)) ||
+       runtime->wait_mask > (m5 ? 0xff : 0x3f) ||
+       (runtime->cache[0] && runtime->discard[0]))
       return false;
-   for (unsigned i = 0; i < 2; ++i)
-      if (runtime->cache[i] && runtime->discard[i])
-         return false;
    const struct agx3_field_kv base[] = {
-      KV(9,2), KV(10,2), KV(25,2), KV(26,2), KV(42,2), KV(43,2),
-      KV(59,1), KV(60,2), KV(77,2), KV(91,2), KV(102,1),
+      KV(9,2), KV(10,dest_half ? 1 : 2), KV(25,2), KV(26,2), KV(42,1), KV(43,2),
+      KV(59,1), KV(60,2), KV(77,2), KV(91,2), KV(95,3), KV(96,55), KV(104,1),
    };
    struct agx3_field_kv ov[32] = {
-      KV(2,dest), KV(35,src0), KV(18,src1), KV(51,immediate),
-      KV(11,runtime->dest_cache), KV(44,runtime->cache[0]),
-      KV(46,runtime->discard[0]), KV(27,runtime->cache[1]),
-      KV(29,runtime->discard[1]), KV(47,src0_abs), KV(48,src0_neg),
-      KV(30,src1_abs), KV(31,src1_neg),
+      KV(2,dest), KV(18,src), KV(34,multiplier), KV(51,addend),
+      KV(11,runtime->dest_cache), KV(27,runtime->cache[0]),
+      KV(29,runtime->discard[0]), KV(30,src_abs), KV(14,saturate),
    };
-   unsigned n = 13;
-   for (unsigned i = 0; i < 6; ++i)
-      if (runtime->wait_mask & (1u << i))
-         ov[n++] = (struct agx3_field_kv)KV(97+i,1);
-   for (unsigned ep = 0; ep <= 5; ++ep) {
-      if (agx3_bind_compose(enc,"f32fma",ep,base,11,ov,n,out,len))
+   unsigned n = 9;
+   /* The specimen's f104 is a slot-8 dependency, not an opcode bit.
+    * Override every M5 wait field, including zero, before selecting an
+    * encoding point. Otherwise every full-width FMA waits on slot 8 and
+    * expands to the 16-byte endpoint even without a dependency. */
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
+      if (m5 || (runtime->wait_mask & (1u << i)))
+         ov[n++] = (struct agx3_field_kv)KV(97+i,!!(runtime->wait_mask & (1u << i)));
+   for (unsigned ep = 0; ep <= (m5 ? 7 : 5); ++ep)
+      if (agx3_bind_compose(enc,"f32fma",ep,base,m5 ? 13 : 10,ov,n,out,len))
          return true;
-   }
    return false;
 }
 
-/* The immediate multiplier and addend occupy independent native fields.
- * This is still one fused operation with one rounding, e.g. depth*2-1. */
 bool
 agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
                      uint16_t src, uint8_t multiplier, uint8_t addend,
                      const struct agx3_falu_runtime *runtime,
                      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !runtime || !out || !len ||
-       !regs_ok(dest, src, 0) || runtime->wait_mask > 0x3f ||
-       (runtime->cache[0] && runtime->discard[0]))
-      return false;
-   const struct agx3_field_kv base[] = {
-      KV(9,2), KV(10,2), KV(25,2), KV(26,2), KV(42,1), KV(43,2),
-      KV(59,1), KV(60,2), KV(77,2), KV(91,2),
-   };
-   struct agx3_field_kv ov[32] = {
-      KV(2,dest), KV(18,src), KV(34,multiplier), KV(51,addend),
-      KV(11,runtime->dest_cache), KV(27,runtime->cache[0]),
-      KV(29,runtime->discard[0]),
-   };
-   unsigned n = 7;
-   for (unsigned i = 0; i < 6; ++i)
-      if (runtime->wait_mask & (1u << i))
-         ov[n++] = (struct agx3_field_kv)KV(97+i,1);
-   for (unsigned ep = 0; ep <= 5; ++ep)
-      if (agx3_bind_compose(enc,"f32fma",ep,base,10,ov,n,out,len))
-         return true;
-   return false;
+   return fma_two_imm(enc, dest, src, multiplier, addend, false, false, false,
+                       runtime, out, len);
+}
+
+/* G17G narrows a full-input FMA directly through f32fma's result width f10.
+ * A forced device-half store proves this form, distinct from f16fma's half
+ * arithmetic and operand widths. Keep its single F32 rounding to F16. */
+bool
+agx3_falu_fma_two_imm_narrow_m5(uint16_t dest, uint16_t src,
+                                uint8_t multiplier, uint8_t addend,
+                                bool src_abs, bool saturate,
+                                const struct agx3_falu_runtime *runtime,
+                                uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_two_imm(AGX_ISA_ENCODING_AGX3C, dest, src, multiplier, addend,
+                       true, src_abs, saturate, runtime, out, len);
 }
 
 /* Immediate multiplier (f34, selected by f42=1) with a modifier-bearing
@@ -422,17 +600,19 @@ agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
  * operand, modifier, lifetime hint and wait bit is an override, so a field
  * the selected encoding point does not consume makes the composer refuse
  * rather than silently drop it. */
-bool
-agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
-                          uint8_t multiplier, uint16_t src1, uint16_t addend,
-                          const struct agx3_falu_mods *m,
-                          const struct agx3_falu_runtime *runtime,
-                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+static bool
+fma_mul_imm(enum agx_isa_encoding enc, uint16_t dest, bool dest_half,
+            uint8_t multiplier, uint16_t src1, uint16_t addend,
+            const struct agx3_falu_mods *m,
+            const struct agx3_falu_runtime *runtime,
+            uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || m == NULL || runtime == NULL ||
-       out == NULL || len == NULL || (dest & 1) || dest >= 256 ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || m == NULL || runtime == NULL ||
+       out == NULL || len == NULL || (dest_half && !m5) ||
+       (!dest_half && (dest & 1)) || dest >= 256 ||
        !slot_ok(src1, m->src1_16) || !slot_ok(addend, m->addend_16) ||
-       runtime->wait_mask > 0x3f)
+       runtime->wait_mask > (m5 ? 0xff : 0x3f))
       return false;
 
    /* There is no f35 register slot in this form, so nothing can carry a
@@ -452,9 +632,13 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
       if (runtime->cache[i] && runtime->discard[i])
          return false;
 
+   /* f10 is the destination width: G17G narrows the fused result straight
+    * into a half (port/hfmawit, half(fma(a, 0.5f, b))). */
    const struct agx3_field_kv base[] = {
-      KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(42, 1),
+      KV(9, 2), KV(10, dest_half ? 1 : 2), KV(25, 2), KV(26, 2), KV(42, 1),
       KV(43, 2), KV(59, 2), KV(60, 2), KV(77, 2), KV(91, 2),
+      /* Native G17G retains operand fields and its own long endpoint. */
+      KV(95, 3), KV(96, 55),
    };
    /* Appended rather than counted: a designated-initialiser list with a
     * hand-written length silently grows a zeroed {field 0, value 0} entry the
@@ -476,12 +660,45 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
    ov[n++] = (struct agx3_field_kv)KV(29, runtime->discard[1]);
    ov[n++] = (struct agx3_field_kv)KV(61, runtime->cache[2]);
    ov[n++] = (struct agx3_field_kv)KV(63, runtime->discard[2]);
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
       ov[n++] = (struct agx3_field_kv)KV(97 + i, (runtime->wait_mask >> i) & 1);
 
-   for (unsigned ep = 0; ep <= 5; ++ep) {
-      if (agx3_bind_compose(enc, "f32fma", ep, base, 10, ov, n, out, len))
+   for (unsigned ep = 0; ep <= (m5 ? 7 : 5); ++ep) {
+      if (agx3_bind_compose(enc, "f32fma", ep, base, m5 ? 12 : 10, ov, n, out, len))
          return true;
    }
    return false;
+}
+
+bool
+agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
+                          uint8_t multiplier, uint16_t src1, uint16_t addend,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_mul_imm(enc, dest, false, multiplier, src1, addend, m, runtime,
+                      out, len);
+}
+
+bool
+agx3_falu_fma_mul_imm_narrow_m5(uint16_t dest, uint8_t multiplier,
+                                uint16_t src1, uint16_t addend,
+                                const struct agx3_falu_mods *m,
+                                const struct agx3_falu_runtime *runtime,
+                                uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
+                                uint8_t *len)
+{
+   return fma_mul_imm(AGX_ISA_ENCODING_AGX3C, dest, true, multiplier, src1,
+                      addend, m, runtime, out, len);
+}
+
+bool
+agx3_falu_add_imm_narrow_m5(uint16_t dest, uint16_t src, uint8_t immediate,
+                         bool src_abs, bool src_neg, bool saturate,
+                         const struct agx3_falu_runtime *runtime,
+                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return add_immediate(AGX_ISA_ENCODING_AGX3C, dest, src, true, immediate,
+                        src_abs, src_neg, saturate, runtime, out, len);
 }

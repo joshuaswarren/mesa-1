@@ -177,6 +177,12 @@ struct vk_acceleration_structure_build_ops {
                   const struct vk_acceleration_structure_build_args *args, struct vk_acceleration_structure_build_state *states,
                   uint32_t build_count, bool flushed_compute_after_init_update_scratch);
 
+   VkResult (*build_leaves)(VkCommandBuffer commandBuffer, struct vk_device *device,
+                            struct vk_meta_device *meta,
+                            const struct vk_acceleration_structure_build_args *args,
+                            struct vk_acceleration_structure_build_state *states,
+                            uint32_t build_count, uint32_t build_flags);
+
    const uint32_t *leaf_spirv_override;
    size_t leaf_spirv_override_size;
 
@@ -240,6 +246,12 @@ void vk_get_as_build_sizes(VkDevice _device, VkAccelerationStructureBuildTypeKHR
                            const struct vk_acceleration_structure_build_args *args);
 
 bool vk_acceleration_struct_vtx_format_supported(VkFormat format);
+
+/* Refresh leaf IR while retaining an existing internal topology. */
+VkResult vk_cmd_build_as_leaves(VkCommandBuffer commandBuffer,
+   struct vk_device *device, struct vk_meta_device *meta,
+   const struct vk_acceleration_structure_build_args *args,
+   const struct vk_acceleration_structure_build_state *state);
 
 static inline VkGeometryTypeKHR
 vk_get_as_geometry_type(const VkAccelerationStructureBuildGeometryInfoKHR *build_info)

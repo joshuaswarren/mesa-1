@@ -70,6 +70,10 @@ struct agx_bg_eot_key {
    /* Store RT0 samples and also resolve that same tile through PBE1.
     * The two EOT outputs share an imageblock offset, not storage. */
    bool store_and_resolve;
+   /* M5 final EOT stores samples and resolves the same tile in one launch.
+    * Kept separate from the G17P store_and_resolve path above; the two
+    * selectors drive different EOT programs. */
+   bool m5_store_and_resolve;
    /* The framebuffer is an AGX_G17P_MRT_MIXED layout. The tile layout keeps
     * only the targets this program touches, at their framebuffer offsets. */
    bool mixed_mrt;
@@ -100,6 +104,9 @@ agx_g17p_packed_clear_ok(const struct agx_tilebuffer_layout *tib)
 }
 
 struct agx_bg_eot_shader {
+   /* Driver-owned immutable launch templates, ralloc children of this
+    * shader. The cache lock serializes creation and list access. */
+   void *m5_tile_templates;
    struct agx_bg_eot_key key;
    struct agx_shader_info info;
    struct agx_bo *bo;

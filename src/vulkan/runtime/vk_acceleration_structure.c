@@ -631,6 +631,10 @@ build_leaves(VkCommandBuffer commandBuffer, struct vk_device *device,
              struct vk_acceleration_structure_build_state *states,
              uint32_t build_count, uint32_t build_flags)
 {
+   if (device->as_build_ops->build_leaves)
+      return device->as_build_ops->build_leaves(commandBuffer, device, meta, args,
+                                                states, build_count, build_flags);
+
    VkPipeline pipeline;
    VkPipelineLayout layout;
 
@@ -724,12 +728,16 @@ vk_cmd_build_as_leaves(VkCommandBuffer commandBuffer, struct vk_device *device,
                       const struct vk_acceleration_structure_build_args *args,
                       const struct vk_acceleration_structure_build_state *state)
 {
+   /* Refresh the leaf IR of an update in place: run the ordinary leaf pass on
+    * a copy that is not typed as an update, so the builder emits leaves without
+    * touching the retained internal topology. */
    struct vk_acceleration_structure_build_state leaves = *state;
    leaves.config.internal_type = VK_INTERNAL_BUILD_TYPE_LBVH;
    /* Only the update path calls this: the retained topology needs leaf nodes
     * and the active count, not the scene bounds that feed Morton codes. */
    leaves.config.build_flags |= VK_BUILD_FLAG_NO_HEADER_BOUNDS;
    leaves.leaf_node_count = 0;
+   leaves.processed = false;
    return build_leaves(commandBuffer, device, meta, args, &leaves, 1,
                        leaves.config.build_flags & VK_LEAF_BUILD_FLAGS);
 }

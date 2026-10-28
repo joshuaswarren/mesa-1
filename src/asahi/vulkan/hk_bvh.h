@@ -6,20 +6,14 @@
  *
  * Honeykrisp software-traversal BVH node format.
  *
- * This is a SOFTWARE format, traversed by shader ALU and global loads.  It is
- * deliberately NOT Apple's RIA BVH layout and it is deliberately not consumed
- * by the AGX3 `intersect_ray` node-test instruction:
+ * The current builder produces this software format for shader ALU traversal.
+ * It cannot be passed to M5's native intersect_ray/continue_ray path. Native
+ * M5 uses the Gen1 node layout for BVH version 3 and an SCS query protocol;
+ * the complete acceleration-structure envelope still needs integrating.
+ * The byte encoders and their regression fixtures live in agx_rt_bvh.h and
+ * tests/test-rt-bvh.c. Hardware traversal must use that native format.
  *
- *  - Apple's `intersect_ray` is a per-node test accelerator, not a traversal
- *    engine (the loop, the stack and commit are software either way), so a
- *    software traversal gives up far less than it sounds like.
- *  - The SCS slot layout that `intersect_ray` reads and writes is only
- *    partially mapped, so there is no lowering template for it.
- *  - agx_rt_bvh.h's Gen5 layout carries a "validated over 64,000,000
- *    randomized headers" claim with no harness anywhere in the tree; it must
- *    not be adopted on that strength.
- *
- * So this format is ours to choose, and it is chosen to be byte-identical to
+ * This software layout is byte-identical to
  * lavapipe's (src/gallium/frontends/lavapipe/lvp_acceleration_structure.h),
  * because the NIR traversal in hk_nir_ray_tracing.c is a port of lavapipe's
  * and keeping the layouts identical keeps that port auditable field by field.

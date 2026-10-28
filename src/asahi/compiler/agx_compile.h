@@ -264,6 +264,7 @@ struct agx_shader_info {
     * opcode must set uses_ray_traversal as well; ray_queries alone is not a
     * future-proof proxy for full RT pipelines. ShaderInfo ID32 is independent
     * from traversal use and must have its own committed-path producer. */
+   bool uses_matrix16;
    bool uses_resource_info_query;
    bool uses_ray_traversal;
    bool ray_traversal_depth_nonzero;
@@ -381,6 +382,9 @@ struct agx_fs_shader_key {
     */
    bool ignore_tib_dependencies;
 
+   /* Driver background programs use the tile layer as their layer input. */
+   bool background;
+
    /* When dynamic sample shading is used, the fragment shader is wrapped in a
     * loop external to the API shader. This bit indicates that we are compiling
     * inside the sample loop, meaning the execution nesting counter is already
@@ -435,6 +439,7 @@ struct agx_shader_key {
    /* Number of reserved preamble slots at the start */
    unsigned reserved_preamble;
 
+   /* Uniform half containing the indexed texture heap; sampler follows at+4. */
    uint16_t g17p_texture_uniform_base;
 
    /* Whether scratch memory is available in the given shader stage */
@@ -500,6 +505,10 @@ struct agx_shader_key {
     * and R32G32 after tilebuffer lowering, so the backend cannot recover the
     * logical layout from the final AGX IR alone. */
    uint8_t g17p_rt0_eot_words;
+
+   /* Select the M5 tile-store ABI for a compiler-owned end-of-tile program. */
+   bool m5_rt0_eot;
+   bool m5_rt0_eot_store_and_resolve;
 
    /* Store the tile without resolving it. Apple's own builtin end-of-tile
     * factory emits a second program per selector whose only differences are
@@ -590,9 +599,17 @@ void agx_preprocess_nir_g17p(nir_shader *nir);
 /* Access private (scratch) memory in whole 32-bit words, the only width the
  * AGX3 stack protocol encodes. agx_preprocess_nir_g17p() runs it. */
 bool agx3_nir_lower_scratch_words(nir_shader *nir);
+void agx_preprocess_nir_m5(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
+bool agx_nir_lower_sample_mask_m5(nir_shader *s);
+
+/* store_zs_agx base bit: the sample mask names exactly one covered sample,
+ * and the store sits in a covered-sample loop that zs_transaction_agx
+ * brackets (M5 only). The backend stages one DEPTHF word for it. */
+#define AGX_ZS_COVERED_SAMPLE (4)
 bool agx_nir_lower_sample_mask_deferred(nir_shader *s);
+bool agx_nir_lower_sample_mask_deferred_m5(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying);
 
 bool agx_nir_lower_cull_distance_vs(struct nir_shader *s);
@@ -702,7 +719,9 @@ static const nir_shader_compiler_options agx_nir_options = {
                               BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
                               BITFIELD_BIT(MESA_SHADER_FRAGMENT),
    .support_indirect_outputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_STAGES),
-   .max_samples = 4,
+   /* Compiler range bound covers M5's native eight-sample path. Device
+    * properties retain each chip's supported sample counts. */
+   .max_samples = 8,
    .lower_fquantize2f16 = true,
    .compact_arrays = true,
    .discard_is_demote = true,

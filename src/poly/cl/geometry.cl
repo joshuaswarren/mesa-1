@@ -286,6 +286,7 @@ poly_pre_gs(global struct poly_geometry_params *p, uint streams,
                                                  prefix_sum, unrolled_in_prims);
 
       *(p->prims_generated_counter[i]) += in_prims[i];
+      *(p->query_prims_generated_counter[i]) += in_prims[i];
    }
 
    uint4 prims = in_prims;

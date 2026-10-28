@@ -86,9 +86,10 @@ hk_drm_attachment_set_init(struct hk_drm_attachment_set *set)
 }
 
 void
-hk_flush_deferred_clears(struct hk_cmd_buffer *cmd)
+hk_flush_deferred_clears_why(struct hk_cmd_buffer *cmd, const char *why)
 {
    (void)cmd;
+   (void)why;
    abort();
 }
 
@@ -350,8 +351,8 @@ test_movable(void)
         r1->oq_stamp[2].handle == 0 && r1->oq_stamp[0].handle == 0);
 
    /* Two full renders in order. The later stream is MOVABLE and stays, a
-    * compute stream waiting on a later render, so the earlier one is kept
-    * (dispatched in place); the movable one is dispatched last. */
+    * compute stream waiting on the later render; the earlier stream joins it,
+    * so one dispatch carries both stores. */
    c = new_cmd();
    r1 = add(c, false);
    fill_slots(r1, 100);
@@ -361,10 +362,9 @@ test_movable(void)
    struct hk_cs *p2 = add_post(c, r2, 1, 2);
    T("in-order movable fixtures defer", deferred(c, p1) && deferred(c, p2));
    hk_resolve_deferred_oq_available(c);
-   T("movable in order: the earlier stream is kept, the movable one last",
-     ndispatched == 2 && dispatched[0].cs == p1 && dispatched[0].writes == 1 &&
-        dispatched[1].cs == p2 && dispatched[1].writes == 1 && listed(c, p1) &&
-        listed(c, p2));
+   T("movable in order: the earlier stream joins the movable one",
+     ndispatched == 1 && dispatched[0].cs == p2 && dispatched[0].writes == 2 &&
+        !listed(c, p1) && listed(c, p2));
 
    /* The earlier stream waits on the later render: nothing after it waits on
     * that render, so it is MOVABLE; the later stream (waiting on the earlier
@@ -418,7 +418,9 @@ test_order(void)
      nstreams(c) == before - 3 && ndispatched == 0);
 
    /* The last render is full: its stream stays as compute waiting on that
-    * render, so the earlier render may not carry its store. */
+    * render, so the earlier render may not carry its store; the earlier
+    * store joins the remaining stream instead of a compute command of its
+    * own. */
    c = new_cmd();
    r[0] = add(c, false);
    p[0] = add_post(c, r[0], 1, 1);
@@ -427,9 +429,42 @@ test_order(void)
    p[1] = add_post(c, r[1], 1, 2);
    T("free-then-full fixtures defer", deferred(c, p[0]) && deferred(c, p[1]));
    hk_resolve_deferred_oq_available(c);
-   T("order: a remaining later stream still keeps the earlier store",
-     r[0]->oq_stamp[3].handle == 0 && ndispatched == 2 && dispatched[0].cs == p[0] &&
-        dispatched[1].cs == p[1]);
+   T("order: the earlier store joins the remaining later stream",
+     r[0]->oq_stamp[3].handle == 0 && ndispatched == 1 &&
+        dispatched[0].cs == p[1] && dispatched[0].writes == 2 &&
+        !listed(c, p[0]));
+
+   /* As above, but a later reset of the first query waits on its stream: the
+    * store may not move past that reset, so it stays in place. */
+   c = new_cmd();
+   r[0] = add(c, false);
+   p[0] = add_post(c, r[0], 1, 1);
+   r[1] = add(c, false);
+   fill_slots(r[1], 200);
+   p[1] = add_post(c, r[1], 1, 2);
+   T("free-then-full-reset fixtures defer", deferred(c, p[0]) && deferred(c, p[1]));
+   struct hk_cs *waiter = add(c, true);
+   waiter->sync.dep[HK_SYNC_CDM].cut = p[0];
+   hk_resolve_deferred_oq_available(c);
+   T("order: a store something waits on does not join a later stream",
+     r[0]->oq_stamp[3].handle == 0 && ndispatched == 2 &&
+        dispatched[0].cs == p[0] && dispatched[1].cs == p[1] &&
+        listed(c, p[0]));
+
+   /* Many queries in each of three passes, more than any render has slots
+    * for: one compute command carries every store. */
+   c = new_cmd();
+   for (unsigned i = 0; i < 3; ++i) {
+      r[i] = add(c, false);
+      p[i] = add_post(c, r[i], 8, 1 + 8 * i);
+   }
+   T("full-passes fixtures defer",
+     deferred(c, p[0]) && deferred(c, p[1]) && deferred(c, p[2]));
+   hk_resolve_deferred_oq_available(c);
+   T("order: stores of passes without enough slots share one dispatch",
+     ndispatched == 1 && dispatched[0].cs == p[2] && dispatched[0].writes == 24 &&
+        !listed(c, p[0]) && !listed(c, p[1]) && r[0]->oq_stamp[3].handle == 0 &&
+        r[1]->oq_stamp[3].handle == 0 && r[2]->oq_stamp[3].handle == 0);
 
    /* A later query reset waits on the last stream: both stores stay. */
    c = new_cmd();

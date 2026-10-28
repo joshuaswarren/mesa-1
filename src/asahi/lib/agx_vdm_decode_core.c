@@ -34,6 +34,29 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
    const uint32_t word0 = agx_load_le32(bytes);
    const uint8_t block_type = word0 >> 29;
 
+   /* Native M5 mesh forms share block types with ordinary state/index
+    * records. Match their exact captured headers before those grammars. */
+   if (word0 == AGX_VDM_MESH_STATE_HEADER) {
+      if (available < AGX_VDM_MESH_STATE_LENGTH ||
+          !agx_vdm_mesh_state_unpack(chip, bytes, AGX_VDM_MESH_STATE_LENGTH,
+                                    &record->data.mesh_state))
+         return false;
+      record->kind = AGX_VDM_RECORD_MESH_STATE;
+      record->length = AGX_VDM_MESH_STATE_LENGTH;
+      record->chip = chip;
+      return true;
+   }
+   if ((word0 & ~UINT32_C(0xff00)) == AGX_VDM_MESH_DISPATCH_BASE) {
+      if (available < AGX_VDM_MESH_DISPATCH_LENGTH ||
+          !agx_vdm_mesh_dispatch_unpack(chip, bytes, AGX_VDM_MESH_DISPATCH_LENGTH,
+                                       &record->data.mesh_dispatch))
+         return false;
+      record->kind = AGX_VDM_RECORD_MESH_DISPATCH;
+      record->length = AGX_VDM_MESH_DISPATCH_LENGTH;
+      record->chip = chip;
+      return true;
+   }
+
    switch (block_type) {
    case 0: {
       uint64_t pointer;

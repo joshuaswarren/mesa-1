@@ -9,6 +9,7 @@
 #include "agx3_select_core.h"
 #include "agx_compiler.h"
 #include "agx_debug.h"
+#include "util/u_debug.h"
 #include "agx_opcodes.h"
 
 /* AGX peephole optimizer responsible for instruction combining. It operates in
@@ -87,7 +88,10 @@ agx_compose_float_src(agx_index to, agx_index from)
 static bool
 agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
 {
-   return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   return ctx->key &&
+          (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+           (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+            (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN))) &&
           I->op == AGX_OPCODE_FCMPSEL && src < 4 &&
           agx_is_equiv(I->src[src], I->src[src ^ 2]);
 }
@@ -248,10 +252,25 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
             agx_can_fold_half_uniform(ins, defs)))
          continue;
 
+      /* M5's f32 add takes at most one half register (f32 + f16, or a half
+       * plus a minifloat immediate); two half registers into an f32 result
+       * have no encoding. Keep the second widening explicit. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          ins->op == AGX_OPCODE_FADD && ins->nr_srcs == 2 &&
+          ins->dest[0].size == AGX_SIZE_32 && src.size == AGX_SIZE_32 &&
+          def->src[0].type == AGX_INDEX_NORMAL &&
+          def->src[0].size == AGX_SIZE_16) {
+         const agx_index other = ins->src[1 - s];
+         if (other.type == AGX_INDEX_NORMAL && other.size == AGX_SIZE_16)
+            continue;
+      }
+
       /* FLTNORM and RGB10A2 packing have only captured f32 sources. Keep
        * the explicit widening used by linked half-width fragment outputs
        * before normalized packing. */
-      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      if (ctx->key &&
+          (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+           ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
           (ins->op == AGX_OPCODE_FLTNORM_AGX3 ||
            ins->op == AGX_OPCODE_PACK_RGB10A2_AGX3) &&
           src.size == AGX_SIZE_32 &&
@@ -308,6 +327,9 @@ image_write_source_can_be_immediate(agx_instr *I, unsigned s)
 static void
 agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
 {
+   if (I->op == AGX_OPCODE_MATMAD8_AGX3 ||
+       I->op == AGX_OPCODE_MATMAD16_AGX3)
+      return;
    agx_foreach_ssa_src(I, s) {
       agx_index src = I->src[s];
       if (I->op == AGX_OPCODE_INTERSECT_RAY_GEN1 ||
@@ -331,6 +353,32 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (I->op == AGX_OPCODE_ALLOCATE_UVB_M5 ||
           I->op == AGX_OPCODE_STORE_UVB_M5 ||
           I->op == AGX_OPCODE_STORE_OBJECT_CHILDCOUNT_M5)
+         continue;
+
+      /* M5 reductions read a register even when every active lane contributes
+       * the same constant, as for the active invocation count. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_SIMD_REDUCE)
+         continue;
+
+      /* Coverage-stack address/data operands, traversal addresses, and UVB
+       * allocation/descriptor and child-count operands have register forms
+       * only. Keep constant materialization intact. */
+      if (I->op == AGX_OPCODE_SCS_STORE_AGX3 ||
+          I->op == AGX_OPCODE_SCS_LOAD_REGISTER_INDEXED_AGX3 ||
+          I->op == AGX_OPCODE_SCS_STORE_REGISTER_INDEXED_AGX3 ||
+          I->op == AGX_OPCODE_SCS_LOAD_REGISTER_BASE_AGX3 ||
+          I->op == AGX_OPCODE_SCS_STORE_REGISTER_BASE_AGX3 ||
+          I->op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 ||
+          I->op == AGX_OPCODE_SCS_STORE_UNIFORM_INDEXED_AGX3 ||
+          I->op == AGX_OPCODE_INTERSECT_RAY_M5 ||
+          I->op == AGX_OPCODE_ALLOCATE_UVB_M5 ||
+          I->op == AGX_OPCODE_STORE_UVB_M5 ||
+          I->op == AGX_OPCODE_STORE_OBJECT_CHILDCOUNT_M5)
+         continue;
+
+      /* PACK_SMPIR-to-GPR takes a half register, not an integer literal. */
+      if (I->op == AGX_OPCODE_PACK_SAMPLER_LOD_AGX3)
          continue;
 
       /* G17P's native subtraction takes two registers. Instruction selection
@@ -359,7 +407,9 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
        * at all -- agx3_select_core.c's AGX3_SEL_OP_ASR requires two plain
        * 32-bit registers -- and the packer then refuses the whole shader.
        * Keep the MOV so selection reproduces Apple's ldimm+sra pair. */
-      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      if (ctx->key &&
+          (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+           ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
           I->op == AGX_OPCODE_ASR && s == 0)
          continue;
 
@@ -515,6 +565,15 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
        use->saturate)
       return false;
 
+   /* M5 (AGX3C) encodes reciprocal and reciprocal square root without a
+    * saturating form, so a saturate folded into one made the shader
+    * unencodable (Skyrim SE's fragment shaders clamp a reciprocal). Keep the
+    * separate saturating move there. */
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       use->saturate &&
+       (I->op == AGX_OPCODE_RCP || I->op == AGX_OPCODE_RSQRT))
+      return false;
+
    /* We can fold f2f16 into 32-bit instructions, but we can't fold f2f32 into
     * 16-bit instructions, since the latter would implicitly promote to a 32-bit
     * instruction which is not exact.
@@ -534,6 +593,19 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
        I->dest[0].size == AGX_SIZE_32 && use->dest[0].size == AGX_SIZE_16 &&
        I->op != AGX_OPCODE_FMUL)
       return false;
+
+   /* M5 (AGX3C): an f16-destination ADD/FMA fed by an immediate has no
+    * grounded encoding -- the packer refuses `ffma d16, r32, #imm16, r32`
+    * (RayTracedGL1's IndirectInit raygen). Keep the explicit narrowing move in
+    * that case only; register-only producers still fold. */
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       I->dest[0].size == AGX_SIZE_32 && use->dest[0].size == AGX_SIZE_16 &&
+       I->op != AGX_OPCODE_FMUL) {
+      agx_foreach_src(I, s) {
+         if (I->src[s].type == AGX_INDEX_IMMEDIATE)
+            return false;
+      }
+   }
 
    /* ...and that narrowing FMUL takes plain registers only: a multiply that
     * already carries |x| or -x on a source keeps its explicit f32-to-f16
@@ -704,6 +776,32 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
 
       if (def == NULL)
          continue; /* happens for phis in loops */
+
+      /* Preserve a pointer assembled from adjacent uniform words instead of
+       * materializing its two words in registers. M5 loads can address the
+       * complete uniform file with an aligned 64-bit base. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_DEVICE_LOAD && s == 0 &&
+          src.size == AGX_SIZE_64 && agx_channels(src) == 1 &&
+          !src.abs && !src.neg && !src.memory &&
+          def->op == AGX_OPCODE_COLLECT && def->nr_srcs == 2 &&
+          def->nr_dests == 1 && def->dest[0].size == AGX_SIZE_64 &&
+          agx_channels(def->dest[0]) == 1 && !def->dest[0].memory &&
+          !def->saturate &&
+          debug_get_bool_option("ASAHI_M5_HIGH_UNIFORM_LOAD", true)) {
+         const agx_index lo = def->src[0], hi = def->src[1];
+         if (lo.type == AGX_INDEX_UNIFORM && hi.type == AGX_INDEX_UNIFORM &&
+             lo.size == AGX_SIZE_32 && hi.size == AGX_SIZE_32 &&
+             agx_channels(lo) == 1 && agx_channels(hi) == 1 &&
+             !lo.abs && !lo.neg && !lo.memory &&
+             !hi.abs && !hi.neg && !hi.memory &&
+             !(lo.value & 3) && hi.value == lo.value + 2 &&
+             agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+                                       lo.value, AGX_SIZE_64)) {
+            agx_replace_src(I, s, agx_uniform(lo.value, AGX_SIZE_64));
+            continue;
+         }
+      }
       if (def->op != AGX_OPCODE_MOV)
          continue;
 
@@ -713,6 +811,23 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
        */
       if (def->src[0].size != src.size &&
           !(def->src[0].size < src.size && agx_supports_zext(I, s)))
+         continue;
+
+      /* M5's mixed-width compare path does not preserve a NIR unsigned
+       * half-to-word conversion. A native SCS u16 load correctly returned
+       * 0x0000c56d, but comparison against a folded half operand rejected it;
+       * the same compiled test passed below bit15. Keep the explicit widening
+       * before comparing. This is the value conversion required by NIR, not
+       * an alteration of the SCS load format or its tested extension bit. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 && s < 2 &&
+          (I->op == AGX_OPCODE_ICMP || I->op == AGX_OPCODE_ICMPSEL))
+         continue;
+
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_BITOP && I->dest[0].size == AGX_SIZE_32 &&
+          def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 &&
+          def->src[0].type != AGX_INDEX_IMMEDIATE)
          continue;
 
       /* AGX2 can carry the zero-extension modifier on integer arithmetic and
@@ -729,6 +844,26 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
            I->op == AGX_OPCODE_QUAD_BALLOT ||
            I->op == AGX_OPCODE_ICMP_BALLOT ||
            I->op == AGX_OPCODE_ICMP_QUAD_BALLOT))
+         continue;
+
+      /* M5's funnel extract takes two word registers. Only a zero-extended
+       * low half shifted out entirely (an immediate shift of 16 or more,
+       * which legalization turns into a bitfield insert) may stay narrow;
+       * keep the explicit extension move for every other half source. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 &&
+          I->op == AGX_OPCODE_EXTR && s < 2 &&
+          !(s == 0 && I->src[2].type == AGX_INDEX_IMMEDIATE &&
+            I->src[2].value >= 16 && I->src[2].value <= 31))
+         continue;
+
+      /* The AGX3C saturating add has only a witnessed 32-bit register form
+       * (iadd/isub with f53, agx3_pack_binary.c); a zero-extended 16-bit
+       * source is refused by the packer. Keep the explicit extension move,
+       * as the AGX3B rule above does for all of these ops. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 &&
+          I->op == AGX_OPCODE_IADD && I->saturate)
          continue;
 
       /* Optimize split(64-bit uniform) so we can get better copyprop of the
@@ -757,16 +892,38 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (def->src[0].type == AGX_INDEX_IMMEDIATE)
          continue;
 
+      /* Native G17S texel fetches can read a static descriptor directly
+       * from CProg uniforms. Keep it through copy propagation, then let
+       * uniform-source validation enforce the witnessed range/alignment. */
+      const bool m5_texture_uniform =
+         ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+         I->op == AGX_OPCODE_TEXTURE_LOAD && s == 3 &&
+         def->src[0].type == AGX_INDEX_UNIFORM &&
+         debug_get_bool_option("ASAHI_M5_UNIFORM_TEXTURE_OPERANDS", true) &&
+         agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+                                  def->src[0].value, def->src[0].size);
+
+      /* An M5 fragment SMP reads its texture and sampler handles from a
+       * pair of aligned 64-bit uniforms (native G17G compiler
+       * argument-buffer samples); forwarded below only as a whole pair. */
+      const bool m5_sample_uniform =
+         ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+         ctx->stage == MESA_SHADER_FRAGMENT && !ctx->is_preamble &&
+         I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
+         def->src[0].type == AGX_INDEX_UNIFORM;
+
       /* ALU instructions cannot take 64-bit. G17P SMP's texture/sampler index
        * operands can (agx_lower_uniform_sources
        * copies back any placement the native form cannot encode). */
-      if (def->src[0].size == AGX_SIZE_64 &&
+      if (def->src[0].size == AGX_SIZE_64 && !m5_texture_uniform &&
+          !m5_sample_uniform &&
           !(I->op == AGX_OPCODE_DEVICE_LOAD && s == 0) &&
           !(I->op == AGX_OPCODE_DEVICE_STORE && s == 1) &&
           !(I->op == AGX_OPCODE_ATOMIC && s == 1) &&
           !(I->op == AGX_OPCODE_INTERSECT_RAY_GEN1 && s < 2) &&
-          !(I->op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 && s == 0) &&
-          !(I->op == AGX_OPCODE_SCS_STORE_UNIFORM_INDEXED_AGX3 && s == 1) &&
+          !((I->op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 && s == 0) ||
+            (I->op == AGX_OPCODE_SCS_STORE_UNIFORM_INDEXED_AGX3 && s == 1) ||
+            (I->op == AGX_OPCODE_INTERSECT_RAY_M5 && s == 1)) &&
           !(I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
             ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
             def->src[0].type == AGX_INDEX_UNIFORM))
@@ -789,6 +946,16 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
          }
          if (agx3_tex_uniform_pair_unwitnessed(ctx, I, pair[0], pair[1]))
             continue;
+         if (m5_sample_uniform) {
+            bool both = true;
+            for (unsigned j = 0; j < 2; ++j) {
+               both &= pair[j].type == AGX_INDEX_UNIFORM &&
+                       pair[j].size == AGX_SIZE_64 && !(pair[j].value & 3) &&
+                       pair[j].value <= 252 && !pair[j].abs && !pair[j].neg;
+            }
+            if (!both)
+               continue;
+         }
       }
 
       agx_replace_src(I, s, def->src[0]);

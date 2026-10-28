@@ -142,14 +142,17 @@ TEST_F(RepairSSA, UseModifiersDoNotLeakIntoPhi)
 }
 
 /* A value defined before a join and read after it gets a phi of itself from
- * the repair. G17P removes that trivial phi; other chips keep their output. */
+ * the repair. G17P and M5 remove that trivial phi; other chips keep their
+ * output. */
 TEST_F(RepairSSA, G17PRemovesTrivialJoinPhi)
 {
-   for (bool g17p : {false, true}) {
+   for (enum agx_chip chip : {AGX_CHIP_G13G, AGX_CHIP_G17P, AGX_CHIP_G17S}) {
+      const bool g17p = chip != AGX_CHIP_G13G;
       agx_shader_key key = {};
-      key.dev.encoding =
-         g17p ? AGX_ISA_ENCODING_AGX3B : AGX_ISA_ENCODING_AGX2;
-      key.dev.chip = g17p ? AGX_CHIP_G17P : AGX_CHIP_G13G;
+      key.dev.encoding = chip == AGX_CHIP_G17S ? AGX_ISA_ENCODING_AGX3C
+                         : g17p                ? AGX_ISA_ENCODING_AGX3B
+                                               : AGX_ISA_ENCODING_AGX2;
+      key.dev.chip = chip;
 
       CASE({
          b->shader->key = &key;

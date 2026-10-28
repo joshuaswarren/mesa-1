@@ -88,6 +88,33 @@ lower_discard_to_sample_mask_0(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* M5 (G17G/G17S) form of the final coverage update. Native M5 fragments
+ * (native G17G compiler: discard + alpha-to-coverage at 4x) issue exactly
+ * one testing MOVMSK, unconditionally, after their kills; a lane whose live
+ * set is empty still executes it. Whether this shader part triggers the
+ * tests is the uniform tests_zs (another linked part may own them), so pick
+ * the testing or the pure-kill form with a uniform branch instead of
+ * splitting per lane (agx_nir_split_g17p_sample_tests): a SIMD group never
+ * reaches the testing update with only some of its live lanes. */
+static void
+final_coverage_update(nir_builder *b, nir_def *killed, bool uniform_tests)
+{
+   nir_def *all_samples = nir_imm_intN_t(b, ALL_SAMPLES, 16);
+   nir_def *live = nir_ixor(b, killed, all_samples);
+   nir_def *testing = nir_load_shader_part_tests_zs_agx(b);
+
+   if (!uniform_tests) {
+      nir_sample_mask_agx(b, nir_ior(b, testing, killed), live);
+      return;
+   }
+
+   nir_push_if(b, nir_ine_imm(b, testing, 0));
+   nir_sample_mask_agx(b, all_samples, live);
+   nir_push_else(b, NULL);
+   nir_sample_mask_agx(b, killed, nir_imm_intN_t(b, 0, 16));
+   nir_pop_if(b, NULL);
+}
+
 static nir_intrinsic_instr *
 last_discard_in_block(nir_block *block)
 {
@@ -125,7 +152,7 @@ cf_node_contains_discard(nir_cf_node *node)
  * earliest unconditionally executed instruction after all discard.
  */
 static void
-run_tests_after_last_discard(nir_builder *b)
+run_tests_after_last_discard(nir_builder *b, bool uniform_tests)
 {
    foreach_list_typed_reverse(nir_cf_node, node, node, &b->impl->body) {
       if (node->type == nir_cf_node_block) {
@@ -145,15 +172,8 @@ run_tests_after_last_discard(nir_builder *b)
              * equivalent to `sample_mask killed, 0`, killing without testing.
              */
             b->cursor = nir_before_instr(&intr->instr);
-
-            nir_def *all_samples = nir_imm_intN_t(b, ALL_SAMPLES, 16);
-            nir_def *killed = nir_u2u16(b, intr->src[0].ssa);
-            nir_def *live = nir_ixor(b, killed, all_samples);
-
-            nir_def *testing = nir_load_shader_part_tests_zs_agx(b);
-            nir_def *affected = nir_ior(b, testing, killed);
-
-            nir_sample_mask_agx(b, affected, live);
+            final_coverage_update(b, nir_u2u16(b, intr->src[0].ssa),
+                                  uniform_tests);
             nir_instr_remove(&intr->instr);
             return;
          } else {
@@ -169,8 +189,15 @@ run_tests_after_last_discard(nir_builder *b)
           * If we're not testing, this turns into sample_mask(0, ~0) which is a
           * no-op.
           */
-         nir_sample_mask_agx(b, nir_load_shader_part_tests_zs_agx(b),
-                             nir_imm_intN_t(b, ALL_SAMPLES, 16));
+         if (uniform_tests) {
+            nir_push_if(b, nir_ine_imm(b, nir_load_shader_part_tests_zs_agx(b), 0));
+            nir_sample_mask_agx(b, nir_imm_intN_t(b, ALL_SAMPLES, 16),
+                                nir_imm_intN_t(b, ALL_SAMPLES, 16));
+            nir_pop_if(b, NULL);
+         } else {
+            nir_sample_mask_agx(b, nir_load_shader_part_tests_zs_agx(b),
+                                nir_imm_intN_t(b, ALL_SAMPLES, 16));
+         }
          return;
       }
    }
@@ -186,8 +213,8 @@ run_tests_at_start(nir_shader *shader)
                        nir_imm_intN_t(&b, ALL_SAMPLES, 16));
 }
 
-bool
-agx_nir_lower_sample_mask(nir_shader *shader)
+static bool
+lower_sample_mask(nir_shader *shader, bool uniform_tests)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
 
@@ -210,19 +237,33 @@ agx_nir_lower_sample_mask(nir_shader *shader)
          nir_builder b = nir_builder_create(impl);
 
          /* run tests late */
-         run_tests_after_last_discard(&b);
+         run_tests_after_last_discard(&b, uniform_tests);
       }
    } else {
       /* regular shaders that don't use discard have nothing to lower */
       return nir_no_progress(impl);
    }
 
-   nir_progress(true, impl, nir_metadata_control_flow);
+   nir_progress(true, impl,
+                uniform_tests ? nir_metadata_none : nir_metadata_control_flow);
 
    nir_shader_intrinsics_pass(shader, lower_discard_to_sample_mask_0,
                               nir_metadata_control_flow, NULL);
 
    return true;
+}
+
+bool
+agx_nir_lower_sample_mask(nir_shader *shader)
+{
+   return lower_sample_mask(shader, false);
+}
+
+/* M5 shader parts: one uniformly selected final coverage update. */
+bool
+agx_nir_lower_sample_mask_m5(nir_shader *shader)
+{
+   return lower_sample_mask(shader, true);
 }
 
 struct deferred_ctx {
@@ -285,6 +326,9 @@ quad_dependent_instr(const nir_instr *instr)
    case nir_intrinsic_ddy_coarse:
    case nir_intrinsic_is_helper_invocation:
    case nir_intrinsic_load_helper_invocation:
+   case nir_intrinsic_load_active_subgroup_invocation_agx:
+   case nir_intrinsic_load_active_subgroup_count_agx:
+   case nir_intrinsic_quad_ballot_agx:
       return true;
    default:
       return false;
@@ -553,6 +597,10 @@ subgroup_instr(const nir_instr *instr)
 {
    if (instr->type != nir_instr_type_intrinsic)
       return false;
+   const nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+   if (op == nir_intrinsic_load_active_subgroup_invocation_agx ||
+       op == nir_intrinsic_load_active_subgroup_count_agx)
+      return true;
    /* Quad operations are also flagged SUBGROUP; they only read their own
     * quad, which a dead-quad kill never leaves partially alive. */
    const unsigned flags =
@@ -613,8 +661,8 @@ kill_dead_quads(nir_function_impl *impl, nir_variable *killed)
  * the fused form run_tests_after_last_discard() builds for an unconditional
  * last discard.
  */
-bool
-agx_nir_lower_sample_mask_deferred(nir_shader *shader)
+static bool
+lower_sample_mask_deferred(nir_shader *shader, bool uniform_tests)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    const bool lanes_reach_sensitive_work =
@@ -630,7 +678,7 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
    if (!shader->info.fs.needs_coarse_quad_helper_invocations &&
        !shader->info.fs.needs_full_quad_helper_invocations &&
        !lanes_reach_sensitive_work)
-      return agx_nir_lower_sample_mask(shader);
+      return lower_sample_mask(shader, uniform_tests);
 
    bool writes_zs =
       shader->info.outputs_written &
@@ -639,7 +687,7 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
    const bool early = shader->info.fs.early_fragment_tests;
    if (!early && !writes_zs && shader->info.fs.uses_discard &&
        !lanes_reach_sensitive_work)
-      return agx_nir_lower_sample_mask(shader);
+      return lower_sample_mask(shader, uniform_tests);
 
    if (early) {
       if (shader->info.fs.uses_discard || writes_zs ||
@@ -696,13 +744,23 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
       /* Tests already ran (or zs_emit runs them): kill without testing. */
       nir_sample_mask_agx(&b, killed, nir_imm_intN_t(&b, 0, 16));
    } else {
-      nir_def *all_samples = nir_imm_intN_t(&b, ALL_SAMPLES, 16);
-      nir_def *live = nir_ixor(&b, killed, all_samples);
-      nir_def *testing = nir_load_shader_part_tests_zs_agx(&b);
-      nir_sample_mask_agx(&b, nir_ior(&b, testing, killed), live);
+      final_coverage_update(&b, killed, uniform_tests);
    }
 
    nir_progress(true, impl, nir_metadata_none);
    NIR_PASS(_, shader, nir_lower_vars_to_ssa);
    return true;
+}
+
+bool
+agx_nir_lower_sample_mask_deferred(nir_shader *shader)
+{
+   return lower_sample_mask_deferred(shader, false);
+}
+
+/* M5: one uniformly selected final coverage update (final_coverage_update). */
+bool
+agx_nir_lower_sample_mask_deferred_m5(nir_shader *shader)
+{
+   return lower_sample_mask_deferred(shader, true);
 }

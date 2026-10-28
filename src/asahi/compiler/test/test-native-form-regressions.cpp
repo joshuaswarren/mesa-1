@@ -1,12 +1,24 @@
 #include "agx3_alu_core.h"
+#include "agx3_falu_mod_core.h"
+#include "agx3_iadd_core.h"
 #include "agx3_pack.h"
 #include "agx3_stage_core.h"
 #include "agx3_tex_core.h"
 #include "agx_test.h"
+#include "agx3_tile_core.h"
+#include "agx3_sr_core.h"
+#include "agx3_subgroup_core.h"
+#include "agx3_matrix_core.h"
+#include "agx3_vary_core.h"
 extern "C" {
 #include "agx_nir.h"
 #include "asahi/layout/layout.h"
 }
+#include "agx_compile.h"
+#include "agx_debug.h"
+#include "compiler/nir/nir_builder.h"
+#include "agx_nir_m5_mesh.h"
+#include "agx3_mesh_core.h"
 #include <gtest/gtest.h>
 #include <vector>
 #include <csignal>
@@ -845,6 +857,109 @@ TEST(NativeForms, TransientTextureResultPreservesEarlierAsyncWriteSpan)
       ralloc_free(mem);
    }
 }
+#include <algorithm>
+
+TEST(NativeForms, M5Matrix8MetalCompilerWitnesses)
+{
+   const uint8_t zero[] = {
+      0xa7, 0x02, 0x05, 0x2a, 0x20, 0x20, 0xaf,
+      0x12, 0x28, 0x06, 0x44, 0x00, 0x02, 0x01,
+   };
+   const uint8_t accumulator[] = {
+      0x2f, 0x02, 0x05, 0x6b, 0x20, 0x20, 0xaf,
+      0x02, 0x28, 0x08, 0x14, 0x00, 0x00, 0x01,
+   };
+   agx3_matrix_mma8_desc d = {};
+   d.dest = 24;
+   d.a = 2;
+   d.b = 20;
+   d.c_zero = true;
+   d.discard[0] = d.discard[1] = true;
+   uint8_t bytes[14], length;
+   ASSERT_TRUE(agx3_matrix_encode_mma8(AGX_ISA_ENCODING_AGX3C, &d,
+                                     bytes, &length));
+   ASSERT_EQ(length, sizeof(zero));
+   EXPECT_EQ(memcmp(bytes, zero, sizeof(zero)), 0);
+
+   d.dest = d.c = 0;
+   d.a = 10;
+   d.b = 6;
+   d.c_zero = false;
+   d.discard[2] = true;
+   d.wait_mask = 0x80;
+   ASSERT_TRUE(agx3_matrix_encode_mma8(AGX_ISA_ENCODING_AGX3C, &d,
+                                     bytes, &length));
+   ASSERT_EQ(length, sizeof(accumulator));
+   EXPECT_EQ(memcmp(bytes, accumulator, sizeof(accumulator)), 0);
+}
+
+static unsigned
+m5_absolute_comparison_instrs(bool repeat_absolute)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "M5 absolute comparisons");
+   nir_def *input = agx_test_load_preamble(&b, 4, 32, 4);
+   nir_def *x = nir_channel(&b, input, 0);
+   nir_def *abs_x = nir_fabs(&b, x);
+   nir_def *first = nir_bcsel(&b, nir_flt(&b, abs_x, nir_channel(&b, input, 1)),
+                              nir_channel(&b, input, 2),
+                              nir_channel(&b, input, 3));
+   nir_def *second =
+      nir_bcsel(&b,
+                nir_flt(&b, repeat_absolute ? abs_x : x,
+                        nir_channel(&b, input, 2)),
+                nir_channel(&b, input, 1), nir_channel(&b, input, 3));
+   agx_test_store_local_pixel_agx(
+      &b, nir_vec4(&b, first, second, first, second),
+      nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16), 0, 0xf,
+      (enum pipe_format)AIL_ISA_FORMAT_I32);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   key.no_preamble = true;
+   key.reserved_preamble = 16;
+   key.fs.nr_samples = 1;
+   agx_preprocess_nir(b.shader);
+   agx_shader_part part = {};
+   EXPECT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
+   unsigned instrs = part.info.stats.instrs;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return instrs;
+}
+
+/* M5 compares |x| through a plain copy. Comparing the same |x| twice in a
+ * block costs no more than comparing |x| and x. */
+TEST(NativeForms, M5RepeatedAbsoluteComparandSharesItsCopy)
+{
+   unsigned once = m5_absolute_comparison_instrs(false);
+   EXPECT_GT(once, 0u);
+   EXPECT_EQ(m5_absolute_comparison_instrs(true), once);
+}
+
+TEST(NativeForms, M5SignedByteToHalfReachesPacker)
+{
+   void *mem = ralloc_context(NULL);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   agx_builder *b = agx_test_builder(mem);
+   b->shader->key = &key;
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_instr *convert = agx_alloc_instr(b, AGX_OPCODE_CONVERT, 1, 2);
+   convert->dest[0] = agx_register(10, AGX_SIZE_16);
+   convert->src[0] = agx_immediate(AGX_CONVERT_S8_TO_F);
+   convert->src[1] = agx_register(10, AGX_SIZE_16);
+   convert->round = AGX_ROUND_RTE;
+   agx_builder_insert(&b->cursor, convert);
+   agx_stop(b);
+   util_dynarray bytes;
+   util_dynarray_init(&bytes, mem);
+   EXPECT_TRUE(agx3_pack_binary(b->shader, &bytes));
+   EXPECT_GT(bytes.size, 4u);
+   ralloc_free(mem);
+}
 
 TEST(NativeForms, BoundedUnaryRegistersUnderPressure)
 {
@@ -1155,6 +1270,88 @@ TEST(NativeForms, TexturePublicationWaitPreservesUnrelatedResult)
    for (unsigned i = 0; i + len <= binary.size; ++i)
       found |= memcmp(bytes + i, carrier, len) == 0;
    EXPECT_TRUE(found);
+   util_dynarray_fini(&binary);
+   ralloc_free(mem);
+}
+
+/* A vertex output whose staging COPY reuses the operand staging of a sample
+ * still in flight retires that sample first. The r0 carrier used for that
+ * rewrites r0, so it must not run while a load is still writing r0 (the
+ * texturelodoffset_pcoffset *shadow_vertex position load): the retirement
+ * must also wait for the stored value's own producer. */
+TEST(NativeForms, M5VertexOutputStagingWaitCoversStoredLoad)
+{
+   void *mem = ralloc_context(NULL);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   agx_builder *b = agx_test_builder(mem);
+   b->shader->key = &key;
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->max_reg = 63;
+
+   /* Earlier loads occupy the first slots, so the sample's slot is not the
+    * one the first output's staging COPY takes. */
+   for (unsigned i = 0; i < 3; ++i) {
+      agx_index value = agx_register(80 + 8 * i, AGX_SIZE_32);
+      value.channels_m1 = 3;
+      agx_device_load_to(b, value, agx_register(8, AGX_SIZE_64),
+                         agx_immediate(i), AGX_FORMAT_I32, 15, 0, false);
+   }
+
+   /* The CTS vertex shader's sample, as register allocation left it: the
+    * reference and the packed level/offset word in r14..r15. */
+   agx_index coords = agx_register(20, AGX_SIZE_32);
+   coords.channels_m1 = 1;
+   coords.discard = true;
+   agx_index level = agx_register(3, AGX_SIZE_16);
+   level.discard = true;
+   agx_index texture = agx_register(12, AGX_SIZE_64);
+   texture.discard = true;
+   agx_index sampler = agx_register(24, AGX_SIZE_64);
+   sampler.discard = true;
+   agx_index compare = agx_register(28, AGX_SIZE_32);
+   compare.channels_m1 = 1;
+   compare.discard = true;
+   agx_index result = agx_register(32, AGX_SIZE_32);
+   result.channels_m1 = 3;
+   agx_texture_sample_to(b, result, coords, level, agx_zero(), texture,
+                         sampler, compare, AGX_DIM_2D,
+                         AGX_LOD_MODE_LOD_MIN, 1, true, true, false,
+                         AGX_GATHER_NONE, false);
+   /* The position load into r0..r3 while the sample is in flight. */
+   agx_index position = agx_register(0, AGX_SIZE_32);
+   position.channels_m1 = 3;
+   agx_device_load_to(b, position, agx_register(8, AGX_SIZE_64),
+                      agx_register(6, AGX_SIZE_32), AGX_FORMAT_I32, 15, 0,
+                      false);
+   for (unsigned i = 0; i < 4; ++i)
+      agx_st_vary(b, agx_immediate(i), agx_register(2 * i, AGX_SIZE_32));
+   agx_st_vary(b, agx_immediate(4), agx_register(32, AGX_SIZE_32));
+   for (unsigned i = 0; i < 3; ++i)
+      agx_st_vary(b, agx_immediate(5 + i), agx_register(80 + 8 * i, AGX_SIZE_32));
+   agx_stop(b);
+
+   util_dynarray binary;
+   util_dynarray_init(&binary, mem);
+   ASSERT_TRUE(agx3_pack_binary(b->shader, &binary));
+
+   /* The one identity carrier, found by its wait mask, waits for both the
+    * sample (staging) and the load (r0). */
+   const uint8_t *bytes = (const uint8_t *)binary.data;
+   unsigned carriers = 0;
+   for (unsigned mask = 1; mask < 0x80; ++mask) {
+      uint8_t carrier[AGX3_ALU_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3C, 0,
+                                              mask, carrier, &len));
+      for (unsigned i = 0; i + len <= binary.size; ++i) {
+         if (memcmp(bytes + i, carrier, len) != 0)
+            continue;
+         ++carriers;
+         EXPECT_EQ(util_bitcount(mask), 2u) << "mask " << mask;
+      }
+   }
+   EXPECT_EQ(carriers, 1u);
    util_dynarray_fini(&binary);
    ralloc_free(mem);
 }
@@ -3348,4 +3545,2357 @@ TEST(LegacyFragments, SideEffectsRetainUpstreamLateDepth)
    EXPECT_EQ(never, 1u);
    EXPECT_EQ(masks, 0u);
    ralloc_free(b.shader);
+}
+
+/* AGX3C bitwise operations with an 8-bit immediate operand, against native
+ * G17G witnesses (the native G17G compiler; port/cwit k_or1, k_and255,
+ * k_xor1, k_or1h). Each follows a load whose scoreboard wait is slot 7. */
+TEST(NativeForms, M5BitwiseImmediateWitnesses)
+{
+   struct {
+      enum agx3_alu_op op;
+      bool narrow;
+      uint16_t dest, src;
+      uint8_t imm;
+      std::vector<uint8_t> expect;
+   } rows[] = {
+      {AGX3_ALU_BOR, false, 0, 0, 1,
+       {0x2b, 0x00, 0x07, 0x80, 0x32, 0x38, 0xa3, 0x02, 0x44, 0x80}},
+      {AGX3_ALU_BAND, false, 0, 0, 255,
+       {0x2b, 0x00, 0x07, 0x80, 0x30, 0x30, 0xa3, 0x02, 0xc4, 0xbf}},
+      {AGX3_ALU_BXOR, false, 0, 0, 1,
+       {0x2b, 0x00, 0x06, 0x80, 0x32, 0x38, 0xa3, 0x02, 0x44, 0x80}},
+      {AGX3_ALU_BOR, true, 2, 2, 1,
+       {0x3b, 0x02, 0x07, 0x00, 0x32, 0x28, 0xa3, 0x02, 0x44, 0x80}},
+   };
+   for (const auto &row : rows) {
+      uint8_t out[AGX3_ALU_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_alu_bit_imm(AGX_ISA_ENCODING_AGX3C, row.op, row.narrow,
+                                   row.dest, row.src, row.imm,
+                                   AGX3_ALU_HINT_DISCARD, 0x80, out, &len))
+         << row.op;
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), row.expect) << row.op;
+   }
+}
+
+
+/* AGX3C runtime texture offsets: PACK_SMPIR into bank 6, against native G17G
+ * witnesses (port/texwit3 d_auto/d_gath: X = h2, Y = h4; d_cmp: h4/h5). */
+TEST(NativeForms, M5RuntimeTextureOffsetWitnesses)
+{
+   uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+   ASSERT_TRUE(agx3_tex_stage_offset_2d(AGX_ISA_ENCODING_AGX3C, 2, 4, 1, 0,
+                                        false, true, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x37, 0x02, 0x00, 0x0a, 0x25, 0x00, 0xaa,
+                                   0x0a, 0x00, 0x01, 0x60, 0x30, 0x00, 0x00}));
+   ASSERT_TRUE(agx3_tex_stage_gather_offset(AGX_ISA_ENCODING_AGX3C, 4, false,
+                                            0, 1, false, true, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x37, 0x00, 0x00, 0x2a, 0x25, 0x00, 0xaa,
+                                   0x0a, 0x40, 0x01, 0x60, 0x30, 0x00, 0x00}));
+}
+
+/* Native G17G (texwit3) SMPs that read a runtime offset staged in bank 6:
+ * d_auto (implicit LOD), d_lvlr (register LOD in the same word, f139 = 4) and
+ * d_arr (array layer in the same word, f77 = 2). Each waits on the staging
+ * slot. The word itself has G17P's layout: layer in bits 0..11, X/Y nibbles
+ * at 12/28, LOD x64 in 16..27 (the PACK_SMPIR f74/f75 pairs of d_lvlr/d_arr). */
+TEST(NativeForms, M5StagedOffsetSampleWitnesses)
+{
+   const struct agx3_tex_sample_desc d_auto = {
+      .width = AGX3_TEX_W32, .mask = 15, .texture = 0, .sampler = 0,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true,
+      .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      .offset = true, .offset_staged = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+   };
+   struct agx3_tex_sample_desc d_lvlr = d_auto;
+   d_lvlr.lod = AGX3_TEX_LOD_REGISTER;
+   struct agx3_tex_sample_desc d_arr = d_auto;
+   d_arr.array = true;
+   d_arr.offset_staged_array = true;
+   const struct {
+      const struct agx3_tex_sample_desc *d;
+      std::vector<uint8_t> native;
+   } cases[] = {
+      {&d_auto, {0x0f, 0x04, 0x16, 0x00, 0x41, 0x80, 0x63, 0x29, 0x01, 0x10, 0x07,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00}},
+      {&d_lvlr, {0x0f, 0x05, 0x16, 0x00, 0x45, 0x80, 0x63, 0x29, 0x01, 0x10, 0x07,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00}},
+      {&d_arr,  {0x0f, 0x05, 0x16, 0x00, 0x41, 0x80, 0x62, 0x29, 0x01, 0x18, 0x07,
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00}},
+   };
+   for (const auto &c : cases) {
+      uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, c.d, out, &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native);
+   }
+
+   /* texwit6 g_arr / g_arr_y: an array gather reads the same layer word
+    * (f77 = 2) with the gather selector f144 (and f145 for component y). */
+   struct agx3_tex_sample_desc g_arr = d_arr;
+   g_arr.gather = AGX3_TEX_GATHER_R;
+   struct agx3_tex_sample_desc g_arr_y = d_arr;
+   g_arr_y.gather = AGX3_TEX_GATHER_G;
+   /* Comparisons (f143) with the reference staged beside the same word. */
+   struct agx3_tex_sample_desc g_cmp_arr = g_arr;
+   g_cmp_arr.shadow = true;
+   struct agx3_tex_sample_desc c_arr = d_arr;
+   c_arr.shadow = true;
+   c_arr.mask = 1;
+   struct agx3_tex_sample_desc c_lvlr = d_lvlr;
+   c_lvlr.shadow = true;
+   c_lvlr.mask = 1;
+   const struct {
+      const struct agx3_tex_sample_desc *d;
+      std::vector<uint8_t> native;
+   } gathers[] = {
+      {&g_arr, {0x0f, 0x05, 0x16, 0x00, 0x41, 0x80, 0x02, 0x21, 0x01, 0x18, 0x16,
+                0x00, 0x00, 0x00}},
+      {&g_arr_y, {0x0f, 0x05, 0x16, 0x00, 0x41, 0x80, 0x22, 0x21, 0x01, 0x18, 0x16,
+                  0x00, 0x00, 0x00}},
+      {&g_cmp_arr, {0x0f, 0x06, 0x16, 0x00, 0x41, 0x80, 0x02, 0x21, 0x01, 0x18, 0x16,
+                    0x00, 0x00, 0x00}},
+      {&c_arr, {0x0f, 0x06, 0x16, 0x00, 0x41, 0x80, 0x02, 0x21, 0x01, 0x18, 0x06,
+                0x00, 0x00, 0x00}},
+      {&c_lvlr, {0x0f, 0x06, 0x16, 0x00, 0x45, 0x80, 0x03, 0x21, 0x01, 0x10, 0x06,
+                 0x00, 0x00, 0x00}},
+   };
+   for (const auto &c : gathers) {
+      uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, c.d, out, &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native);
+   }
+}
+
+/* Native G17G (port/cwit3) ALU forms behind the spirv_assembly.type 8/16-bit
+ * refusals: `ushort(1) << uint(n)` is one 32-bit-count sll with the
+ * immediate one. */
+TEST(NativeForms, M5ShiftOneWitness)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH] = {0}, len = 0;
+   ASSERT_TRUE(agx3_alu_sll_one_m5(0, false, 0, AGX3_ALU_HINT_DISCARD, false,
+                                   0, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x27, 0x01, 0x20, 0x1a, 0x26, 0x00, 0xa0,
+                                   0x02, 0x00, 0x80, 0x20, 0x34, 0x00, 0x00}));
+   ASSERT_TRUE(agx3_alu_sll_one_m5(3, true, 4, AGX3_ALU_HINT_NONE, false, 0,
+                                   out, &len));
+   EXPECT_EQ(len, 14);
+}
+
+/* Native G17G (port/cwit3) addsat/subsat, popcount(ushort) and ~x. */
+TEST(NativeForms, M5SpirvIntegerWitnesses)
+{
+   const auto eq = [](const uint8_t *out, uint8_t len,
+                      std::vector<uint8_t> native) {
+      return std::vector<uint8_t>(out, out + len) == native;
+   };
+   uint8_t out[AGX3_ALU_MAX_LENGTH] = {0}, len = 0;
+
+   /* 32-bit: iadd32/isub32 register point with saturation; each native
+    * instance waits on slot 8 (f53), as its loads publish there. */
+   for (unsigned v = 0; v < 3; ++v) {
+      const struct agx3_iadd_desc d = {
+         .src_a_is_register = true, .src_a_reg = 0,
+         .src_a_sign_extend = v == 1, .src_a_kill = true, .src_kill = true,
+         .dest = 0, .src = 4, .sign_extend = v == 1,
+         .wait_mask = 0x80, .subtract = v == 2, .saturate = true,
+      };
+      uint8_t b[AGX3_IADD_MAX_LENGTH] = {0}, n = 0;
+      ASSERT_TRUE(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &d, b, &n)) << v;
+      const std::vector<uint8_t> native[] = {
+         {0x2f, 0x00, 0x04, 0x1a, 0x21, 0x00, 0xa3, 0x02, 0x38, 0x81, 0x20, 0x00},
+         {0x2f, 0x00, 0x04, 0x1a, 0x21, 0x00, 0xa3, 0x02, 0x38, 0x81, 0xe0, 0x00},
+         {0x2f, 0x00, 0x04, 0x1a, 0x25, 0x00, 0xa2, 0x02, 0x18, 0x81, 0x20, 0x00},
+      };
+      EXPECT_EQ(std::vector<uint8_t>(b, b + n), native[v]) << v;
+   }
+
+   /* 16-bit: half result and operands. */
+   const uint16_t src[2] = {4, 2};
+   const enum agx3_alu_hint discard[2] = {AGX3_ALU_HINT_DISCARD,
+                                          AGX3_ALU_HINT_DISCARD};
+   ASSERT_TRUE(agx3_alu_addsub_sat16_m5(2, src, discard, false, false, false,
+                                        0x80, out, &len));
+   EXPECT_TRUE(eq(out, len, {0x3f, 0x00, 0x04, 0x38, 0x21, 0x00, 0xa3, 0x02,
+                             0xb0, 0x00, 0x20, 0x00}));
+   ASSERT_TRUE(agx3_alu_addsub_sat16_m5(2, src, discard, true, false, false,
+                                        0x80, out, &len));
+   EXPECT_TRUE(eq(out, len, {0x3f, 0x00, 0x04, 0x38, 0x21, 0x00, 0xa3, 0x02,
+                             0xb0, 0x00, 0xe0, 0x00}));
+   ASSERT_TRUE(agx3_alu_addsub_sat16_m5(2, src, discard, true, true, false,
+                                        0x80, out, &len));
+   EXPECT_TRUE(eq(out, len, {0x3f, 0x00, 0x04, 0x38, 0x25, 0x08, 0xa2, 0x02,
+                             0x90, 0x00, 0x60, 0x00}));
+
+   /* popcount(ushort), waiting on slot 8. */
+   ASSERT_TRUE(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 2, 2, true,
+                                 AGX3_ALU_HINT_DISCARD, false, 0x80, out,
+                                 &len));
+   EXPECT_TRUE(eq(out, len, {0x3f, 0x02, 0x00, 0x00, 0x32, 0x20, 0xaa, 0x02,
+                             0x04, 0x00}));
+
+   /* ~ushort and ~uint, waiting on slot 8. */
+   ASSERT_TRUE(agx3_alu_bit_not_m5(2, 2, false, AGX3_ALU_HINT_DISCARD, false,
+                                   0x80, out, &len));
+   EXPECT_TRUE(eq(out, len, {0x3b, 0x02, 0x26, 0x18, 0x21, 0x08, 0xa0, 0x02}));
+   ASSERT_TRUE(agx3_alu_bit_not_m5(0, 0, true, AGX3_ALU_HINT_DISCARD, false,
+                                   0x80, out, &len));
+   EXPECT_TRUE(eq(out, len, {0x2b, 0x00, 0x26, 0x1a, 0x21, 0x08, 0xa8, 0x02}));
+}
+
+/* texwit6 minimum-LOD samples with a runtime offset in bank 6: the bias
+ * (f139 = 3) or gradient (f139 = 5) and the minimum (f140 = 2) come from the
+ * staged word / banks, as on G17P. */
+TEST(NativeForms, M5MinimumLodOffsetSampleWitnesses)
+{
+   struct agx3_tex_sample_desc base = {
+      .width = AGX3_TEX_W32, .mask = 15, .texture = 0, .sampler = 0,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      .offset = true, .offset_staged = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+   };
+   struct agx3_tex_sample_desc m_bias = base;
+   m_bias.lod = AGX3_TEX_LOD_BIAS_REGISTER;
+   m_bias.min_lod = true;
+   struct agx3_tex_sample_desc m_grad = base;
+   m_grad.lod = AGX3_TEX_LOD_GRADIENT;
+   m_grad.min_lod = true;
+   const struct {
+      const char *name;
+      const struct agx3_tex_sample_desc *d;
+      std::vector<uint8_t> native;
+   } cases[] = {
+      {"m_bias", &m_bias, {0x0f, 0x06, 0x16, 0x00, 0x45, 0x80, 0x60, 0x29, 0x01, 0x18, 0x07,
+                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00}},
+      {"m_grad", &m_grad, {0x0f, 0x06, 0x12, 0x00, 0x41, 0x80, 0x60, 0x29, 0x01, 0x18, 0x07,
+                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00}},
+   };
+   /* texwit7: the same with a comparison (f143, mask 1, 14-byte form). */
+   struct agx3_tex_sample_desc c_bias_min = m_bias;
+   c_bias_min.shadow = true;
+   c_bias_min.mask = 1;
+   struct agx3_tex_sample_desc c_arr_grad_min = m_grad;
+   c_arr_grad_min.shadow = true;
+   c_arr_grad_min.mask = 1;
+   c_arr_grad_min.array = true;
+   c_arr_grad_min.offset_staged_array = true;
+   const struct {
+      const char *name;
+      const struct agx3_tex_sample_desc *d;
+      std::vector<uint8_t> native;
+   } cmp[] = {
+      {"c_bias_min", &c_bias_min, {0x0f, 0x07, 0x16, 0x00, 0x45, 0x80, 0x00, 0x21, 0x01, 0x18, 0x06,
+                                   0x00, 0x00, 0x00}},
+      {"c_arr_grad_min", &c_arr_grad_min, {0x0f, 0x04, 0x12, 0x00, 0x45, 0x80, 0x03, 0x21, 0x01, 0x18, 0x06,
+                                           0x00, 0x00, 0x00}},
+   };
+   for (const auto &c : cmp) {
+      uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+      const bool ok = agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, c.d, out, &len);
+      EXPECT_TRUE(ok) << c.name;
+      if (ok) {
+         EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native) << c.name;
+      }
+   }
+   for (const auto &c : cases) {
+      uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+      const bool ok = agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, c.d, out, &len);
+      EXPECT_TRUE(ok) << c.name;
+      if (ok) {
+         EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native) << c.name;
+      }
+   }
+}
+
+TEST(NativeForms, M5MinimumBank8Witness)
+{
+   uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+   ASSERT_TRUE(agx3_tex_stage_minimum_bank8_m5(6, 1, 0, false, true, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x27, 0x02, 0x00, 0x2a, 0x25, 0x00, 0xaa,
+                                   0x12, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00}));
+
+   /* The SMPs that read that minimum: texwit8 ca_br_min_d (2D-array
+    * comparison, register bias, runtime offset) and m3_br_min_d (3D). */
+   struct agx3_tex_sample_desc ca = {
+      .width = AGX3_TEX_W32, .mask = 1, .lod = AGX3_TEX_LOD_BIAS_REGISTER,
+      .min_lod = true, .slot = 1, .wait_mask = 1, .coord_kill = true,
+      .final = true, .array = true,
+      .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE, .shadow = true,
+      .offset = true, .offset_staged = true, .offset_staged_array = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &ca, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x0f, 0x04, 0x16, 0x00, 0x41, 0x80, 0x00,
+                                   0x21, 0x01, 0x00, 0x00, 0x00, 0x00, 0x80}));
+   struct agx3_tex_sample_desc cc = ca;
+   cc.array = false;
+   cc.cube = true;
+   cc.offset = false;
+   cc.offset_staged = false;
+   cc.offset_staged_array = false;
+   ASSERT_TRUE(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &cc, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x0f, 0x06, 0x16, 0x00, 0x41, 0x80, 0x03,
+                                   0x21, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00}));
+
+   struct agx3_tex_sample_desc m3 = ca;
+   m3.shadow = false;
+   m3.mask = 15;
+   m3.array = false;
+   m3.offset_staged_array = false;
+   m3.three_d = true;
+   ASSERT_TRUE(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &m3, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x0f, 0x04, 0x16, 0x00, 0x41, 0x80, 0x62,
+                                   0x29, 0x01, 0x18, 0x07, 0x00, 0x00, 0x00,
+                                   0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+                                   0x00}));
+}
+
+
+/* Native G17G at-sample interpolation (lane-mesh/cwit-interp ias_k1,
+ * ias_k1_np, sp@4): ITRCOORDS f38=2 on the sample index, then f32interp
+ * token leaves (f39=2, f32 = token, f41 live / f43 final) with the projective
+ * RHW leaf (f54) first. */
+TEST(NativeForms, M5SampleInterpolationWitnesses)
+{
+   const auto bytes = [](const uint8_t *out, uint8_t len) {
+      return std::vector<uint8_t>(out, out + len);
+   };
+   uint8_t out[AGX3_VARY_MAX_LENGTH] = {0}, len = 0;
+
+   const struct {
+      uint16_t dest, src;
+      std::vector<uint8_t> native;
+   } coords[] = {
+      {6, 0, {0x37, 0x00, 0x24, 0x1a, 0x2a, 0x00, 0xab, 0x0a, 0x00, 0x02}},
+      {10, 4, {0x37, 0x00, 0x24, 0x3a, 0x2a, 0x00, 0xab, 0x12, 0x00, 0x02}},
+      {14, 1, {0x37, 0x01, 0x24, 0x1a, 0x2a, 0x00, 0xab, 0x1a, 0x00, 0x02}},
+   };
+   for (const auto &c : coords) {
+      ASSERT_TRUE(agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3C, c.dest,
+                                          c.src, true, 0, out, &len));
+      EXPECT_EQ(bytes(out, len), c.native) << c.dest;
+   }
+
+   ASSERT_TRUE(agx3_vary_projective_rhw_sample(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                                               6, false, out, &len));
+   EXPECT_EQ(bytes(out, len),
+             (std::vector<uint8_t>{0x27, 0x00, 0x04, 0x0a, 0x2a, 0x20, 0xaa,
+                                   0x02, 0x06, 0x88}));
+   ASSERT_TRUE(agx3_vary_projective_rhw_sample(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                                               10, false, out, &len));
+   EXPECT_EQ(bytes(out, len),
+             (std::vector<uint8_t>{0x27, 0x00, 0x04, 0x0a, 0x2a, 0x20, 0xaa,
+                                   0x02, 0x0a, 0x88}));
+
+   const struct {
+      uint16_t dest, coef;
+      bool perspective;
+      uint16_t coords;
+      bool kill;
+      std::vector<uint8_t> native;
+   } leaves[] = {
+      {0, 1, true, 6, false,
+       {0x27, 0x01, 0x04, 0x0a, 0x2a, 0x20, 0xaa, 0x02, 0x06, 0x80}},
+      {8, 2, true, 6, false,
+       {0x27, 0x02, 0x04, 0x0a, 0x2a, 0x20, 0xaa, 0x12, 0x06, 0x80}},
+      {2, 3, true, 6, false,
+       {0x37, 0x03, 0x04, 0x0a, 0x2a, 0x20, 0xaa, 0x02, 0x06, 0x80}},
+      {6, 4, true, 6, true,
+       {0x37, 0x00, 0x04, 0x1a, 0x2a, 0x20, 0xaa, 0x0a, 0x06, 0x04}},
+      {0, 0, false, 4, false,
+       {0x27, 0x00, 0x04, 0x0a, 0x2a, 0x20, 0xaa, 0x02, 0x04, 0x80}},
+      {4, 3, false, 4, true,
+       {0x27, 0x03, 0x04, 0x0a, 0x2a, 0x20, 0xaa, 0x0a, 0x04, 0x04}},
+   };
+   for (const auto &l : leaves) {
+      ASSERT_TRUE(agx3_vary_interp_sample(AGX_ISA_ENCODING_AGX3C, l.dest,
+                                          l.coef, l.perspective, l.coords,
+                                          l.kill, out, &len));
+      EXPECT_EQ(bytes(out, len), l.native) << l.dest << " " << l.coef;
+   }
+}
+
+/* Native G17G quad ballots of a boolean immediate (lane-mesh/cwit-quad
+ * q_term/q_vote, cwit-quad2 q_any_mem): quad_any(false) and the quad
+ * active-lane ballot(1 != 0). */
+TEST(NativeForms, M5QuadImmediateBallotWitnesses)
+{
+   const struct {
+      uint16_t dest, value;
+      std::vector<uint8_t> native;
+   } rows[] = {
+      {14, 0, {0x37, 0x00, 0x20, 0x18, 0x2d, 0x00, 0xa6, 0x1a, 0x30, 0x00, 0x08, 0x40}},
+      {4, 1, {0x27, 0x01, 0x20, 0x18, 0x2d, 0x00, 0xa6, 0x0a, 0x30, 0x00, 0x08, 0x40}},
+      {2, 1, {0x37, 0x01, 0x20, 0x18, 0x2d, 0x00, 0xa6, 0x02, 0x30, 0x00, 0x08, 0x40}},
+   };
+   for (const auto &r : rows) {
+      uint8_t out[AGX3_SUBGROUP_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_subgroup_encode_quad_ballot_imm(r.dest, true, r.value, 0,
+                                                       out, &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), r.native) << r.dest;
+   }
+}
+
+/* Native G17G centroid inputs (lane-mesh/cwit-interp iac, cwit-interp2
+ * cp/cnp at 1 and 4 samples): the fragment opens with the marked SR39 read,
+ * whose slot 1 ITRCOORDS f38=1 waits on; the token then feeds the same
+ * f32interp leaves as at-sample interpolation. */
+TEST(NativeForms, M5CentroidInterpolationWitnesses)
+{
+   struct agx3_sr_desc sr = {};
+   sr.width = AGX3_SR_W16;
+   sr.sr = 39;
+   sr.slot = 1;
+   sr.first = true;
+   uint8_t srb[AGX3_SR_MAX_LENGTH] = {0}, srlen = 0;
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &sr, srb, &srlen));
+   EXPECT_EQ(std::vector<uint8_t>(srb, srb + srlen),
+             (std::vector<uint8_t>{0x24, 0x82, 0x01, 0x00, 0x20, 0x00, 0xb0,
+                                   0x02}));
+
+   const struct {
+      uint16_t dest;
+      std::vector<uint8_t> native;
+   } coords[] = {
+      {6, {0x37, 0x04, 0x24, 0x1a, 0x2a, 0x00, 0xab, 0x0a, 0x00, 0x00}},
+      {4, {0x27, 0x04, 0x24, 0x1a, 0x2a, 0x00, 0xab, 0x0a, 0x00, 0x00}},
+   };
+   for (const auto &c : coords) {
+      uint8_t out[AGX3_VARY_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_vary_centroid_coords(AGX_ISA_ENCODING_AGX3C, c.dest, 0,
+                                            true, 0x1, out, &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native) << c.dest;
+   }
+}
+
+/* AGX3C texture barriers wait in their own first word on the result slots of
+ * the image writes in flight. Native G17G bytes from port/fencewit:
+ * k_fence (slot2), k_fence2 (slots 2+3), k_simdbar_tex (slot1), k_tgbar_tex,
+ * k_atf_tg. */
+TEST(NativeForms, M5TextureFenceWitnesses)
+{
+   const struct {
+      agx3_barrier_scope scope;
+      uint16_t wait;
+      std::vector<uint8_t> native;
+   } rows[] = {
+      {AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, 0x2,
+       {0x87, 0x26, 0x00, 0x06, 0x00, 0x08, 0x87, 0x1e, 0x00, 0x06, 0x00, 0x00}},
+      {AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, 0x6,
+       {0x87, 0x26, 0x00, 0x06, 0x00, 0x18, 0x87, 0x1e, 0x00, 0x06, 0x00, 0x00}},
+      {AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, 0x1,
+       {0x87, 0x26, 0x00, 0x06, 0x00, 0x04, 0x87, 0x1e, 0x00, 0x06, 0x00, 0x00}},
+      {AGX3_BARRIER_SCOPE_TEXTURE, 0x2,
+       {0x87, 0x67, 0x00, 0x06, 0x00, 0x08, 0x87, 0x5f, 0x00, 0x06, 0x00, 0x00}},
+      {AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP, 0x2,
+       {0x87, 0x27, 0x00, 0x06, 0x00, 0x08, 0x87, 0x1f, 0x00, 0x06, 0x00, 0x00}},
+      {AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, 0,
+       {0x87, 0x26, 0x00, 0x06, 0x00, 0x00, 0x87, 0x1e, 0x00, 0x06, 0x00, 0x00}},
+   };
+   for (const auto &r : rows) {
+      agx3_encoded_scoped_barrier enc = {};
+      ASSERT_TRUE(agx3_pack_scoped_barrier_wait(AGX_ISA_ENCODING_AGX3C,
+                                                r.scope, r.wait, &enc))
+         << r.scope << " " << r.wait;
+      EXPECT_EQ(std::vector<uint8_t>(enc.bytes, enc.bytes + enc.length),
+                r.native) << r.scope << " " << r.wait;
+   }
+
+   agx3_encoded_scoped_barrier enc = {};
+   EXPECT_FALSE(agx3_pack_scoped_barrier(
+      AGX_ISA_ENCODING_AGX3B, AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP,
+      &enc));
+   EXPECT_FALSE(agx3_pack_scoped_barrier(
+      AGX_ISA_ENCODING_AGX3C, AGX3_BARRIER_SCOPE_TEXTURE_FENCE, &enc));
+   EXPECT_FALSE(agx3_pack_scoped_barrier_wait(
+      AGX_ISA_ENCODING_AGX3B, AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, 0x2,
+      &enc));
+   EXPECT_FALSE(agx3_pack_scoped_barrier_wait(
+      AGX_ISA_ENCODING_AGX3C, AGX3_BARRIER_SCOPE_DEVICE, 0x2, &enc));
+}
+
+/* Each AGX3C image write's fence waits on that write's own result slot in
+ * the barrier word, with no separate retirement, as k_fence_twice does. */
+TEST(NativeForms, M5ImageFenceWaitsWriteSlotInBarrier)
+{
+   void *mem = ralloc_context(NULL);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   agx_builder *b = agx_test_builder(mem);
+   b->shader->key = &key;
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_index data = agx_register(16, AGX_SIZE_32);
+   data.channels_m1 = 3;
+   agx_index coord = agx_register(24, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   for (unsigned i = 0; i < 3; ++i) {
+      agx_image_write(b, data, coord, agx_zero(), agx_uniform(8, AGX_SIZE_64),
+                      agx_register(28, AGX_SIZE_32), AGX_DIM_2D, true);
+      agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT);
+   }
+   agx_stop(b);
+   util_dynarray binary;
+   util_dynarray_init(&binary, mem);
+   ASSERT_TRUE(agx3_pack_binary(b->shader, &binary));
+
+   const uint8_t *bytes = (const uint8_t *)binary.data;
+   unsigned fences = 0;
+   for (unsigned i = 0; i + 12 <= binary.size; ++i) {
+      if (bytes[i] != 0x87 || bytes[i + 1] != 0x26 || bytes[i + 6] != 0x87 ||
+          bytes[i + 7] != 0x1e)
+         continue;
+      /* One wait bit, on a slot an imgwci before it signals. */
+      const uint16_t wait = (bytes[i + 5] >> 2) | (((bytes[i + 3] >> 5) & 3) << 6);
+      EXPECT_EQ(util_bitcount(wait), 1u) << fences;
+      agx3_encoded_scoped_barrier enc = {};
+      ASSERT_TRUE(agx3_pack_scoped_barrier_wait(
+         AGX_ISA_ENCODING_AGX3C, AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, wait,
+         &enc));
+      EXPECT_EQ(memcmp(bytes + i, enc.bytes, 12), 0) << fences;
+      ++fences;
+      i += 11;
+   }
+   EXPECT_EQ(fences, 3u);
+   util_dynarray_fini(&binary);
+   ralloc_free(mem);
+}
+
+/* G17G 2D-MS texel fetches staged through PACK_SMPIR: the vertex form
+ * (port/vmswit v_ms_f) is the fragment form (f_ms_f) with sampler index 0. */
+TEST(NativeForms, M5VertexMultisampleFetchWitness)
+{
+   const struct {
+      uint16_t sampler;
+      std::vector<uint8_t> native;
+   } rows[] = {
+      {0, {0x0f, 0x04, 0x1a, 0x00, 0x45, 0x80, 0x61, 0x29, 0x01, 0x08, 0x02,
+           0x00, 0x00, 0x00}},
+      {1, {0x0f, 0x04, 0x1a, 0x00, 0x45, 0x81, 0x61, 0x29, 0x01, 0x08, 0x02,
+           0x00, 0x00, 0x00}},
+   };
+   for (const auto &r : rows) {
+      agx3_tex_fetch_desc d = {};
+      d.width = AGX3_TEX_W32;
+      d.mask = 0xf;
+      d.slot = 1;
+      d.wait_mask = 1;
+      d.coord_kill = true;
+      d.final = true;
+      d.multisample = true;
+      d.staged_sample = true;
+      d.sampler_value = r.sampler;
+      uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, out, &len))
+         << r.sampler;
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), r.native) << r.sampler;
+   }
+}
+
+/* AGX3C TEX destinations are eight-bit half indices: G17G places a read at
+ * half 174 under register pressure (port/rawit k_read_hi). */
+TEST(NativeForms, M5HighTextureDestinationWitness)
+{
+   agx3_tex_fetch_desc d = {};
+   d.width = AGX3_TEX_W32;
+   d.dest = 174;
+   d.mask = 0xf;
+   d.slot = 2;
+   d.wait_mask = 1;
+   d.coord_kill = true;
+   d.final = true;
+   uint8_t out[AGX3_TEX_MAX_LENGTH] = {0}, len = 0;
+   ASSERT_TRUE(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x7f, 0x06, 0x5a, 0x00, 0xc8, 0x80, 0x60,
+                                   0x39}));
+   d.dest = 128;
+   EXPECT_FALSE(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+}
+
+/* G17G saturate(half): the f16add -0.0h form with f14, plain and with the
+ * negate/abs modifiers (port/hsatwit k_hsat, k_hsat_neg, k_hsat_abs,
+ * k_hsat_live). */
+TEST(NativeForms, M5HalfSaturateWitness)
+{
+   const struct {
+      uint16_t dest, src;
+      bool abs, neg;
+      enum agx3_alu_hint hint;
+      std::vector<uint8_t> native;
+   } cases[] = {
+      {2, 2, false, false, AGX3_ALU_HINT_DISCARD,
+       {0x38, 0x02, 0x04, 0x02, 0x22, 0x20, 0xa0, 0x02, 0x84, 0x16}},
+      {2, 2, false, true, AGX3_ALU_HINT_DISCARD,
+       {0x38, 0x02, 0x04, 0x02, 0x22, 0x20, 0xa0, 0x02, 0x84, 0x96}},
+      {2, 2, true, false, AGX3_ALU_HINT_DISCARD,
+       {0x38, 0x02, 0x04, 0x02, 0x22, 0x20, 0xa0, 0x02, 0x84, 0x36}},
+      {5, 4, false, false, AGX3_ALU_HINT_NONE,
+       {0x28, 0x00, 0x04, 0x0b, 0x22, 0x20, 0xa0, 0x0a, 0x80, 0x16}},
+   };
+   for (const auto &c : cases) {
+      uint8_t out[AGX3_ALU_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_alu_half_add_negzero_m5(c.dest, c.src, c.abs, c.neg,
+                                               true, c.hint, false, 0x80, out,
+                                               &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native);
+   }
+}
+
+/* G17G float(h) * minifloat into a float (port/hmulwit). */
+TEST(NativeForms, M5HalfTimesMinifloatWitness)
+{
+   const struct {
+      uint16_t dest, src, imm;
+      bool abs, sat;
+      enum agx3_alu_hint hint;
+      uint16_t wait;
+      std::vector<uint8_t> native;
+   } cases[] = {
+      {0, 0, 32, false, false, AGX3_ALU_HINT_DISCARD, 0x80,
+       {0x29, 0x00, 0x05, 0x10, 0x22, 0x80, 0xac, 0x02, 0x02, 0x80, 0x20,
+        0x00, 0x02, 0x10}},
+      {0, 0, 32, false, true, AGX3_ALU_HINT_DISCARD, 0x80,
+       {0x29, 0x00, 0x05, 0x10, 0x22, 0x80, 0xac, 0x02, 0x02, 0x80, 0x20,
+        0x02, 0x02, 0x10}},
+      {0, 0, 32, true, false, AGX3_ALU_HINT_DISCARD, 0x80,
+       {0x29, 0x00, 0x05, 0x10, 0x22, 0x80, 0xac, 0x02, 0x02, 0x80, 0x20,
+        0x08, 0x02, 0x10}},
+      {0, 4, 32, false, false, AGX3_ALU_HINT_NONE, 0x80,
+       {0x29, 0x00, 0x05, 0x10, 0x22, 0x80, 0xac, 0x02, 0x02, 0x81, 0x00,
+        0x00, 0x02, 0x10}},
+      {0, 6, 32, false, false, AGX3_ALU_HINT_CACHE, 0x80,
+       {0x29, 0x00, 0x05, 0x10, 0x22, 0x80, 0xac, 0x02, 0x82, 0x81, 0x10,
+        0x00, 0x02, 0x10}},
+      {2, 6, 64, false, false, AGX3_ALU_HINT_CACHE, 0,
+       {0x19, 0xc1, 0x05, 0x86, 0x80, 0x00}},
+      {6, 6, 80, false, false, AGX3_ALU_HINT_DISCARD, 0,
+       {0x39, 0xd1, 0x15, 0x06, 0x80, 0x00}},
+   };
+   for (const auto &c : cases) {
+      uint8_t out[AGX3_ALU_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_alu_fmul_half_minifloat_m5(c.dest, c.src, c.imm, false,
+                                                  c.abs, c.sat, c.hint,
+                                                  c.wait, out, &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native);
+   }
+}
+
+/* G17G half(fma(a, k, b)): the immediate-multiplier FMA with f10=1
+ * (port/hfmawit). */
+TEST(NativeForms, M5NarrowingFmaImmediateWitness)
+{
+   const struct {
+      uint16_t dest, src1, add;
+      uint8_t k;
+      bool src1_16, sat, src_cache, src_discard, add_cache, add_discard;
+      std::vector<uint8_t> native;
+   } cases[] = {
+      {2, 2, 4, 32, false, false, false, true, false, true,
+       {0x39, 0x02, 0x07, 0x08, 0x20, 0x30, 0xa3, 0x02, 0x30, 0x88, 0x98,
+        0x00, 0x04, 0x08, 0x00, 0x80}},
+      {2, 2, 4, 160, false, false, false, true, false, true,
+       {0x39, 0x02, 0x07, 0x08, 0x20, 0x30, 0xa3, 0x02, 0x30, 0xa8, 0x98,
+        0x00, 0x04, 0x08, 0x00, 0x80}},
+      {2, 2, 4, 32, false, true, false, true, false, true,
+       {0x39, 0x02, 0x07, 0x08, 0x20, 0x30, 0xa3, 0x02, 0x30, 0x88, 0x98,
+        0x02, 0x04, 0x08, 0x00, 0x80}},
+      {10, 4, 6, 32, false, false, true, false, true, false,
+       {0x39, 0x80, 0x07, 0x18, 0x20, 0x30, 0xa3, 0x12, 0x10, 0x88, 0x98,
+        0x00, 0x06, 0x04, 0x00, 0x80}},
+      {2, 4, 2, 32, true, false, false, true, false, true,
+       {0x39, 0x00, 0x07, 0x18, 0x20, 0x30, 0xa7, 0x02, 0x20, 0x88, 0x98,
+        0x00, 0x02, 0x08, 0x00, 0x80}},
+   };
+   for (const auto &c : cases) {
+      const struct agx3_falu_mods m = {.src1_16 = c.src1_16,
+                                       .saturate = c.sat};
+      const struct agx3_falu_runtime rt = {
+         .cache = {false, c.src_cache, c.add_cache},
+         .discard = {false, c.src_discard, c.add_discard},
+         .dest_cache = false,
+         .wait_mask = 0x80,
+      };
+      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH] = {0}, len = 0;
+      ASSERT_TRUE(agx3_falu_fma_mul_imm_narrow_m5(c.dest, c.k, c.src1, c.add,
+                                                  &m, &rt, out, &len));
+      EXPECT_EQ(std::vector<uint8_t>(out, out + len), c.native);
+   }
+}
+
+/* G17G B5G6R5Unorm framebuffer fetch: three 16-bit lanes (port/fbwit). */
+TEST(NativeForms, M5Rgb565TileLoadWitness)
+{
+   uint8_t out[AGX3_TILE_MAX_LENGTH] = {0}, len = 0;
+   ASSERT_TRUE(agx3_tile_load(AGX_ISA_ENCODING_AGX3C, 0, AGX3_TILE_W16, 8, 7,
+                              0, AGX3_TILE_SAMPLE_1X, 0, true, true, out,
+                              &len));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + len),
+             (std::vector<uint8_t>{0x27, 0x01, 0x05, 0x00, 0x01, 0x87, 0xbc,
+                                   0x02, 0x00, 0x00, 0x40, 0xd8, 0x20, 0x00}));
+}
+TEST(NativeForms, M5MeshUVBNativeOperands)
+{
+   uint8_t bytes[8], length = 0;
+   const uint8_t allocation[] = {0x35,0x01,0x0f,0x00,0x20,0x00,0xa2,0x0a};
+   const uint8_t primitive[] = {0x25,0x00,0x0b,0x18,0x20,0x00,0xa2,0x0a};
+   const uint8_t position[] = {0x35,0x02,0x0b,0x0a,0x20,0x00,0xa2,0x0a};
+   ASSERT_TRUE(agx3_mesh_allocate_uvb(AGX_ISA_ENCODING_AGX3C,1,10,true,bytes,&length));
+   EXPECT_EQ(length,8u); EXPECT_EQ(memcmp(bytes,allocation,8),0);
+   ASSERT_TRUE(agx3_mesh_uvst(AGX_ISA_ENCODING_AGX3C,12,true,true,bytes,&length));
+   EXPECT_EQ(memcmp(bytes,primitive,8),0);
+   ASSERT_TRUE(agx3_mesh_uvst(AGX_ISA_ENCODING_AGX3C,22,false,true,bytes,&length));
+   EXPECT_EQ(memcmp(bytes,position,8),0);
+   EXPECT_TRUE(agx3_mesh_allocate_uvb(AGX_ISA_ENCODING_AGX3B,1,10,true,bytes,&length));
+   EXPECT_FALSE(agx3_mesh_uvst(AGX_ISA_ENCODING_AGX3C,1,false,true,bytes,&length));
+   EXPECT_FALSE(agx3_mesh_uvst(AGX_ISA_ENCODING_AGX3C,254,false,true,bytes,&length));
+}
+
+TEST(NativeForms, M5MeshUVBReachesNativePacker)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
+                          &agx_nir_options, "M5 native UVB descriptor");
+   b.shader->info.workgroup_size[0] = 3;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *index = nir_load_local_invocation_index(&b);
+   /* Dynamic values deliberately exercise SSA -> scheduling -> register
+    * allocation. The backend must see both words of the hidden descriptor. */
+   nir_allocate_mesh_uvb_agx(&b,nir_u2u16(&b,index),
+                              nir_u2u16(&b,nir_iadd_imm(&b,index,3)));
+   nir_def *descriptor = nir_vec2(&b,index,nir_iadd_imm(&b,index,32));
+   nir_store_mesh_uvb_agx(&b,descriptor,.flags=0);
+   nir_store_mesh_uvb_agx(&b,descriptor,.flags=1);
+   nir_validate_shader(b.shader,"M5 native UVB");
+   agx_preprocess_nir(b.shader);
+   agx_shader_key key = {};
+   key.dev.chip = AGX_CHIP_G17S;
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.no_preamble = true;
+   agx_shader_part part = {};
+   bool compiled = agx_compile_shader_nir(b.shader,&key,&part);
+   EXPECT_TRUE(compiled) << agx_last_compile_refusal();
+   if (compiled) { EXPECT_GT(part.info.binary_size,24u); free(part.binary); }
+   ralloc_free(b.shader);
+}
+
+
+TEST(NativeForms, M5ObjectChildcountNativeLeaf)
+{
+   uint8_t bytes[8], size;
+   const uint8_t native[] = {0x35,0x04,0x33,0x00,0x24,0x00,0xa8,0x02};
+   ASSERT_TRUE(agx3_mesh_object_childcount(AGX_ISA_ENCODING_AGX3C,bytes,&size));
+   ASSERT_EQ(size,sizeof(native));
+   EXPECT_EQ(memcmp(bytes,native,size),0);
+   EXPECT_TRUE(agx3_mesh_object_childcount(AGX_ISA_ENCODING_AGX3B,bytes,&size));
+}
+
+TEST(NativeForms, M5ObjectChildcountSSACompiles)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_TASK,
+                     &agx_nir_options,"M5 native object childcount SSA");
+   b.shader->info.workgroup_size[0]=3;
+   b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.io_lowered=true;
+   nir_def *pointer=nir_pack_64_2x32(&b,nir_load_preamble(&b,2,32,.base=0));
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_def *value=nir_load_global_constant(&b,1,32,
+      nir_iadd(&b,pointer,nir_u2u64(&b,nir_imul_imm(&b,lane,4))),.align_mul=4);
+   nir_store_object_childcount_agx(&b,value);
+   nir_validate_shader(b.shader,"object childcount");
+   agx_preprocess_nir_m5(b.shader);
+   agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;
+   key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+   agx_shader_part part={};
+   bool compiled=agx_compile_shader_nir(b.shader,&key,&part);
+   EXPECT_TRUE(compiled)<<agx_last_compile_refusal();
+   if(compiled){EXPECT_EQ(part.info.scratch_size,0u);free(part.binary);}
+   ralloc_free(b.shader);
+}
+
+/* The record task's child grid takes 16 bytes past the body's threadgroup
+ * memory; a body using all 32 KiB aliases word 0 after a rendezvous. */
+TEST(NativeForms, M5TaskGridFitsFullThreadgroupMemory)
+{
+   for (unsigned shared : {64u, 32768u}) {
+      for (bool payload : {false, true}) {
+         nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_TASK,&agx_nir_options,"task grid");
+         b.shader->info.workgroup_size[0]=32;
+         b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+         b.shader->info.shared_size=shared;b.shader->info.task_payload_size=payload ? 4 : 0;
+         if (payload)
+            nir_store_task_payload(&b,nir_imm_int(&b,7),nir_imm_int(&b,0),.align_mul=4);
+         nir_launch_mesh_workgroups(&b,nir_imm_ivec3(&b,2,1,1));
+         ASSERT_TRUE(agx_nir_lower_m5_task(b.shader,payload ? 16384 : 0,payload));
+         nir_validate_shader(b.shader,"task grid");
+         EXPECT_LE(b.shader->info.shared_size,32768u);
+         if (payload) {
+            EXPECT_EQ(b.shader->info.shared_size,shared==64 ? 128u : 32768u);
+         }
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(NativeForms, M5MeshUserSharedBarrierCompile)
+{
+   for (unsigned shared : {0u,4u,64u,128u}) {
+      nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,
+                            &agx_nir_options,"native mesh shared output readback");
+      b.shader->info.workgroup_size[0]=3;
+      b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+      b.shader->info.mesh.max_vertices_out=3;
+      b.shader->info.mesh.max_primitives_out=1;
+      b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;
+      b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES;
+      b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;
+      b.shader->info.io_lowered=true;b.shader->info.shared_size=shared;
+      nir_def *lane=nir_load_local_invocation_index(&b);
+      nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,3),nir_imm_int(&b,1),
+                                         nir_imm_int(&b,0),.stream_id=0);
+      nir_def *pos=nir_vec4(&b,nir_u2f32(&b,lane),nir_imm_float(&b,1),
+                            nir_imm_float(&b,.25),nir_imm_float(&b,1));
+      nir_store_per_vertex_output(&b,pos,lane,nir_imm_int(&b,0),
+         .write_mask=15,.src_type=nir_type_float32,
+         .io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+      nir_push_if(&b,nir_ieq_imm(&b,lane,0));
+      nir_store_per_primitive_output(&b,nir_imm_ivec3(&b,0,1,2),
+         nir_imm_int(&b,0),nir_imm_int(&b,0),.write_mask=7,.src_type=nir_type_uint32,
+         .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+      if(shared)nir_store_shared(&b,nir_imm_int(&b,0x531a),nir_imm_int(&b,0),
+                                .write_mask=1,.align_mul=4);
+      nir_pop_if(&b,NULL);
+      nir_barrier(&b,.execution_scope=SCOPE_WORKGROUP,.memory_scope=SCOPE_WORKGROUP,
+         .memory_semantics=NIR_MEMORY_ACQ_REL,.memory_modes=nir_var_mem_shared);
+      nir_def *token=shared?nir_load_shared(&b,1,32,nir_imm_int(&b,0),.align_mul=4):nir_imm_int(&b,0);
+      nir_store_global(&b,token,nir_iadd(&b,nir_imm_int64(&b,0x2000000),
+            nir_u2u64(&b,nir_imul_imm(&b,lane,4))),.write_mask=1,.align_mul=4);
+      ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+      EXPECT_EQ(b.shader->info.shared_size,((shared+63)&~63u)+128);
+      unsigned output_reads=0;bool user_address=false;
+      nir_foreach_block(block,b.impl)nir_foreach_instr(in,block) {
+         if(in->type!=nir_instr_type_intrinsic)continue;
+         nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+         EXPECT_NE(i->intrinsic,nir_intrinsic_load_per_vertex_output);
+         EXPECT_NE(i->intrinsic,nir_intrinsic_load_per_primitive_output);
+         if(i->intrinsic==nir_intrinsic_load_shared) {
+            output_reads++;
+            if(nir_src_is_const(i->src[0])&&nir_src_as_uint(i->src[0])==0&&i->def.bit_size==32)
+               user_address=true;
+         }
+      }
+      EXPECT_GE(output_reads,2u);EXPECT_EQ(user_address,shared!=0);
+      nir_validate_shader(b.shader,"mesh output load arena");
+      agx_preprocess_nir(b.shader);agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;
+      key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+      agx_shader_part part={};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader,&key,&part))<<agx_last_compile_refusal();
+      free(part.binary);ralloc_free(b.shader);
+   }
+}
+
+/* A padded mesh workgroup keeps its API body under the exact invocation
+ * mask; a top-level execution barrier splits that body and is passed by every
+ * physical lane. */
+TEST(NativeForms, M5MeshPaddedTopLevelBarrierStaysUnmasked)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"padded top-level barrier");
+   b.shader->info.workgroup_size[0]=b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=3;b.shader->info.mesh.max_primitives_out=1;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;b.shader->info.shared_size=4;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES;
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;
+   nir_def *index=nir_load_local_invocation_index(&b);
+   nir_store_shared(&b,index,nir_imm_int(&b,0),.align_mul=4);
+   nir_barrier(&b,.execution_scope=SCOPE_WORKGROUP,.memory_scope=SCOPE_WORKGROUP,
+      .memory_semantics=NIR_MEMORY_ACQ_REL,.memory_modes=nir_var_mem_shared);
+   nir_set_vertex_and_primitive_count(&b,nir_iadd_imm(&b,index,3),nir_imm_int(&b,1),nir_imm_int(&b,0));
+   ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+   EXPECT_GT(b.shader->info.workgroup_size[0],1u);
+   nir_validate_shader(b.shader,"padded top-level barrier");
+   unsigned user_barriers=0;
+   nir_foreach_block(block,nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(in,block) {
+         if(in->type!=nir_instr_type_intrinsic)continue;
+         nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+         if(i->intrinsic==nir_intrinsic_barrier &&
+            nir_intrinsic_execution_scope(i)!=SCOPE_NONE) {
+            EXPECT_EQ(block->cf_node.parent->type,nir_cf_node_function);
+            user_barriers++;
+         }
+      }
+   }
+   EXPECT_GE(user_barriers,1u);
+   ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5MeshPaddedNestedBarrierRefusesWithoutMutation)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"padded nested barrier refusal");
+   b.shader->info.workgroup_size[0]=b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=3;b.shader->info.mesh.max_primitives_out=1;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;b.shader->info.shared_size=4;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES;
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;
+   nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,3),nir_imm_int(&b,1),nir_imm_int(&b,0));
+   nir_push_if(&b,nir_ieq_imm(&b,nir_load_local_invocation_index(&b),0));
+   nir_barrier(&b,.execution_scope=SCOPE_WORKGROUP,.memory_scope=SCOPE_WORKGROUP,
+      .memory_semantics=NIR_MEMORY_ACQ_REL,.memory_modes=nir_var_mem_shared);
+   nir_pop_if(&b,NULL);
+   EXPECT_FALSE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+   EXPECT_EQ(b.shader->info.shared_size,4u);EXPECT_EQ(b.shader->info.workgroup_size[0],1u);
+   ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5MeshPrimitiveDeclarationsRespectWrittenMask)
+{
+   for (bool written : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_MESH, &agx_nir_options, "mesh primitive declaration");
+      b.shader->info.io_lowered = true;
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.mesh.max_vertices_out = 256;
+      b.shader->info.mesh.max_primitives_out = 256;
+      b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+      b.shader->info.outputs_written = VARYING_BIT_POS |
+         VARYING_BIT_PRIMITIVE_INDICES | (written ? VARYING_BIT_VAR(0) : 0);
+      b.shader->info.per_primitive_outputs =
+         VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_VAR(0);
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 3),
+                                       nir_imm_int(&b, 1), nir_imm_int(&b, 0));
+      for (unsigned vertex = 0; vertex < 3; ++vertex) {
+         nir_store_per_vertex_output(&b, nir_imm_vec4(&b, vertex, 0, 0, 1),
+            nir_imm_int(&b, vertex), nir_imm_int(&b, 0), .write_mask = 15,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      }
+      nir_store_per_primitive_output(&b, nir_imm_ivec3(&b, 0, 1, 2),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 7,
+         .src_type = nir_type_uint32,
+         .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES, .num_slots = 1});
+      if (written) {
+         nir_store_per_primitive_output(&b, nir_imm_vec4(&b, 0, 1, 0, 1),
+            nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 15,
+            .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1});
+      }
+      EXPECT_EQ(agx_nir_lower_m5_mesh_triangle_probe(b.shader), !written);
+      if (written) {
+         EXPECT_EQ(b.shader->info.shared_size, 0u);
+         EXPECT_EQ(b.shader->info.workgroup_size[0], 1u);
+      } else {
+         EXPECT_EQ(b.shader->info.shared_size, 4928u);
+         nir_validate_shader(b.shader, "mesh unused primitive declaration");
+      }
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5MeshVertexColorUVSTReachesRA)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"native mesh color UVST");
+   b.shader->info.workgroup_size[0]=3;b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=3;b.shader->info.mesh.max_primitives_out=1;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES|VARYING_BIT_VAR(0);
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;b.shader->info.io_lowered=true;
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,3),nir_imm_int(&b,1),nir_imm_int(&b,0));
+   nir_store_per_vertex_output(&b,nir_imm_vec4(&b,0,1,0,1),lane,nir_imm_int(&b,0),
+      .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_VAR0,.num_slots=1});
+   nir_store_per_vertex_output(&b,nir_imm_vec4(&b,0,0,.25,1),lane,nir_imm_int(&b,0),
+      .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+   nir_push_if(&b,nir_ieq_imm(&b,lane,0));
+   nir_store_per_primitive_output(&b,nir_imm_ivec3(&b,0,1,2),nir_imm_int(&b,0),
+      nir_imm_int(&b,0),.write_mask=7,.src_type=nir_type_uint32,
+      .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+   nir_pop_if(&b,NULL);
+   ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));EXPECT_EQ(b.shader->info.shared_size,192u);
+   unsigned uvst=0;nir_foreach_block(block,b.impl)nir_foreach_instr(in,block)
+      if(in->type==nir_instr_type_intrinsic&&nir_instr_as_intrinsic(in)->intrinsic==nir_intrinsic_store_mesh_uvb_agx)uvst++;
+   EXPECT_EQ(uvst,9u);nir_validate_shader(b.shader,"native color planes");agx_preprocess_nir(b.shader);
+   agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+   agx_shader_part part={};ASSERT_TRUE(agx_compile_shader_nir(b.shader,&key,&part))<<agx_last_compile_refusal();
+   free(part.binary);ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5MeshNativeLargeOutputBatchesCompile)
+{
+   for (unsigned vertices : {3u,4u,5u,8u,9u,16u,32u,33u,64u,256u}) {
+      const unsigned primitives=vertices==64?126:vertices==256?256:1;
+      nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,
+         &agx_nir_options,"native mesh larger UVB rounds");
+      b.shader->info.workgroup_size[0]=32;
+      b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+      b.shader->info.mesh.max_vertices_out=vertices;
+      b.shader->info.mesh.max_primitives_out=primitives;
+      b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;
+      b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES|VARYING_BIT_VAR(0);
+      b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;
+      b.shader->info.io_lowered=true;
+      nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,vertices),nir_imm_int(&b,primitives),nir_imm_int(&b,0));
+      /* The UVS layout comes from the per-vertex stores themselves. */
+      nir_store_per_vertex_output(&b,nir_imm_vec4(&b,0,1,0,1),nir_load_local_invocation_index(&b),
+         nir_imm_int(&b,0),.write_mask=15,.src_type=nir_type_float32,
+         .io_semantics={.location=VARYING_SLOT_VAR0,.num_slots=1});
+      ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+      unsigned varying=0,primitive=0,round2=0;
+      const unsigned position=((3*primitives+15)&~15u)+16;
+      const unsigned stride=((vertices+3)&~3u)*4;
+      nir_foreach_block(block,b.impl)nir_foreach_instr(in,block) {
+         if(in->type!=nir_instr_type_intrinsic)continue;
+         nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+         if(i->intrinsic!=nir_intrinsic_store_mesh_uvb_agx)continue;
+         ASSERT_TRUE(nir_src_is_const(i->src[0]));
+         unsigned target=nir_src_comp_as_uint(i->src[0],0), address=nir_src_comp_as_uint(i->src[0],1);
+         if(nir_intrinsic_flags(i)) {primitive++;EXPECT_EQ(address,(target>>16)*4);}
+         else {varying++;EXPECT_EQ(address,position+(target&65535)*stride+4*(target>>16));
+            if((target>>16)==32)round2++;}
+      }
+      EXPECT_EQ(varying,8*((vertices+31)/32));
+      EXPECT_EQ(primitive,((3*primitives+3)/4+31)/32);
+      EXPECT_EQ(round2,vertices>32?8u:0u);
+      EXPECT_EQ(b.shader->info.shared_size,(position+8*stride+63)&~63u);
+      nir_validate_shader(b.shader,"native larger mesh batch descriptors");
+      agx_preprocess_nir(b.shader);agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;
+      key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+      agx_shader_part part={};ASSERT_TRUE(agx_compile_shader_nir(b.shader,&key,&part))<<agx_last_compile_refusal();
+      free(part.binary);ralloc_free(b.shader);
+   }
+}
+
+/* Mesh shader with three per-vertex user slots of different interpolation
+ * classes: VAR0 vec4 smooth, VAR1 ivec2 flat (stored as 16-bit), VAR2 float
+ * noperspective, plus position. */
+static nir_shader *
+m5_mesh_multi_varying_shader(void)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"native mesh multi varyings");
+   b.shader->info.workgroup_size[0]=4;b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=4;b.shader->info.mesh.max_primitives_out=2;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES|
+      VARYING_BIT_VAR(0)|VARYING_BIT_VAR(1)|VARYING_BIT_VAR(2);
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;b.shader->info.io_lowered=true;
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,4),nir_imm_int(&b,2),nir_imm_int(&b,0));
+   nir_store_per_vertex_output(&b,nir_imm_vec4(&b,0,0,.25,1),lane,nir_imm_int(&b,0),
+      .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+   nir_store_per_vertex_output(&b,nir_vec4(&b,nir_u2f32(&b,lane),nir_imm_float(&b,1),
+      nir_imm_float(&b,2),nir_imm_float(&b,3)),lane,nir_imm_int(&b,0),
+      .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_VAR0,.num_slots=1});
+   nir_store_per_vertex_output(&b,nir_u2u16(&b,nir_vec2(&b,lane,nir_imm_int(&b,7))),lane,nir_imm_int(&b,0),
+      .write_mask=3,.src_type=nir_type_int16,.io_semantics={.location=VARYING_SLOT_VAR1,.num_slots=1});
+   nir_store_per_vertex_output(&b,nir_imm_float(&b,5),lane,nir_imm_int(&b,0),
+      .write_mask=1,.component=1,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_VAR2,.num_slots=1});
+   nir_push_if(&b,nir_ieq_imm(&b,lane,0));
+   nir_store_per_primitive_output(&b,nir_imm_ivec3(&b,0,1,2),nir_imm_int(&b,0),
+      nir_imm_int(&b,0),.write_mask=7,.src_type=nir_type_uint32,
+      .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+   nir_pop_if(&b,NULL);
+   return b.shader;
+}
+
+/* Point and line meshes with user and per-primitive words: the point size
+ * word follows the user words (agx_nir_lower_uvs group order) and every
+ * primitive gets one private vertex per corner for its flat words. */
+TEST(NativeForms, M5PointLineMeshPerPrimitiveWords)
+{
+   for (auto primitive : {MESA_PRIM_POINTS, MESA_PRIM_LINES}) {
+      const unsigned corners = primitive == MESA_PRIM_POINTS ? 1 : 2;
+      nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"point/line per-primitive");
+      b.shader->info.workgroup_size[0]=2;b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+      b.shader->info.mesh.max_vertices_out=2;b.shader->info.mesh.max_primitives_out=2;
+      b.shader->info.mesh.primitive_type=primitive;b.shader->info.io_lowered=true;
+      b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES|VARYING_BIT_VAR(0)|
+         (primitive==MESA_PRIM_POINTS ? VARYING_BIT_PSIZ : 0);
+      b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES|VARYING_BIT_VAR(0);
+      nir_def *lane=nir_load_local_invocation_index(&b);
+      nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,2),nir_imm_int(&b,2),nir_imm_int(&b,0));
+      nir_store_per_vertex_output(&b,nir_imm_vec4(&b,0,0,.25,1),lane,nir_imm_int(&b,0),
+         .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+      if (primitive==MESA_PRIM_POINTS)
+         nir_store_per_vertex_output(&b,nir_imm_float(&b,1),lane,nir_imm_int(&b,0),
+            .write_mask=1,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_PSIZ,.num_slots=1});
+      nir_store_per_primitive_output(&b,nir_imm_vec4(&b,0,0,1,1),lane,nir_imm_int(&b,0),
+         .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_VAR0,.num_slots=1});
+      nir_store_per_primitive_output(&b,primitive==MESA_PRIM_POINTS ? lane : nir_vec2(&b,lane,lane),
+         lane,nir_imm_int(&b,0),.write_mask=BITFIELD_MASK(corners),.src_type=nir_type_uint32,
+         .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+      struct agx_m5_mesh_varyings v;
+      ASSERT_TRUE(agx_m5_mesh_gather_varyings(b.shader,&v));
+      EXPECT_EQ(v.first[VARYING_SLOT_VAR0],4u);EXPECT_FALSE(v.dynamic);
+      if (primitive==MESA_PRIM_POINTS) {
+         EXPECT_EQ(v.first[VARYING_SLOT_PSIZ],8u);EXPECT_EQ(v.size,9u);
+      } else {
+         EXPECT_EQ(v.size,8u);
+      }
+      ASSERT_TRUE(agx_nir_lower_m5_mesh(b.shader,&v));
+      EXPECT_EQ(b.shader->info.mesh.max_vertices_out,2u*corners);
+      nir_validate_shader(b.shader,"point/line per-primitive");
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5MeshMultiVaryingPlanesFollowLinkedUVS)
+{
+   nir_shader *s=m5_mesh_multi_varying_shader();
+   struct agx_m5_mesh_varyings v;
+   ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));
+   EXPECT_EQ(v.components[VARYING_SLOT_VAR0],4u);EXPECT_EQ(v.components[VARYING_SLOT_VAR1],2u);
+   EXPECT_EQ(v.components[VARYING_SLOT_VAR2],2u);EXPECT_EQ(v.size,12u);EXPECT_TRUE(v.dynamic);
+   /* Linked order: smooth VAR0, linear VAR2 last, flat VAR1 between. */
+   v.first[VARYING_SLOT_VAR0]=4;v.first[VARYING_SLOT_VAR1]=8;v.first[VARYING_SLOT_VAR2]=10;v.dynamic=false;
+   ASSERT_TRUE(agx_nir_lower_m5_mesh(s,&v));
+   const unsigned stride=16,position=16+16;
+   EXPECT_EQ(s->info.shared_size,(position+12*stride+63)&~63u);
+   unsigned planes=0;bool seen[12]={};
+   nir_foreach_block(block,nir_shader_get_entrypoint(s))nir_foreach_instr(in,block) {
+      if(in->type!=nir_instr_type_intrinsic)continue;
+      nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+      EXPECT_NE(i->intrinsic,nir_intrinsic_load_uvs_index_agx);
+      if(i->intrinsic!=nir_intrinsic_store_mesh_uvb_agx||nir_intrinsic_flags(i))continue;
+      ASSERT_TRUE(nir_src_is_const(i->src[0]));
+      unsigned target=nir_src_comp_as_uint(i->src[0],0),address=nir_src_comp_as_uint(i->src[0],1);
+      ASSERT_LT(target&65535,12u);seen[target&65535]=true;planes++;
+      EXPECT_EQ(address,position+(target&65535)*stride);
+   }
+   EXPECT_EQ(planes,12u);for(unsigned k=0;k<12;k++)EXPECT_TRUE(seen[k])<<k;
+   /* Stores land in the linked planes: VAR2.y is plane 11. */
+   bool var2y=false;unsigned narrow=0;
+   nir_foreach_block(block,nir_shader_get_entrypoint(s))nir_foreach_instr(in,block) {
+      if(in->type!=nir_instr_type_intrinsic)continue;
+      nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+      if(i->intrinsic==nir_intrinsic_store_shared) {
+         /* Only the vertex/primitive counts are 16-bit; INT16 VAR1 is widened. */
+         narrow+=i->src[0].ssa->bit_size==16;
+         nir_scalar a=nir_scalar_resolved(i->src[1].ssa,0);
+         if(nir_scalar_is_alu(a)&&nir_scalar_alu_op(a)==nir_op_iadd) {
+            for(unsigned k=0;k<2;k++){nir_scalar c=nir_scalar_chase_alu_src(a,k);
+               if(nir_scalar_is_const(c)&&nir_scalar_as_uint(c)==position+11*stride)var2y=true;}
+         }
+      }
+   }
+   EXPECT_TRUE(var2y);EXPECT_EQ(narrow,2u);
+   nir_validate_shader(s,"native multi varying planes");agx_preprocess_nir(s);
+   agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+   agx_shader_part part={};ASSERT_TRUE(agx_compile_shader_nir(s,&key,&part))<<agx_last_compile_refusal();
+   free(part.binary);ralloc_free(s);
+}
+
+TEST(NativeForms, M5MeshDynamicVaryingSelectorsReadRootIndex)
+{
+   nir_shader *s=m5_mesh_multi_varying_shader();
+   struct agx_m5_mesh_varyings v;
+   ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));ASSERT_TRUE(v.dynamic);
+   ASSERT_TRUE(agx_nir_lower_m5_mesh(s,&v));
+   unsigned index_loads=0,dynamic=0,fixed=0;
+   nir_foreach_block(block,nir_shader_get_entrypoint(s))nir_foreach_instr(in,block) {
+      if(in->type!=nir_instr_type_intrinsic)continue;
+      nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+      if(i->intrinsic==nir_intrinsic_load_uvs_index_agx)index_loads++;
+      if(i->intrinsic!=nir_intrinsic_store_mesh_uvb_agx||nir_intrinsic_flags(i))continue;
+      if(nir_src_is_const(i->src[0])){fixed++;EXPECT_LT(nir_src_comp_as_uint(i->src[0],0)&65535,4u);}
+      else dynamic++;
+   }
+   EXPECT_EQ(index_loads,3u);EXPECT_EQ(fixed,4u);EXPECT_EQ(dynamic,8u);
+   nir_validate_shader(s,"native dynamic varying selectors");ralloc_free(s);
+}
+
+TEST(NativeForms, M5MeshClipDistancesPublishVaryingAndClippingPlanes)
+{
+   for (unsigned count : {2u, 8u}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_MESH, &agx_nir_options, "native mesh clipping planes");
+      b.shader->info.io_lowered = true;
+      b.shader->info.workgroup_size[0] = 3;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.mesh.max_vertices_out = 3;
+      b.shader->info.mesh.max_primitives_out = 1;
+      b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+      b.shader->info.clip_distance_array_size = count;
+      b.shader->info.outputs_written = VARYING_BIT_POS |
+         VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_CLIP_DIST0 |
+         (count > 4 ? VARYING_BIT_CLIP_DIST1 : 0);
+      b.shader->info.per_primitive_outputs = VARYING_BIT_PRIMITIVE_INDICES;
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 3),
+                                       nir_imm_int(&b, 1), nir_imm_int(&b, 0));
+      nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 0, 0, 0, 1),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      for (unsigned c = 0; c < count; ++c) {
+         nir_store_per_vertex_output(&b, nir_imm_float(&b, c + 0.25f),
+            nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 1,
+            .component = c % 4, .src_type = nir_type_float32,
+            .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0 + c / 4,
+                             .num_slots = 1});
+      }
+      nir_store_per_primitive_output(&b, nir_imm_ivec3(&b, 0, 1, 2),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 7,
+         .src_type = nir_type_uint32,
+         .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES,
+                          .num_slots = 1});
+      struct agx_m5_mesh_varyings v;
+      ASSERT_TRUE(agx_m5_mesh_gather_varyings(b.shader, &v));
+      EXPECT_EQ(v.clip_distance_count, count);
+      EXPECT_EQ(v.clip_distance_first, 4u + count);
+      EXPECT_EQ(v.size, 4u + 2 * count);
+      EXPECT_EQ(v.dynamic, count > 4);
+      v.dynamic = false;
+      ASSERT_TRUE(agx_nir_lower_m5_mesh(b.shader, &v));
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      unsigned copies[8] = {0};
+      nir_foreach_block(block, b.impl) nir_foreach_instr(in, block) {
+         if (in->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *i = nir_instr_as_intrinsic(in);
+         if (i->intrinsic != nir_intrinsic_store_shared ||
+             !nir_src_is_const(i->src[1]))
+            continue;
+         unsigned address = nir_src_as_uint(i->src[1]);
+         if (address < 96)
+            continue;
+         ASSERT_LT(address, 32u + 16 * v.size);
+         unsigned component = ((address - 96) / 16) % count;
+         ASSERT_TRUE(nir_src_is_const(i->src[0]));
+         EXPECT_FLOAT_EQ(nir_src_as_float(i->src[0]), component + 0.25f);
+         copies[component]++;
+      }
+      for (unsigned c = 0; c < count; ++c)
+         EXPECT_EQ(copies[c], 2u);
+      nir_validate_shader(b.shader, "native mesh clip-distance publication");
+      agx_preprocess_nir_m5(b.shader);
+      agx_shader_key key = {};
+      key.dev.chip = AGX_CHIP_G17S;
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.no_preamble = true;
+      agx_shader_part part = {};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part))
+         << agx_last_compile_refusal();
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5MeshVaryingRefusalsLeaveShaderUntouched)
+{
+   /* A placement that does not cover every written component is refused. */
+   nir_shader *s=m5_mesh_multi_varying_shader();
+   struct agx_m5_mesh_varyings v;
+   ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));
+   v.first[VARYING_SLOT_VAR2]=v.first[VARYING_SLOT_VAR1];
+   EXPECT_FALSE(agx_nir_lower_m5_mesh(s,&v));
+   EXPECT_EQ(s->info.shared_size,0u);EXPECT_EQ(s->info.workgroup_size[0],4u);
+   ralloc_free(s);
+}
+
+TEST(NativeForms, M5MeshPaddedGlobalInvocationIdUsesApiSize)
+{
+   /* API workgroup 8 threads padded to 24 physical lanes (max_vertices 24):
+    * the hardware thread position in grid counts physical lanes, so the
+    * lowering must rebuild gl_GlobalInvocationID from the API size. */
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"padded global id");
+   b.shader->info.workgroup_size[0]=8;b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=24;b.shader->info.mesh.max_primitives_out=8;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES;
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;b.shader->info.io_lowered=true;
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,24),nir_imm_int(&b,8),nir_imm_int(&b,0));
+   nir_def *gid=nir_channel(&b,nir_load_global_invocation_id(&b,32),0);
+   nir_store_per_vertex_output(&b,nir_vec4(&b,nir_u2f32(&b,gid),nir_imm_float(&b,0),
+      nir_imm_float(&b,0),nir_imm_float(&b,1)),lane,nir_imm_int(&b,0),
+      .write_mask=15,.src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+   nir_store_per_primitive_output(&b,nir_imm_ivec3(&b,0,1,2),lane,nir_imm_int(&b,0),
+      .write_mask=7,.src_type=nir_type_uint32,
+      .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+   ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+   EXPECT_EQ(b.shader->info.workgroup_size[0],24u);
+   unsigned global=0,workgroup=0;
+   nir_foreach_block(block,b.impl)nir_foreach_instr(in,block) {
+      if(in->type!=nir_instr_type_intrinsic)continue;
+      nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+      global+=i->intrinsic==nir_intrinsic_load_global_invocation_id;
+      workgroup+=i->intrinsic==nir_intrinsic_load_workgroup_id;
+   }
+   EXPECT_EQ(global,0u);EXPECT_GE(workgroup,1u);
+   nir_validate_shader(b.shader,"padded global id");
+   agx_preprocess_nir(b.shader);agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;
+   key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+   agx_shader_part part={};ASSERT_TRUE(agx_compile_shader_nir(b.shader,&key,&part))<<agx_last_compile_refusal();
+   free(part.binary);ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5SaturatingAddOfHalfIndexCompiles)
+{
+   /* nir_opt_idiv_const turns an unsigned divide by 7 into
+    * umul_high(uadd_sat(x, 1), magic); x here is the 16-bit local index
+    * special register, zero-extended. The AGX3C saturating add only has a
+    * witnessed 32-bit register form, so the extension must stay a move. */
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,&agx_nir_options,"udiv7 of local index");
+   b.shader->info.workgroup_size[0]=64;b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_def *q=nir_udiv_imm(&b,lane,7);
+   nir_store_global(&b,q,nir_iadd(&b,nir_imm_int64(&b,0x2000000),
+      nir_u2u64(&b,nir_imul_imm(&b,lane,4))),.write_mask=1,.align_mul=4);
+   agx_preprocess_nir(b.shader);
+   agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+   agx_shader_part part={};
+   ASSERT_TRUE(agx_compile_shader_nir(b.shader,&key,&part))<<agx_last_compile_refusal();
+   free(part.binary);ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5NativeTriangleMeshProbeCompiles)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,
+                     &agx_nir_options,"M5 native triangle mesh probe");
+   b.shader->info.workgroup_size[0]=3;b.shader->info.workgroup_size[1]=1;
+   b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=3;b.shader->info.mesh.max_primitives_out=1;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES;
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES;
+   b.shader->info.io_lowered=true;
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,3),nir_imm_int(&b,1),
+                                       nir_imm_int(&b,0),.stream_id=0);
+   nir_def *x=nir_bcsel(&b,nir_ieq_imm(&b,lane,2),nir_imm_float(&b,0),
+                nir_bcsel(&b,nir_ieq_imm(&b,lane,0),nir_imm_float(&b,-1),
+                                                     nir_imm_float(&b,1)));
+   nir_def *y=nir_bcsel(&b,nir_ieq_imm(&b,lane,2),nir_imm_float(&b,1),
+                                                     nir_imm_float(&b,-1));
+   nir_def *pos=nir_vec4(&b,x,y,nir_imm_float(&b,0.25),nir_imm_float(&b,1));
+   nir_store_per_vertex_output(&b,pos,lane,nir_imm_int(&b,0),
+     .write_mask=15,.src_type=nir_type_float32,
+     .io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+   nir_push_if(&b,nir_ieq_imm(&b,lane,0));
+   nir_store_per_primitive_output(&b,nir_imm_ivec3(&b,0,1,2),
+     nir_imm_int(&b,0),nir_imm_int(&b,0),.write_mask=7,.src_type=nir_type_uint32,
+     .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+   nir_pop_if(&b,NULL);
+   ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+   EXPECT_EQ(b.shader->info.shared_size,128u);
+   nir_validate_shader(b.shader,"native triangle mesh probe");
+   agx_preprocess_nir(b.shader);
+   agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;
+   key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+   agx_shader_part part={};
+   bool compiled=agx_compile_shader_nir(b.shader,&key,&part);
+   EXPECT_TRUE(compiled)<<agx_last_compile_refusal();
+   if(compiled){
+      printf("native-triangle-mesh binary=%u gprs=%u shared=%u scratch=%u\n",
+        part.info.binary_size,part.info.nr_gprs,part.info.local_size,part.info.scratch_size);
+      FILE *f=fopen("native-triangle-mesh.bin","wb");
+      if(f){fwrite(part.binary,1,part.info.binary_size,f);fclose(f);}
+      free(part.binary);
+   }
+   ralloc_free(b.shader);
+}
+
+/* cts-coverage/fp-controls/native/nanmin.gpubin, G17G with -fno-fast-math:
+ * IEEE minNum/maxNum retain condition 3/7 and the compare/select ties. */
+TEST(NativeForms, M5MinNumMaxNumNaNWitnesses)
+{
+   for (bool maximum : {false, true}) {
+      agx3_fsel32_gpu1_desc d = {};
+      d.dest = 2;
+      d.cmp0 = 2; d.cmp1 = 3;
+      d.cmp0_16 = d.cmp1_16 = true;
+      d.cmp0_hint = d.cmp1_hint = AGX3_ALU_HINT_DISCARD;
+      d.sel[0] = 2; d.sel[1] = 3;
+      d.sel_hint[0] = d.sel_hint[1] = AGX3_ALU_HINT_DISCARD;
+      d.sel_integer = true;
+      d.condition = maximum ? 7 : 3;
+      d.wait_mask = 0x80;
+      uint8_t out[AGX3_ALU_MAX_LENGTH] = {}, length = 0;
+      ASSERT_TRUE(agx3_alu_fcmp_select16_gpu1(&d, out, &length));
+      const std::vector<uint8_t> native = maximum
+         ? std::vector<uint8_t>{0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,
+                               0xcc,0x80,0xa0,0x64,0x26,0x00,0x80,0x00}
+         : std::vector<uint8_t>{0x32,0x02,0x45,0x0a,0x23,0x00,0xa0,0x02,
+                               0xcc,0x80,0xa0,0x60,0x26,0x00,0x80,0x00};
+      EXPECT_EQ(std::vector<uint8_t>(out, out + length), native);
+      d.sel[1] = 5;
+      EXPECT_FALSE(agx3_alu_fcmp_select16_gpu1(&d, out, &length));
+   }
+   agx3_fsel32_gpu1_desc d = {};
+   d.dest = 4; d.dest_cache = true;
+   d.cmp0 = 4; d.cmp1 = 6;
+   d.cmp0_hint = d.cmp1_hint = AGX3_ALU_HINT_DISCARD;
+   d.sel[0] = 4; d.sel[1] = 6;
+   d.sel_hint[0] = d.sel_hint[1] = AGX3_ALU_HINT_DISCARD;
+   d.sel_integer = true; d.condition = 7; d.wait_mask = 0x80;
+   uint8_t out[AGX3_ALU_MAX_LENGTH] = {}, length = 0;
+   ASSERT_TRUE(agx3_alu_fcmp_select32_gpu1(&d, out, &length));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + length),
+      (std::vector<uint8_t>{0x22,0x00,0x07,0x2b,0x2b,0x00,0xa0,
+                           0x0a,0x96,0x01,0xa1,0x64,0x20,0x40}));
+   d.dest = 2; d.dest_cache = false; d.cmp1 = d.sel[1] = 2;
+   d.condition = 3; d.wait_mask = 1;
+   ASSERT_TRUE(agx3_alu_fcmp_select32_gpu1(&d, out, &length));
+   EXPECT_EQ(std::vector<uint8_t>(out, out + length),
+             (std::vector<uint8_t>{0x12,0x05,0x1e,0x03,0x01,0x20}));
+   d.sel[0] = 8;
+   EXPECT_FALSE(agx3_alu_fcmp_select32_gpu1(&d, out, &length));
+}
+
+TEST(NativeForms, M5MappedBufferPointerOffsets)
+{
+   nir_builder builder = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "M5 mapped buffer pointers");
+   nir_builder *b = &builder;
+   std::vector<nir_intrinsic_instr *> stores;
+   auto store_test_val = [&](nir_def *value) {
+      nir_intrinsic_instr *store = nir_intrinsic_instr_create(
+         b->shader, nir_intrinsic_store_global);
+      store->num_components = 1;
+      store->src[0] = nir_src_for_ssa(value);
+      store->src[1] = nir_src_for_ssa(nir_imm_int64(b, 0x1000 + 4 * stores.size()));
+      nir_intrinsic_set_align(store, 4, 0);
+      nir_intrinsic_set_write_mask(store, 1);
+      nir_builder_instr_insert(b, &store->instr);
+      stores.push_back(store);
+   };
+   auto test_val = [&](unsigned i) { return stores[i]->src[0].ssa; };
+   for (nir_address_format format : {
+        nir_address_format_64bit_global_32bit_offset_map,
+        nir_address_format_64bit_bounded_global_map}) {
+      nir_def *parts[] = {nir_imm_int(b, 0x1000), nir_imm_int(b, 2),
+         nir_imm_int(b, 4096), nir_imm_int(b, 12), nir_imm_int(b, 0x1234)};
+      nir_def *ptr = nir_vec(b, parts, 5);
+      ptr = nir_build_addr_iadd(b, ptr, format, nir_var_mem_ssbo,
+                               nir_imm_int(b, 28));
+      ptr = nir_bcsel(b, nir_imm_false(b), nir_build_imm(b, 5, 32, nir_address_format_null_value(format)), ptr);
+      unsigned start = stores.size();
+      for (unsigned c = 0; c < 5; ++c)
+         store_test_val(nir_channel(b, ptr, c));
+      nir_def *other = nir_vector_insert_imm(b, ptr, nir_imm_int(b, 0x4321), 4);
+      store_test_val(nir_b2i32(b, nir_build_addr_ieq(b, ptr, other, format)));
+      nir_def *changed = nir_build_addr_iadd(b, ptr, format, nir_var_mem_ssbo,
+                                           nir_imm_int(b, 4));
+      store_test_val(nir_b2i32(b, nir_build_addr_ieq(b, ptr, changed, format)));
+      NIR_PASS(_, b->shader, nir_opt_constant_folding);
+      const uint32_t expected[] = {0x1000, 2, 4096, 40, 0x1234, 1, 0};
+      for (unsigned c = 0; c < 7; ++c)
+         EXPECT_EQ(nir_src_as_uint(nir_src_for_ssa(test_val(start + c))), expected[c]);
+   }
+   nir_validate_shader(b->shader, "mapped buffer pointers");
+   ralloc_free(b->shader);
+}
+
+TEST(NativeForms, M5GemmNativeCapturedInstructions)
+{
+   struct Case { agx3_matrix_gemm16_desc desc; uint8_t bytes[10]; };
+   const Case cases[] = {
+      {{16, 80, 72, AGX3_MATRIX_INPUT_BF16, true,false,false, 1}, {0xaf,0x00,0x25,0x82,0x2a,0x02,0xa0,0x02,0x00,0x12}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_BF16, false,false,true, 0}, {0xa7,0x04,0x25,0x80,0x22,0x02,0xa0,0x02,0x00,0x0e}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_BF16, true,false,false, 1}, {0xaf,0x00,0x25,0x80,0x2a,0x02,0xa0,0x02,0x00,0x0e}},
+      {{16, 48, 0, AGX3_MATRIX_INPUT_BF16, false,false,true, 0}, {0xa7,0x04,0x25,0x03,0x22,0x02,0xa0,0x02,0x00,0x00}},
+      {{16, 72, 64, AGX3_MATRIX_INPUT_BF16, true,false,false, 1}, {0xaf,0x00,0x25,0x90,0x2a,0x02,0xa0,0x02,0x00,0x10}},
+      {{16, 56, 48, AGX3_MATRIX_INPUT_BF16, false,false,true, 0}, {0xa7,0x04,0x25,0x13,0x22,0x02,0xa0,0x02,0x00,0x0c}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_BF16, true,false,false, 1}, {0xaf,0x00,0x25,0x80,0x2a,0x02,0xa0,0x02,0x00,0x0e}},
+      {{16, 48, 0, AGX3_MATRIX_INPUT_BF16, false,false,true, 0}, {0xa7,0x04,0x25,0x03,0x22,0x02,0xa0,0x02,0x00,0x00}},
+      {{16, 80, 72, AGX3_MATRIX_INPUT_F16, true,false,false, 1}, {0xaf,0x00,0x25,0x82,0x2a,0x02,0xa4,0x42,0x00,0x12}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_F16, false,false,true, 0}, {0xa7,0x04,0x25,0x80,0x22,0x02,0xa4,0x42,0x00,0x0e}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_F16, true,false,false, 1}, {0xaf,0x00,0x25,0x80,0x2a,0x02,0xa4,0x42,0x00,0x0e}},
+      {{16, 48, 0, AGX3_MATRIX_INPUT_F16, false,false,true, 0}, {0xa7,0x04,0x25,0x03,0x22,0x02,0xa4,0x42,0x00,0x00}},
+      {{16, 72, 64, AGX3_MATRIX_INPUT_F16, true,false,false, 1}, {0xaf,0x00,0x25,0x90,0x2a,0x02,0xa4,0x42,0x00,0x10}},
+      {{16, 56, 48, AGX3_MATRIX_INPUT_F16, false,false,true, 0}, {0xa7,0x04,0x25,0x13,0x22,0x02,0xa4,0x42,0x00,0x0c}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_F16, true,false,false, 1}, {0xaf,0x00,0x25,0x80,0x2a,0x02,0xa4,0x42,0x00,0x0e}},
+      {{16, 48, 0, AGX3_MATRIX_INPUT_F16, false,false,true, 0}, {0xa7,0x04,0x25,0x03,0x22,0x02,0xa4,0x42,0x00,0x00}},
+      {{16, 80, 72, AGX3_MATRIX_INPUT_F16, true,true,false, 1}, {0xaf,0x00,0x25,0x82,0x2a,0x02,0xa4,0x42,0x08,0x12}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_F16, false,true,true, 0}, {0xa7,0x04,0x25,0x80,0x22,0x02,0xa4,0x42,0x08,0x0e}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_F16, true,true,false, 1}, {0xaf,0x00,0x25,0x80,0x2a,0x02,0xa4,0x42,0x08,0x0e}},
+      {{16, 48, 0, AGX3_MATRIX_INPUT_F16, false,true,true, 0}, {0xa7,0x04,0x25,0x03,0x22,0x02,0xa4,0x42,0x08,0x00}},
+      {{16, 72, 64, AGX3_MATRIX_INPUT_F16, true,true,false, 1}, {0xaf,0x00,0x25,0x90,0x2a,0x02,0xa4,0x42,0x08,0x10}},
+      {{16, 56, 48, AGX3_MATRIX_INPUT_F16, true,true,true, 0}, {0xa7,0x04,0x25,0x13,0x2a,0x02,0xa4,0x42,0x08,0x0c}},
+      {{16, 64, 56, AGX3_MATRIX_INPUT_F16, true,true,false, 1}, {0xaf,0x00,0x25,0x80,0x2a,0x02,0xa4,0x42,0x08,0x0e}},
+      {{16, 48, 0, AGX3_MATRIX_INPUT_F16, false,true,true, 0}, {0xa7,0x04,0x25,0x03,0x22,0x02,0xa4,0x42,0x08,0x00}},
+   };
+   for (const auto &c : cases) {
+      uint8_t out[10] = {}, length = 0;
+      ASSERT_TRUE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3C,
+                                           &c.desc, out, &length));
+      ASSERT_EQ(length, 10u);
+      EXPECT_EQ(std::vector<uint8_t>(out, out + length),
+                std::vector<uint8_t>(c.bytes, c.bytes + 10));
+      EXPECT_FALSE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3B,
+                                            &c.desc, out, &length));
+   }
+   auto invalid = cases[0].desc;
+   uint8_t out[10] = {}, length = 0;
+   invalid.dest = 17;
+   EXPECT_FALSE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3C,
+                                         &invalid, out, &length));
+   invalid = cases[0].desc;
+   invalid.a = 81;
+   EXPECT_FALSE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3C,
+                                         &invalid, out, &length));
+   invalid = cases[0].desc;
+   invalid.input_type = static_cast<agx3_matrix_input_type>(2);
+   EXPECT_FALSE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3C,
+                                         &invalid, out, &length));
+}
+
+TEST(NativeForms, M5MeshCullDistancesKeepVertexAndClipDomains)
+{
+   nir_shader *s = m5_mesh_multi_varying_shader();
+   s->info.clip_distance_array_size = 1;
+   s->info.cull_distance_array_size = 5;
+   s->info.outputs_written |= VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1;
+   nir_builder b = nir_builder_at(nir_after_cf_list(&nir_shader_get_entrypoint(s)->body));
+   const float distances[] = {-7.0f, -1.0f, 0.0f, 2.0f, -2.0f, 1.0f};
+   for (unsigned c = 0; c < ARRAY_SIZE(distances); ++c) {
+      nir_store_per_vertex_output(&b, nir_imm_float(&b, distances[c]),
+         nir_imm_int(&b, 2), nir_imm_int(&b, c / 4),
+         .write_mask = 1, .component = c % 4, .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0, .num_slots = 2});
+   }
+   ASSERT_TRUE(agx_nir_lower_cull_distance_vs(s));
+   NIR_PASS(_, s, nir_opt_constant_folding);
+   unsigned masks = 0;
+   bool found[5] = {};
+   nir_foreach_block(block, nir_shader_get_entrypoint(s)) nir_foreach_instr(in, block) {
+      if (in->type != nir_instr_type_intrinsic) continue;
+      nir_intrinsic_instr *i = nir_instr_as_intrinsic(in);
+      if (i->intrinsic != nir_intrinsic_store_per_vertex_output)
+         continue;
+      const unsigned slot = nir_intrinsic_io_semantics(i).location;
+      if (slot < VARYING_SLOT_CULL_PRIMITIVE ||
+          slot > VARYING_SLOT_CULL_PRIMITIVE + 1)
+         continue;
+      unsigned c = 4 * (slot - VARYING_SLOT_CULL_PRIMITIVE +
+                        nir_src_as_uint(i->src[2])) + nir_intrinsic_component(i);
+      ASSERT_LT(c, 5u);
+      EXPECT_FALSE(found[c]); found[c] = true;
+      EXPECT_EQ(nir_src_as_uint(i->src[1]), 2u);
+      ASSERT_TRUE(nir_src_is_const(i->src[0]));
+      EXPECT_FLOAT_EQ(nir_src_as_float(i->src[0]), distances[c + 1] >= 0.0f ? 1.0f : 0.0f);
+      masks++;
+   }
+   EXPECT_EQ(masks, 5u);
+   struct agx_m5_mesh_varyings v;
+   ASSERT_TRUE(agx_m5_mesh_gather_varyings(s, &v));
+   EXPECT_EQ(v.components[VARYING_SLOT_CULL_PRIMITIVE], 4u);
+   EXPECT_EQ(v.components[VARYING_SLOT_CULL_PRIMITIVE + 1], 1u);
+   EXPECT_EQ(v.clip_distance_count, 1u);
+   v.dynamic = false;
+   ASSERT_TRUE(agx_nir_lower_m5_mesh(s, &v));
+   nir_validate_shader(s, "mesh cull and clip distance domains");
+   agx_preprocess_nir_m5(s);
+   agx_shader_key key = {};
+   key.dev.chip = AGX_CHIP_G17S; key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.no_preamble = true;
+   agx_shader_part part = {};
+   ASSERT_TRUE(agx_compile_shader_nir(s, &key, &part)) << agx_last_compile_refusal();
+   free(part.binary); ralloc_free(s);
+}
+
+TEST(NativeForms, M5IntegerRegisterBallotPredicatesReachPacker)
+{
+   for (agx_icond condition : {AGX_ICOND_UEQ, AGX_ICOND_SEQ, AGX_ICOND_ULT,
+                              AGX_ICOND_UGT, AGX_ICOND_SLT, AGX_ICOND_SGT}) {
+      for (bool invert : {false, true}) {
+         void *mem = ralloc_context(NULL);
+         agx_shader_key key = {};
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+         key.dev.chip = AGX_CHIP_G17S;
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->key = &key;
+         b->shader->stage = MESA_SHADER_COMPUTE;
+         agx_instr *ballot = agx_alloc_instr(b, AGX_OPCODE_ICMP_BALLOT, 1, 2);
+         ballot->dest[0] = agx_register(22, AGX_SIZE_32);
+         ballot->src[0] = agx_register(20, AGX_SIZE_32);
+         ballot->src[1] = agx_register(16, AGX_SIZE_32);
+         ballot->icond = condition;
+         ballot->invert_cond = invert;
+         agx_builder_insert(&b->cursor, ballot);
+         agx_stop(b);
+         util_dynarray bytes;
+         util_dynarray_init(&bytes, mem);
+         EXPECT_TRUE(agx3_pack_binary(b->shader, &bytes)) << condition << " invert=" << invert;
+         EXPECT_GT(bytes.size, 4u);
+         ralloc_free(mem);
+      }
+   }
+}
+
+TEST(NativeForms, M5GemmIndependentIntrinsicWitnesses)
+{
+   struct Case { unsigned a, b; bool zero, transpose, preserve; uint8_t bytes[10]; };
+   const Case cases[] = {
+      {8, 0, true, false, true, {0x2f,0x00,0x05,0x10,0x22,0x00,0xa4,0x42,0x02,0x00}},
+      {8, 0, true, true, true, {0x2f,0x00,0x05,0x10,0x22,0x00,0xa4,0x42,0x0e,0x00}},
+      {24,16,false,false,false,{0x2f,0x00,0x25,0x12,0x22,0x02,0xa4,0x42,0x00,0x04}},
+   };
+   for (const auto &c : cases) {
+      agx3_matrix_gemm16_desc desc = {};
+      desc.a = c.a; desc.b = c.b; desc.input_type = AGX3_MATRIX_INPUT_F16;
+      desc.wait_mask = 128; desc.zero_accumulator = c.zero;
+      desc.transpose_a = c.transpose; desc.transpose_b = c.transpose;
+      desc.preserve_a = c.preserve; desc.preserve_b = c.preserve;
+      uint8_t bytes[10], length;
+      ASSERT_TRUE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3C, &desc, bytes, &length));
+      ASSERT_EQ(length, 10u);
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + length), std::vector<uint8_t>(c.bytes, c.bytes + 10));
+   }
+}
+
+TEST(NativeForms, M5MmaNativeOperandTypeWitnesses)
+{
+   struct Case { agx3_matrix_mma8_desc desc; uint8_t bytes[14]; };
+   const Case cases[] = {
+      {{14,78,52,14,false,true,{false,false,false},{true,true,true},0,AGX3_MATRIX_INPUT_F32},
+       {0x37,0x02,0x05,0x7a,0x28,0x20,0xaf,0x1a,0x31,0x08,0x18,0x00,0x1a,0x19}},
+      {{102,102,94,98,false,true,{false,true,true},{true,false,false},128,AGX3_MATRIX_INPUT_BF16},
+       {0x3f,0x02,0x85,0xbb,0x28,0x20,0xaf,0x2a,0x61,0x04,0x19,0x00,0x86,0x04}},
+   };
+   for (const auto &c : cases) {
+      uint8_t bytes[14], length;
+      ASSERT_TRUE(agx3_matrix_encode_mma8(AGX_ISA_ENCODING_AGX3C, &c.desc, bytes, &length));
+      ASSERT_EQ(length, 14u);
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + length), std::vector<uint8_t>(c.bytes, c.bytes + 14));
+   }
+}
+
+TEST(NativeForms, M5GemmMixedOperandExecutionWitnesses)
+{
+   agx3_matrix_gemm16_desc d = {};
+   d.a = 24; d.b = 16; d.wait_mask = 128;
+   for (unsigned swap = 0; swap < 2; ++swap) {
+      d.input_type = swap ? AGX3_MATRIX_INPUT_F16 : AGX3_MATRIX_INPUT_BF16;
+      d.b_input_type = swap ? AGX3_MATRIX_INPUT_BF16 : AGX3_MATRIX_INPUT_F16;
+      const uint8_t expected[2][10] = {
+         {0x2f,0x00,0x25,0x12,0x22,0x02,0xa0,0x42,0x00,0x04},
+         {0x2f,0x00,0x25,0x12,0x22,0x02,0xa4,0x02,0x00,0x04},
+      };
+      uint8_t bytes[10], length;
+      ASSERT_TRUE(agx3_matrix_encode_gemm16(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+      ASSERT_EQ(length, 10u);
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + length), std::vector<uint8_t>(expected[swap], expected[swap] + 10));
+   }
+}
+
+TEST(NativeForms, M5VectorAccumulatorCopiesEveryComponent)
+{
+   for (unsigned channels : {2u, 4u, 8u}) {
+      for (unsigned dest : {8u, 34u, 64u}) {
+         void *mem = ralloc_context(NULL);
+         agx_shader_key key = {};
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->key = &key;
+         agx_index src = agx_register(32, AGX_SIZE_32);
+         agx_index dst = agx_register(dest, AGX_SIZE_32);
+         src.channels_m1 = dst.channels_m1 = channels - 1;
+         agx_mov_to(b, dst, src);
+         agx_stop(b);
+         agx_lower_pseudo(b->shader);
+         uint32_t registers[128];
+         for (unsigned i = 0; i < ARRAY_SIZE(registers); ++i)
+            registers[i] = 0x10000000 + i;
+         unsigned copies = 0;
+         agx_foreach_instr_global(b->shader, I) {
+            if (I->op == AGX_OPCODE_STOP)
+               continue;
+            ASSERT_EQ(I->op, AGX_OPCODE_BITOP);
+            ASSERT_EQ(agx_channels(I->dest[0]), 1u);
+            ASSERT_EQ(agx_channels(I->src[0]), 1u);
+            registers[I->dest[0].value] = registers[I->src[0].value];
+            ++copies;
+         }
+         EXPECT_EQ(copies, channels);
+         for (unsigned c = 0; c < channels; ++c)
+            EXPECT_EQ(registers[dest + 2 * c], 0x10000000u + 32 + 2 * c);
+         util_dynarray bytes;
+         util_dynarray_init(&bytes, mem);
+         EXPECT_TRUE(agx3_pack_binary(b->shader, &bytes));
+         ralloc_free(mem);
+      }
+   }
+}
+
+TEST(NativeForms, M5QuadHelpersKeepFragmentEntryUnmarked)
+{
+   for (unsigned helpers : {0u, 1u, 2u}) {
+      SCOPED_TRACE(helpers);
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->nir = rzalloc(mem, nir_shader);
+      b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+      b->shader->nir->info.fs.needs_coarse_quad_helper_invocations = helpers == 1;
+      b->shader->nir->info.fs.needs_full_quad_helper_invocations = helpers == 2;
+      agx_interp_agx3_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(1),
+                         agx_immediate(0), AGX_INTERPOLATION_CENTER, false);
+      agx_stop(b);
+      util_dynarray binary;
+      util_dynarray_init(&binary, mem);
+      ASSERT_TRUE(agx3_pack_binary(b->shader, &binary));
+      uint8_t expected[AGX3_VARY_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_vary_interp_at_start(AGX_ISA_ENCODING_AGX3C,
+                     0, 1, false, AGX3_VARY_CENTER, helpers == 0, expected, &len));
+      ASSERT_GE(binary.size, len);
+      EXPECT_EQ(memcmp(binary.data, expected, len), 0);
+      ralloc_free(mem);
+   }
+}
+
+
+TEST(NativeForms, M5MultisampleTileDataRemainsLiveUntilLastStore)
+{
+   for (unsigned targets : {1u, 4u}) {
+      SCOPED_TRACE(targets);
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+      key.secondary = true;
+      key.no_preamble = true;
+      key.fs.nr_samples = 4;
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->agx3_mrt_tile_ops_ordered = true;
+      for (unsigned rt = 0; rt < targets; ++rt)
+         BITSET_SET(key.g17p_tile_partitions, 4 * rt);
+      agx_wait_pix(b, 12);
+      std::vector<std::vector<uint8_t>> expected;
+      for (unsigned sample = 0; sample < 4; ++sample) {
+         for (unsigned target = targets; target-- > 0;) {
+            const bool last = sample == 3 && target == 0;
+            agx_index data = agx_register(0, AGX_SIZE_16);
+            data.channels_m1 = 1;
+            data.discard = last;
+            const agx_index coverage = agx_register(16 + sample, AGX_SIZE_16);
+            agx_st_tile(b, data, coverage, agx_null(), AGX_FORMAT_U8NORM,
+                        15, target * 4, false, target);
+            uint8_t bytes[AGX3_TILE_MAX_LENGTH], length;
+            ASSERT_TRUE(agx3_tile_store_f13(AGX_ISA_ENCODING_AGX3C, 0,
+               AGX3_TILE_W8, 15, target * 4,
+               agx3_tile_sample_reg(16 + sample, false), 0, last,
+               bytes, &length));
+            expected.emplace_back(bytes, bytes + length);
+         }
+      }
+      agx_stop(b);
+      util_dynarray binary;
+      util_dynarray_init(&binary, mem);
+      ASSERT_TRUE(agx3_pack_binary(b->shader, &binary));
+      const uint8_t *start = (const uint8_t *)binary.data;
+      const uint8_t *end = start + binary.size;
+      for (const auto &bytes : expected) {
+         auto found = std::search(start, end, bytes.begin(), bytes.end());
+         ASSERT_NE(found, end);
+         start = found + bytes.size();
+      }
+      ralloc_free(mem);
+   }
+}
+
+TEST(NativeForms, M5EmptyMeshTopology)
+{
+   for (auto primitive : {MESA_PRIM_POINTS, MESA_PRIM_LINES}) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+         &agx_nir_options, "empty mesh with memory work");
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.mesh.primitive_type = primitive;
+      b.shader->info.mesh.max_vertices_out = 1;
+      b.shader->info.mesh.max_primitives_out = 1;
+      b.shader->info.io_lowered = true;
+      nir_def *lane = nir_load_local_invocation_index(&b);
+      nir_store_global(&b, lane, nir_iadd(&b, nir_imm_int64(&b, 0x2000000),
+                       nir_u2u64(&b, nir_imul_imm(&b, lane, 4))),
+                       .write_mask=1, .align_mul=4);
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), nir_undef(&b, 1, 32));
+      ASSERT_TRUE(agx_nir_m5_canonicalize_empty_mesh(b.shader));
+      EXPECT_EQ(b.shader->info.mesh.primitive_type, MESA_PRIM_TRIANGLES);
+      ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+      agx_preprocess_nir(b.shader);
+      agx_shader_key key = {};
+      key.dev.chip = AGX_CHIP_G17S;
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.no_preamble = true;
+      agx_shader_part part = {};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part))
+         << agx_last_compile_refusal();
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5EmptyMeshRejectsOutput)
+{
+   for (unsigned nonzero = 0; nonzero < 3; ++nonzero) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+         &agx_nir_options, "nonempty mesh");
+      b.shader->info.mesh.primitive_type = MESA_PRIM_POINTS;
+      if (nonzero == 2)
+         b.shader->info.outputs_written = VARYING_BIT_POS;
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, nonzero == 0),
+         nir_imm_int(&b, nonzero == 1), nir_undef(&b, 1, 32));
+      EXPECT_FALSE(agx_nir_m5_canonicalize_empty_mesh(b.shader));
+      EXPECT_EQ(b.shader->info.mesh.primitive_type, MESA_PRIM_POINTS);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5EmptyMeshRejectsConditionalCount)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+      &agx_nir_options, "conditional mesh count");
+   b.shader->info.mesh.primitive_type = MESA_PRIM_POINTS;
+   EXPECT_FALSE(agx_nir_m5_canonicalize_empty_mesh(b.shader));
+   nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
+   nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 0),
+      nir_imm_int(&b, 0), nir_undef(&b, 1, 32));
+   nir_pop_if(&b, NULL);
+   EXPECT_FALSE(agx_nir_m5_canonicalize_empty_mesh(b.shader));
+   EXPECT_EQ(b.shader->info.mesh.primitive_type, MESA_PRIM_POINTS);
+   ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5MeshActiveSubgroupIndexReachesPacker)
+{
+   for (unsigned half : {0u, 1u, 14u, 63u, 254u}) {
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->shader->stage = MESA_SHADER_MESH;
+      agx_get_sr_coverage_to(b, agx_register(half, AGX_SIZE_16),
+                             AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP);
+      agx_stop(b);
+      util_dynarray bytes;
+      util_dynarray_init(&bytes, mem);
+      EXPECT_TRUE(agx3_pack_binary(b->shader, &bytes));
+      EXPECT_GT(bytes.size, 4u);
+      ralloc_free(mem);
+   }
+}
+
+TEST(NativeForms, M5MeshLargeWorkgroupsCompile)
+{
+   const unsigned sizes[][3] = {
+      {129,1,1}, {256,1,1}, {512,1,1}, {1024,1,1},
+      {1,1024,1}, {1,1,1024}, {3,5,7}, {1025,1,1},
+   };
+   for (const auto &size : sizes) {
+      SCOPED_TRACE(size[0] * size[1] * size[2]);
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+         &agx_nir_options, "mesh workgroup bounds");
+      for (unsigned i = 0; i < 3; ++i)
+         b.shader->info.workgroup_size[i] = size[i];
+      b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+      b.shader->info.mesh.max_vertices_out = 1;
+      b.shader->info.mesh.max_primitives_out = 1;
+      b.shader->info.io_lowered = true;
+      nir_def *lane = nir_load_local_invocation_index(&b);
+      nir_def *id = nir_load_local_invocation_id(&b);
+      nir_def *value = nir_iadd(&b, lane, nir_channel(&b, id, 2));
+      nir_store_global(&b, value, nir_iadd(&b, nir_imm_int64(&b, 0x2000000),
+                       nir_u2u64(&b, nir_imul_imm(&b, lane, 4))),
+                       .write_mask=1, .align_mul=4);
+      nir_barrier(&b, .execution_scope=SCOPE_WORKGROUP,
+         .memory_scope=SCOPE_WORKGROUP, .memory_semantics=NIR_MEMORY_ACQ_REL,
+         .memory_modes=nir_var_mem_global);
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), nir_undef(&b, 1, 32));
+      bool valid = size[0] * size[1] * size[2] <= 1024;
+      ASSERT_EQ(agx_nir_lower_m5_mesh_triangle_probe(b.shader), valid);
+      if (!valid) {
+         EXPECT_EQ(b.shader->info.workgroup_size[0], size[0]);
+         ralloc_free(b.shader);
+         continue;
+      }
+      EXPECT_EQ(b.shader->info.workgroup_size[2], size[2] > 1023 ? 1u : size[2]);
+      agx_preprocess_nir_m5(b.shader);
+      agx_shader_key key = {};
+      key.dev.chip = AGX_CHIP_G17S;
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.no_preamble = true;
+      agx_shader_part part = {};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part))
+         << agx_last_compile_refusal();
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5MeshImageReadStagesCoordinates)
+{
+   void *mem = ralloc_context(NULL);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   agx_builder *b = agx_test_builder(mem);
+   b->shader->key = &key;
+   b->shader->stage = MESA_SHADER_MESH;
+   agx_instr *read = agx_alloc_instr(b, AGX_OPCODE_IMAGE_LOAD, 1, 6);
+   read->dest[0] = agx_register(24, AGX_SIZE_32);
+   read->dest[0].channels_m1 = 3;
+   read->src[0] = agx_register(12, AGX_SIZE_32);
+   read->src[0].channels_m1 = 1;
+   read->src[1] = agx_immediate(0);
+   read->src[2] = agx_immediate(0);
+   read->src[3] = agx_register(18, AGX_SIZE_64);
+   read->src[4] = agx_immediate(0);
+   read->src[5] = agx_null();
+   read->dim = AGX_DIM_2D;
+   read->lod_mode = AGX_LOD_MODE_AUTO_LOD;
+   read->mask = 1;
+   agx_builder_insert(&b->cursor, read);
+   agx_stop(b);
+   util_dynarray bytes;
+   util_dynarray_init(&bytes, mem);
+   EXPECT_TRUE(agx3_pack_binary(b->shader, &bytes));
+   EXPECT_GT(b->shader->agx3_staging_halfs, 0u);
+   ralloc_free(mem);
+}
+
+TEST(NativeForms, M5MeshImageReadUsesNativeHeapIndex)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+      &agx_nir_options, "mesh native image descriptor");
+   nir_def *handle = agx_test_bindless_image_agx(&b, nir_imm_int(&b, 64), 2);
+   nir_def *coord = nir_imm_ivec4(&b, 0, 0, 0, 0);
+   nir_def *value = agx_test_bindless_image_load(&b, 4, 32, handle, coord,
+      nir_imm_int(&b, 0), nir_imm_int(&b, 0), GLSL_SAMPLER_DIM_2D,
+      PIPE_FORMAT_R32_UINT, ACCESS_COHERENT, nir_type_uint32);
+   nir_store_global(&b, value, nir_imm_int64(&b, 0x2000000),
+                    .write_mask=15, .align_mul=4);
+   ASSERT_TRUE(agx_nir_lower_g17g_indexed_reads(b.shader));
+   unsigned reads = 0;
+   nir_foreach_block(block, b.impl) nir_foreach_instr(in, block) {
+      if (in->type != nir_instr_type_intrinsic) continue;
+      nir_intrinsic_instr *i = nir_instr_as_intrinsic(in);
+      if (i->intrinsic != nir_intrinsic_bindless_image_load) continue;
+      auto image = nir_src_as_intrinsic(i->src[0]);
+      ASSERT_NE(image, nullptr);
+      EXPECT_EQ(image->intrinsic, nir_intrinsic_bindless_image_agx);
+      EXPECT_EQ(image->src[0].ssa->bit_size, 64u);
+      EXPECT_EQ(nir_intrinsic_desc_set(image), 0u);
+      reads++;
+   }
+   EXPECT_EQ(reads, 1u);
+   nir_validate_shader(b.shader, "native mesh image index");
+   ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5Independent3DSamplesUseSeparateStaging)
+{
+   for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_COMPUTE}) {
+      for (bool gradient : {false, true}) {
+         const unsigned span = gradient ? (stage == MESA_SHADER_VERTEX ? 40u : 32u) : 8u;
+         for (unsigned count : {2u, std::min(8u, 256u / span)}) {
+         SCOPED_TRACE(count);
+         SCOPED_TRACE(stage);
+         SCOPED_TRACE(gradient);
+         void *mem = ralloc_context(NULL);
+         agx_shader_key key = {};
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+         key.dev.chip = AGX_CHIP_G17S;
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->key = &key;
+         b->shader->stage = stage;
+         b->shader->max_reg = 63;
+         agx_index coords = agx_register(64, AGX_SIZE_32);
+         coords.channels_m1 = 2;
+         agx_index lod = agx_immediate(0);
+         if (gradient) {
+            lod = agx_register(72, AGX_SIZE_32);
+            lod.channels_m1 = 5;
+         }
+         for (unsigned n = 0; n < count; ++n) {
+            unsigned dest = 8 * n;
+            agx_index value = agx_register(dest, AGX_SIZE_32);
+            value.channels_m1 = 3;
+            agx_texture_sample_to(b, value, coords, lod,
+               agx_immediate(0), agx_immediate(0), agx_immediate(0),
+               agx_null(), AGX_DIM_3D,
+               gradient ? AGX_LOD_MODE_LOD_GRAD : AGX_LOD_MODE_LOD_MIN,
+               15, false, false, false, AGX_GATHER_NONE, false);
+         }
+         agx_fadd_to(b, agx_register(96, AGX_SIZE_32),
+                     agx_register(0, AGX_SIZE_32),
+                     agx_register(8, AGX_SIZE_32));
+         for (unsigned n = 2; n < count; ++n)
+            agx_fadd_to(b, agx_register(96, AGX_SIZE_32),
+                        agx_register(96, AGX_SIZE_32),
+                        agx_register(8 * n, AGX_SIZE_32));
+         agx_stop(b);
+         util_dynarray binary;
+         util_dynarray_init(&binary, mem);
+         ASSERT_TRUE(agx3_pack_binary(b->shader, &binary));
+         EXPECT_GE(b->shader->agx3_staging_halfs, count * span);
+         uint8_t expected[AGX3_TEX_COPY_MAX_LENGTH], len;
+         ASSERT_TRUE(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3C,
+            (count - 1) * span + (gradient ? 8 : 0),
+            gradient ? 72 : 64, count, 0,
+            true, false, expected, &len));
+         const auto *data = static_cast<const uint8_t *>(binary.data);
+         bool found = false;
+         for (unsigned i = 0; i + len <= binary.size; ++i)
+            found |= memcmp(data + i, expected, len) == 0;
+         EXPECT_TRUE(found);
+         util_dynarray_fini(&binary);
+         ralloc_free(mem);
+         }
+      }
+   }
+}
+
+TEST(NativeForms, M5MeshWithoutOutputsKeepsMemoryWrites)
+{
+   for (unsigned threads : {1u, 32u}) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+         &agx_nir_options, "memory-only mesh");
+      b.shader->info.workgroup_size[0] = threads;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+      b.shader->info.mesh.max_vertices_out = 3;
+      b.shader->info.mesh.max_primitives_out = 1;
+      b.shader->info.io_lowered = true;
+      nir_store_global(&b, nir_load_local_invocation_index(&b),
+                       nir_imm_int64(&b, 0x2000000),
+                       .write_mask=1, .align_mul=4);
+      ASSERT_TRUE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+      unsigned memory_writes = 0;
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_intrinsic &&
+                   nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_global)
+                  memory_writes++;
+            }
+         }
+      }
+      EXPECT_EQ(memory_writes, 1u);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST(NativeForms, M5MeshOutputStillRequiresCount)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+      &agx_nir_options, "mesh output without count");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   b.shader->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+   b.shader->info.mesh.max_vertices_out = 3;
+   b.shader->info.mesh.max_primitives_out = 1;
+   b.shader->info.io_lowered = true;
+   b.shader->info.outputs_written = VARYING_BIT_POS;
+   EXPECT_FALSE(agx_nir_lower_m5_mesh_triangle_probe(b.shader));
+   ralloc_free(b.shader);
+}
+
+/* Two triangles sharing vertices 1 and 2, a smooth per-vertex VAR1 and
+ * per-primitive VAR0/viewport (and optionally layer) words. */
+static nir_shader *
+m5_mesh_per_primitive_shader(bool layer, unsigned max_primitives,
+                             gl_varying_slot extra_primitive_slot)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_MESH,&agx_nir_options,"mesh per-primitive words");
+   b.shader->info.workgroup_size[0]=4;b.shader->info.workgroup_size[1]=b.shader->info.workgroup_size[2]=1;
+   b.shader->info.mesh.max_vertices_out=4;b.shader->info.mesh.max_primitives_out=max_primitives;
+   b.shader->info.mesh.primitive_type=MESA_PRIM_TRIANGLES;b.shader->info.io_lowered=true;
+   b.shader->info.outputs_written=VARYING_BIT_POS|VARYING_BIT_PRIMITIVE_INDICES|VARYING_BIT_VAR(0)|
+      VARYING_BIT_VAR(1)|VARYING_BIT_VIEWPORT|(layer?VARYING_BIT_LAYER:0);
+   b.shader->info.per_primitive_outputs=VARYING_BIT_PRIMITIVE_INDICES|VARYING_BIT_VAR(0)|
+      VARYING_BIT_VIEWPORT|(layer?VARYING_BIT_LAYER:0);
+   nir_def *lane=nir_load_local_invocation_index(&b);
+   nir_set_vertex_and_primitive_count(&b,nir_imm_int(&b,4),nir_imm_int(&b,2),nir_imm_int(&b,0));
+   nir_store_per_vertex_output(&b,nir_vec4(&b,nir_u2f32(&b,lane),nir_imm_float(&b,0),nir_imm_float(&b,0),
+      nir_imm_float(&b,1)),lane,nir_imm_int(&b,0),.write_mask=15,.src_type=nir_type_float32,
+      .io_semantics={.location=VARYING_SLOT_POS,.num_slots=1});
+   nir_store_per_vertex_output(&b,nir_imm_vec2(&b,.5,.25),lane,nir_imm_int(&b,0),.write_mask=3,
+      .src_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_VAR1,.num_slots=1});
+   nir_push_if(&b,nir_ult_imm(&b,lane,2));
+   nir_def *first=nir_imul_imm(&b,lane,2);
+   nir_store_per_primitive_output(&b,nir_vec3(&b,first,nir_iadd_imm(&b,first,1),nir_iadd_imm(&b,first,2)),
+      lane,nir_imm_int(&b,0),.write_mask=7,.src_type=nir_type_uint32,
+      .io_semantics={.location=VARYING_SLOT_PRIMITIVE_INDICES,.num_slots=1});
+   nir_store_per_primitive_output(&b,nir_vec4(&b,nir_u2f32(&b,lane),nir_imm_float(&b,1),nir_imm_float(&b,0),
+      nir_imm_float(&b,1)),lane,nir_imm_int(&b,0),.write_mask=15,.src_type=nir_type_float32,
+      .io_semantics={.location=VARYING_SLOT_VAR0,.num_slots=1});
+   nir_store_per_primitive_output(&b,lane,lane,nir_imm_int(&b,0),.write_mask=1,.src_type=nir_type_int32,
+      .io_semantics={.location=VARYING_SLOT_VIEWPORT,.num_slots=1});
+   if (layer)
+      nir_store_per_primitive_output(&b,nir_iadd_imm(&b,lane,3),lane,nir_imm_int(&b,0),.write_mask=1,
+         .src_type=nir_type_int32,.io_semantics={.location=VARYING_SLOT_LAYER,.num_slots=1});
+   if (extra_primitive_slot != VARYING_SLOT_POS)
+      nir_store_per_primitive_output(&b,lane,lane,nir_imm_int(&b,0),.write_mask=1,.src_type=nir_type_int32,
+         .io_semantics={.location=extra_primitive_slot,.num_slots=1});
+   nir_pop_if(&b,NULL);
+   return b.shader;
+}
+
+TEST(NativeForms, M5MeshPerPrimitiveWordsUsePrivateVertices)
+{
+   for (bool layer : {false, true}) {
+      nir_shader *s=m5_mesh_per_primitive_shader(layer,2,VARYING_SLOT_POS);
+      struct agx_m5_mesh_varyings v;
+      ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));
+      /* Slot order: layer, viewport, VAR0, VAR1; then the packed
+       * layer/viewport word, as the vertex stage's UVS layout. */
+      EXPECT_TRUE(v.lv);EXPECT_TRUE(v.dynamic);
+      EXPECT_EQ(v.components[VARYING_SLOT_LAYER],1u);EXPECT_EQ(v.first[VARYING_SLOT_LAYER],4u);
+      EXPECT_EQ(v.primitive_comps[VARYING_SLOT_LAYER],layer?1u:0u);
+      EXPECT_EQ(v.components[VARYING_SLOT_VIEWPORT],1u);EXPECT_EQ(v.first[VARYING_SLOT_VIEWPORT],5u);
+      EXPECT_EQ(v.components[VARYING_SLOT_VAR0],4u);EXPECT_EQ(v.primitive_comps[VARYING_SLOT_VAR0],4u);
+      EXPECT_EQ(v.first[VARYING_SLOT_VAR0],6u);
+      EXPECT_EQ(v.components[VARYING_SLOT_VAR1],2u);EXPECT_EQ(v.primitive_comps[VARYING_SLOT_VAR1],0u);
+      EXPECT_EQ(v.first[VARYING_SLOT_VAR1],10u);
+      EXPECT_EQ(v.lv_first,12u);EXPECT_EQ(v.size,13u);EXPECT_EQ(v.primitive_stride_B,0u);
+      /* Linked (declaration) order, so every plane has a fixed UVS index. */
+      v.dynamic=false;
+      ASSERT_TRUE(agx_nir_lower_m5_mesh(s,&v));
+      /* Three private vertices per primitive. */
+      EXPECT_EQ(s->info.mesh.max_vertices_out,6u);
+      /* Index bytes 16, counts 16, export 13 planes x 32, vertex sources
+       * 6 x 16, primitive sources (VAR0 4 + viewport 1 + layer) x 16. */
+      const unsigned primitive_planes=5+(layer?1:0);
+      EXPECT_EQ(s->info.shared_size,(32+13*32+6*16+primitive_planes*16+63)&~63u);
+      unsigned index_words=0,vertex_planes=0,index_loads=0,u8_stores=0,pack=0,rendezvous=0,loops=0;
+      nir_foreach_block(block,nir_shader_get_entrypoint(s))nir_foreach_instr(in,block) {
+         if(in->type==nir_instr_type_alu&&nir_instr_as_alu(in)->op==nir_op_pack_32_2x16_split)pack++;
+         if(in->type==nir_instr_type_intrinsic&&nir_instr_as_intrinsic(in)->intrinsic==nir_intrinsic_barrier&&
+            nir_intrinsic_execution_scope(nir_instr_as_intrinsic(in))==SCOPE_WORKGROUP)rendezvous++;
+         if(in->type!=nir_instr_type_intrinsic)continue;
+         nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+         EXPECT_NE(i->intrinsic,nir_intrinsic_store_per_primitive_output);
+         EXPECT_NE(i->intrinsic,nir_intrinsic_load_mesh_primitive_storage_agx);
+         if(i->intrinsic==nir_intrinsic_load_shared&&i->def.bit_size==8)index_loads++;
+         if(i->intrinsic==nir_intrinsic_store_shared&&i->src[0].ssa->bit_size==8)u8_stores++;
+         if(i->intrinsic!=nir_intrinsic_store_mesh_uvb_agx)continue;
+         if(nir_intrinsic_flags(i)){index_words++;continue;}
+         vertex_planes++;
+         ASSERT_TRUE(nir_src_is_const(i->src[0]));
+         EXPECT_EQ(nir_src_comp_as_uint(i->src[0],1),32+32*(nir_src_comp_as_uint(i->src[0],0)&65535));
+      }
+      /* One 32-vertex batch of 13 planes and one index batch. SIMD group 0
+       * copies between two rendezvous, without a loop. */
+      foreach_list_typed(nir_cf_node,node,node,&nir_shader_get_entrypoint(s)->body)
+         loops+=node->type==nir_cf_node_loop;
+      EXPECT_EQ(index_words,1u);EXPECT_EQ(vertex_planes,13u);
+      EXPECT_EQ(rendezvous,2u);EXPECT_EQ(loops,0u);
+      /* The copy reads every index byte once and rewrites it. */
+      EXPECT_EQ(index_loads,1u);EXPECT_GE(u8_stores,2u);EXPECT_EQ(pack,1u);
+      nir_validate_shader(s,"mesh per-primitive private vertices");agx_preprocess_nir_m5(s);
+      agx_shader_key key={};key.dev.chip=AGX_CHIP_G17S;key.dev.encoding=AGX_ISA_ENCODING_AGX3C;key.no_preamble=true;
+      agx_shader_part part={};ASSERT_TRUE(agx_compile_shader_nir(s,&key,&part))<<agx_last_compile_refusal();
+      free(part.binary);ralloc_free(s);
+   }
+}
+
+/* gl_CullPrimitiveEXT: one byte per primitive, cleared before the body and
+ * compacted away before the export. */
+TEST(NativeForms, M5MeshCullPrimitiveCompacts)
+{
+   for (unsigned primitives : {2u, 85u}) {
+      nir_shader *s=m5_mesh_per_primitive_shader(false,primitives,VARYING_SLOT_CULL_PRIMITIVE);
+      s->info.outputs_written|=VARYING_BIT_CULL_PRIMITIVE;
+      s->info.per_primitive_outputs|=VARYING_BIT_CULL_PRIMITIVE;
+      struct agx_m5_mesh_varyings v;
+      ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));
+      EXPECT_TRUE(v.cull_primitive);
+      EXPECT_EQ(v.components[VARYING_SLOT_CULL_PRIMITIVE],0u);
+      ASSERT_TRUE(agx_nir_lower_m5_mesh(s,&v));
+      nir_validate_shader(s,"cull primitive");
+      EXPECT_LE(s->info.shared_size,32768u);
+      ralloc_free(s);
+   }
+}
+
+TEST(NativeForms, M5MeshPerPrimitiveRefusalsLeaveShaderUntouched)
+{
+   /* No private-vertex form beyond the native 256 output vertices. */
+   const struct { unsigned primitives; gl_varying_slot extra; bool gather; } rows[] = {
+      {86, VARYING_SLOT_POS, true},
+   };
+   for (const auto &r : rows) {
+      nir_shader *s=m5_mesh_per_primitive_shader(false,r.primitives,r.extra);
+      struct agx_m5_mesh_varyings v;
+      EXPECT_EQ(agx_m5_mesh_gather_varyings(s,&v),r.gather);
+      if (r.gather) {
+         EXPECT_FALSE(agx_nir_lower_m5_mesh(s,&v));
+      }
+      EXPECT_EQ(s->info.shared_size,0u);EXPECT_EQ(s->info.mesh.max_vertices_out,4u);
+      ralloc_free(s);
+   }
+   /* 85 primitives fit: 255 private vertices. */
+   nir_shader *s=m5_mesh_per_primitive_shader(false,85,VARYING_SLOT_POS);
+   struct agx_m5_mesh_varyings v;
+   ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));
+   ASSERT_TRUE(agx_nir_lower_m5_mesh(s,&v));
+   EXPECT_EQ(s->info.mesh.max_vertices_out,255u);
+   nir_validate_shader(s,"mesh 85 primitives");ralloc_free(s);
+}
+
+TEST(NativeForms, M5MeshPrimitiveIdIsAPrimitiveWord)
+{
+   /* A mesh-written gl_PrimitiveID is a flat user word of the primitive's
+    * private vertices, which the fragment shader's gl_PrimitiveID links to. */
+   nir_shader *s=m5_mesh_per_primitive_shader(false,2,VARYING_SLOT_PRIMITIVE_ID);
+   s->info.outputs_written|=VARYING_BIT_PRIMITIVE_ID;
+   s->info.per_primitive_outputs|=VARYING_BIT_PRIMITIVE_ID;
+   struct agx_m5_mesh_varyings v;
+   ASSERT_TRUE(agx_m5_mesh_gather_varyings(s,&v));
+   EXPECT_EQ(v.primitive_comps[VARYING_SLOT_PRIMITIVE_ID],1u);
+   EXPECT_EQ(v.components[VARYING_SLOT_PRIMITIVE_ID],1u);
+   ASSERT_TRUE(agx_nir_lower_m5_mesh(s,&v));
+   EXPECT_EQ(s->info.mesh.max_vertices_out,6u);
+   nir_validate_shader(s,"mesh primitive id");ralloc_free(s);
+}
+
+TEST(NativeForms, M5MeshFragmentReadsPrimitiveWordsFlat)
+{
+   nir_builder b=nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,&agx_nir_options,"fs per-primitive inputs");
+   b.shader->info.io_lowered=true;
+   b.shader->info.per_primitive_inputs=VARYING_BIT_VAR(0)|VARYING_BIT_VAR(1)|VARYING_BIT_VIEWPORT|
+                                       VARYING_BIT_PRIMITIVE_ID;
+   nir_def *color=nir_load_per_primitive_input(&b,4,32,nir_imm_int(&b,0),.component=0,
+      .dest_type=nir_type_float32,.io_semantics={.location=VARYING_SLOT_VAR0,.num_slots=1});
+   nir_def *half=nir_load_per_primitive_input(&b,2,16,nir_imm_int(&b,0),.component=1,
+      .dest_type=nir_type_float16,.io_semantics={.location=VARYING_SLOT_VAR1,.num_slots=1});
+   nir_def *viewport=nir_load_per_primitive_input(&b,1,32,nir_imm_int(&b,0),
+      .dest_type=nir_type_int32,.io_semantics={.location=VARYING_SLOT_VIEWPORT,.num_slots=1});
+   nir_def *id=nir_load_per_primitive_input(&b,1,32,nir_imm_int(&b,0),
+      .dest_type=nir_type_int32,.io_semantics={.location=VARYING_SLOT_PRIMITIVE_ID,.num_slots=1});
+   nir_store_global(&b,nir_vec4(&b,nir_channel(&b,color,0),nir_f2f32(&b,nir_channel(&b,half,1)),
+      nir_i2f32(&b,viewport),nir_i2f32(&b,id)),nir_imm_int64(&b,0x1000),.write_mask=15,.align_mul=16);
+   ASSERT_TRUE(agx_nir_lower_m5_mesh_fragment(b.shader));
+   unsigned flat=0,primitive=0,narrowed=0;
+   nir_foreach_block(block,b.impl)nir_foreach_instr(in,block) {
+      if(in->type==nir_instr_type_alu&&nir_instr_as_alu(in)->op==nir_op_f2f16)narrowed++;
+      if(in->type!=nir_instr_type_intrinsic)continue;
+      nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
+      if(i->intrinsic==nir_intrinsic_load_per_primitive_input)
+         primitive++;
+      if(i->intrinsic==nir_intrinsic_load_input) {
+         flat++;EXPECT_EQ(i->def.bit_size,32u);
+         EXPECT_EQ(nir_alu_type_get_type_size(nir_intrinsic_dest_type(i)),32u);
+         if(nir_intrinsic_io_semantics(i).location==VARYING_SLOT_VAR1) {
+            EXPECT_EQ(nir_intrinsic_component(i),1u);
+         }
+      }
+   }
+   EXPECT_EQ(flat,4u);EXPECT_EQ(primitive,0u);EXPECT_EQ(narrowed,1u);
+   EXPECT_EQ(b.shader->info.per_primitive_inputs,0u);
+   nir_validate_shader(b.shader,"fs per-primitive inputs");
+   EXPECT_FALSE(agx_nir_lower_m5_mesh_fragment(b.shader));
+   ralloc_free(b.shader);
+}
+
+TEST(NativeForms, M5UniformDifferenceHonorsNIRSignedZero)
+{
+   std::vector<uint8_t> programs[2];
+   for (unsigned strict = 0; strict < 2; ++strict) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "uniform difference zero");
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.fp_math_ctrl = nir_fp_exact |
+         (strict ? nir_fp_preserve_signed_zero : 0);
+      nir_def *u = agx_test_load_preamble(&b, 1, 32, 12);
+      nir_def *r = nir_u2f32(&b, nir_load_local_invocation_index(&b));
+      nir_def *difference = nir_fsub(&b, u, r);
+      nir_def *scale = agx_test_load_preamble(&b, 1, 32, 14);
+      nir_def *product = nir_fmul(&b, difference, scale);
+      nir_store_global(&b, product, nir_imm_int64(&b, 0x2000000),
+                       .write_mask = 1, .align_mul = 4);
+      agx_preprocess_nir_m5(b.shader);
+      agx_shader_key key = {};
+      key.dev.chip = AGX_CHIP_G17S;
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.no_preamble = true;
+      key.reserved_preamble = 16;
+      agx_shader_part part = {};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part))
+         << agx_last_compile_refusal();
+      const uint8_t *bytes = static_cast<const uint8_t *>(part.binary);
+      programs[strict].assign(bytes, bytes + part.info.main_size);
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+   EXPECT_NE(programs[1], programs[0]);
+}
+
+TEST(NativeForms, M5OrSelectTracksVectorConversionComponent)
+{
+   for (unsigned bits : {16u, 32u}) {
+      for (unsigned conditions = 0; conditions < 8; ++conditions) {
+         for (unsigned component = 0; component < 2; ++component) {
+            for (unsigned selected = 0; selected < 2; ++selected) {
+               for (bool swapped : {false, true}) {
+                  for (bool inverted : {false, true}) {
+                     SCOPED_TRACE(::testing::Message() << bits << ":" << conditions
+                        << ":" << component << ":" << selected << ":"
+                        << swapped << ":" << inverted);
+                     nir_builder b = nir_builder_init_simple_shader(
+                        MESA_SHADER_COMPUTE, &agx_nir_options, "vector b2f component");
+                     nir_def *a = nir_ieq(&b,
+                        nir_imm_ivec2(&b, conditions & 1, (conditions >> 1) & 1),
+                        nir_imm_int(&b, 1));
+                     nir_def *other = nir_ieq(&b, nir_imm_int(&b, conditions >> 2),
+                                              nir_imm_int(&b, 1));
+                     nir_def *condition = nir_ior(&b, nir_channel(&b, a, component), other);
+                     nir_alu_instr *ior = nir_def_as_alu(condition);
+                     nir_src_rewrite(&ior->src[0].src, a);
+                     ior->src[0].swizzle[0] = component;
+                     nir_def *boolean = inverted ? nir_inot(&b, a) : a;
+                     nir_def *converted = bits == 16 ? nir_b2f16(&b, boolean)
+                                                     : nir_b2f32(&b, boolean);
+                     nir_alu_instr *b2f = nir_def_as_alu(converted);
+                     b2f->src[0].swizzle[0] = swapped ? 1 : 0;
+                     b2f->src[0].swizzle[1] = swapped ? 0 : 1;
+                     nir_def *value = nir_bcsel(&b, condition,
+                        nir_channel(&b, converted, selected), nir_imm_floatN_t(&b, 3.0, bits));
+                     nir_alu_instr *sel = nir_def_as_alu(value);
+                     nir_src_rewrite(&sel->src[1].src, converted);
+                     sel->src[1].swizzle[0] = selected;
+                     nir_intrinsic_instr *store = nir_store_global(&b,
+                        bits == 16 ? nir_f2f32(&b, value) : value,
+                        nir_imm_int64(&b, 0x2000000), .write_mask = 1, .align_mul = 4);
+                     nir_validate_shader(b.shader, "vector conversion before OR select");
+                     unsigned source_component = selected ^ unsigned(swapped);
+                     EXPECT_EQ(agx_nir_m5_split_or_selects(b.shader),
+                               source_component == component);
+                     nir_validate_shader(b.shader, "vector conversion after OR select");
+                     while (nir_opt_constant_folding(b.shader)) {}
+                     ASSERT_TRUE(nir_src_is_const(store->src[0]));
+                     bool selected_bool = ((conditions >> source_component) & 1) ^ inverted;
+                     bool taken = ((conditions >> component) & 1) || (conditions & 4);
+                     EXPECT_FLOAT_EQ(nir_src_as_float(store->src[0]),
+                                     taken ? float(selected_bool) : 3.0f);
+                     ralloc_free(b.shader);
+                  }
+               }
+            }
+         }
+      }
+   }
 }

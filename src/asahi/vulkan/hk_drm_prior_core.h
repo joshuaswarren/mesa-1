@@ -78,6 +78,26 @@ hk_drm_rebase_prior(struct drm_asahi_cmd_header *h, void *payload,
    }
    h->vdm_barrier = barriers[0];
    h->cdm_barrier = barriers[1];
+   if (exact && h->cmd_type == DRM_ASAHI_CMD_RENDER &&
+       (r->legacy.flags & DRM_ASAHI_RENDER_COMPUTE_STAGE_BARRIERS)) {
+      /* The tiling half's compute prefix is rebased like the header's. */
+      struct drm_asahi_cmd_render_with_stage_prior *s = payload;
+      if (h->size != sizeof(*s))
+         return false;
+      const uint16_t value = s->ta_cdm_barrier;
+      if (value != DRM_ASAHI_BARRIER_NONE && value != 0) {
+         if (value > before[1]) {
+            s->ta_cdm_barrier = value - before[1];
+         } else {
+            if (initial[1] > UINT64_MAX - value)
+               return false;
+            const uint64_t absolute = initial[1] + value;
+            if (absolute > s->ta_prior_cdm)
+               s->ta_prior_cdm = absolute;
+            s->ta_cdm_barrier = DRM_ASAHI_BARRIER_NONE;
+         }
+      }
+   }
    if (exact && h->cmd_type == DRM_ASAHI_CMD_RENDER) {
       r->prior_vdm = prior[0];
       r->prior_cdm = prior[1];

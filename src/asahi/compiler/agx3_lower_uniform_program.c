@@ -11,7 +11,8 @@ bool
 agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs)
 {
    if (!has_inputs || !ctx->is_preamble || !ctx->num_blocks ||
-       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+       (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B &&
+        ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C))
       return false;
 
    struct uniform_block {
@@ -125,7 +126,8 @@ fail:
 bool
 agx3_lower_uniform_half_exports(agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B || !ctx->is_preamble)
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B &&
+        ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C) || !ctx->is_preamble)
       return false;
 
    bool occupied[512] = {false};
@@ -228,12 +230,13 @@ agx3_lower_uniform_half_exports(agx_context *ctx)
 
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
       /* COPY writes an aligned word. Keep the live half in its original
-       * lane and clear only the unoccupied neighbour. A late DCE can leave
+       * lane; the unoccupied neighbour is padding that nothing reads, so
+       * leave it undefined rather than clearing it. A late DCE can leave
        * just the odd half of an allocated pair live. */
       agx_index word = agx_temp(ctx, AGX_SIZE_32);
       agx_instr *collect = agx_collect_to(&b, word, 2);
       collect->src[base & 1] = value;
-      collect->src[(base & 1) ^ 1] = agx_immediate(0);
+      collect->src[(base & 1) ^ 1] = agx_undef(AGX_SIZE_16);
       I->src[0] = word;
       I->src[1] = agx_immediate(base & ~1u);
       if (ctx->out)
@@ -247,11 +250,17 @@ agx3_lower_uniform_half_exports(agx_context *ctx)
  * and RA. Only fold a same-block, single-use scalar value into its uniform
  * export. Native AIR-NT add/mul/fma witnesses ground plain f32 inputs and
  * low-file aligned outputs. Texture/sampler state stores are unrelated.
+ *
+ * M5 (G17G) constant programs witness two shapes only: an
+ * all-register FMA (the vertex matrix products) and an immediate*register
+ * MUL (agx3_uniform_float_store_encode). The other values keep their
+ * uniform store.
  */
 bool
 agx3_lower_uniform_program(agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool m5 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B) ||
        !ctx->is_preamble || !ctx->alloc)
       return false;
 
@@ -320,6 +329,7 @@ agx3_lower_uniform_program(agx_context *ctx)
             admitted &= !alu->saturate && alu->nr_dests == 1 &&
                alu->nr_srcs == (alu->op == AGX_OPCODE_FFMA ? 3 : 2);
             bool has_register = false;
+            unsigned registers = 0, immediates = 0;
             agx_foreach_src(alu, s) {
                const agx_index src = alu->src[s];
                const bool reg = src.type == AGX_INDEX_NORMAL ||
@@ -329,8 +339,16 @@ agx3_lower_uniform_program(agx_context *ctx)
                   ((reg && src.size == AGX_SIZE_32 && agx_channels(src) == 1) ||
                    (immediate && src.value <= 255));
                has_register |= reg;
+               registers += reg;
+               immediates += immediate;
             }
             admitted &= has_register;
+            if (m5) {
+               admitted &= alu->op == AGX_OPCODE_FFMA ? registers == 3
+                           : alu->op == AGX_OPCODE_FMUL
+                              ? registers == 1 && immediates == 1
+                              : false;
+            }
          }
          if (!admitted)
             continue;

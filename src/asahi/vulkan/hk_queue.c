@@ -10,6 +10,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_queue.h"
+#include "hk_native_write_class.h"
 #include "hk_acceleration_structure.h"
 #include "hk_buffer.h"
 
@@ -21,6 +22,7 @@
 #include "agx_vdm_hal200_bind_tail_core.h"
 #include "decode.h"
 #include "hk_cmd_buffer.h"
+#include "hk_frame_anatomy.h"
 #include "hk_device.h"
 #include "hk_drm_render_core.h"
 #include "hk_drm_prior_core.h"
@@ -50,6 +52,8 @@
 #include "layout.h"
 #include "vk_drm_syncobj.h"
 #include "vk_sync.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(m5_chunk_timelines, "ASAHI_M5_CHUNK_TIMELINES", true)
 
 /* Signal scope includes all earlier commands on this Vulkan queue. A DRM
  * timeline point retains its predecessor fence chain; an individual submit's
@@ -120,6 +124,7 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
    size_t len = cs->stream_linked ? 65536 /* XXX */ : (cs->current - cs->start);
 
    *cmd = (struct drm_asahi_cmd_compute){
+      .flags = cs->m5_matrix_ops ? DRM_ASAHI_COMPUTE_USES_MATRIX : 0,
       .cdm_ctrl_stream_base = cs->addr,
       .cdm_ctrl_stream_end = cs->addr + len,
 
@@ -197,8 +202,12 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    static_assert(sizeof(c->zls_ctrl) == sizeof(cs->cr.zls_control));
    memcpy(&c->zls_ctrl, &cs->cr.zls_control, sizeof(cs->cr.zls_control));
 
-   if (agx_native_graphics(&dev->dev)) {
-      c->isp_zls_pixels = hk_drm_g17p_zls_pixels(
+   if (agx_native_graphics(&dev->dev) || agx_chip_g17_m5(dev->dev.chip)) {
+      c->isp_zls_pixels = agx_chip_g17_m5(dev->dev.chip)
+         ? hk_drm_m5_zls_pixels(
+              cs->cr.zls_width, cs->cr.zls_height, cs->cr.depth.buffer,
+              cs->cr.depth.meta, cs->cr.stencil.buffer, cs->cr.stencil.meta)
+         : hk_drm_g17p_zls_pixels(
          cs->cr.zls_width, cs->cr.zls_height, cs->cr.depth.buffer,
          cs->cr.depth.meta, cs->cr.stencil.buffer, cs->cr.stencil.meta);
       c->isp_bgobjdepth = hk_drm_g17p_depth_clear(
@@ -228,12 +237,16 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
     * render pass whose known primitive count is at most four, and never for
     * a continued pass or one with uncounted (indirect, mesh) work. This
     * stream's bound counts every draw of the whole pass, so it proves that. */
-   if (agx_native_graphics(&dev->dev) &&
+   if ((agx_native_graphics(&dev->dev) || agx_chip_g17_m5(dev->dev.chip)) &&
        (dev->dev.params.features & DRM_ASAHI_FEATURE_FEW_PRIMITIVES) &&
        cs->g17p_pass_begins && cs->g17p_pass_ends &&
        cs->g17p_primitive_bound <= 4) {
       c->flags |= DRM_ASAHI_RENDER_FEW_PRIMITIVES;
    }
+
+   if (agx_chip_g17_m5(dev->dev.chip))
+      c->flags |= hk_m5_shader_write_class_flags(dev->dev.params.features,
+                                                cs->m5_shader_writes_memory);
 
    if ((dev->dev.debug & AGX_DBG_NOCLUSTER) &&
        dev->dev.chip != AGX_CHIP_G17P) {
@@ -412,16 +425,17 @@ asahi_append_fragment_attachments(struct hk_device *dev,
    }
 }
 
-/* Submit all ordered control streams together up to the kernel's advertised
- * limit.  Splitting every stream into a separate ioctl serializes real games
- * at the queue boundary; keep single-stream submission only as an explicit
- * diagnostic control.
+/* Native AGX3 benefits from submitting ordered control streams together.
+ * G13X already serializes both engines, and separate ioctls let the kernel
+ * start a render while the following compute submission is prepared. This
+ * matters for post-graphics query availability and its CPU round trip.
  */
 static inline unsigned
 max_commands_per_submit(struct hk_device *dev)
 {
    return hk_drm_submit_command_limit(
-      !HK_PERF(dev, NOBATCH), dev->dev.params.max_commands_per_submission);
+      dev->dev.chip != AGX_CHIP_G13X && !HK_PERF(dev, NOBATCH),
+      dev->dev.params.max_commands_per_submission);
 }
 
 static VkResult
@@ -447,9 +461,37 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    if (dev->dev.is_virtio)
       u_rwlock_rdunlock(&dev->external_bos.lock);
 
-   if (ret)
+   if (ret) {
+      /* Opt-in diagnostic: preserve the exact rejected submission so the
+       * kernel's validation can be replayed offline. No effect unless set. */
+      const char *dump = os_get_option("ASAHI_SUBMIT_DUMP_ON_ERROR");
+      if (dump && *dump) {
+         const int err = errno;
+         static unsigned seq;
+         char path[512];
+         snprintf(path, sizeof(path), "%s/submit-%d-%u.bin", dump, (int)getpid(),
+                  p_atomic_inc_return(&seq));
+         FILE *f = fopen(path, "wb");
+         if (f) {
+            /* Header: errno, struct size, then the ioctl struct, the command
+             * stream, and the sync array (16 bytes per entry). */
+            const uint32_t hdr[4] = {(uint32_t)err, sizeof(*submit),
+                                     submit->cmdbuf_size,
+                                     submit->in_sync_count + submit->out_sync_count};
+            fwrite(hdr, sizeof(hdr), 1, f);
+            fwrite(submit, sizeof(*submit), 1, f);
+            fwrite((const void *)(uintptr_t)submit->cmdbuf, 1, submit->cmdbuf_size, f);
+            if (submit->syncs)
+               fwrite((const void *)(uintptr_t)submit->syncs,
+                      sizeof(struct drm_asahi_sync), hdr[3], f);
+            fclose(f);
+            mesa_loge("hk: rejected submission (errno %d) saved to %s", err, path);
+         }
+         errno = err;
+      }
       return vk_device_set_lost(&dev->vk,
                                 "DRM_IOCTL_ASAHI_SUBMIT failed: %m");
+   }
 
    return VK_SUCCESS;
 }
@@ -463,15 +505,25 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
 static VkResult
 queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
                     struct drm_asahi_submit *submit, unsigned command_count,
-                    unsigned ring_idx, const uint64_t prior_base[2])
+                    unsigned ring_idx, const uint64_t prior_base[2],
+                    bool chunk_timelines, uint64_t first_chunk_point,
+                    struct hk_frame_anatomy_submit *anatomy)
 {
    uint8_t *cmdbuf = (uint8_t *)(uintptr_t)submit->cmdbuf;
    uint32_t offs = 0;
    unsigned submitted_vdm = 0, submitted_cdm = 0;
    unsigned commands_remaining = command_count;
+   unsigned chunk_index = 0;
+   uint64_t last_attempted_point = first_chunk_point - 1;
 
    uint64_t out_syncs =
       submit->syncs + sizeof(struct drm_asahi_sync) * submit->in_sync_count;
+
+   struct drm_asahi_sync *chunk_signal = (void *)(uintptr_t)out_syncs;
+   if (chunk_timelines)
+      assert(submit->out_sync_count == 1 &&
+             chunk_signal->sync_type == DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ &&
+             chunk_signal->handle == queue->drm.syncobj);
 
    while (commands_remaining) {
       bool first = commands_remaining == command_count;
@@ -487,6 +539,8 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
       struct hk_drm_command_span span;
       if (!hk_drm_next_command_span(cmdbuf, submit->cmdbuf_size, base_offs,
                                     count, &span)) {
+         if (chunk_timelines)
+            queue->drm.timeline_value = last_attempted_point;
          return vk_device_set_lost(
             &dev->vk, "Invalid internal Asahi command stream framing");
       }
@@ -494,6 +548,8 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
       unsigned cdm_count = span.compute_count;
       unsigned vdm_count = span.render_count;
       if (last && offs != submit->cmdbuf_size) {
+         if (chunk_timelines)
+            queue->drm.timeline_value = last_attempted_point;
          return vk_device_set_lost(
             &dev->vk, "Trailing synthetic Asahi commands without hardware");
       }
@@ -509,17 +565,17 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
 
          if (!hk_drm_rebase_prior(cmd, cmd + 1, submitted_vdm,
                                   submitted_cdm, prior_base,
-                                  queue->sync.exact_prior))
+                                  queue->sync.exact_prior)) {
+            if (chunk_timelines)
+               queue->drm.timeline_value = last_attempted_point;
             return vk_device_set_lost(&dev->vk,
                                       "Invalid historical Asahi prefix");
+         }
       }
 
-      /* We can't signal the out-syncobjs until all prior work finishes. Since
-       * only the last ioctl will signal, make sure it waits on prior ioctls.
-       *
-       * TODO: there might be a more performant way to do this.
-      */
-      if (last && !first) {
+      /* Without per-chunk completion points, only the final ioctl contributes
+       * to the output fence. It must cover the preceding chunks explicitly. */
+      if (last && !first && !chunk_timelines) {
          assert(span.first_hardware_offset != SIZE_MAX);
          struct drm_asahi_cmd_header *cmd =
             (void *)(cmdbuf + span.first_hardware_offset);
@@ -536,7 +592,15 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
        * retain the first-command chain and receive the waits only once. */
       bool has_in_syncs = first ||
          (dev->dev.params.features & DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS);
-      bool has_out_syncs = last;
+      /* Distinct timeline points join completion without making this
+       * chunk execute after every command in its predecessor. */
+      bool has_out_syncs = last || chunk_timelines;
+      if (chunk_timelines)
+         chunk_signal->timeline_value = first_chunk_point + chunk_index;
+
+      /* Profiler: barriers of this chunk exactly as rebased above. */
+      if (unlikely(anatomy))
+         hk_frame_anatomy_note_barriers(anatomy, cmdbuf, base_offs, offs);
 
       struct drm_asahi_submit submit_ioctl = {
          .flags = submit->flags,
@@ -549,9 +613,15 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
          .out_sync_count = has_out_syncs ? submit->out_sync_count : 0,
       };
 
+      if (chunk_timelines)
+         last_attempted_point = chunk_signal->timeline_value;
       VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx);
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
+         if (chunk_timelines)
+            queue->drm.timeline_value = last_attempted_point;
          return result;
+      }
+      chunk_index++;
 
       submitted_cdm += cdm_count;
       submitted_vdm += vdm_count;
@@ -615,7 +685,7 @@ hk_flush_bind(struct hk_bind_builder *b)
       op = (struct drm_asahi_gem_bind_op){
          .handle = b->dev->dev.scratch_bo->uapi_handle,
          .flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE |
-                  DRM_ASAHI_BIND_SINGLE_PAGE,
+                  agx_fill_bind_flags(&b->dev->dev),
          .addr = b->va->addr + b->resourceOffset,
          .range = b->size,
       };
@@ -665,6 +735,11 @@ hk_sparse_buffer_map_commit(struct hk_bind_builder *b)
       const uint64_t pages = DIV_ROUND_UP(op->range, AIL_PAGESIZE);
       const bool resident =
          op->handle != b->dev->dev.scratch_bo->uapi_handle;
+
+      VkResult result = hk_update_physical_sparse_map(
+         b->dev, op->addr, op->range, !resident);
+      if (result != VK_SUCCESS)
+         return result;
 
       for (uint64_t page = 0; page < pages; ++page) {
          if (first + page >= b->buffer->sparse_map_entries)
@@ -1070,7 +1145,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       if (result != VK_SUCCESS)
          return result;
 
-      flush_sstt = dev->dev.chip == AGX_CHIP_G17P &&
+      flush_sstt = (dev->dev.chip == AGX_CHIP_G17P ||
+                    agx_chip_g17_m5(dev->dev.chip)) &&
                    hk_sparse_submission_updates_sstt(submit);
    }
 
@@ -1107,17 +1183,33 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       queue->sync.submitted[HK_SYNC_VDM], queue->sync.submitted[HK_SYNC_CDM],
    };
 
-   /* G17P permits independent engines and physical render queues to finish
-    * out of order. Publish API signals from the cumulative queue point in the
-    * ioctl when supported, or transfer it afterwards on older kernels. Both
-    * preserve independent execution while covering earlier work.
+   /* Independent engines and physical render queues may finish
+    * out of order. Publish API signals from the cumulative queue point,
+    * preserving independent execution while covering earlier work: on G17P
+    * in the ioctl when the kernel accepts a cumulative output
+    * (DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS), otherwise by a transfer after
+    * the ioctl. M5 always transfers, also for its chunked timelines.
     */
-   const bool cumulative_signals = dev->dev.chip == AGX_CHIP_G17P;
-   const bool kernel_cumulative = cumulative_signals &&
+   const bool cumulative_signals =
+      dev->dev.chip == AGX_CHIP_G17P ||
+      (agx_chip_g17_m5(dev->dev.chip) &&
+       (dev->dev.params.features & DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES));
+   const bool kernel_cumulative = dev->dev.chip == AGX_CHIP_G17P &&
       submit->signal_count > 0 &&
       (dev->dev.params.features & DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS);
    const unsigned kernel_signal_count =
       cumulative_signals && !kernel_cumulative ? 0 : submit->signal_count;
+   const bool chunk_timelines = cumulative_signals &&
+      (dev->dev.params.features & DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS) &&
+      agx_chip_g17_m5(dev->dev.chip) &&
+      debug_get_option_m5_chunk_timelines() &&
+      command_count > max_commands_per_submit(dev);
+   const uint64_t point_count = chunk_timelines
+      ? 1 + (command_count - 1) / max_commands_per_submit(dev) : 1;
+   if (queue->drm.timeline_value > UINT64_MAX - point_count)
+      return vk_device_set_lost(&dev->vk, "Asahi queue timeline overflow");
+   const uint64_t first_chunk_point = queue->drm.timeline_value + 1;
+   queue->drm.timeline_value += point_count;
    unsigned wait_count = 0;
    struct drm_asahi_sync *syncs =
       alloca((submit->wait_count + kernel_signal_count + 1) *
@@ -1162,7 +1254,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          ? DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ_CUMULATIVE
          : DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ,
       .handle = queue->drm.syncobj,
-      .timeline_value = ++queue->drm.timeline_value,
+      .timeline_value = queue->drm.timeline_value,
    };
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
@@ -1170,8 +1262,53 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                            queue, queue->drm.timeline_value);
    }
 
+   /* Opt-in frame anatomy profiler (HK_FRAME_ANATOMY): NULL unless enabled
+    * and this submit is sampled, so the hooks below cost one NULL test. */
+   struct hk_frame_anatomy_submit *anatomy =
+      unlikely(dev->frame_anatomy)
+         ? hk_frame_anatomy_begin_submit(dev, queue, command_count)
+         : NULL;
+
+   /* Anatomy: which waits are still unsignalled at submission; the kernel
+    * holds every command of the submission until they signal. */
+   if (unlikely(anatomy) && submit->wait_count) {
+      unsigned timeline = 0, pending = 0, pending_timeline = 0;
+      for (unsigned i = 0; i < submit->wait_count; ++i) {
+         struct vk_sync *sync = submit->waits[i].sync;
+         if (!vk_sync_type_is_drm_syncobj(sync->type))
+            continue;
+         uint32_t handle = vk_sync_as_drm_syncobj(sync)->syncobj;
+         bool done;
+         if (sync->flags & VK_SYNC_IS_TIMELINE) {
+            uint64_t point = 0;
+            timeline++;
+            done = !drmSyncobjQuery(dev->dev.fd, &handle, &point, 1) &&
+                   point >= submit->waits[i].wait_value;
+         } else {
+            done = !drmSyncobjWait(dev->dev.fd, &handle, 1, 0, 0, NULL);
+         }
+         if (!done) {
+            pending++;
+            pending_timeline += !!(sync->flags & VK_SYNC_IS_TIMELINE);
+         }
+      }
+      hk_frame_anatomy_note(dev, "submit waits=%u timeline=%u pending=%u "
+                            "pending_timeline=%u signals=%u commands=%u",
+                            submit->wait_count, timeline, pending,
+                            pending_timeline, submit->signal_count,
+                            command_count);
+   }
+
    /* Now setup the command structs */
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
+
+   /* A small G16S submit otherwise grows the heap allocation once for its
+    * header and again for the command. Keep those payloads on the stack;
+    * util_dynarray moves to the heap if attachments or more commands need
+    * additional space. The ioctl consumes the payload before we return.
+    */
+   if (agx_is_m4_pro(&dev->dev))
+      util_dynarray_init_from_stack(&payload, alloca(1024), 1024);
 
    unsigned nr_vdm = 0, nr_cdm = 0;
 
@@ -1221,6 +1358,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                             DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS),
                           completed)) {
       util_dynarray_fini(&payload);
+      if (unlikely(anatomy))
+         hk_frame_anatomy_end_submit(anatomy, dev, queue, VK_ERROR_DEVICE_LOST);
       return vk_device_set_lost(&dev->vk, "Asahi command ordinal overflow");
    }
 
@@ -1286,11 +1425,37 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                    cs->timestamp.end.handle || cs->timestamp.start.handle);
 
             asahi_append_compute_attachments(dev, &payload, cs);
+            if (agx_chip_g17_m5(dev->dev.chip) &&
+                (dev->dev.params.features & DRM_ASAHI_FEATURE_COMPUTE_RESOURCES)) {
+               /* The header size is 16 bits; never let it truncate. */
+               if (cs->compute_resources.size > UINT16_MAX) {
+                  util_dynarray_fini(&payload);
+                  if (unlikely(anatomy))
+                     hk_frame_anatomy_end_submit(anatomy, dev, queue,
+                                                 VK_ERROR_DEVICE_LOST);
+                  return vk_device_set_lost(
+                     &dev->vk, "M5 compute resource list too large (%u bytes)",
+                     cs->compute_resources.size);
+               }
+               const struct drm_asahi_cmd_header resources = {
+                  .cmd_type = DRM_ASAHI_SET_COMPUTE_RESOURCES,
+                  .size = cs->compute_resources.size,
+                  .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
+                  .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
+               };
+               util_dynarray_append(&payload, resources);
+               util_dynarray_append_array(&payload, uint8_t,
+                                         cs->compute_resources.data,
+                                         cs->compute_resources.size);
+            }
             struct drm_asahi_cmd_compute_with_prior cmd = {0};
             asahi_fill_cdm_command(dev, cs, &cmd.legacy);
             cmd.legacy.flags |= hk_as_build_flags(dev->dev.chip,
                                                   dev->dev.params.features,
                                                   cs->as_build);
+            if (unlikely(anatomy))
+               hk_frame_anatomy_compute(anatomy, dev, cs, &cmd.legacy, i,
+                                        nr_vdm + nr_cdm, payload.size);
             /* Native ray queries exist only on kernels that accept the
              * extended command (hk_g17p_rt_enabled). */
             assert(!cs->gen1_native_rq || dev->gen1_native_rq);
@@ -1302,6 +1467,20 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                cmd.intersection_first=1;cmd.intersection_count=112;
                cmd.intersection_default_program=UINT64_C(0x10010020000);
                cmd.intersection_default_control=UINT64_C(0x16000000000);
+            } else if (cs->m5_native_rq) {
+               header.size = sizeof(cmd);
+               cmd.scs_layout = dev->m5_rq_instances
+                  ? ((debug_get_bool_option("ASAHI_M5_RQ_CANDIDATE_PROBE", false) || debug_get_bool_option("ASAHI_M5_RQ_CANDIDATE_API", false))
+                     ? UINT64_C(0x01140000600100e8) /* 276-entry IFT50 tail */
+                     : UINT64_C(0x00480000600100e8))
+                  : UINT64_C(0x0028000060000070);
+               cmd.cdm_auxiliary_allocation = 14;
+               cmd.intersection_pool = dev->m5_rq_ift->va->addr;
+               cmd.intersection_pool_bytes = 0x8000;
+               cmd.intersection_first = 1;
+               cmd.intersection_count = 112;
+               cmd.intersection_default_program = dev->m5_rq_default_program;
+               cmd.intersection_default_control = dev->m5_rq_default_control;
             }
             if (queue->sync.exact_prior) {
                header.size = sizeof(cmd);
@@ -1325,6 +1504,41 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                    cs->timestamp.end.handle || cs->timestamp.start.handle);
 
             asahi_append_fragment_attachments(dev, &payload, cs);
+            if (dev->dev.params.features & DRM_ASAHI_FEATURE_RENDER_RESOURCES) {
+               /* V2 kernels take 104-byte drm_asahi_render_program_v2 records
+                * through command 7; the tile record is widened to match. */
+               const bool v2 = dev->dev.params.features &
+                               DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2;
+               const struct drm_asahi_render_program_v2 tile = {
+                  .legacy = cs->tile_resources};
+               const size_t tile_bytes =
+                  v2 ? sizeof(tile) : sizeof(cs->tile_resources);
+               /* The header size is 16 bits; never let it truncate. */
+               if (cs->render_resources.size + tile_bytes > UINT16_MAX) {
+                  util_dynarray_fini(&payload);
+                  if (unlikely(anatomy))
+                     hk_frame_anatomy_end_submit(anatomy, dev, queue,
+                                                 VK_ERROR_DEVICE_LOST);
+                  return vk_device_set_lost(
+                     &dev->vk, "M5 render resource list too large (%u bytes)",
+                     cs->render_resources.size);
+               }
+               const struct drm_asahi_cmd_header resources = {
+                  .cmd_type = v2 ? DRM_ASAHI_SET_RENDER_RESOURCES_V2
+                                 : DRM_ASAHI_SET_RENDER_RESOURCES,
+                  .size = cs->render_resources.size + tile_bytes,
+                  .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
+                  .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
+               };
+               util_dynarray_append(&payload, resources);
+               util_dynarray_append_array(
+                  &payload, uint8_t,
+                  v2 ? (const void *)&tile : (const void *)&cs->tile_resources,
+                  tile_bytes);
+               util_dynarray_append_array(&payload, uint8_t,
+                                         cs->render_resources.data,
+                                         cs->render_resources.size);
+            }
             struct drm_asahi_cmd_render_with_prior cmd = {0};
             asahi_fill_vdm_command(dev, cs, &cmd.legacy);
 
@@ -1343,13 +1557,35 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                 (cs->sync.barrier[HK_SYNC_VDM] != DRM_ASAHI_BARRIER_NONE ||
                  cs->sync.prior[HK_SYNC_VDM] != 0))
                cmd.legacy.flags |= DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
+
+            /* Likewise for compute: when the vertex half depends on less
+             * compute work than the fragment half (image-only producers
+             * ordered by image barriers, fragment-only destinations), the
+             * kernel orders the tiling half after that prefix alone. */
+            STATIC_ASSERT(sizeof(struct drm_asahi_cmd_render_with_stage_prior) ==
+                          sizeof(struct drm_asahi_cmd_render_with_prior) + 16);
+            const bool stage_cdm =
+               agx_chip_g17_m5(dev->dev.chip) && queue->sync.exact_prior &&
+               (dev->dev.params.features &
+                DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS) &&
+               cs->sync.ta_split &&
+               (cs->sync.barrier_ta[HK_SYNC_CDM] !=
+                   cs->sync.barrier[HK_SYNC_CDM] ||
+                cs->sync.prior_ta[HK_SYNC_CDM] != cs->sync.prior[HK_SYNC_CDM]);
+            if (stage_cdm)
+               cmd.legacy.flags |= DRM_ASAHI_RENDER_COMPUTE_STAGE_BARRIERS;
+            if (unlikely(anatomy))
+               hk_frame_anatomy_render(anatomy, dev, cs, &cmd.legacy, i,
+                                       nr_vdm + nr_cdm, payload.size);
             header.size = hk_drm_render_command_size(
-               agx_native_graphics(&dev->dev), queue->sync.exact_prior);
+               agx_native_graphics(&dev->dev) || agx_chip_g17_m5(dev->dev.chip),
+               queue->sync.exact_prior);
             if (queue->sync.exact_prior) {
                cmd.prior_vdm = command_prior[HK_SYNC_VDM];
                cmd.prior_cdm = command_prior[HK_SYNC_CDM];
             }
-            if (cs->gen1_native_fragment_rq || cs->gen1_native_vertex_rq) {
+            if (!agx_chip_g17_m5(dev->dev.chip) &&
+                (cs->gen1_native_fragment_rq || cs->gen1_native_vertex_rq)) {
                struct drm_asahi_cmd_render_with_ray_query extended = {.legacy = cmd};
                for (unsigned stage = 0; stage < 2; ++stage) {
                   if (!(stage ? cs->gen1_native_fragment_rq
@@ -1367,6 +1603,16 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                header.size = sizeof(extended);
                util_dynarray_append(&payload, header);
                util_dynarray_append_array(&payload, uint8_t, &extended, header.size);
+            } else if (stage_cdm) {
+               const struct drm_asahi_cmd_render_with_stage_prior staged = {
+                  .legacy = cmd,
+                  .ta_cdm_barrier = cs->sync.barrier_ta[HK_SYNC_CDM],
+                  .ta_prior_cdm = cs->sync.prior_ta[HK_SYNC_CDM],
+               };
+               header.size = sizeof(staged);
+               util_dynarray_append(&payload, header);
+               util_dynarray_append_array(&payload, uint8_t, &staged,
+                                          header.size);
             } else {
                util_dynarray_append(&payload, header);
                util_dynarray_append_array(&payload, uint8_t, &cmd, header.size);
@@ -1393,13 +1639,20 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       .cmdbuf = (uint64_t)(uintptr_t)(payload.data),
    };
 
+   /* Profiler: "edges" timestamp claims happen in the final payload. */
+   if (unlikely(anatomy))
+      hk_frame_anatomy_prepare(anatomy, dev, payload.data, payload.size);
+
    VkResult result;
    if (command_count <= max_commands_per_submit(dev)) {
+      if (unlikely(anatomy))
+         hk_frame_anatomy_note_barriers(anatomy, payload.data, 0, payload.size);
       result =
          queue_submit_single(dev, &submit_ioctl, queue->drm.virt_ring_idx);
    } else {
       result = queue_submit_looped(dev, queue, &submit_ioctl, command_count,
-                                   queue->drm.virt_ring_idx, prior_base);
+                                   queue->drm.virt_ring_idx, prior_base,
+                                   chunk_timelines, first_chunk_point, anatomy);
    }
    if (cumulative_signals && !kernel_cumulative) {
       /* The kernel can publish an error fence even when submission fails.
@@ -1411,6 +1664,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    }
 
    util_dynarray_fini(&payload);
+
+   if (unlikely(anatomy))
+      hk_frame_anatomy_end_submit(anatomy, dev, queue, result);
 
    return result;
 }
@@ -1488,9 +1744,18 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
       priority_info ? priority_info->globalPriority
                     : VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
 
-   /* High-priority scheduling still needs kernel qualification. */
+   /* On M5, quantize relative priorities to the two unprivileged firmware
+    * classes. An explicit global class takes precedence; the kernel checks
+    * permission for elevated classes. No scheduling work is needed during
+    * submission. Elsewhere high-priority scheduling still needs kernel
+    * qualification.
+    */
    enum drm_asahi_priority drm_priority = translate_priority(priority);
-   if (drm_priority >= DRM_ASAHI_PRIORITY_HIGH) {
+   if (agx_chip_g17_m5(dev->dev.chip)) {
+      if (!priority_info &&
+          pCreateInfo->pQueuePriorities[index_in_family] < 0.5f)
+         drm_priority = DRM_ASAHI_PRIORITY_LOW;
+   } else if (drm_priority >= DRM_ASAHI_PRIORITY_HIGH) {
       vk_free(&dev->vk.alloc, queue);
       return VK_ERROR_NOT_PERMITTED_EXT;
    }
@@ -1502,6 +1767,8 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
    }
 
    queue->vk.driver_submit = hk_queue_submit;
+   queue->sync.precise_tile_evictions = agx_is_m4_pro(&dev->dev);
+   queue->sync.direct_single_footprints = agx_is_m4_pro(&dev->dev);
    queue->sync.serialize = dev->dev.params.gpu_generation >= 13 &&
                            dev->dev.params.gpu_generation <= 14;
    /* A serialized queue orders every command after both engines' complete
@@ -1541,7 +1808,8 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
    queue->drm.timeline_value = initial_value;
    queue->drm.signalled_value = initial_value;
 
-   if (dev->dev.chip == AGX_CHIP_G17P &&
+   if ((dev->dev.chip == AGX_CHIP_G17P ||
+        agx_chip_g17_m5(dev->dev.chip)) &&
        dev->vk.enabled_features.sparseBinding) {
       queue->g17p_sstt_flush_bo =
          agx_bo_create(&dev->dev, AIL_PAGESIZE, 0, 0, "SSTT flush stream");
@@ -1552,9 +1820,9 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
 
       uint8_t *stream = agx_bo_map(queue->g17p_sstt_flush_bo);
       if (!stream ||
-          !agx3_cdm_sstt_flush_invalidate_pack(AGX_CHIP_G17P, stream) ||
+          !agx3_cdm_sstt_flush_invalidate_pack(dev->dev.chip, stream) ||
           !agx3_cdm_stream_terminate_pack(
-             AGX_CHIP_G17P,
+             dev->dev.chip,
              stream + AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE)) {
          hk_queue_finish(dev, queue);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);

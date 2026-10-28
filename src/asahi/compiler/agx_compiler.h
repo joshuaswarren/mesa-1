@@ -24,6 +24,9 @@ extern "C" {
 #define AGX_NUM_REGS (256)
 
 
+/* G17G/S native allocation ends at r125; r126/r127 are not GPRs. */
+#define AGX3C_NUM_REGS (252)
+
 /* u0-u255 inclusive, as pairs of 16-bits */
 #define AGX_NUM_UNIFORMS (512)
 
@@ -376,6 +379,7 @@ typedef struct {
       uint64_t imm;
       uint32_t writeout;
       uint32_t truth_table;
+      uint32_t matrix_type;
       uint32_t component;
       uint32_t channels;
       uint32_t bfi_mask;
@@ -440,6 +444,10 @@ typedef struct {
 
    /* TODO: Handle loads more efficiently */
    bool coherent : 1;
+   /* M5 image load from memory no store of this shader can write (NIR
+    * ACCESS_CAN_REORDER and ACCESS_RESTRICT, not coherent): the M5 copy
+    * schedule may move it across memory stores. */
+   bool memory_can_reorder : 1;
    /* AGX3 memory index scale excludes the access-format size. */
    bool memory_index_is_bytes : 1;
    /* Raw subword memory elements use packed payloads (device loads use
@@ -450,9 +458,9 @@ typedef struct {
     * and are never inferred from generic memory IR. */
    bool scs_zero_extend : 1;
    bool scs_c_load_marker : 1;
-   bool scs_c_status_load;
-   /* Native G17P traversal publishes completion on scoreboard slot 6. */
+   bool scs_c_status_load : 1;
    bool scs_rt_wait : 1;
+   bool scs_rt_completion : 1;
    uint8_t scs_address_selector;
 
    /* Final st_vary op */
@@ -464,6 +472,9 @@ typedef struct {
    /* Scoreboard index, 0 or 1. Leave as 0 for instructions that do not require
     * scoreboarding (everything but memory load/store and texturing). */
    unsigned scoreboard : 1;
+
+   /* NIR permits either sign for a zero result of this floating add. */
+   bool no_signed_zero : 1;
 
    /* Output modifiers */
    bool saturate : 1;
@@ -480,6 +491,13 @@ typedef struct {
    bool agx3_tex_coord_start : 1;
    bool agx3_tex_coords_staged : 1;
    bool agx3_cube_scalar_coords  : 1;
+
+   /* M5 texel fetch or 2D sample with independent scalar coordinates:
+    * src[0] is x, src[6] is y and src[7] is the sample index of a
+    * multisampled read or the layer of an array read (null otherwise). The
+    * staging COPYs read each component where it lives, so no contiguous
+    * coordinate vector has to be collected for the read. */
+   bool agx3_split_coords : 1;
 
 } agx_instr;
 
@@ -666,6 +684,9 @@ typedef struct {
 
    /* Beginning of stack allocation used for parallel copy lowering */
    bool has_spill_pcopy_reserved;
+
+   /* M5 CEM owns halves 8..15, beyond CF/shuffle/parallel-copy scratch. */
+   bool agx3_cem_low_scratch;
 
    /* The remat-only spiller had to spill a value to scratch; register
     * allocation must finish with real spilling under the full budget. */
@@ -1161,6 +1182,12 @@ agx_builder_insert(agx_cursor *cursor, agx_instr *I)
 bool agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx,
                                        const agx_instr *I, agx_index texture,
                                        agx_index sampler);
+/* Whether replacing source s of an M5 main-program FADD/FMUL/FFMA with
+ * `uniform` gives a native uniform-operand form (agx3_uniform_float_encode). */
+bool agx3_m5_float_accepts_uniform(const agx_context *ctx, const agx_instr *I,
+                                   unsigned s, unsigned uniform,
+                                   enum agx_size size);
+
 bool agx_instr_accepts_uniform(enum agx_isa_encoding encoding,
                                enum agx_opcode op, unsigned src_index,
                                unsigned value, enum agx_size size);
@@ -1182,6 +1209,7 @@ bool agx3_lower_texture_publications(agx_context *ctx);
 bool agx3_fuse_fma_texture_publications(agx_context *ctx);
 bool agx3_lower_scalar_texture_publications(agx_context *ctx);
 bool agx3_lower_scalar_cube_coordinates(agx_context *ctx);
+bool agx3_split_texture_coordinates(agx_context *ctx);
 void agx_lower_uniform_sources(agx_context *ctx);
 void agx_opt_cse(agx_context *ctx);
 bool agx_opt_collect_split(agx_context *ctx);
@@ -1191,6 +1219,7 @@ bool agx_can_rematerialize_uniform(const agx_context *ctx, const agx_instr *I);
 bool agx_has_uniform_store(const agx_context *ctx);
 void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
+void agx_opt_promote_m5_float_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
 void agx_ilp_schedule(agx_context *ctx);
@@ -1235,7 +1264,9 @@ bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
 static inline unsigned
 agx_reserved_registers(const agx_context *ctx)
 {
-   if (ctx->has_spill_pcopy_reserved)
+   if (ctx->agx3_cem_low_scratch)
+      return 16;
+   else if (ctx->has_spill_pcopy_reserved)
       return 8;
    else if (ctx->any_quad_divergent_shuffle)
       return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
@@ -1246,9 +1277,11 @@ agx_reserved_registers(const agx_context *ctx)
 }
 
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
+bool agx_fold_m5_spill_constant_phis(agx_context *ctx);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
+void agx_ra_without_remat(agx_context *ctx);
 bool agx3_is_async(const agx_instr *I);
 unsigned agx_calc_register_demand(agx_context *ctx, bool remat);
 unsigned agx3_tile_store_bank(agx_context *ctx);
@@ -1267,6 +1300,7 @@ void agx_pack_binary(agx_context *ctx, struct util_dynarray *emission);
  * encoding. */
 bool agx3_g17p_interleaved_zs(const agx_context *ctx);
 bool agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission);
+const char *agx3_last_pack_refusal(void);
 
 #ifndef NDEBUG
 void agx_validate(agx_context *ctx, const char *after_str);
@@ -1297,6 +1331,50 @@ agx_is_float_src(const agx_instr *I, unsigned s)
    return info.is_float || (s < 2 && fcmp);
 }
 
+/* The M5 select with a uniform first comparand that native G17G
+ * fragments use (agx3_alu_fcmp_select32_gpu1 cmp0_uniform): a 32-bit
+ * result choosing a zero immediate or a 32-bit register after comparing an
+ * aligned 32-bit uniform with a 32-bit register, by GE or LE once the
+ * NaN-ignoring conditions are normalized as the packer does. Returns the
+ * normalized condition and whether the selected operands are exchanged. */
+static inline bool
+agx3_m5_fcmpsel_uniform_cmp0(const agx_instr *I, unsigned *condition,
+                             bool *swap)
+{
+   if (I->op != AGX_OPCODE_FCMPSEL || I->nr_dests != 1 || I->nr_srcs != 4 ||
+       I->saturate || I->dest[0].size != AGX_SIZE_32 ||
+       agx_channels(I->dest[0]) != 1)
+      return false;
+   const agx_index u = I->src[0], r = I->src[1];
+   if (u.type != AGX_INDEX_UNIFORM || u.size != AGX_SIZE_32 || (u.value & 1) ||
+       u.value >= 256 || u.abs || u.neg || u.memory ||
+       r.type == AGX_INDEX_UNIFORM || r.type == AGX_INDEX_IMMEDIATE ||
+       r.size != AGX_SIZE_32 || agx_channels(r) != 1 || r.abs || r.neg ||
+       r.memory)
+      return false;
+   unsigned cond = I->fcond;
+   bool exchanged = I->invert_cond;
+   if (cond == AGX_FCOND_LTN) {
+      cond = AGX_FCOND_GE;
+      exchanged = !exchanged;
+   } else if (cond == AGX_FCOND_GTN) {
+      cond = AGX_FCOND_LE;
+      exchanged = !exchanged;
+   }
+   if (cond != AGX_FCOND_GE && cond != AGX_FCOND_LE)
+      return false;
+   const agx_index imm = I->src[exchanged ? 3 : 2];
+   const agx_index reg = I->src[exchanged ? 2 : 3];
+   if (imm.type != AGX_INDEX_IMMEDIATE || imm.value != 0 || imm.abs ||
+       imm.neg || reg.type == AGX_INDEX_UNIFORM ||
+       reg.type == AGX_INDEX_IMMEDIATE || reg.size != AGX_SIZE_32 ||
+       agx_channels(reg) != 1 || reg.abs || reg.neg || reg.memory)
+      return false;
+   *condition = cond;
+   *swap = exchanged;
+   return true;
+}
+
 struct agx_copy {
    /* Base register destination of the copy */
    unsigned dest;
@@ -1314,10 +1392,18 @@ struct agx_copy {
 void agx_emit_parallel_copies(agx_builder *b, struct agx_copy *copies,
                               unsigned n);
 
+/* As above, with an optional free 32-bit GPR (two aligned halves that no
+ * copy reads or writes and that holds no live value at this point).  Register
+ * cycles are then broken with one move through it instead of a three-XOR
+ * swap per element.  Pass agx_null() when no such register is known. */
+void agx_emit_parallel_copies_temp(agx_builder *b, struct agx_copy *copies,
+                                   unsigned num_copies, agx_index temp);
+
 void agx_compute_liveness(agx_context *ctx);
 void agx_liveness_ins_update(struct u_sparse_bitset *live, agx_instr *I);
 
-bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
+bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p,
+                          bool agx3c);
 bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
 bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
                                           unsigned allocated);

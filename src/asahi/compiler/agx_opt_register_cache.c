@@ -6,10 +6,101 @@
 
 #include <stdlib.h>
 #include "util/bitset.h"
+#include "util/lut.h"
 #include "util/u_debug.h"
 #include "agx_compiler.h"
 #include "agx_debug.h"
 #include "shader_enums.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(m5_redundant_copies,
+                           "ASAHI_M5_REDUNDANT_COPIES", true)
+
+/* Remove bit-identical overwrites only after allocation, without extending
+ * allocation live ranges. The cache pass below recomputes all use hints. */
+static void
+agx3_remove_redundant_physical_copies(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       !debug_get_option_m5_redundant_copies())
+      return;
+
+   uint32_t serial = 0;
+   agx_foreach_block(ctx, block) {
+      uint32_t value[AGX_NUM_REGS] = {0};
+      agx_foreach_instr_in_block_safe(block, I) {
+         const struct agx_opcode_info *info = &agx_opcodes_info[I->op];
+         if (!info->can_eliminate || !info->can_reorder ||
+             info->schedule_class != AGX_SCHEDULE_CLASS_NONE ||
+             !I->nr_dests) {
+            memset(value, 0, sizeof(value));
+            continue;
+         }
+
+         uint32_t copied[4] = {0}, old_value[4] = {0};
+         bool copy = false;
+         const agx_index dst = I->nr_dests == 1 ? I->dest[0] : agx_null();
+         const unsigned count = agx_is_null(dst) ? 0 : agx_index_size_16(dst);
+         const bool plain_dst = dst.type == AGX_INDEX_REGISTER && !dst.memory &&
+            !dst.abs && !dst.neg && !I->saturate && !I->shift &&
+            !I->invert_cond && !I->memory_is_packed &&
+            count >= 1 && count <= 4 && dst.value + count <= AGX_NUM_REGS;
+         if (plain_dst) {
+            for (unsigned c = 0; c < count; ++c)
+               old_value[c] = value[dst.value + c];
+         }
+         if (plain_dst && I->op == AGX_OPCODE_MOV_IMM && count <= 2) {
+            for (unsigned c = 0; c < count; ++c)
+               copied[c] = UINT32_C(0x80000000) |
+                           ((I->imm >> (16 * c)) & 0xffff);
+            copy = true;
+         } else if (plain_dst && I->op == AGX_OPCODE_BITOP &&
+                    I->truth_table == UTIL_LUT2(a) && I->nr_srcs == 2) {
+            const agx_index src = I->src[0];
+            if (!src.memory && !src.abs && !src.neg && src.size == dst.size &&
+                agx_index_size_16(src) == count) {
+               if (src.type == AGX_INDEX_REGISTER &&
+                   src.value + count <= AGX_NUM_REGS) {
+                  for (unsigned c = 0; c < count; ++c) {
+                     if (!value[src.value + c])
+                        value[src.value + c] = ++serial;
+                     copied[c] = value[src.value + c];
+                  }
+                  copy = true;
+               } else if (src.type == AGX_INDEX_UNIFORM &&
+                          src.value + count <= 512) {
+                  for (unsigned c = 0; c < count; ++c)
+                     copied[c] = UINT32_C(0x40000000) | (src.value + c);
+                  copy = true;
+               }
+            }
+         }
+         if (copy) {
+            bool redundant = true;
+            for (unsigned c = 0; c < count; ++c)
+               redundant &= old_value[c] == copied[c];
+            if (redundant) {
+               agx_remove_instruction(I);
+               continue;
+            }
+            for (unsigned c = 0; c < count; ++c)
+               value[dst.value + c] = copied[c];
+         } else {
+            agx_foreach_dest(I, d) {
+               const agx_index dest = I->dest[d];
+               const unsigned n = agx_index_size_16(dest);
+               if (dest.type != AGX_INDEX_REGISTER || dest.memory ||
+                   dest.value + n > AGX_NUM_REGS) {
+                  memset(value, 0, sizeof(value));
+                  break;
+               }
+               for (unsigned c = 0; c < n; ++c)
+                  value[dest.value + c] = ++serial;
+            }
+         }
+      }
+   }
+}
 
 static void
 postra_liveness_ins(BITSET_WORD *live, agx_instr *I)
@@ -97,6 +188,8 @@ writes_reg(const agx_instr *I, unsigned reg)
 void
 agx_opt_register_cache(agx_context *ctx)
 {
+   agx3_remove_redundant_physical_copies(ctx);
+
    /* Analyze the shader globally */
    postra_liveness(ctx);
 
@@ -162,7 +255,7 @@ agx_opt_register_cache(agx_context *ctx)
     * reads are at the top of the loop, across the back edge. Cache a loop
     * compare's register source when the loop header reads it with an ALU
     * instruction before writing it, unless this read is its last use. */
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+   if (!agx_isa_is_agx3(ctx->key->dev.encoding))
       return;
 
    agx_foreach_block(ctx, block) {

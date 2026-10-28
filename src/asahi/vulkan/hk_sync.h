@@ -73,15 +73,28 @@ enum hk_sync_kind {
    /* Destination scopes only: pre-rasterization shaders that read images.
     * An image barrier can only order the image's own accesses, and a
     * pre-rasterization stage accesses an image only through a shader that
-    * reads one. On G17P, image barriers therefore name this class (and the
-    * fragment class) where other dependencies name HK_SYNC_GFX: a render's
-    * fragment half always waits on it, its vertex half only once it draws
-    * with a pre-rasterization shader that reads images
+    * reads one. On G17P and M5, image barriers therefore name this class
+    * (and the fragment class) where other dependencies name HK_SYNC_GFX: a
+    * render's fragment half always waits on it, its vertex half only once it
+    * draws with a pre-rasterization shader that reads images
     * (hk_sync_vertex_images). Other chips never record it. */
    HK_SYNC_GFX_IMG = 1 << 4,
+
+   /* Stream kinds only, never a destination scope: work that can write
+    * memory a later pre-rasterization stage reads other than through an
+    * image. Graphics work writes such memory only from shaders (storage,
+    * atomics), through transform feedback, through attachments that can
+    * alias other resources, and in its pre- and post-graphics streams; a
+    * render without any of those writes only its attachments, which a later
+    * pre-rasterization stage can read only through an image (HK_SYNC_GFX_IMG).
+    * Every stream of another kind is counted too. On M5 a dependency from
+    * graphics work to pre-rasterization stages orders a render's vertex half
+    * only after the latest such stream on the render subqueue
+    * (hk_sync_barrier()). */
+   HK_SYNC_GFX_MEM = 1 << 5,
 };
 
-#define HK_SYNC_NUM_KINDS 5
+#define HK_SYNC_NUM_KINDS 6
 
 /* Subqueue index: 0 render (VDM), 1 compute (CDM). */
 enum hk_sync_sq {
@@ -211,6 +224,10 @@ struct hk_sync_stream {
     * compares: a pre-graphics stream takes the number reserved just below
     * its render so it sorts before it, where the list places it. */
    uint32_t seq;
+
+   /* The latest HK_SYNC_GFX_MEM stream on this stream's subqueue recorded
+    * before it. */
+   struct hk_cs *prev_mem;
 
    /* Set at submission: 1-based position among the commands of this
     * subqueue in the ioctl being built. */
@@ -343,6 +360,14 @@ struct hk_sync_queue {
    struct hk_sync_recent recent[HK_SYNC_RECENT_FOOTPRINTS];
    uint32_t recent_next, recent_count;
    uint64_t recent_max, evicted;
+   /* G16S: complete writes need no preservation query against other
+    * complete writes, including entries evicted from the bounded ring.
+    * Retain all writes for a future partial-tile or sparse-layer pass.
+    */
+   bool precise_tile_evictions;
+   /* A single command buffer already owns the complete footprint list. */
+   bool direct_single_footprints;
+   uint64_t last_preserve, evicted_preserve;
 };
 
 void hk_sync_reset(struct hk_cmd_buffer *cmd);
@@ -374,6 +399,7 @@ void hk_sync_src_dep(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
 /* The render stream draws with a pre-rasterization shader that reads images:
  * its vertex half joins the image-barrier requirements (HK_SYNC_GFX_IMG). */
 void hk_sync_vertex_images(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+void hk_sync_note_memory_write(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 /* Every later stream of the given kinds waits on cs. */
 void hk_sync_after_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
@@ -393,6 +419,11 @@ void hk_sync_check_cs(struct hk_cmd_buffer *cmd);
 void hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
                    struct hk_cs *from);
+
+/* M5: merging compute stream from into the adjacent stream into would make
+ * the work into already holds wait for a render it does not wait for. */
+bool hk_sync_merge_delays(struct hk_cmd_buffer *cmd, const struct hk_cs *into,
+                          const struct hk_cs *from);
 
 /* Obtain the general compute stream, ended and recreated if it is not
  * positioned after dep. The returned stream carries dep. */

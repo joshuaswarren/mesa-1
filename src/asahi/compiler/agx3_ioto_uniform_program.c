@@ -89,27 +89,48 @@ agx3_ioto_uniform_program_desc_body_bound(
           checked.count != inputs->count ||
           checked.storage_bytes != inputs->storage_bytes ||
           (inputs->count &&
-           (!agx_chip_native_preamble(chip) || desc->fast_path_enabled)))
+           ((!agx_chip_native_preamble(chip) && !agx_chip_g17_m5(chip)) ||
+            desc->fast_path_enabled)))
          return false;
       uint64_t covered[AGX3_CPROG_INPUT_WORDS] = {0};
+      size_t copies = 0;
       for (size_t i = 0; i < desc->range_count; ++i) {
          const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
+         /* Ranges are dword aligned (uniform_range_valid) and the loader
+          * publishes per loaded dword (pack_cprog_copy): one 32-bit COPY for
+          * a selected pair at an even compact position, else one 16-bit
+          * COPY per selected half. */
          for (unsigned h = range->start_halfs;
-              h < range->start_halfs + range->size_halfs; ++h) {
-            const uint64_t bit = UINT64_C(1) << (h % 64);
-            if (!(inputs->halves[h / 64] & bit))
+              h < range->start_halfs + range->size_halfs; h += 2) {
+            unsigned mask = 0;
+            for (unsigned j = 0; j < 2; ++j) {
+               const unsigned half = h + j;
+               const uint64_t bit = UINT64_C(1) << (half % 64);
+               if (!(inputs->halves[half / 64] & bit))
+                  continue;
+               if (covered[half / 64] & bit)
+                  return false;
+               covered[half / 64] |= bit;
+               mask |= 1u << j;
+            }
+            if (!mask)
                continue;
-            if (covered[h / 64] & bit)
+            uint16_t tps;
+            if (!agx3_cprog_input_tps_half(&checked, (mask & 1) ? h : h + 1,
+                                           &tps))
                return false;
-            covered[h / 64] |= bit;
+            copies += (mask == 3 && !(tps & 1)) ? 1 : __builtin_popcount(mask);
          }
       }
       for (unsigned w = 0; w < AGX3_CPROG_INPUT_WORDS; ++w) {
          if (covered[w] != inputs->halves[w])
             return false;
       }
-      /* At worst each selected half uses its own extended COPY. */
-      if (!add_size(&bound, 10u * inputs->count))
+      /* An extended COPY is at most 10 bytes (8 on M5). Bounding each
+       * selected half by its own COPY instead roughly doubled this term and
+       * refused M5 compute loaders that read a few hundred input halves
+       * (e.g. ubo.*_compute) although they compose to about 4 KiB. */
+      if (!add_size(&bound, 10u * copies))
          return false;
    }
    *bytes = bound;

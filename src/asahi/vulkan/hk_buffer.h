@@ -21,7 +21,10 @@ struct hk_buffer {
    /** Reserved VA for sparse buffers, NULL otherwise. */
    struct agx_va *va;
 
-   /** One residency bit per sparse-buffer page, G17P only. */
+   /** Bytes of that VA counted in hk_device::sparse_scratch_B. */
+   uint64_t sparse_scratch_B;
+
+   /** One residency bit per sparse-buffer page on Gen9/Gen10 AGX3. */
    struct agx_bo *sparse_map;
    uint32_t sparse_map_entries;
 };
@@ -92,5 +95,12 @@ hk_buffer_addr_range(const struct hk_buffer *buffer, uint64_t offset,
    };
 }
 
+VkResult hk_reserve_sparse_scratch(struct hk_device *dev, uint64_t size_B);
+void hk_release_sparse_scratch(struct hk_device *dev, uint64_t size_B);
+
 VkResult hk_bind_scratch(struct hk_device *dev, struct agx_va *va,
                          unsigned offs_B, size_t size_B);
+
+/* Publish a bound/unbound sparse buffer range to physical pointer reads. */
+VkResult hk_update_physical_sparse_map(struct hk_device *dev, uint64_t address,
+                                       uint64_t size, bool nonresident);

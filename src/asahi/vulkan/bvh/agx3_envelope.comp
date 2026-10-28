@@ -125,7 +125,7 @@ publish_metadata(hk_agx3_envelope_job job, uint64_t image_bytes)
 }
 
 void
-clear_instance_pointers(uint job_index, uint lane)
+clear_instance_pointers(uint job_index, uint first, uint stride)
 {
    hk_agx3_envelope_job job = DEREF(INDEX(hk_agx3_envelope_job, args.jobs, job_index));
    if (job.geometry_type != VK_GEOMETRY_TYPE_INSTANCES_KHR ||
@@ -136,7 +136,7 @@ clear_instance_pointers(uint job_index, uint lane)
    uint64_t size = pointers + uint64_t(job.leaf_bound) * 16ul + 184ul;
    if (job.output_bvh >= (1ul << 48) || size > (1ul << 48) - job.output_bvh)
       return;
-   for (uint i = lane; i < job.leaf_bound; i += 64u) {
+   for (uint i = first; i < job.leaf_bound; i += stride) {
       store64(job.output_bvh + pointers + uint64_t(i)*16ul, 0ul);
       store64(job.output_bvh + pointers + uint64_t(i)*16ul + 8ul, 0ul);
    }
@@ -145,9 +145,14 @@ clear_instance_pointers(uint job_index, uint lane)
 void
 main()
 {
-   for (uint i = gl_WorkGroupID.x; i < args.job_count && args.refit == 0u;
-        i += gl_NumWorkGroups.x)
-      clear_instance_pointers(i, gl_LocalInvocationID.x);
+   /* A single job's pointers are cleared by the whole grid, which a TLAS
+    * build sizes to its instances; several jobs take a workgroup each. */
+   if (args.refit == 0u && args.job_count == 1u)
+      clear_instance_pointers(0u, gl_GlobalInvocationID.x,
+                              gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+   for (uint i = gl_WorkGroupID.x; i < args.job_count && args.job_count > 1u &&
+        args.refit == 0u; i += gl_NumWorkGroups.x)
+      clear_instance_pointers(i, gl_LocalInvocationID.x, gl_WorkGroupSize.x);
    uint id = gl_GlobalInvocationID.x;
    if (id >= args.job_count)
       return;

@@ -38,6 +38,10 @@ uint32_t hk_drm_g17p_zls_pixels(uint32_t width, uint32_t height,
                                 uint64_t depth_base, uint64_t depth_meta,
                                 uint64_t stencil_base, uint64_t stencil_meta);
 
+uint32_t hk_drm_m5_zls_pixels(uint32_t width, uint32_t height,
+                              uint64_t depth_base, uint64_t depth_meta,
+                              uint64_t stencil_base, uint64_t stencil_meta);
+
 uint32_t hk_drm_g17p_depth_clear(uint32_t depth_clear,
                                  uint64_t depth_base, uint64_t depth_meta,
                                  uint64_t stencil_base, uint64_t stencil_meta);

@@ -31,7 +31,7 @@ uint64_t agx_best_modifiers[] = {
 
 static VkFormatFeatureFlags2
 hk_modifier_features(const struct agx_device *dev, uint64_t mod,
-                     VkFormat vk_format, const VkFormatProperties *props)
+                     VkFormat vk_format, const VkFormatProperties3 *props)
 {
    /* There's no corresponding fourcc, so don't advertise modifiers */
    if (vk_format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
@@ -39,20 +39,24 @@ hk_modifier_features(const struct agx_device *dev, uint64_t mod,
       return 0;
    }
 
-   /* Don't advertise compression for the uncompressable */
+   /* Don't advertise compression for the uncompressable. A compressed image
+    * has no host-copy layout (images with host-transfer usage are never
+    * compressed). */
    if (mod == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED) {
       if (!hk_can_compress_format(dev, vk_format))
          return 0;
 
-      /* G17P shares compressed images without storage or host-copy access
-       * (hk_g17p_shared_compression_shape()). */
-      if (dev->chip == AGX_CHIP_G17P)
+      /* G17P and M5 share compressed images without storage or host-copy
+       * access (hk_g17p_shared_compression_shape()). */
+      if (dev->chip == AGX_CHIP_G17P || agx_chip_g17_m5(dev->chip))
          return props->optimalTilingFeatures &
                 ~(VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
                   VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT |
                   VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
                   VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
                   VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT);
+      return props->optimalTilingFeatures &
+             ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
    }
 
    /* Interchange: the 32-bit RGBA formats on G17P; never storage or host
@@ -77,7 +81,7 @@ hk_modifier_features(const struct agx_device *dev, uint64_t mod,
 static void
 get_drm_format_modifier_properties_list(
    const struct hk_physical_device *physical_device, VkFormat vk_format,
-   VkDrmFormatModifierPropertiesListEXT *list, const VkFormatProperties *props)
+   VkDrmFormatModifierPropertiesListEXT *list, const VkFormatProperties3 *props)
 {
    VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                           list->pDrmFormatModifierProperties,
@@ -97,7 +101,8 @@ get_drm_format_modifier_properties_list(
          *out_props = (VkDrmFormatModifierPropertiesEXT){
             .drmFormatModifier = mod,
             .drmFormatModifierPlaneCount = vk_format_get_plane_count(vk_format),
-            .drmFormatModifierTilingFeatures = flags,
+            .drmFormatModifierTilingFeatures =
+               vk_format_features2_to_features(flags),
          };
       };
    }
@@ -106,7 +111,7 @@ get_drm_format_modifier_properties_list(
 static void
 get_drm_format_modifier_properties_list_2(
    const struct hk_physical_device *physical_device, VkFormat vk_format,
-   VkDrmFormatModifierPropertiesList2EXT *list, const VkFormatProperties *props)
+   VkDrmFormatModifierPropertiesList2EXT *list, const VkFormatProperties3 *props)
 {
    VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierProperties2EXT, out,
                           list->pDrmFormatModifierProperties,
@@ -152,6 +157,14 @@ hk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       .bufferFeatures = vk_format_features2_to_features(buffer2),
    };
 
+   /* Modifier lists report the 64-bit feature sets (host image transfer,
+    * formatless storage, ...), which VkFormatProperties cannot carry. */
+   const VkFormatProperties3 props3 = {
+      .linearTilingFeatures = linear2,
+      .optimalTilingFeatures = optimal2,
+      .bufferFeatures = buffer2,
+   };
+
    vk_foreach_struct(sType, ext, pFormatProperties->pNext) {
       switch (sType) {
       case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
@@ -163,13 +176,13 @@ hk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       }
 
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT:
-         get_drm_format_modifier_properties_list(
-            pdevice, format, ext, &pFormatProperties->formatProperties);
+         get_drm_format_modifier_properties_list(pdevice, format, ext,
+                                                 &props3);
          break;
 
       case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT:
-         get_drm_format_modifier_properties_list_2(
-            pdevice, format, ext, &pFormatProperties->formatProperties);
+         get_drm_format_modifier_properties_list_2(pdevice, format, ext,
+                                                   &props3);
          break;
 
       default:

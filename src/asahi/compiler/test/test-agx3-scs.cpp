@@ -26,7 +26,7 @@ TEST(SCSRegisterIR, NeoScalarAndVector)
       result.channels_m1 = util_last_bit(mask) - 1;
       agx_scs_load_register_indexed_agx3_to(
          b, result, agx_register(32, AGX_SIZE_32),
-         agx_register(28, AGX_SIZE_32), 512, AGX_FORMAT_I32, mask, 3, false);
+         agx_register(28, AGX_SIZE_32), 512, AGX_FORMAT_I32, mask, 3, false, false);
       agx_stop(b);
       util_dynarray binary = UTIL_DYNARRAY_INIT;
       ASSERT_TRUE(agx3_pack_binary(b->shader, &binary));

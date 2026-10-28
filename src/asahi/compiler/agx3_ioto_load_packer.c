@@ -226,9 +226,7 @@ pack_absolute_copy(void *context, enum agx_chip chip,
       return false;
 
    uint16_t destination_half, source_half;
-   const uint16_t destination_stride =
-      packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 ? 2 : 4;
-   if (!add_half(load->native_slot_half, (uint16_t)(destination_stride * dword),
+   if (!add_half(load->native_slot_half, (uint16_t)(2u * dword),
                  &destination_half) ||
        !add_half(load->data.half, (uint16_t)(2u * dword), &source_half))
       return false;
@@ -243,7 +241,8 @@ pack_absolute_copy(void *context, enum agx_chip chip,
       if (!packer->copy_wait_emitted) {
          if (load->signal_slot == 0 || load->signal_slot > 8)
             return false;
-         wait_slot = load->signal_slot;
+         /* LDDEV slots are one-based; COPY wait fields are zero-based. */
+         wait_slot = load->signal_slot - 1;
       }
    } else {
       return false;
@@ -266,7 +265,8 @@ pack_cprog_copy(void *context, enum agx_chip chip,
                 struct agx_ioto_load_raw_record records[2], uint8_t *count)
 {
    struct agx3_ioto_load_packer *packer = context;
-   if (!packer || packer->chip != chip || !agx_chip_native_preamble(chip) ||
+   if (!packer || packer->chip != chip ||
+       (!agx_chip_native_preamble(chip) && !agx_chip_g17_m5(chip)) ||
        !load || !records || !count || dword >= load->count_dwords ||
        dword >= 4 || !direct_load_registers_ok(load))
       return false;
@@ -276,15 +276,18 @@ pack_cprog_copy(void *context, enum agx_chip chip,
    unsigned mask = (load->cprog_input_mask >> (2 * dword)) & 3;
    uint8_t bytes[AGX3_CPROG_INPUT_COPY_MAX_SIZE];
    size_t length;
-   if (!agx3_cprog_input_publish_at(mask, tps, load->data.half + 2u * dword,
-                                    bytes, sizeof(bytes), &length) ||
-       length > 20 || length % 10)
+   const bool m5 = agx_chip_g17_m5(chip);
+   const unsigned copy_size = m5 ? 8 : 10;
+   if (!agx3_cprog_input_publish_at_encoding(
+          m5 ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B,
+          mask, tps, load->data.half + 2u * dword,
+          bytes, sizeof(bytes), &length) || length > 20 || length % copy_size)
       return false;
-   *count = length / 10;
+   *count = length / copy_size;
    for (unsigned i = 0; i < *count; ++i) {
       records[i].kind = AGX_IOTO_LOAD_RAW_COPY_EP1;
-      records[i].length = 10;
-      memcpy(records[i].bytes, bytes + 10 * i, 10);
+      records[i].length = copy_size;
+      memcpy(records[i].bytes, bytes + copy_size * i, copy_size);
    }
    return true;
 }

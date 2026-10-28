@@ -100,6 +100,13 @@ is_b(enum agx_isa_encoding e)
 }
 
 bool
+agx3_funop_carries_wait(enum agx_isa_encoding enc, enum agx3_funop op)
+{
+   return (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+          op < AGX3_FUNOP_COUNT && forms[op].wait_ok;
+}
+
+bool
 agx3_funop_encode_source_lifetime(
    enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest, uint16_t src,
    bool src_abs, bool src_neg, bool saturate, uint16_t wait_mask, bool src_live,

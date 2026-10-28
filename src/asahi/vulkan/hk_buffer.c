@@ -7,12 +7,57 @@
 #include "hk_buffer.h"
 #include "hk_acceleration_structure.h"
 
+#include <errno.h>
+
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "hk_device.h"
 #include "hk_device_memory.h"
 #include "hk_entrypoints.h"
 #include "hk_physical_device.h"
+#include "util/u_atomic.h"
+
+VkResult
+hk_update_physical_sparse_map(struct hk_device *dev, uint64_t address,
+                               uint64_t size, bool nonresident)
+{
+   struct agx_bo *bo = dev->physical_sparse_map;
+   if (!bo || !size)
+      return VK_SUCCESS;
+   const uint64_t base = dev->dev.main_heap_base;
+   const uint64_t span = dev->dev.main_heap_size;
+   if (address < base || address - base > span ||
+       size > span - (address - base) ||
+       (address | size) & (AIL_PAGESIZE - 1))
+      return vk_error(dev, VK_ERROR_UNKNOWN);
+
+   const uint64_t first = (address - base) / AIL_PAGESIZE;
+   const uint64_t last = first + size / AIL_PAGESIZE;
+   uint32_t *header = agx_bo_map(bo);
+   uint32_t *map = header + 4;
+   int32_t changed = 0;
+   for (uint64_t page = first; page < last;) {
+      const unsigned count = MIN2(last - page, 32 - (page & 31));
+      const uint32_t mask = BITFIELD_MASK(count) << (page & 31);
+      if (nonresident) {
+         uint32_t old = __atomic_fetch_or(&map[page >> 5], mask,
+                                           __ATOMIC_RELAXED);
+         changed += util_bitcount(~old & mask);
+      } else {
+         uint32_t old = __atomic_fetch_and(&map[page >> 5], ~mask,
+                                            __ATOMIC_RELAXED);
+         changed -= util_bitcount(old & mask);
+      }
+      page += count;
+   }
+   __atomic_fetch_add(&header[0], changed, __ATOMIC_RELEASE);
+   const uint64_t offset = 16 + (first >> 5) * sizeof(uint32_t);
+   const uint64_t end = 16 + DIV_ROUND_UP(last, 32) * sizeof(uint32_t);
+   if (agx_bo_sync_for_device(bo, offset, end - offset) ||
+       agx_bo_sync_for_device(bo, 0, 16))
+      return vk_error(dev, VK_ERROR_DEVICE_LOST);
+   return VK_SUCCESS;
+}
 
 static uint32_t
 hk_get_buffer_alignment(const struct hk_physical_device *pdev,
@@ -83,21 +128,50 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
                 size_t size_B)
 {
    uint64_t addr = va->addr + offset_B;
-   uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE;
+   uint32_t flags = DRM_ASAHI_BIND_READ | agx_fill_bind_flags(&dev->dev);
 
+   /* The kernel refuses a fill it cannot back (ENOMEM; on M5 also its
+    * hypervisor page-table budget): that is device memory exhaustion. */
    /* Map read-write scratch to the primary (bottom half) VA range */
    int ret = agx_bo_bind(&dev->dev, dev->dev.scratch_bo, addr, size_B, 0,
                          flags | DRM_ASAHI_BIND_WRITE);
    if (ret)
-      return VK_ERROR_UNKNOWN;
+      return errno == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN;
 
    /* Map read-only scratch to the secondary (top half) VA range */
    ret = agx_bo_bind(&dev->dev, dev->dev.zero_bo,
                      addr + dev->dev.sparse_ro_offset, size_B, 0, flags);
    if (ret)
-      return VK_ERROR_UNKNOWN;
+      return errno == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN;
 
    return VK_SUCCESS;
+}
+
+/* M5 publishes every scratch-filled sparse page through the hypervisor,
+ * which allocates one page-table frame from its own heap per 32 MiB of VA and
+ * never frees it. Keep each device within its advertised
+ * sparseAddressSpaceSize; beyond it creation fails cleanly.
+ */
+VkResult
+hk_reserve_sparse_scratch(struct hk_device *dev, uint64_t size_B)
+{
+   if (!agx_chip_g17_m5(dev->dev.chip))
+      return VK_SUCCESS;
+
+   uint64_t used = p_atomic_add_return(&dev->sparse_scratch_B, size_B);
+   if (used > HK_M5_SPARSE_ADDR_SPACE_SIZE) {
+      p_atomic_add(&dev->sparse_scratch_B, -(int64_t)size_B);
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "M5 sparse address space exhausted");
+   }
+   return VK_SUCCESS;
+}
+
+void
+hk_release_sparse_scratch(struct hk_device *dev, uint64_t size_B)
+{
+   if (size_B)
+      p_atomic_add(&dev->sparse_scratch_B, -(int64_t)size_B);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -149,17 +223,38 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       }
       buffer->vk.device_address = buffer->va->addr;
 
-      /* Bind scratch pages to make read/write across the VA valid */
-      VkResult result = hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
-      if (result != VK_SUCCESS) {
-         agx_va_free(&dev->dev, buffer->va, true);
-         buffer->va = NULL;
-         vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
-         return result;
+      /* Binding-only sparse buffers must be fully bound before GPU use.
+       * On M5, reserve their VA without eagerly populating both views with
+       * scratch pages through SPTM. Partially resident buffers still need
+       * safe unbound accesses.
+       */
+      const bool binding_only =
+         agx_chip_g17_m5(dev->dev.chip) &&
+         (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) &&
+         !(buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT);
+      if (!binding_only) {
+         VkResult result = hk_reserve_sparse_scratch(dev, vma_size_B);
+         if (result != VK_SUCCESS) {
+            agx_va_free(&dev->dev, buffer->va, true);
+            buffer->va = NULL;
+            vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+            return result;
+         }
+         buffer->sparse_scratch_B =
+            agx_chip_g17_m5(dev->dev.chip) ? vma_size_B : 0;
+         result = hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+         if (result != VK_SUCCESS) {
+            hk_release_sparse_scratch(dev, buffer->sparse_scratch_B);
+            agx_va_free(&dev->dev, buffer->va, true);
+            buffer->va = NULL;
+            vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+            return result;
+         }
       }
 
-      if (dev->dev.chip == AGX_CHIP_G17P &&
-         (buffer->vk.create_flags &
+      if ((dev->dev.chip == AGX_CHIP_G17P ||
+           agx_chip_g17_m5(dev->dev.chip)) &&
+          (buffer->vk.create_flags &
            VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT)) {
          const uint64_t entries = DIV_ROUND_UP(vma_size_B, AIL_PAGESIZE);
 
@@ -204,6 +299,19 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       }
    }
 
+   if (buffer->sparse_map) {
+      VkResult result = hk_update_physical_sparse_map(
+         dev, buffer->va->addr, align64(buffer->vk.size, AIL_PAGESIZE), true);
+      if (result != VK_SUCCESS) {
+         hk_update_physical_sparse_map(dev, buffer->va->addr,
+            align64(buffer->vk.size, AIL_PAGESIZE), false);
+         agx_bo_unreference(&dev->dev, buffer->sparse_map);
+         agx_va_free(&dev->dev, buffer->va, true);
+         vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+         return result;
+      }
+   }
+
    *pBuffer = hk_buffer_to_handle(buffer);
 
    return VK_SUCCESS;
@@ -219,9 +327,14 @@ hk_DestroyBuffer(VkDevice device, VkBuffer _buffer,
    if (!buffer)
       return;
 
+   if (buffer->sparse_map)
+      hk_update_physical_sparse_map(dev, buffer->va->addr,
+         align64(buffer->vk.size, AIL_PAGESIZE), false);
+
    if (buffer->va) {
       agx_va_free(&dev->dev, buffer->va, true);
    }
+   hk_release_sparse_scratch(dev, buffer->sparse_scratch_B);
 
    agx_bo_unreference(&dev->dev, buffer->sparse_map);
 
@@ -346,10 +459,12 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
             mem->bo->va->addr + pBindInfos[i].memoryOffset;
       }
 
-      if (buffer->vk.usage & VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR) {
-         VK_FROM_HANDLE(hk_device, dev, device);
+      VK_FROM_HANDLE(hk_device, dev, device);
+      if (dev->g17p_native_as &&
+          (buffer->vk.usage & VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR))
          hk_gen1_publish_buffer_as_addresses(dev, &buffer->vk);
-      }
+      if (dev->m5_native_as)
+         hk_m5_as_buffer_bound(dev, &buffer->vk);
 
       const VkBindMemoryStatusKHR *status =
          vk_find_struct_const(pBindInfos[i].pNext, BIND_MEMORY_STATUS_KHR);

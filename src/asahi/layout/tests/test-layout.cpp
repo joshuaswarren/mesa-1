@@ -6,6 +6,54 @@
 #include <gtest/gtest.h>
 #include "layout.h"
 
+TEST(Layout, M5DepthStencilArrayPageStride)
+{
+   for (auto format : {PIPE_FORMAT_Z16_UNORM, PIPE_FORMAT_Z32_FLOAT,
+                       PIPE_FORMAT_S8_UINT}) {
+      struct ail_layout layout = {};
+      layout.policy = AIL_LAYOUT_POLICY_M5;
+      layout.tiling = AIL_TILING_TWIDDLED;
+      layout.format = format;
+      layout.width_px = 16;
+      layout.height_px = 16;
+      layout.depth_px = 4;
+      layout.levels = 1;
+      layout.sample_count_sa = 1;
+      layout.renderable = true;
+      ail_make_miptree(&layout);
+      EXPECT_TRUE(layout.page_aligned_layers);
+      EXPECT_EQ(layout.layer_stride_B, AIL_PAGESIZE);
+      EXPECT_EQ(layout.size_B, 4u * AIL_PAGESIZE);
+   }
+}
+
+TEST(Layout, M5SparseMipTailPageStride)
+{
+   struct ail_layout ordinary = {};
+   ordinary.policy = AIL_LAYOUT_POLICY_M5;
+   ordinary.tiling = AIL_TILING_GPU;
+   ordinary.format = PIPE_FORMAT_R32_UINT;
+   ordinary.width_px = 128;
+   ordinary.height_px = 64;
+   ordinary.depth_px = 1;
+   ordinary.levels = 8;
+   ordinary.sample_count_sa = 1;
+   struct ail_layout sparse = ordinary;
+   sparse.sparse_residency = true;
+   ail_make_miptree(&ordinary);
+   ail_make_miptree(&sparse);
+
+   EXPECT_NE(ordinary.layer_stride_B % AIL_PAGESIZE, 0u);
+   EXPECT_EQ(sparse.layer_stride_B % AIL_PAGESIZE, 0u);
+   EXPECT_TRUE(sparse.page_aligned_layers);
+   const unsigned tail = sparse.mip_tail_first_lod;
+   EXPECT_LT(sparse.level_offsets_B[tail] / AIL_PAGESIZE,
+             sparse.layer_stride_B / AIL_PAGESIZE);
+   EXPECT_EQ(sparse.size_B, sparse.layer_stride_B);
+   for (unsigned l = 0; l <= sparse.levels; ++l)
+      EXPECT_EQ(ordinary.level_offsets_B[l], sparse.level_offsets_B[l]);
+}
+
 TEST(Layout, M5EightSampleGeometry)
 {
    EXPECT_EQ(ail_effective_width_sa(37, 8), 74u);

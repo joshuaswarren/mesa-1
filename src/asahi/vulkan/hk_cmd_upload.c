@@ -4,6 +4,10 @@
 #include "hk_device.h"
 #include "hk_shader.h"
 #include "util/u_cpu_detect.h"
+#include "util/u_debug.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(m5_fragment_root_shadow,
+                           "ASAHI_M5_FRAGMENT_ROOT_SHADOW", true)
 
 static struct agx_ptr
 hk_pool_root_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
@@ -38,6 +42,10 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
       dev->samplers.table.bo && dev->samplers.table.bo->va
          ? dev->samplers.table.bo->va->addr
          : 0;
+   root->physical_sparse_map = dev->physical_sparse_map
+      ? dev->physical_sparse_map->va->addr : 0;
+   root->physical_sparse_base = dev->dev.main_heap_base;
+   root->physical_sparse_size = dev->dev.main_heap_size;
 
    /* Dynamic buffers past the highest one ever bound are read by no bound
     * layout. Never read the uninitialized hole in an earlier upload. */
@@ -60,6 +68,8 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
              cmd->state.gfx.root &&
              desc->uploaded_root.gpu != cmd->state.gfx.root)
             cmd->state.gfx.g17p_bind_tail.valid = false;
+         if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS)
+            cmd->state.gfx.root_cpu = desc->uploaded_root.cpu;
          hk_upload_stat(cmd, root_reuses, 1);
          return desc->uploaded_root.gpu;
       }
@@ -69,12 +79,24 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    if (!root_ptr.gpu)
       return 0;
 
+   if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS)
+      cmd->state.gfx.root_cpu = root_ptr.cpu;
+
    /* A HAL200 tail built for the old root names it and must be rebuilt
     * before publication. Byte-identical roots keep that identity. */
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
        cmd->state.gfx.root && root_ptr.gpu != cmd->state.gfx.root)
       cmd->state.gfx.g17p_bind_tail.valid = false;
    root->root_desc_addr = root_ptr.gpu;
+   /* Capture from the CPU source after every publication-time augmentation.
+    * Reading the GPU-mapped root back here would pay uncached load latency. */
+   if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+       agx_chip_g17_m5(dev->dev.chip) &&
+       debug_get_option_m5_fragment_root_shadow()) {
+      struct hk_graphics_state *gfx = &cmd->state.gfx;
+      hk_root_fragment_snapshot_publish(gfx, root_ptr.cpu, root);
+   }
+
    memcpy(root_ptr.cpu, root, head_B);
    if (tail_B < root_size)
       memcpy((uint8_t *)root_ptr.cpu + tail_B, (const uint8_t *)root + tail_B,

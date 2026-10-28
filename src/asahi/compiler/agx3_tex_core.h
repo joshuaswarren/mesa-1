@@ -23,9 +23,8 @@
 extern "C" {
 #endif
 
-/* Long enough for every emitted form: the texel fetch is 14 bytes (AGX3b) /
- * 8 bytes (AGX3c); the filtered sample is 14 bytes (AGX3b) / 22 bytes
- * (AGX3c, smp.ep3). */
+/* Long enough for dense and sparse operations: AGX3b uses up to 20 bytes,
+ * while AGX3c uses up to 22 bytes (smp.ep3). */
 #define AGX3_TEX_MAX_LENGTH 22u
 
 enum agx3_tex_width {
@@ -77,7 +76,8 @@ enum agx3_tex_level_kind {
 };
 
 struct agx3_tex_fetch_desc {
-   uint16_t heap_uniform_base;
+   uint16_t heap_uniform_base; /* texture at base, sampler at base+4 */
+   bool dest_cache;    /* destination lifetime hint */
    uint16_t dest;       /* half-register index */
    uint16_t coord;      /* four-half aligned pair of f32 coordinates */
    enum agx3_tex_width width;
@@ -110,13 +110,11 @@ struct agx3_tex_fetch_desc {
    uint16_t lod_x64;
    bool register_lod;
    /*
-    * Sparse residency: f142=1 requests it and f120=1 marks the access. The
+    * Sparse residency: f142=1 requests it; AGX3b also sets f120=1. The
     * residency code is one more 32-bit register after the masked channels
-    * (dest + channels * halves), as on AGX2. f120 lies past the 112-bit ep3
-    * form, so a sparse operation is always the 20-byte ep4 form. Apple also
-    * changes the f112 operand profile, but that profile makes sparse fetches
-    * and explicit-LOD sparse samples fail on G17P, so the dense profile is
-    * kept. AGX3b only.
+    * (dest + channels * halves), as on AGX2. AGX3b uses the 20-byte ep4
+    * form and AGX3c uses the 22-byte ep3 form. Keep the driver descriptor
+    * profile: Apple's argument-buffer f112 profile is a different ABI.
     */
    bool sparse;
 };
@@ -140,6 +138,10 @@ bool agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
  *  - LEVEL: immediate level (f37=1, f139=2), `lod_x64` = level * 64.
  *  - REGISTER: per-lane half-float level packed by PACK_SMPIR (f139=4). The
  *    fragment marker is present here too; it does not select derivatives.
+ *
+ * G17G also uses these 2D forms, constant/register bias, and immediate XY
+ * offsets. Its fragment immediate LEVEL form sets the group marker too.
+ * The C floating-level publisher consumes its half-register source.
  *
  * G17P also has 2D-array (register layer) and cube forms, and 3D
  * immediate-level samples (f76=3 selects the third coordinate). Other
@@ -187,6 +189,9 @@ enum agx3_tex_gather {
 };
 
 struct agx3_tex_sample_desc {
+   /* Relocate both uploaded heap pointers together, retaining their +4
+    * separation. Zero preserves every existing native witness byte. M5
+    * query dispatches use168/172 to avoid their captured runtime prefix. */
    uint16_t heap_uniform_base;
    uint16_t dest;       /* half-register index */
    uint16_t coord;      /* four-half aligned pair of f32 coordinates */
@@ -208,12 +213,11 @@ struct agx3_tex_sample_desc {
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
    bool coord_kill;
    bool final;          /* witnessed final texture-op marker */
-   /* f156 terminates a fragment sample group. Fresh G17P two/three-sample
+   /* f156 terminates a fragment sample group. Native G17P/G17G multi-sample
     * pipelines clear it on every earlier SMP and set it only on the final
     * ordinary sample. Explicit-gradient samples sit outside the group and
-    * reject both flags. These explicit aggregate-group flags are G17P-only;
-    * leaving both clear preserves the independently witnessed per-op encoding
-    * in every other stage/ISA. */
+    * reject both flags. Leaving both clear preserves the independently
+    * witnessed single-operation encoding. */
    bool sample_group_nonterminal;
    bool sample_group_end;
    /* Vertex explicit-LOD samples use the same SMP fields and operand staging
@@ -370,6 +374,12 @@ bool agx3_tex_cube_cem_calc_to(enum agx_isa_encoding enc, uint16_t x,
 
 bool agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+/* Keep a C cube comparison's reference live through any aliased XYZ input. */
+bool agx3_tex_cube_cem_calc_reference_to(
+   enum agx_isa_encoding enc, uint16_t x, uint16_t y, uint16_t z,
+   uint16_t dest, uint8_t axis, bool discard, uint16_t reference,
+   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 bool agx3_tex_cube_cem_rcp_to(enum agx_isa_encoding enc, uint16_t value,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
@@ -424,6 +434,16 @@ bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                               bool src_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+bool agx3_tex_stage_ms_sample_at(enum agx_isa_encoding enc, uint16_t bank,
+                                 uint16_t src, uint8_t slot, uint16_t wait_mask,
+                                 bool src_cache, bool src_discard,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_stage_ms_array_sample_at(
+   enum agx_isa_encoding enc, uint16_t bank, uint16_t sample,
+   uint16_t packed_layer, uint8_t slot, bool cache, bool discard,
+   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 /* Pack CEM's face alone into the 32-bit GPR `dest` for a biased cube sample
  * with a minimum LOD. The face half is always consumed. */
 bool agx3_tex_pack_cube_face(enum agx_isa_encoding enc, uint16_t face,
@@ -444,6 +464,20 @@ bool agx3_tex_stage_cube_bias_min(enum agx_isa_encoding enc, uint16_t bias,
 bool agx3_tex_pack_minimum(enum agx_isa_encoding enc, uint16_t src,
                            uint16_t dest, bool cache, bool discard,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* AGX3C: stage a minimum LOD to sampler bank 8 (a comparison owns bank 4 and
+ * the bank-6 word has no room beside its layer/bias or 3D Z nibble). */
+bool agx3_tex_stage_minimum_bank8_m5(uint16_t src, uint8_t slot,
+                                     uint16_t wait_mask, bool cache,
+                                     bool discard,
+                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                     uint8_t *len);
+
+/* G17G PACK_SMPIR-to-GPR: half-float level/bias to a reusable native word.
+ * COPY publishes that word at staging bank+6. */
+bool agx3_tex_pack_float_lod_m5(uint16_t src, uint16_t dest,
+                               bool cache, bool discard, uint16_t wait_mask,
+                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 bool agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                  uint16_t dest, bool cache, bool discard,
@@ -507,6 +541,12 @@ bool agx3_tex_encode_image_write_rgba8_2d(
 
 /* A native staging COPY must preserve a coordinate GPR if later work uses
  * it. CACHE/NONE/DISCARD are independent of the staging-bank release bit. */
+/* Full-range 32-bit source for scalar M5 texture publication only. */
+bool agx3_tex_stage_copy_scalar_m5(uint16_t dest, uint16_t src, uint8_t slot,
+                                 uint16_t wait_mask, bool src_cache,
+                                 bool src_discard,
+                                 uint8_t out[AGX3_TEX_COPY_MAX_LENGTH], uint8_t *len);
+
 bool agx3_tex_stage_copy_hints(enum agx_isa_encoding enc, uint16_t dest,
                                uint16_t src, uint8_t slot, uint16_t wait_mask,
                                bool src_cache, bool src_discard,
@@ -515,6 +555,10 @@ bool agx3_tex_stage_copy_hints(enum agx_isa_encoding enc, uint16_t dest,
 bool agx3_tex_stage_copy(enum agx_isa_encoding enc, uint16_t dest,
                          uint16_t src, uint8_t slot, uint16_t wait_mask,
                          uint8_t out[AGX3_TEX_COPY_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_encode_image_write_agx3c(
+   const struct agx3_image_write_desc *d, uint16_t uniform_base,
+   uint8_t staging_slot, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 #ifdef __cplusplus
 }

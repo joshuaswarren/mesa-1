@@ -13,6 +13,21 @@
  * (hk_nir_ray_tracing.c) is already a port of lavapipe's, so the two halves fit
  * without reinterpretation.
  *
+ * On M5, two departures from lavapipe's single megakernel, both for
+ * throughput:
+ *
+ *  - One kernel is compiled PER RAY-GENERATION GROUP rather than one for the
+ *    whole pipeline.  A trace runs exactly one raygen, so inlining every raygen
+ *    into one kernel only makes each dispatch pay for the union: its code
+ *    size, its register count (the occupancy of every trace was that of the
+ *    worst raygen) and its scratch (the stack was sized for the largest raygen
+ *    frame).  hk_cmd_trace_rays.c selects the kernel on the GPU from the SBT.
+ *
+ *  - A stage that several groups name (a hit group with and without an
+ *    any-hit shader commonly share one closest-hit) is inlined once per call
+ *    site, guarded by the disjunction of the groups' handle tests, instead of
+ *    once per group.
+ *
  * The one real divergence is how the trace-rays record reaches the shader.
  * lavapipe binds it as an internal SSBO; hk has no internal descriptor set, so
  * the record's device address is published in the compute root descriptor table
@@ -312,10 +327,18 @@ struct hk_rt_compiler {
    VkPipelineCreateFlags2KHR flags;
    bool position_fetch;
    bool native_agx;
-   nir_variable *native_query, *native_hit_kind;
+   bool native_m5;
+   /* M5 compiles one kernel per ray-generation group and shares a stage's
+    * call site between the groups naming it. Other chips keep the single
+    * megakernel with one call site per group. */
+   bool m5;
    bool callable_dispatch;
 
    struct hk_rt_shader_state state;
+   nir_variable *native_query;
+   /* Hit kind reported by the intersection shader of a committed generated
+    * (procedural) hit; triangle hits derive theirs from the facing bit. */
+   nir_variable *native_hit_kind;
 
    struct hash_table **functions;
    struct hash_table *function_depths;
@@ -516,6 +539,98 @@ hk_call_ray_tracing_stage(nir_builder *b, struct hk_rt_compiler *compiler,
    }
 }
 
+/*
+ * Which stage of a shader group a call site dispatches through.
+ * HK_RT_GROUP_RECURSIVE is the group's callable stage (general or closest-hit),
+ * filtered by `stage_filter`; the other two are reached from inside traversal.
+ */
+enum hk_rt_group_stage {
+   HK_RT_GROUP_RECURSIVE,
+   HK_RT_GROUP_AHIT,
+   HK_RT_GROUP_ISEC,
+};
+
+struct hk_rt_stage_call {
+   nir_shader *stage;
+   /* The any-hit shader paired with an intersection shader's group, else NULL:
+    * reportIntersectionEXT lowering binds it to the intersection body. */
+   nir_shader *ahit;
+   nir_def *cond;
+   /* Without merged call sites (cond == NULL), the group's handle test is
+    * emitted where the call is. */
+   nir_def *handle;
+   uint32_t handle_index;
+};
+
+/*
+ * Collect the distinct stage bodies the pipeline's groups select for `handle`
+ * through `which`, each guarded by the disjunction of its groups' handle
+ * tests.  Several groups commonly name the same stage; emitting one inlined
+ * copy per call site instead of one per group keeps a closest-hit shared by N
+ * hit groups from appearing N times at every traceRayEXT.  The groups are
+ * indistinguishable inside the stage: the shader record pointer was already
+ * taken from the SBT record itself, not from the group.  `calls` must hold
+ * group_count entries.
+ */
+static unsigned
+hk_rt_collect_stage_calls(nir_builder *b, struct hk_rt_compiler *compiler,
+                          nir_def *handle, enum hk_rt_group_stage which,
+                          mesa_shader_stage stage_filter,
+                          struct hk_rt_stage_call *calls)
+{
+   unsigned count = 0;
+
+   for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
+      const struct hk_ray_tracing_group *group = compiler->pipeline->groups + i;
+      const uint32_t index = which == HK_RT_GROUP_AHIT   ? group->ahit_index
+                             : which == HK_RT_GROUP_ISEC ? group->isec_index
+                                                         : group->recursive_index;
+      if (index == VK_SHADER_UNUSED_KHR)
+         continue;
+
+      nir_shader *stage = compiler->pipeline->stages[index]->nir;
+      if (which == HK_RT_GROUP_RECURSIVE && stage->info.stage != stage_filter)
+         continue;
+
+      nir_shader *ahit = NULL;
+      if (which == HK_RT_GROUP_ISEC && group->ahit_index != VK_SHADER_UNUSED_KHR)
+         ahit = compiler->pipeline->stages[group->ahit_index]->nir;
+
+      if (!compiler->m5) {
+         calls[count++] = (struct hk_rt_stage_call){
+            .stage = stage, .ahit = ahit, .handle = handle,
+            .handle_index = group->handle.index,
+         };
+         continue;
+      }
+
+      nir_def *test = nir_ieq_imm(b, handle, group->handle.index);
+
+      unsigned j;
+      for (j = 0; j < count; ++j) {
+         if (calls[j].stage == stage && calls[j].ahit == ahit)
+            break;
+      }
+
+      if (j == count) {
+         calls[count++] = (struct hk_rt_stage_call){
+            .stage = stage, .ahit = ahit, .cond = test,
+         };
+      } else {
+         calls[j].cond = nir_ior(b, calls[j].cond, test);
+      }
+   }
+
+   return count;
+}
+
+static nir_def *
+hk_rt_stage_call_cond(nir_builder *b, const struct hk_rt_stage_call *call)
+{
+   return call->cond ? call->cond
+                     : nir_ieq_imm(b, call->handle, call->handle_index);
+}
+
 /* Preserve invocation state across nested calls. SSA/DCE eliminates fields
  * that the caller never reads after the return; no fixed spill frame is added. */
 struct hk_rt_saved_state {
@@ -593,18 +708,13 @@ hk_execute_callable_inline(nir_builder *b, struct hk_rt_compiler *compiler,
    nir_store_var(b, state->shader_call_data_offset,
                  nir_iadd_imm(b, payload, -(int32_t)stack_size), 0x1);
 
-   for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
-      struct hk_ray_tracing_group *group = compiler->pipeline->groups + i;
-      if (group->recursive_index == VK_SHADER_UNUSED_KHR)
-         continue;
-
-      nir_shader *stage =
-         compiler->pipeline->stages[group->recursive_index]->nir;
-      if (stage->info.stage != MESA_SHADER_CALLABLE)
-         continue;
-
-      nir_push_if(b, nir_ieq_imm(b, callable_entry.value, group->handle.index));
-      hk_call_ray_tracing_stage(b, compiler, stage, false);
+   struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+   const unsigned count = hk_rt_collect_stage_calls(
+      b, compiler, callable_entry.value, HK_RT_GROUP_RECURSIVE,
+      MESA_SHADER_CALLABLE, calls);
+   for (unsigned i = 0; i < count; i++) {
+      nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+      hk_call_ray_tracing_stage(b, compiler, calls[i].stage, false);
       nir_pop_if(b, NULL);
    }
 
@@ -934,24 +1044,17 @@ hk_handle_aabb_intersection(nir_builder *b,
    nir_store_var(b, state->shader_record_ptr, isec_entry.shader_record_ptr,
                  0x1);
 
-   for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
-      struct hk_ray_tracing_group *group = compiler->pipeline->groups + i;
-      if (group->isec_index == VK_SHADER_UNUSED_KHR)
-         continue;
-
-      nir_shader *stage = compiler->pipeline->stages[group->isec_index]->nir;
-
-      nir_push_if(b, nir_ieq_imm(b, isec_entry.value, group->handle.index));
-      hk_call_ray_tracing_stage(b, compiler, stage, true);
+   struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+   const unsigned count = hk_rt_collect_stage_calls(
+      b, compiler, isec_entry.value, HK_RT_GROUP_ISEC, MESA_SHADER_NONE, calls);
+   for (unsigned i = 0; i < count; i++) {
+      nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+      hk_call_ray_tracing_stage(b, compiler, calls[i].stage, true);
       nir_pop_if(b, NULL);
-
-      nir_shader *ahit_stage = NULL;
-      if (group->ahit_index != VK_SHADER_UNUSED_KHR)
-         ahit_stage = compiler->pipeline->stages[group->ahit_index]->nir;
 
       struct hk_lower_isec_state isec_state = {
          .compiler = compiler,
-         .ahit = ahit_stage,
+         .ahit = calls[i].ahit,
       };
       nir_shader_intrinsics_pass(b->shader, hk_lower_isec_intrinsic,
                                  nir_metadata_none, &isec_state);
@@ -1029,15 +1132,13 @@ hk_handle_triangle_intersection(nir_builder *b,
       nir_store_var(b, state->shader_record_ptr,
                     ahit_entry.shader_record_ptr, 0x1);
 
-      for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
-         struct hk_ray_tracing_group *group = compiler->pipeline->groups + i;
-         if (group->ahit_index == VK_SHADER_UNUSED_KHR)
-            continue;
-
-         nir_shader *stage = compiler->pipeline->stages[group->ahit_index]->nir;
-
-         nir_push_if(b, nir_ieq_imm(b, ahit_entry.value, group->handle.index));
-         hk_call_ray_tracing_stage(b, compiler, stage, true);
+      struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+      const unsigned count = hk_rt_collect_stage_calls(
+         b, compiler, ahit_entry.value, HK_RT_GROUP_AHIT, MESA_SHADER_NONE,
+         calls);
+      for (unsigned i = 0; i < count; i++) {
+         nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+         hk_call_ray_tracing_stage(b, compiler, calls[i].stage, true);
          nir_pop_if(b, NULL);
       }
    }
@@ -1222,6 +1323,205 @@ static void hk_rt_dispatch_hit_or_miss(nir_builder *, struct hk_rt_compiler *,
 static nir_variable *hk_deref_base_var(nir_deref_instr *);
 
 static void
+hk_rt_m5_load_hit_state(nir_builder *b, struct hk_rt_compiler *compiler,
+                        nir_def *q, nir_def *as, bool committed,
+                        nir_def *generated)
+{
+   struct hk_rt_shader_state *state = &compiler->state;
+   nir_def *instance_id = nir_rq_load(b, 1, 32, q, .committed = committed,
+      .ray_query_value = nir_ray_query_value_intersection_instance_id);
+   /* Native pointer table entries contain record-relative-offset +4. */
+   nir_def *table = nir_load_global(b, 1, 64, nir_iadd_imm(b, as, 128),
+                                    .align_mul = 8);
+   nir_def *entry = nir_load_global(b, 1, 64,
+      nir_iadd(b, nir_iadd(b, as, table), nir_u2u64(b, nir_ishl_imm(b, instance_id, 4))),
+      .align_mul = 8);
+   nir_def *instance = nir_iadd_imm(b, nir_iadd(b, as, entry), -4);
+   nir_store_var(b, state->instance_addr, instance, 1);
+   nir_def *primitive = nir_rq_load(b, 1, 32, q, .committed = committed,
+      .ray_query_value = nir_ray_query_value_intersection_primitive_index);
+   nir_store_var(b, state->primitive_id, primitive, 1);
+   nir_def *geometry = nir_rq_load(b, 1, 32, q, .committed = committed,
+      .ray_query_value = nir_ray_query_value_intersection_geometry_index);
+   nir_store_var(b, state->geometry_id_and_flags, geometry, 1);
+   nir_def *distance = nir_rq_load(b, 1, 32, q, .committed = committed,
+      .ray_query_value = nir_ray_query_value_intersection_t);
+   nir_store_var(b, state->tmax, distance, 1);
+   nir_def *front = nir_rq_load(b, 1, 1, q, .committed = committed,
+      .ray_query_value = nir_ray_query_value_intersection_front_face);
+   nir_def *hit_kind =
+      nir_bcsel(b, front, nir_imm_int(b, 0xfe), nir_imm_int(b, 0xff));
+   if (generated)
+      hit_kind = nir_bcsel(b, generated,
+                           nir_load_var(b, compiler->native_hit_kind), hit_kind);
+   nir_store_var(b, state->hit_kind, hit_kind, 1);
+   /* A generated hit's attributes were written by the intersection shader
+    * into the same frame; do not overwrite them with barycentrics. */
+   if (generated)
+      nir_push_if(b, nir_inot(b, generated));
+   nir_def *bary = nir_rq_load(b, 2, 32, q, .committed = committed,
+      .ray_query_value = nir_ray_query_value_intersection_barycentrics);
+   nir_store_scratch(b, bary, nir_load_var(b, state->stack_ptr),
+                     .align_mul = 8, .write_mask = 3);
+   if (generated)
+      nir_pop_if(b, NULL);
+   nir_def *otw = nir_iadd(b, instance,
+      nir_load_global(b, 1, 64, nir_iadd_imm(b, instance, 104), .align_mul = 8));
+   nir_def *sbt = nir_load_global(b, 1, 32, nir_iadd_imm(b, otw, 48), .align_mul = 4);
+   nir_store_var(b, state->traversal.sbt_offset_and_flags, sbt, 1);
+   nir_store_var(b, state->sbt_index,
+                 hk_hit_sbt_index(b, state, geometry), 1);
+}
+
+/* Procedural candidate of the native query: run the hit group's intersection
+ * shader with the candidate state loaded. hk_lower_isec_intrinsic turns each
+ * reportIntersectionEXT into a [tmin, committed t] window check, the any-hit
+ * stage and an accept/rollback of tmax/hit kind, exactly as on the software
+ * traversal. An accepted report then commits the candidate at the final
+ * reported distance through rayQueryGenerateIntersection semantics. */
+static void
+hk_trace_ray_m5_aabb_candidate(nir_builder *b, struct hk_rt_compiler *compiler,
+                               nir_def *q, nir_def *flags)
+{
+   struct hk_rt_shader_state *state = &compiler->state;
+
+   bool has_isec = false;
+   for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
+      if (compiler->pipeline->groups[i].isec_index != VK_SHADER_UNUSED_KHR) {
+         has_isec = true;
+         break;
+      }
+   }
+   /* Without an intersection shader a procedural geometry has no defined
+    * intersection: the candidate is left unconfirmed. */
+   if (!has_isec)
+      return;
+
+   /* gl_RayTmaxEXT inside an intersection shader is the current committed
+    * distance, not the candidate record's distance. */
+   nir_store_var(b, state->tmax, nir_rq_load(b, 1, 32, q, .committed = true,
+      .ray_query_value = nir_ray_query_value_intersection_t), 1);
+   nir_store_var(b, state->opaque, nir_rq_load(b, 1, 1, q, .committed = false,
+      .ray_query_value = nir_ray_query_value_intersection_candidate_aabb_opaque), 1);
+   nir_store_var(b, state->accept, nir_imm_false(b), 0x1);
+   nir_store_var(b, state->terminate,
+      nir_test_mask(b, flags, SpvRayFlagsTerminateOnFirstHitKHRMask), 1);
+
+   struct hk_sbt_entry isec_entry = hk_load_sbt_entry(
+      b, nir_load_var(b, state->sbt_index), HK_RT_CMD_HIT_ADDRESS);
+   nir_store_var(b, state->shader_record_ptr, isec_entry.shader_record_ptr,
+                 0x1);
+
+   struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+   const unsigned count = hk_rt_collect_stage_calls(
+      b, compiler, isec_entry.value, HK_RT_GROUP_ISEC, MESA_SHADER_NONE, calls);
+   for (unsigned i = 0; i < count; i++) {
+      nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+      hk_call_ray_tracing_stage(b, compiler, calls[i].stage, true);
+      nir_pop_if(b, NULL);
+
+      struct hk_lower_isec_state isec_state = {
+         .compiler = compiler,
+         .ahit = calls[i].ahit,
+      };
+      nir_shader_intrinsics_pass(b->shader, hk_lower_isec_intrinsic,
+                                 nir_metadata_none, &isec_state);
+   }
+
+   nir_push_if(b, nir_load_var(b, state->accept));
+   {
+      nir_store_var(b, compiler->native_hit_kind,
+                    nir_load_var(b, state->hit_kind), 1);
+      nir_rq_generate_intersection(b, q, nir_load_var(b, state->tmax));
+      nir_push_if(b, nir_load_var(b, state->terminate));
+      nir_rq_terminate(b, q);
+      nir_pop_if(b, NULL);
+   }
+   nir_pop_if(b, NULL);
+}
+
+/* Native AS buffers use the captured Apple layout. Reuse the Vulkan query
+ * lowering for traversal; software hk_bvh traversal cannot interpret them. */
+static void
+hk_trace_ray_m5(nir_builder *b, struct hk_rt_compiler *compiler,
+                nir_def *as, nir_def *flags, nir_def *mask,
+                nir_def *origin, nir_def *tmin, nir_def *dir, nir_def *tmax)
+{
+   struct hk_rt_shader_state *state = &compiler->state;
+   /* Each generated traversal drains/terminates its native queue and copies
+    * the committed hit into state before invoking closest-hit or miss code.
+    * Those stages therefore reuse this context for their subsequent traces.
+    * Any application ray-query variables remain separate and retain the
+    * lowerer's multiple-live-query guard. */
+   if (!compiler->native_query) {
+      compiler->native_query = nir_variable_create(b->shader, nir_var_shader_temp,
+         glsl_uint64_t_type(), "rt.query");
+      compiler->native_query->data.ray_query = true;
+      compiler->native_hit_kind = nir_variable_create(b->shader,
+         nir_var_shader_temp, glsl_uint_type(), "rt.hit_kind");
+   }
+   nir_variable *query = compiler->native_query;
+   nir_def *q = &nir_build_deref_var(b, query)->def;
+   /* SkipClosestHitShader selects a pipeline stage after traversal; it
+    * does not change the native intersection query. */
+   nir_def *query_flags = nir_iand_imm(b, flags,
+      ~SpvRayFlagsSkipClosestHitShaderKHRMask);
+   nir_rq_initialize(b, q, as, query_flags, mask, origin, tmin, dir, tmax);
+   nir_push_loop(b);
+   nir_break_if(b, nir_inot(b, nir_rq_proceed(b, 1, q)));
+   if (debug_get_bool_option("ASAHI_M5_RQ_CANDIDATE_API", false)) {
+      /* The native query API internally commits opaque hits. Each returned
+       * triangle is nonopaque and must run the selected any-hit stage before
+       * confirmation. Rejected candidates leave traversal uncommitted. */
+      hk_rt_m5_load_hit_state(b, compiler, q, as, false, NULL);
+      /* A procedural (AABB) candidate runs the hit group's intersection
+       * shader instead of the any-hit stage; reportIntersectionEXT commits
+       * it at the reported distance after the optional any-hit stage. */
+      nir_def *candidate_type = nir_rq_load(b, 1, 32, q, .committed = false,
+         .ray_query_value = nir_ray_query_value_intersection_type);
+      nir_push_if(b, nir_ieq_imm(b, candidate_type, 1));
+      {
+         hk_trace_ray_m5_aabb_candidate(b, compiler, q, flags);
+      }
+      nir_push_else(b, NULL);
+      {
+         nir_store_var(b, state->accept, nir_imm_true(b), 1);
+         nir_store_var(b, state->terminate,
+            nir_test_mask(b, flags, SpvRayFlagsTerminateOnFirstHitKHRMask), 1);
+         struct hk_sbt_entry ahit_entry = hk_load_sbt_entry(
+            b, nir_load_var(b, state->sbt_index), HK_RT_CMD_HIT_ADDRESS);
+         nir_store_var(b, state->shader_record_ptr, ahit_entry.shader_record_ptr, 1);
+         struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+         const unsigned count = hk_rt_collect_stage_calls(
+            b, compiler, ahit_entry.value, HK_RT_GROUP_AHIT, MESA_SHADER_NONE,
+            calls);
+         for (unsigned i = 0; i < count; ++i) {
+            nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+            hk_call_ray_tracing_stage(b, compiler, calls[i].stage, true);
+            nir_pop_if(b, NULL);
+         }
+         nir_push_if(b, nir_load_var(b, state->accept));
+         nir_rq_confirm_intersection(b, q);
+         nir_push_if(b, nir_load_var(b, state->terminate));
+         nir_rq_terminate(b, q);
+         nir_pop_if(b, NULL);
+         nir_pop_if(b, NULL);
+      }
+      nir_pop_if(b, NULL);
+   }
+   nir_pop_loop(b, NULL);
+   /* A miss after rejected candidates keeps the original ray maximum. */
+   nir_store_var(b, state->tmax, tmax, 1);
+   nir_def *type = nir_rq_load(b, 1, 32, q, .committed = true,
+                               .ray_query_value = nir_ray_query_value_intersection_type);
+   nir_store_var(b, state->traversal.hit, nir_ine_imm(b, type, 0), 1);
+   nir_push_if(b, nir_ine_imm(b, type, 0));
+   /* Committed type 2 is a generated (procedural) hit. */
+   hk_rt_m5_load_hit_state(b, compiler, q, as, true, nir_ieq_imm(b, type, 2));
+   nir_pop_if(b, NULL);
+}
+
+static void
 hk_trace_ray(nir_builder *b, struct hk_rt_compiler *compiler,
              nir_intrinsic_instr *instr)
 {
@@ -1312,6 +1612,19 @@ hk_trace_ray(nir_builder *b, struct hk_rt_compiler *compiler,
    if (compiler->native_agx)
       hk_trace_ray_native(b, compiler, accel_struct, flags, cull_mask,
                       origin, tmin, dir, tmax);
+   else if (compiler->native_m5) {
+      /* Pipeline skip flags cull like the matching ray flags, but are not
+       * part of the shader-visible IncomingRayFlags. */
+      uint32_t pipeline_flags = 0;
+      if (compiler->flags & VK_PIPELINE_CREATE_2_RAY_TRACING_SKIP_TRIANGLES_BIT_KHR)
+         pipeline_flags |= SpvRayFlagsSkipTrianglesKHRMask;
+      if (compiler->flags & VK_PIPELINE_CREATE_2_RAY_TRACING_SKIP_AABBS_BIT_KHR)
+         pipeline_flags |= SpvRayFlagsSkipAABBsKHRMask;
+      hk_trace_ray_m5(b, compiler, accel_struct,
+                      pipeline_flags ? nir_ior_imm(b, flags, pipeline_flags)
+                                     : flags,
+                      cull_mask, origin, tmin, dir, tmax);
+   }
    else
       hk_build_ray_traversal(b, &args);
    nir_pop_if(b, NULL);
@@ -1325,7 +1638,7 @@ static void
 hk_rt_load_wto(nir_builder *b, const struct hk_rt_compiler *compiler,
                 nir_def *instance, nir_def *rows[3])
 {
-   if (!compiler->native_agx) {
+   if (!compiler->native_agx && !compiler->native_m5) {
       hk_load_wto_matrix(b, instance, NULL, rows);
       return;
    }
@@ -1357,18 +1670,13 @@ hk_rt_dispatch_hit_or_miss(nir_builder *b, struct hk_rt_compiler *compiler,
       nir_store_var(b, state->shader_record_ptr,
                     chit_entry.shader_record_ptr, 0x1);
 
-      for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
-         struct hk_ray_tracing_group *group = compiler->pipeline->groups + i;
-         if (group->recursive_index == VK_SHADER_UNUSED_KHR)
-            continue;
-
-         nir_shader *stage =
-            compiler->pipeline->stages[group->recursive_index]->nir;
-         if (stage->info.stage != MESA_SHADER_CLOSEST_HIT)
-            continue;
-
-         nir_push_if(b, nir_ieq_imm(b, chit_entry.value, group->handle.index));
-         hk_call_ray_tracing_stage(b, compiler, stage, true);
+      struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+      const unsigned count = hk_rt_collect_stage_calls(
+         b, compiler, chit_entry.value, HK_RT_GROUP_RECURSIVE,
+         MESA_SHADER_CLOSEST_HIT, calls);
+      for (unsigned i = 0; i < count; i++) {
+         nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+         hk_call_ray_tracing_stage(b, compiler, calls[i].stage, true);
          nir_pop_if(b, NULL);
       }
 
@@ -1381,18 +1689,13 @@ hk_rt_dispatch_hit_or_miss(nir_builder *b, struct hk_rt_compiler *compiler,
       nir_store_var(b, state->shader_record_ptr,
                     miss_entry.shader_record_ptr, 0x1);
 
-      for (uint32_t i = 0; i < compiler->pipeline->group_count; i++) {
-         struct hk_ray_tracing_group *group = compiler->pipeline->groups + i;
-         if (group->recursive_index == VK_SHADER_UNUSED_KHR)
-            continue;
-
-         nir_shader *stage =
-            compiler->pipeline->stages[group->recursive_index]->nir;
-         if (stage->info.stage != MESA_SHADER_MISS)
-            continue;
-
-         nir_push_if(b, nir_ieq_imm(b, miss_entry.value, group->handle.index));
-         hk_call_ray_tracing_stage(b, compiler, stage, true);
+      struct hk_rt_stage_call calls[compiler->pipeline->group_count];
+      const unsigned count = hk_rt_collect_stage_calls(
+         b, compiler, miss_entry.value, HK_RT_GROUP_RECURSIVE,
+         MESA_SHADER_MISS, calls);
+      for (unsigned i = 0; i < count; i++) {
+         nir_push_if(b, hk_rt_stage_call_cond(b, &calls[i]));
+         hk_call_ray_tracing_stage(b, compiler, calls[i].stage, true);
          nir_pop_if(b, NULL);
       }
    }
@@ -2017,7 +2320,7 @@ hk_lower_ray_tracing_instr(nir_builder *b, nir_instr *instr, void *data)
       nir_def *custom_instance_and_mask = nir_load_global(
          b, 1, 32,
          nir_iadd_imm(b, instance_node_addr,
-                      compiler->native_agx ? 96 :
+                      (compiler->native_agx || compiler->native_m5) ? 96 :
                          offsetof(struct hk_bvh_instance_node,
                                   custom_instance_and_mask)));
       def = nir_iand_imm(b, custom_instance_and_mask, 0xFFFFFF);
@@ -2035,7 +2338,7 @@ hk_lower_ray_tracing_instr(nir_builder *b, nir_instr *instr, void *data)
       def = nir_load_global(
          b, 1, 32,
          nir_iadd_imm(b, instance_node_addr,
-                      compiler->native_agx ? 100 :
+                      (compiler->native_agx || compiler->native_m5) ? 100 :
                          offsetof(struct hk_bvh_instance_node, instance_id)));
       break;
    }
@@ -2061,7 +2364,7 @@ hk_lower_ray_tracing_instr(nir_builder *b, nir_instr *instr, void *data)
    case nir_intrinsic_load_ray_object_to_world: {
       const unsigned c = nir_intrinsic_column(intr);
       nir_def *instance_node_addr = nir_load_var(b, state->instance_addr);
-      if (compiler->native_agx) {
+      if (compiler->native_agx || compiler->native_m5) {
          nir_def *relative = nir_load_global(b, 1, 64,
             nir_iadd_imm(b, instance_node_addr, 104), .align_mul = 8);
          def = nir_load_global(b, 3, 32,
@@ -2170,6 +2473,15 @@ hk_ray_tracing_pipeline_destroy(struct vk_device *vk_dev,
    if (pipeline->shader)
       hk_api_shader_destroy(vk_dev, &pipeline->shader->vk, pAllocator);
 
+   if (pipeline->kernels) {
+      for (uint32_t i = 0; i < pipeline->kernel_count; i++) {
+         if (pipeline->kernels[i].shader)
+            hk_api_shader_destroy(vk_dev, &pipeline->kernels[i].shader->vk,
+                                  pAllocator);
+      }
+      free(pipeline->kernels);
+   }
+
    if (pipeline->stages) {
       for (uint32_t i = 0; i < pipeline->stage_count; i++)
          hk_rt_stage_nir_unref(pipeline->stages[i]);
@@ -2205,17 +2517,42 @@ hk_ray_tracing_pipeline_get_shader(struct vk_pipeline *vk_pipeline,
    return NULL;
 }
 
-/* All RT stages are inlined into a single compute megakernel. Report that
- * executable once, with the API stages it implements rather than COMPUTE. A
- * library only retains stage NIR and has no executable to enumerate.
+/* All RT stages are inlined into a single compute megakernel, except on M5,
+ * which compiles one kernel per ray-generation group. Report each executable
+ * with the API stages it implements rather than COMPUTE. A library only
+ * retains stage NIR and has no executable to enumerate.
  */
 static VkResult
 hk_rt_pipeline_get_executable_properties(
-   UNUSED struct vk_device *device, struct vk_pipeline *vk_pipeline,
+   struct vk_device *device, struct vk_pipeline *vk_pipeline,
    uint32_t *executable_count, VkPipelineExecutablePropertiesKHR *properties)
 {
    struct hk_ray_tracing_pipeline *pipeline =
       hk_pipeline_to_ray_tracing(vk_pipeline);
+
+   if (pipeline->kernel_count) {
+      const uint32_t capacity = properties ? *executable_count : 0;
+      *executable_count = properties ? MIN2(capacity, pipeline->kernel_count)
+                                     : pipeline->kernel_count;
+      for (uint32_t i = 0; properties && i < *executable_count; i++) {
+         struct vk_shader *shader = &pipeline->kernels[i].shader->vk;
+         uint32_t count = 1;
+         VkResult result = shader->ops->get_executable_properties(
+            device, shader, &count, &properties[i]);
+         if (result != VK_SUCCESS)
+            return result;
+         assert(count == 1);
+         properties[i].stages = pipeline->base.stages;
+         snprintf(properties[i].name, sizeof(properties[i].name),
+                  "Ray generation %u", pipeline->kernels[i].raygen_handle_index);
+         snprintf(properties[i].description, sizeof(properties[i].description),
+                  "Ray-tracing megakernel for ray-generation group %u",
+                  pipeline->kernels[i].raygen_handle_index);
+      }
+      return properties && capacity < pipeline->kernel_count ? VK_INCOMPLETE
+                                                             : VK_SUCCESS;
+   }
+
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutablePropertiesKHR, out, properties,
                          executable_count);
 
@@ -2232,16 +2569,27 @@ hk_rt_pipeline_get_executable_properties(
    return vk_outarray_status(&out);
 }
 
+static const struct vk_shader *
+hk_rt_pipeline_executable(const struct hk_ray_tracing_pipeline *pipeline,
+                          uint32_t executable_index)
+{
+   if (pipeline->kernel_count) {
+      assert(executable_index < pipeline->kernel_count);
+      return &pipeline->kernels[executable_index].shader->vk;
+   }
+
+   assert(pipeline->shader && executable_index == 0);
+   return &pipeline->shader->vk;
+}
+
 static VkResult
 hk_rt_pipeline_get_executable_statistics(
    struct vk_device *device, struct vk_pipeline *vk_pipeline,
    uint32_t executable_index, uint32_t *statistic_count,
    VkPipelineExecutableStatisticKHR *statistics)
 {
-   struct hk_ray_tracing_pipeline *pipeline =
-      hk_pipeline_to_ray_tracing(vk_pipeline);
-   assert(pipeline->shader && executable_index == 0);
-   const struct vk_shader *shader = &pipeline->shader->vk;
+   const struct vk_shader *shader = hk_rt_pipeline_executable(
+      hk_pipeline_to_ray_tracing(vk_pipeline), executable_index);
 
    return shader->ops->get_executable_statistics(
       device, shader, 0, statistic_count, statistics);
@@ -2253,10 +2601,8 @@ hk_rt_pipeline_get_internal_representations(
    uint32_t executable_index, uint32_t *representation_count,
    VkPipelineExecutableInternalRepresentationKHR *representations)
 {
-   struct hk_ray_tracing_pipeline *pipeline =
-      hk_pipeline_to_ray_tracing(vk_pipeline);
-   assert(pipeline->shader && executable_index == 0);
-   const struct vk_shader *shader = &pipeline->shader->vk;
+   const struct vk_shader *shader = hk_rt_pipeline_executable(
+      hk_pipeline_to_ray_tracing(vk_pipeline), executable_index);
 
    return shader->ops->get_executable_internal_representations(
       device, shader, 0, representation_count, representations);
@@ -2277,6 +2623,10 @@ hk_rt_stage_to_nir(struct hk_device *dev,
                    const VkPipelineShaderStageCreateInfo *stage_info,
                    nir_shader **nir_out)
 {
+   if (pipeline_flags &
+       VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR)
+      return VK_PIPELINE_COMPILE_REQUIRED;
+
    struct hk_physical_device *pdev = hk_device_physical(dev);
    struct vk_pipeline_robustness_state rstate;
 
@@ -2448,6 +2798,17 @@ hk_compile_ray_tracing_stages(
       NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
       NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
+      /* nir_lower_vars_to_ssa promotes most locals to SSA but leaves their
+       * declarations behind, and nir_lower_vars_to_explicit_types below
+       * assigns a frame slot to every surviving function_temp declaration,
+       * promoted or not.  Every call site of a GLSL function was inlined
+       * with its own copy of the callee's locals, so the dead declarations
+       * dominate the frame: RTGL1's IndirectInit raygen declared a 28,416-byte
+       * frame of which the kernel touched 24 bytes (the payload window), and
+       * the per-dispatch stack reservation multiplies that by the recursion
+       * depth.  Drop the dead declarations so the frame holds only what is
+       * still addressed (payload, hit attributes, dynamically indexed arrays,
+       * ray queries). */
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
@@ -2521,6 +2882,10 @@ hk_compile_ray_tracing_stages(
    return VK_SUCCESS;
 }
 
+/* Lowest address a capture/replay handle pointer may hold: the smallest page
+ * size, below which no process memory can be mapped. */
+#define HK_RT_MIN_REPLAY_HANDLE_ADDRESS 4096
+
 static VkResult
 hk_init_ray_tracing_groups(
    struct hk_device *dev, struct hk_ray_tracing_pipeline *pipeline,
@@ -2538,31 +2903,21 @@ hk_init_ray_tracing_groups(
              group_info->anyHitShader, group_info->intersectionShader))
          return VK_ERROR_FEATURE_NOT_PRESENT;
 
-      /* A group index past the end of this pipeline's own stage array is
-       * application error, and the validation layer catches it -- but the
-       * megakernel builder dereferences it, so without a check the driver
-       * faults in a release build instead of refusing.  This is the same
-       * process-boundary argument agx_emit_imadshl_agx() makes: refuse
-       * loudly rather than take the process down. */
+      /* Library stages are appended to the local stage array before group
+       * initialization. Newly declared groups may reference any stage in
+       * that combined array, including a shader-only library's stages. */
       const struct hk_ray_tracing_group *g = pipeline->groups + i;
-      uint32_t own_stage_count = create_info->stageCount;
-      if (create_info->pLibraryInfo) {
-         for (uint32_t l = 0; l < create_info->pLibraryInfo->libraryCount; l++) {
-            VK_FROM_HANDLE(vk_pipeline, vk_lib,
-                           create_info->pLibraryInfo->pLibraries[l]);
-            own_stage_count += hk_pipeline_to_ray_tracing(vk_lib)->stage_count;
-         }
-      }
+      const uint32_t total_stage_count = pipeline->stage_count;
       if ((g->recursive_index != VK_SHADER_UNUSED_KHR &&
-           g->recursive_index >= own_stage_count) ||
+           g->recursive_index >= total_stage_count) ||
           (g->ahit_index != VK_SHADER_UNUSED_KHR &&
-           g->ahit_index >= own_stage_count) ||
+           g->ahit_index >= total_stage_count) ||
           (g->isec_index != VK_SHADER_UNUSED_KHR &&
-           g->isec_index >= own_stage_count)) {
+           g->isec_index >= total_stage_count)) {
          return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                           "ray tracing group %u names a shader index past "
-                          "stageCount %u",
-                          i, own_stage_count);
+                          "combined stageCount %u",
+                          i, total_stage_count);
       }
 
       /* Handles are unique per device, not per pipeline, so a handle an
@@ -2571,9 +2926,29 @@ hk_init_ray_tracing_groups(
       if ((vk_rt_pipeline_create_flags(create_info) &
            VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR) &&
           group_info->pShaderGroupCaptureReplayHandle) {
+         /* A replay handle points at the 4-byte value that
+          * vkGetRayTracingCaptureReplayShaderGroupHandlesKHR returned. No
+          * application memory lives in the zero page; a pointer there is a
+          * tool's offset from a NULL base (gfxreconstruct replays a 0-byte
+          * captured handle set as NULL + 4 * group). Report that the handle
+          * cannot be reused instead of faulting on it. */
+         if ((uintptr_t)group_info->pShaderGroupCaptureReplayHandle <
+             HK_RT_MIN_REPLAY_HANDLE_ADDRESS) {
+            return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                             "ray tracing group %u: capture/replay handle "
+                             "pointer %p is in the zero page",
+                             i, group_info->pShaderGroupCaptureReplayHandle);
+         }
          uint32_t replay;
          memcpy(&replay, group_info->pShaderGroupCaptureReplayHandle,
                 sizeof(replay));
+         /* Handles start at 1 (p_atomic_inc_return below), so 0 was never
+          * returned by vkGetRayTracingCaptureReplayShaderGroupHandlesKHR. */
+         if (!replay) {
+            return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                             "ray tracing group %u: capture/replay handle 0 "
+                             "was never issued", i);
+         }
          pipeline->groups[i].handle.index = replay;
          uint32_t current = p_atomic_read(&dev->rt_group_handle_alloc);
          while (current < replay) {
@@ -2619,11 +2994,22 @@ hk_init_ray_tracing_groups(
    return VK_SUCCESS;
 }
 
+/*
+ * Compile the kernel for one ray-generation group: that raygen, plus every
+ * stage reachable from it through the shader binding table (hit, miss,
+ * intersection, callable), inlined.  Without a group, compile the single
+ * megakernel that selects between every raygen group.  The kernel still checks the raygen
+ * record's handle against its own group, so a kernel dispatched for another
+ * group's record retires without tracing; the GPU-side selection in
+ * hk_cmd_trace_rays.c dispatches the others with zero threadgroups.
+ */
 static VkResult
-hk_compile_ray_tracing_pipeline(
+hk_compile_rt_kernel(
    struct hk_device *dev, struct hk_ray_tracing_pipeline *pipeline,
    const VkRayTracingPipelineCreateInfoKHR *create_info,
-   const VkAllocationCallbacks *pAllocator)
+   const VkAllocationCallbacks *pAllocator,
+   const struct hk_ray_tracing_group *raygen_group,
+   struct hk_rt_kernel *kernel)
 {
    struct hk_physical_device *pdev = hk_device_physical(dev);
    struct vk_pipeline_robustness_state rstate;
@@ -2641,6 +3027,8 @@ hk_compile_ray_tracing_pipeline(
    nir_builder _b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, nir_options, "ray tracing pipeline");
    nir_builder *b = &_b;
+
+   kernel->raygen_handle_index = raygen_group ? raygen_group->handle.index : 0;
 
    /* nir_builder_init_simple_shader() marks the shader internal, and
     * hk_compile_nir() turns that into `has_scratch = false`
@@ -2660,6 +3048,8 @@ hk_compile_ray_tracing_pipeline(
       .flags = vk_rt_pipeline_create_flags(create_info),
       .position_fetch = dev->vk.enabled_features.rayTracingPositionFetch,
       .native_agx = dev->gen1_native_rq && dev->gen1_rq_instances,
+      .native_m5 = dev->m5_native_rq && dev->m5_rq_instances,
+      .m5 = agx_chip_g17_m5(dev->dev.chip),
       .callable_dispatch = hk_callable_dispatch_needed(pipeline),
       .max_depth = create_info->maxPipelineRayRecursionDepth,
    };
@@ -2704,18 +3094,29 @@ hk_compile_ray_tracing_pipeline(
    nir_store_var(b, compiler.state.shader_record_ptr,
                  raygen_entry.shader_record_ptr, 0x1);
 
-   for (uint32_t i = 0; i < pipeline->group_count; i++) {
-      struct hk_ray_tracing_group *group = pipeline->groups + i;
-      if (group->recursive_index == VK_SHADER_UNUSED_KHR)
-         continue;
+   if (raygen_group) {
+      nir_shader *stage = pipeline->stages[raygen_group->recursive_index]->nir;
+      assert(stage->info.stage == MESA_SHADER_RAYGEN);
 
-      nir_shader *stage = pipeline->stages[group->recursive_index]->nir;
-      if (stage->info.stage != MESA_SHADER_RAYGEN)
-         continue;
-
-      nir_push_if(b, nir_ieq_imm(b, raygen_entry.value, group->handle.index));
+      nir_push_if(b, nir_ieq_imm(b, raygen_entry.value,
+                                 raygen_group->handle.index));
       hk_call_ray_tracing_stage(b, &compiler, stage, false);
       nir_pop_if(b, NULL);
+   } else {
+      /* Single megakernel: every raygen group, selected by its handle. */
+      for (uint32_t i = 0; i < pipeline->group_count; i++) {
+         struct hk_ray_tracing_group *group = pipeline->groups + i;
+         if (group->recursive_index == VK_SHADER_UNUSED_KHR)
+            continue;
+
+         nir_shader *stage = pipeline->stages[group->recursive_index]->nir;
+         if (stage->info.stage != MESA_SHADER_RAYGEN)
+            continue;
+
+         nir_push_if(b, nir_ieq_imm(b, raygen_entry.value, group->handle.index));
+         hk_call_ray_tracing_stage(b, &compiler, stage, false);
+         nir_pop_if(b, NULL);
+      }
    }
 
    nir_shader_instructions_pass(b->shader, hk_lower_ray_tracing_instr,
@@ -2769,14 +3170,30 @@ hk_compile_ray_tracing_pipeline(
             nir_intrinsic_load_ray_tracing_stack_base_lvp,
             b->shader->scratch_size);
 
-   pipeline->stack_sizes = compiler.sizes;
-   pipeline->stack_size = hk_rt_pipeline_stack_size(
+   /* Each kernel reserves exactly what its own raygen needs; the pipeline
+    * reports the maximum over its kernels. */
+   const uint32_t stack_size = hk_rt_pipeline_stack_size(
       &compiler.sizes, create_info->maxPipelineRayRecursionDepth);
-   b->shader->scratch_size += pipeline->stack_size;
+   b->shader->scratch_size += stack_size;
+
+   pipeline->stack_sizes.raygen =
+      MAX2(pipeline->stack_sizes.raygen, compiler.sizes.raygen);
+   pipeline->stack_sizes.any_hit =
+      MAX2(pipeline->stack_sizes.any_hit, compiler.sizes.any_hit);
+   pipeline->stack_sizes.closest_hit =
+      MAX2(pipeline->stack_sizes.closest_hit, compiler.sizes.closest_hit);
+   pipeline->stack_sizes.miss =
+      MAX2(pipeline->stack_sizes.miss, compiler.sizes.miss);
+   pipeline->stack_sizes.intersection =
+      MAX2(pipeline->stack_sizes.intersection, compiler.sizes.intersection);
+   pipeline->stack_sizes.callable =
+      MAX2(pipeline->stack_sizes.callable, compiler.sizes.callable);
+   pipeline->stack_size = MAX2(pipeline->stack_size, stack_size);
 
    hk_rt_optimize_nir(b->shader);
 
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   if (agx_chip_isa_encoding(dev->dev.chip) == AGX_ISA_ENCODING_AGX3C ||
+       dev->dev.chip == AGX_CHIP_G17P) {
       bool indirect = false;
       nir_foreach_function_impl(impl, b->shader) {
          nir_foreach_block(block, impl) {
@@ -2847,13 +3264,87 @@ hk_compile_ray_tracing_pipeline(
    };
 
    return hk_compile_shader(dev, &info, NULL, &dev->vk.enabled_features,
-                            pAllocator, &pipeline->shader);
+                            pAllocator, &kernel->shader);
+}
+
+/*
+ * On M5, one kernel per ray-generation group.  A pipeline whose groups name no
+ * raygen (only a library can be created that way) has nothing to compile;
+ * hk_cmd_trace_rays.c refuses to trace with it.
+ */
+static VkResult
+hk_compile_ray_tracing_pipeline(
+   struct hk_device *dev, struct hk_ray_tracing_pipeline *pipeline,
+   const VkRayTracingPipelineCreateInfoKHR *create_info,
+   const VkAllocationCallbacks *pAllocator)
+{
+   /* Only M5 compiles one kernel per ray-generation group; elsewhere the
+    * pipeline is one megakernel. */
+   if (!agx_chip_g17_m5(dev->dev.chip)) {
+      struct hk_rt_kernel kernel = {0};
+      VkResult result = hk_compile_rt_kernel(dev, pipeline, create_info,
+                                             pAllocator, NULL, &kernel);
+      pipeline->shader = kernel.shader;
+      return result;
+   }
+   uint32_t raygen_count = 0;
+   for (uint32_t i = 0; i < pipeline->group_count; i++) {
+      const struct hk_ray_tracing_group *group = pipeline->groups + i;
+      if (group->recursive_index != VK_SHADER_UNUSED_KHR &&
+          pipeline->stages[group->recursive_index]->nir->info.stage ==
+             MESA_SHADER_RAYGEN)
+         raygen_count++;
+   }
+
+   if (raygen_count == 0)
+      return VK_SUCCESS;
+
+   if (vk_rt_pipeline_create_flags(create_info) &
+       VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR)
+      return VK_PIPELINE_COMPILE_REQUIRED;
+
+   pipeline->kernels = calloc(raygen_count, sizeof(*pipeline->kernels));
+   if (!pipeline->kernels)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   for (uint32_t i = 0; i < pipeline->group_count; i++) {
+      const struct hk_ray_tracing_group *group = pipeline->groups + i;
+      if (group->recursive_index == VK_SHADER_UNUSED_KHR ||
+          pipeline->stages[group->recursive_index]->nir->info.stage !=
+             MESA_SHADER_RAYGEN)
+         continue;
+
+      VkResult result = hk_compile_rt_kernel(
+         dev, pipeline, create_info, pAllocator, group,
+         &pipeline->kernels[pipeline->kernel_count]);
+      if (result != VK_SUCCESS)
+         return result;
+
+      pipeline->kernel_count++;
+   }
+
+   assert(pipeline->kernel_count == raygen_count);
+   return VK_SUCCESS;
 }
 
 /* The common binary entrypoints own vk_rt_pipeline objects.  Honeykrisp's
- * megakernel and retained library NIR have a different layout and lifetime. */
+ * megakernel (or, on M5, per-raygen kernels) and retained library NIR have a
+ * different layout and lifetime. */
 #define HK_RT_BINARY_MAGIC   0x42524b48u
 #define HK_RT_BINARY_VERSION 1u
+
+/* What an RT binary carries after the stage NIR. */
+enum hk_rt_binary_executable {
+   HK_RT_BINARY_LIBRARY = 0,
+   HK_RT_BINARY_MEGAKERNEL = 1,
+   HK_RT_BINARY_RAYGEN_KERNELS = 2, /* M5 */
+};
+
+static bool
+hk_rt_binaries_native(const struct hk_device *dev)
+{
+   return dev->dev.chip == AGX_CHIP_G17P || agx_chip_g17_m5(dev->dev.chip);
+}
 
 static void
 hk_rt_pipeline_key(struct hk_device *dev,
@@ -2934,7 +3425,9 @@ hk_rt_binary_serialize(struct hk_device *dev,
    blob_write_uint32(blob, pipeline->stage_count);
    blob_write_uint32(blob, pipeline->group_count);
    blob_write_uint32(blob, pipeline->base.stages);
-   blob_write_uint32(blob, pipeline->shader != NULL);
+   blob_write_uint32(blob, pipeline->kernel_count ? HK_RT_BINARY_RAYGEN_KERNELS
+                           : pipeline->shader ? HK_RT_BINARY_MEGAKERNEL
+                                              : HK_RT_BINARY_LIBRARY);
    blob_write_bytes(blob, &pipeline->stack_sizes,
                     sizeof(pipeline->stack_sizes));
    blob_write_uint32(blob, pipeline->stack_size);
@@ -2954,6 +3447,15 @@ hk_rt_binary_serialize(struct hk_device *dev,
    if (pipeline->shader && !pipeline->shader->vk.ops->serialize(
                               &dev->vk, &pipeline->shader->vk, blob))
       return false;
+   if (pipeline->kernel_count) {
+      blob_write_uint32(blob, pipeline->kernel_count);
+      for (uint32_t i = 0; i < pipeline->kernel_count; ++i) {
+         const struct vk_shader *shader = &pipeline->kernels[i].shader->vk;
+         blob_write_uint32(blob, pipeline->kernels[i].raygen_handle_index);
+         if (!shader->ops->serialize(&dev->vk, shader, blob))
+            return false;
+      }
+   }
    return !blob->out_of_memory;
 }
 
@@ -2964,7 +3466,7 @@ hk_CreatePipelineBinariesKHR(VkDevice device,
                              VkPipelineBinaryHandlesInfoKHR *out)
 {
    VK_FROM_HANDLE(hk_device, dev, device);
-   if (dev->dev.chip != AGX_CHIP_G17P)
+   if (!hk_rt_binaries_native(dev))
       return vk_common_CreatePipelineBinariesKHR(device, info, alloc, out);
 
    if (info->pPipelineCreateInfo &&
@@ -3016,7 +3518,7 @@ hk_GetPipelineKeyKHR(VkDevice device, const VkPipelineCreateInfoKHR *info,
        !vk_find_struct_const(info->pNext, RAY_TRACING_PIPELINE_CREATE_INFO_KHR))
       return vk_common_GetPipelineKeyKHR(device, info, key);
    VK_FROM_HANDLE(hk_device, dev, device);
-   if (dev->dev.chip != AGX_CHIP_G17P)
+   if (!hk_rt_binaries_native(dev))
       return vk_common_GetPipelineKeyKHR(device, info, key);
 
    const VkRayTracingPipelineCreateInfoKHR *rt =
@@ -3069,9 +3571,13 @@ hk_rt_binary_deserialize(struct hk_device *dev,
    uint32_t stages = blob_read_uint32(&blob);
    uint32_t groups = blob_read_uint32(&blob);
    pipeline->base.stages = blob_read_uint32(&blob);
-   bool executable = blob_read_uint32(&blob);
+   const uint32_t executable = blob_read_uint32(&blob);
+   const uint32_t kernels_kind = agx_chip_g17_m5(dev->dev.chip)
+                                    ? HK_RT_BINARY_RAYGEN_KERNELS
+                                    : HK_RT_BINARY_MEGAKERNEL;
    if (blob.overrun ||
-       executable ==
+       (executable != HK_RT_BINARY_LIBRARY && executable != kernels_kind) ||
+       (executable != HK_RT_BINARY_LIBRARY) ==
           !!(pipeline->base.flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) ||
        stages > size / sizeof(uint32_t) ||
        groups > size / sizeof(pipeline->groups[0]))
@@ -3110,7 +3616,7 @@ hk_rt_binary_deserialize(struct hk_device *dev,
          goto done;
       }
    }
-   if (executable) {
+   if (executable == HK_RT_BINARY_MEGAKERNEL) {
       struct vk_shader *shader = NULL;
       result = dev->vk.shader_ops->deserialize(
          &dev->vk, &blob, dev->vk.physical->properties.shaderBinaryVersion,
@@ -3118,6 +3624,32 @@ hk_rt_binary_deserialize(struct hk_device *dev,
       if (result != VK_SUCCESS)
          goto done;
       pipeline->shader = container_of(shader, struct hk_api_shader, vk);
+   } else if (executable == HK_RT_BINARY_RAYGEN_KERNELS) {
+      const uint32_t kernel_count = blob_read_uint32(&blob);
+      if (blob.overrun || kernel_count == 0 || kernel_count > groups)
+         goto done;
+      pipeline->kernels = calloc(kernel_count, sizeof(*pipeline->kernels));
+      if (!pipeline->kernels) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto done;
+      }
+      for (uint32_t i = 0; i < kernel_count; ++i) {
+         const uint32_t handle = blob_read_uint32(&blob);
+         struct vk_shader *shader = NULL;
+         if (blob.overrun) {
+            result = VK_ERROR_UNKNOWN;
+            goto done;
+         }
+         result = dev->vk.shader_ops->deserialize(
+            &dev->vk, &blob, dev->vk.physical->properties.shaderBinaryVersion,
+            alloc, &shader);
+         if (result != VK_SUCCESS)
+            goto done;
+         pipeline->kernels[i].shader =
+            container_of(shader, struct hk_api_shader, vk);
+         pipeline->kernels[i].raygen_handle_index = handle;
+         pipeline->kernel_count++;
+      }
    }
    result =
       blob.overrun || blob.current != blob.end ? VK_ERROR_UNKNOWN : VK_SUCCESS;
@@ -3163,8 +3695,7 @@ hk_create_ray_tracing_pipeline(
 
    const VkPipelineBinaryInfoKHR *binaries =
       vk_find_struct_const(create_info->pNext, PIPELINE_BINARY_INFO_KHR);
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       binaries && binaries->binaryCount) {
+   if (hk_rt_binaries_native(dev) && binaries && binaries->binaryCount) {
       if (binaries->binaryCount != 1) {
          result = VK_ERROR_UNKNOWN;
          goto fail;
@@ -3176,7 +3707,7 @@ hk_create_ray_tracing_pipeline(
       *out_pipeline = vk_pipeline_to_handle(&pipeline->base);
       return VK_SUCCESS;
    }
-   if (dev->dev.chip == AGX_CHIP_G17P)
+   if (hk_rt_binaries_native(dev))
       hk_rt_pipeline_key(dev, create_info, pipeline->binary_key);
 
    pipeline->stage_count = create_info->stageCount;

@@ -420,7 +420,8 @@ agx_ppp_hal200_fragment_face_depth_pack(
     * inserts this mode into both SECONDARY face words. Isolated native
     * witnesses give ANY=0, GREATER=1, LESS=2, UNCHANGED=3; adding a late
     * atomic to either conservative depth shader changes its mode to ANY. */
-   unsigned mode = early_tests ? 3 : writes_memory ? 0 : conservative_depth;
+   unsigned mode = agx_ppp_fragment_depth_mode(conservative_depth, early_tests,
+                                              writes_memory);
    *out = (original & ~UINT32_C(0x00c00000)) | (mode << 22);
    return true;
 }

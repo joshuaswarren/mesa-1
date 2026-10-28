@@ -128,6 +128,7 @@ if with_tests
         ['zink_query_test.c', zink_device_info, zink_instance, vk_dispatch_table, spirv_info_h],
         dependencies : [idep_nir_headers, idep_mesautil, idep_vulkan_util_headers,
                         idep_vulkan_util, idep_vulkan_wsi_defines, dep_libdrm, vulkan_wsi_deps],
+        link_with : libgallium,
         include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_vulkan_util],
         c_args : ['-UNDEBUG', '-ffunction-sections', '-fdata-sections'] + cc.get_supported_arguments('-fno-tree-slp-vectorize'),
         link_args : ['-Wl,--gc-sections'],

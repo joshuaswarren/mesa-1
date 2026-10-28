@@ -1949,12 +1949,18 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
       priority = DRM_ASAHI_PRIORITY_LOW;
    else if (flags & PIPE_CONTEXT_PRIORITY_MEDIUM)
       priority = DRM_ASAHI_PRIORITY_MEDIUM;
-
-   /* TODO: High/realtime need us to handle errors since we might not have
-    * permission. Sort this out later.
-    */
+   else if (flags & (PIPE_CONTEXT_PRIORITY_HIGH | PIPE_CONTEXT_PRIORITY_REALTIME))
+      priority = DRM_ASAHI_PRIORITY_HIGH;
 
    ctx->queue_id = agx_create_command_queue(agx_device(screen), priority);
+
+   /* Kernels grant HIGH only on G17, to CAP_SYS_NICE or DRM-master callers;
+    * otherwise fall back to MEDIUM.
+    */
+   if (ctx->queue_id == UINT32_MAX && priority == DRM_ASAHI_PRIORITY_HIGH) {
+      priority = DRM_ASAHI_PRIORITY_MEDIUM;
+      ctx->queue_id = agx_create_command_queue(agx_device(screen), priority);
+   }
    if (ctx->queue_id == UINT32_MAX) {
       u_upload_destroy(pctx->stream_uploader);
       ralloc_free(ctx);

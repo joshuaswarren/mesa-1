@@ -33,6 +33,18 @@
 #include "hk_build_interface.h"
 #include "agx3_node.h"
 
+/* Variants for one geometry kind: their jobs are inner nodes or that
+ * kind's leaves only, so the other kinds' encoders, and their registers,
+ * drop out. A job of another kind fails as an invalid job. */
+#ifdef HK_AGX3_REFIT_TRIANGLES
+#define HK_AGX3_REFIT 1
+#define HK_AGX3_LEAF_ONLY HK_AGX3_NODE_LEAF
+#endif
+/* Only triangle structures pair triangles. */
+#if defined(HK_AGX3_LEAF_PAIRS) && !defined(HK_AGX3_LEAF_ONLY)
+#define HK_AGX3_LEAF_ONLY HK_AGX3_NODE_LEAF
+#endif
+
 #define JOBS HK_AGX3_NODE_JOBS_PER_GROUP
 /* Built twice: HK_AGX3_LEAF_PAIRS encodes jobs whose children may be
  * triangle pairs (see hk_agx3_plan_args.pairs) and keeps four vertices per
@@ -236,16 +248,31 @@ main()
       job = DEREF(INDEX(hk_agx3_leaf_job, args.jobs, id));
       count = job.child_count;
 #endif
-      if (count < 1u || count > 8 || job.node_kind > HK_AGX3_NODE_AABBS) {
+#ifdef HK_AGX3_LEAF_ONLY
+      const bool kind_ok = job.node_kind == HK_AGX3_NODE_INNER ||
+                           job.node_kind == HK_AGX3_LEAF_ONLY;
+#else
+      const bool kind_ok = job.node_kind <= HK_AGX3_NODE_AABBS;
+#endif
+      if (count < 1u || count > 8 || !kind_ok) {
          if (lane == 0)
             DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_INVALID_COUNT;
          live = false;
       }
    }
    const bool valid = live;
+#ifdef HK_AGX3_LEAF_ONLY
+   const bool leaf = HK_AGX3_LEAF_ONLY == HK_AGX3_NODE_LEAF &&
+                     live && job.node_kind == HK_AGX3_NODE_LEAF;
+   const bool instances = HK_AGX3_LEAF_ONLY == HK_AGX3_NODE_INSTANCES &&
+                          live && job.node_kind == HK_AGX3_NODE_INSTANCES;
+   const bool aabbs = HK_AGX3_LEAF_ONLY == HK_AGX3_NODE_AABBS &&
+                      live && job.node_kind == HK_AGX3_NODE_AABBS;
+#else
    bool leaf = live && job.node_kind == HK_AGX3_NODE_LEAF;
    bool instances = live && job.node_kind == HK_AGX3_NODE_INSTANCES;
    bool aabbs = live && job.node_kind == HK_AGX3_NODE_AABBS;
+#endif
    uint capacity = max(min(count, 4u), 1u), blocks = (count + capacity - 1u) / capacity;
    /* This lane's child: its bounds, record vertices and words. Lanes past
     * the last child keep empty bounds, which the reductions ignore. */

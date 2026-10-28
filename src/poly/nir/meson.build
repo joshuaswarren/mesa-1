@@ -21,6 +21,17 @@ libpoly_nir = static_library(
 
 if with_tests
   test(
+    'poly-gs-output-types',
+    executable(
+      'poly-gs-output-types',
+      '../tests/poly-gs-output-types.c',
+      include_directories : [inc_poly],
+      link_with : [libpoly_nir],
+      dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+    ),
+    suite : 'poly',
+  )
+  test(
     'poly-gs-outputs',
     executable(
       'poly-gs-outputs',

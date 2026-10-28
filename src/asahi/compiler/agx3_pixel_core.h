@@ -41,6 +41,16 @@ extern "C" {
  */
 bool agx3_pixel_colour_entry(enum agx_isa_encoding enc,
                              uint8_t out[AGX3_PIXEL_MAX_LENGTH], uint8_t *len);
+/*
+ * The same entry gate with f34 set: 077000050000 on AGX3c. Every native G17G
+ * fragment that writes depth or stencil alone at several samples opens with
+ * it, and exactly those never release the depth/coverage class explicitly
+ * (no pixrel 1); every other witnessed fragment uses the plain gate. What
+ * the bit selects in hardware is not decoded. AGX3c only.
+ */
+bool agx3_pixel_colour_entry_zs_unreleased(enum agx_isa_encoding enc,
+                                           uint8_t out[AGX3_PIXEL_MAX_LENGTH],
+                                           uint8_t *len);
 
 /*
  * Bracket a colourless fragment's returning memory atomic. Apple's G17P

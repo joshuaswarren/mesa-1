@@ -26,6 +26,14 @@ g17p_explicit_lod_stage(mesa_shader_stage stage)
           stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL;
 }
 
+/* M5 TA programs (API mesh and object/task) have no fragment derivatives and
+ * take the same heap-indexed texture/image operands as compute. */
+static bool
+m5_ta_stage(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_MESH || stage == MESA_SHADER_TASK;
+}
+
 /* agx_nir_lower_g17p_indexed_samplers() is all-or-nothing per shader: one
  * unadmitted texture or image instruction and NOTHING in that shader gets a
  * heap index, so every texture instruction in it then reaches the packer with
@@ -70,7 +78,7 @@ g17p_decline(const char *why, const nir_tex_instr *tex,
 }
 
 static bool
-g17p_sample_shape(const nir_tex_instr *tex)
+g17p_sample_shape(const nir_tex_instr *tex, bool m5)
 {
    const bool query_lod = tex->op == nir_texop_lod;
    const int backend_coord =
@@ -243,8 +251,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
     * (+8,+8) is 0x00080008), not in the compact SMP byte used after
     * agx_emit_tex() folds it.  Admit exactly that generated representation;
     * the backend later maps it to (y << 4) | x. */
+   /* C's texture lowering (generation 10) packs gather offsets like any
+    * other constant offset: compact (y << 4) | x. */
    const bool valid_constant_offset =
-      tex->op == nir_texop_tg4
+      tex->op == nir_texop_tg4 && !m5
          ? (constant_offset & ~0x000f000fu) == 0
          : constant_offset <= (three_d ? 0xfffu : 0xffu);
    /* Native bank-6 minimum operands are grounded for 2D, 2D-array and 3D
@@ -509,7 +519,7 @@ g17p_combined_sampler_candidate(const nir_shader *shader,
             if (instr->type != nir_instr_type_tex)
                continue;
 
-            if (sample || !g17p_sample_shape(nir_instr_as_tex(instr)))
+            if (sample || !g17p_sample_shape(nir_instr_as_tex(instr), false))
                return NULL;
             sample = nir_instr_as_tex(instr);
          }
@@ -781,11 +791,12 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
  * after command recording and dynamically selected array elements are visible.
  */
 static bool
-lower_indexed_samplers(nir_shader *shader, int native32_set)
+lower_indexed_samplers(nir_shader *shader, int native32_set, bool m5)
 {
    if (!shader || (!g17p_explicit_lod_stage(shader->info.stage) &&
                    shader->info.stage != MESA_SHADER_FRAGMENT &&
-                   shader->info.stage != MESA_SHADER_COMPUTE))
+                   shader->info.stage != MESA_SHADER_COMPUTE &&
+                   !(m5 && m5_ta_stage(shader->info.stage))))
       return false;
 
    unsigned samples = 0, image_reads = 0;
@@ -814,12 +825,13 @@ lower_indexed_samplers(nir_shader *shader, int native32_set)
             /* Explicit levels and gradients need no fragment derivatives.
              * Gather uses the packer's existing non-fragment level-zero form.
              * Ordinary implicit samples and biases still remain closed. */
-            if (!fetch && g17p_explicit_lod_stage(shader->info.stage) &&
+            if (!fetch && (g17p_explicit_lod_stage(shader->info.stage) ||
+                           (m5 && m5_ta_stage(shader->info.stage))) &&
                 tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
                 tex->op != nir_texop_tg4)
                return g17p_decline("vertex_implicit_sample", tex, NULL,
                                    shader->info.stage);
-            if (!fetch && !g17p_sample_shape(tex))
+            if (!fetch && !g17p_sample_shape(tex, m5))
                return g17p_decline("sample_shape", tex, NULL,
                                    shader->info.stage);
             nir_intrinsic_instr *image = nir_src_as_intrinsic(
@@ -982,13 +994,145 @@ lower_indexed_samplers(nir_shader *shader, int native32_set)
 bool
 agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
-   return lower_indexed_samplers(shader, -1);
+   return lower_indexed_samplers(shader, -1, false);
+}
+
+
+/* G17G multisample texel fetches: fragment, compute and vertex. The vertex
+ * form is the fragment form with sampler index 0 (port/vmswit v_ms_f, v_ms_u,
+ * v_msa_f, v_ms_k against f_ms_f). */
+static bool
+g17g_ms_read_stage(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_FRAGMENT || stage == MESA_SHADER_COMPUTE ||
+          stage == MESA_SHADER_VERTEX;
+}
+
+bool
+agx_nir_lower_g17g_indexed_reads(nir_shader *shader)
+{
+   if (!shader || (!g17p_explicit_lod_stage(shader->info.stage) &&
+                   shader->info.stage != MESA_SHADER_FRAGMENT &&
+                   shader->info.stage != MESA_SHADER_COMPUTE &&
+                   !m5_ta_stage(shader->info.stage)))
+      return false;
+
+   unsigned reads = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic) {
+               const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                   intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
+                  if (nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_MS &&
+                      !g17g_ms_read_stage(shader->info.stage))
+                     return false;
+                  if ((nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D &&
+                       nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_3D &&
+                       nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_CUBE &&
+                       nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS) ||
+                      intr->def.bit_size != 32)
+                     return false;
+                  reads++;
+               }
+            }
+            if (instr->type != nir_instr_type_tex)
+               continue;
+            const nir_tex_instr *tex = nir_instr_as_tex(instr);
+            const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+            const bool multisample = tex->sampler_dim == GLSL_SAMPLER_DIM_MS;
+            const bool query_lod = tex->op == nir_texop_lod &&
+               shader->info.stage == MESA_SHADER_FRAGMENT &&
+               tex->dest_type == nir_type_float32 && tex->def.bit_size == 32 &&
+               (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+                tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
+                tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE);
+            if (multisample && !g17g_ms_read_stage(shader->info.stage))
+               return false;
+            if ((!multisample && !query_lod &&
+                 tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
+                 tex->sampler_dim != GLSL_SAMPLER_DIM_3D &&
+                 tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE))
+               return false;
+
+            /* C uses the common heap indices but its own SMP selectors and
+             * staging. Ordinary 2D/array/3D/cube samples share the supported
+             * LOD forms and interleaved gradient banks. Minimum LOD uses
+             * typed publishers shared with the dimension's layer/face.
+             * Runtime offsets retain their generation-specific requirements. */
+            const int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+            const int packed_offset =
+               nir_tex_instr_src_index(tex, nir_tex_src_backend2);
+            const bool constant_offset =
+               (offset < 0 || nir_src_is_const(tex->src[offset].src)) &&
+               (packed_offset < 0 ||
+                nir_src_is_const(tex->src[packed_offset].src));
+            const bool ms_fetch = multisample &&
+               g17p_indexed_fetch_shape(tex) && offset < 0 && packed_offset < 0;
+            const bool fetch = ms_fetch || (!multisample &&
+               tex->op == nir_texop_txf && lod >= 0 &&
+               (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+                tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
+               offset < 0 && packed_offset < 0 &&
+               (tex->dest_type == nir_type_uint32 ||
+                tex->dest_type == nir_type_float32 ||
+                tex->dest_type == nir_type_int32));
+            const bool minimum =
+               nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0 ||
+               nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0;
+            /* Constant offsets are SMP immediates on C as on B: native G17G
+             * (texwit3) carries {f43, f51, f141} on 2D, 2D-array, 3D,
+             * comparison and gather samples alike. Cubes have no offset. */
+            /* Runtime offsets: the generation-10 lowering keeps X/Y separate
+             * (a component vector, or a 2x16 pair for a gather) on non-array
+             * 2D samples without a register LOD/bias/minimum; the packer
+             * publishes them with PACK_SMPIR into bank 6 (texwit3/4 d_*). */
+            const bool runtime_offset = !constant_offset &&
+               offset < 0 && packed_offset >= 0 && !tex->is_array &&
+               tex->sampler_dim == GLSL_SAMPLER_DIM_2D && !minimum &&
+               nir_src_num_components(tex->src[packed_offset].src) ==
+                  (tex->op == nir_texop_tg4 ? 1u : 2u) &&
+               (lod < 0 || nir_src_is_const(tex->src[lod].src)) &&
+               (nir_tex_instr_src_index(tex, nir_tex_src_bias) < 0 ||
+                nir_src_is_const(tex->src[nir_tex_instr_src_index(
+                   tex, nir_tex_src_bias)].src));
+            /* A 2D or 2D-array sample whose runtime offset shares bank 6
+             * with its layer or register LOD/bias arrives as G17P's complete
+             * 32-bit word (one component), staged by COPY; a comparison's
+             * reference rides in front of it (texwit6 c_arr, c_lvlr,
+             * g_cmp_arr). */
+            const bool packed_runtime_offset = !constant_offset &&
+               offset < 0 && packed_offset >= 0 &&
+               (tex->op != nir_texop_tg4 || tex->is_array) &&
+               (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+                (tex->sampler_dim == GLSL_SAMPLER_DIM_3D &&
+                 nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0)) &&
+               nir_src_num_components(tex->src[packed_offset].src) == 1;
+            const bool sample = !multisample &&
+               (constant_offset || runtime_offset || packed_runtime_offset) &&
+               (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE ||
+                (offset < 0 && packed_offset < 0)) &&
+               (tex->dest_type == nir_type_float32 ||
+                tex->dest_type == nir_type_uint32 ||
+                tex->dest_type == nir_type_int32) &&
+               (tex->op == nir_texop_tex || tex->op == nir_texop_txl ||
+                tex->op == nir_texop_txb || tex->op == nir_texop_tg4 ||
+                (tex->op == nir_texop_txd &&
+                 tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE));
+            if (!fetch && !sample && !query_lod)
+               return false;
+            reads++;
+         }
+      }
+   }
+   return reads > 0 && lower_indexed_samplers(shader, -1, true);
 }
 
 bool
 agx_nir_lower_g17p_native32_samplers(nir_shader *shader, uint8_t texture_set)
 {
-   return lower_indexed_samplers(shader, texture_set);
+   return lower_indexed_samplers(shader, texture_set, false);
 }
 
 static bool
@@ -1499,7 +1643,7 @@ agx_nir_lower_g17p_sampled_storage(
          block_count++;
          nir_foreach_instr(instr, block) {
             if (instr->type == nir_instr_type_tex) {
-               if (sample || !g17p_sample_shape(nir_instr_as_tex(instr)))
+               if (sample || !g17p_sample_shape(nir_instr_as_tex(instr), false))
                   return false;
                sample = nir_instr_as_tex(instr);
                continue;

@@ -17,6 +17,8 @@ query_report(global uint64_t *results, global uint16_t *oq_index,
     * need to remap indices according to the query pool's allocation.
     */
    uint result_index = oq_index ? oq_index[query] : query;
+   if (oq_index && result_index == LIBAGX_QUERY_INDEX_UNUSED)
+      return 0;
 
    return results + (result_index * reports_per_query);
 }
@@ -42,7 +44,7 @@ libagx_copy_query(global uint32_t *availability, global uint64_t *results,
 
    if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {
       for (unsigned i = 0; i < reports_per_query; ++i) {
-         vk_write_query(dst, i, flags, report[i]);
+         vk_write_query(dst, i, flags, report ? report[i] : 0);
       }
    }
 
@@ -93,8 +95,9 @@ libagx_reset_query(global uint32_t *availability, global uint64_t *results,
       query_report(results, oq_index, reports_per_query, query);
 
    /* XXX: is this supposed to happen on the begin? */
-   for (unsigned j = 0; j < reports_per_query; ++j) {
-      report[j] = value;
+   if (report) {
+      for (unsigned j = 0; j < reports_per_query; ++j)
+         report[j] = value;
    }
 }
 

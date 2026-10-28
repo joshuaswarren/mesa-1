@@ -134,7 +134,8 @@ build_addr_ushr_imm(nir_builder *b, nir_def *addr,
          b, addr, nir_ushr_imm(b, nir_channel(b, addr, 1), shift), 1);
 
    case nir_address_format_64bit_global_32bit_offset:
-      assert(addr->num_components == 4);
+   case nir_address_format_64bit_global_32bit_offset_map:
+      assert(addr->num_components == nir_address_format_num_components(addr_format));
       return nir_vector_insert_imm(
          b, addr, nir_ushr_imm(b, nir_channel(b, addr, 3), shift), 3);
 
@@ -154,7 +155,8 @@ build_addr_for_var(nir_builder *b, nir_variable *var,
                             nir_var_mem_push_const | nir_var_mem_constant));
 
    const nir_address_format base_addr_format =
-      addr_format == nir_address_format_64bit_global_32bit_offset
+      (addr_format == nir_address_format_64bit_global_32bit_offset ||
+       addr_format == nir_address_format_64bit_global_32bit_offset_map)
          ? nir_address_format_64bit_global
          : addr_format;
    const unsigned num_comps = nir_address_format_num_components(base_addr_format);
@@ -164,7 +166,8 @@ build_addr_for_var(nir_builder *b, nir_variable *var,
    case nir_address_format_2x32bit_global:
    case nir_address_format_32bit_global:
    case nir_address_format_64bit_global:
-   case nir_address_format_64bit_global_32bit_offset: {
+   case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map: {
       nir_def *base_addr;
       switch (var->data.mode) {
       case nir_var_shader_temp:
@@ -276,8 +279,10 @@ nir_address_format_bit_size(nir_address_format addr_format)
    case nir_address_format_64bit_global:
       return 64;
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
       return 32;
    case nir_address_format_64bit_bounded_global:
+   case nir_address_format_64bit_bounded_global_map:
       return 32;
    case nir_address_format_32bit_index_offset:
       return 32;
@@ -301,6 +306,9 @@ unsigned
 nir_address_format_num_components(nir_address_format addr_format)
 {
    switch (addr_format) {
+   case nir_address_format_64bit_global_32bit_offset_map:
+   case nir_address_format_64bit_bounded_global_map:
+      return 5;
    case nir_address_format_32bit_global:
       return 1;
    case nir_address_format_2x32bit_global:
@@ -381,8 +389,10 @@ addr_format_is_global(nir_address_format addr_format,
    return addr_format == nir_address_format_32bit_global ||
           addr_format == nir_address_format_2x32bit_global ||
           addr_format == nir_address_format_64bit_global ||
-          addr_format == nir_address_format_64bit_global_32bit_offset ||
-          addr_format == nir_address_format_64bit_bounded_global;
+          (addr_format == nir_address_format_64bit_global_32bit_offset ||
+       addr_format == nir_address_format_64bit_global_32bit_offset_map) ||
+          (addr_format == nir_address_format_64bit_bounded_global ||
+       addr_format == nir_address_format_64bit_bounded_global_map);
 }
 
 static bool
@@ -412,8 +422,10 @@ addr_to_global(nir_builder *b, nir_def *addr,
       return addr;
 
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
    case nir_address_format_64bit_bounded_global:
-      assert(addr->num_components == 4);
+   case nir_address_format_64bit_bounded_global_map:
+      assert(addr->num_components == nir_address_format_num_components(addr_format));
       return nir_iadd(b, nir_pack_64_2x32(b, nir_trim_vector(b, addr, 2)),
                       nir_u2u64(b, nir_channel(b, addr, 3)));
 
@@ -432,15 +444,17 @@ addr_to_global(nir_builder *b, nir_def *addr,
 static bool
 addr_format_needs_bounds_check(nir_address_format addr_format)
 {
-   return addr_format == nir_address_format_64bit_bounded_global;
+   return (addr_format == nir_address_format_64bit_bounded_global ||
+       addr_format == nir_address_format_64bit_bounded_global_map);
 }
 
 static nir_def *
 addr_is_in_bounds(nir_builder *b, nir_def *addr,
                   nir_address_format addr_format, unsigned size)
 {
-   assert(addr_format == nir_address_format_64bit_bounded_global);
-   assert(addr->num_components == 4);
+   assert((addr_format == nir_address_format_64bit_bounded_global ||
+       addr_format == nir_address_format_64bit_bounded_global_map));
+   assert(addr->num_components == nir_address_format_num_components(addr_format));
    assert(size > 0);
    return nir_ult(b, nir_iadd_imm(b, nir_channel(b, addr, 3), size - 1),
                   nir_channel(b, addr, 2));
@@ -665,9 +679,11 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_load_deref:
       switch (mode) {
       case nir_var_mem_ubo:
-         if (addr_format == nir_address_format_64bit_global_32bit_offset)
+         if ((addr_format == nir_address_format_64bit_global_32bit_offset ||
+       addr_format == nir_address_format_64bit_global_32bit_offset_map))
             op = nir_intrinsic_load_global_constant_offset;
-         else if (addr_format == nir_address_format_64bit_bounded_global)
+         else if ((addr_format == nir_address_format_64bit_bounded_global ||
+       addr_format == nir_address_format_64bit_bounded_global_map))
             op = nir_intrinsic_load_global_constant_bounded;
          else if (addr_format_is_global(addr_format, mode))
             op = nir_intrinsic_load_global_constant;
@@ -675,7 +691,8 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
             op = nir_intrinsic_load_ubo;
          break;
       case nir_var_mem_ssbo:
-         if (addr_format == nir_address_format_64bit_bounded_global &&
+         if ((addr_format == nir_address_format_64bit_bounded_global ||
+       addr_format == nir_address_format_64bit_bounded_global_map) &&
              b->shader->options->has_load_global_bounded)
             op = nir_intrinsic_load_global_bounded;
          else if (addr_format_is_global(addr_format, mode))
@@ -770,13 +787,15 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
 
    if (op == nir_intrinsic_load_global_constant_offset ||
        op == nir_intrinsic_load_global_offset) {
-      assert(addr_format == nir_address_format_64bit_global_32bit_offset);
+      assert((addr_format == nir_address_format_64bit_global_32bit_offset ||
+       addr_format == nir_address_format_64bit_global_32bit_offset_map));
       load->src[0] = nir_src_for_ssa(
          nir_pack_64_2x32(b, nir_trim_vector(b, addr, 2)));
       load->src[1] = nir_src_for_ssa(nir_channel(b, addr, 3));
    } else if (op == nir_intrinsic_load_global_bounded ||
               op == nir_intrinsic_load_global_constant_bounded) {
-      assert(addr_format == nir_address_format_64bit_bounded_global);
+      assert((addr_format == nir_address_format_64bit_bounded_global ||
+       addr_format == nir_address_format_64bit_bounded_global_map));
       load->src[0] = nir_src_for_ssa(
          nir_pack_64_2x32(b, nir_trim_vector(b, addr, 2)));
       load->src[1] = nir_src_for_ssa(nir_channel(b, addr, 3));
@@ -1015,7 +1034,8 @@ build_explicit_io_store(nir_builder *b, nir_intrinsic_instr *intrin,
 
    store->src[0] = nir_src_for_ssa(value);
    if (op == nir_intrinsic_store_global_offset) {
-      assert(addr_format == nir_address_format_64bit_global_32bit_offset);
+      assert((addr_format == nir_address_format_64bit_global_32bit_offset ||
+       addr_format == nir_address_format_64bit_global_32bit_offset_map));
       store->src[1] = nir_src_for_ssa(
          nir_pack_64_2x32(b, nir_trim_vector(b, addr, 2)));
       store->src[2] = nir_src_for_ssa(nir_channel(b, addr, 3));
@@ -1750,7 +1770,9 @@ lower_explicit_io_array_length(nir_builder *b, nir_intrinsic_instr *intrin,
    nir_def *offset, *size;
    switch (addr_format) {
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
    case nir_address_format_64bit_bounded_global:
+   case nir_address_format_64bit_bounded_global_map:
       offset = nir_channel(b, addr, 3);
       size = nir_channel(b, addr, 2);
       break;
@@ -2307,7 +2329,9 @@ nir_address_format_null_value(nir_address_format addr_format)
       [nir_address_format_2x32bit_global] = { { 0 } },
       [nir_address_format_64bit_global] = { { 0 } },
       [nir_address_format_64bit_global_32bit_offset] = { { 0 } },
+      [nir_address_format_64bit_global_32bit_offset_map] = { { 0 } },
       [nir_address_format_64bit_bounded_global] = { { 0 } },
+      [nir_address_format_64bit_bounded_global_map] = { { 0 } },
       [nir_address_format_32bit_index_offset] = { { .u32 = ~0 }, { .u32 = ~0 } },
       [nir_address_format_32bit_index_offset_pack64] = { { .u64 = ~0ull } },
       [nir_address_format_vec2_index_32bit_offset] = { { .u32 = ~0 }, { .u32 = ~0 }, { .u32 = ~0 } },
@@ -2326,6 +2350,9 @@ nir_build_addr_ieq(nir_builder *b, nir_def *addr0, nir_def *addr1,
                    nir_address_format addr_format)
 {
    switch (addr_format) {
+   case nir_address_format_64bit_bounded_global_map:
+      return nir_ball_iequal(b, nir_trim_vector(b, addr0, 4),
+                               nir_trim_vector(b, addr1, 4));
    case nir_address_format_32bit_global:
    case nir_address_format_2x32bit_global:
    case nir_address_format_64bit_global:
@@ -2337,6 +2364,7 @@ nir_build_addr_ieq(nir_builder *b, nir_def *addr0, nir_def *addr1,
       return nir_ball_iequal(b, addr0, addr1);
 
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
       return nir_ball_iequal(b, nir_channels(b, addr0, 0xb),
                              nir_channels(b, addr1, 0xb));
 
@@ -2379,7 +2407,9 @@ nir_build_addr_isub(nir_builder *b, nir_def *addr0, nir_def *addr1,
       return nir_u2u64(b, nir_isub(b, nir_u2u32(b, addr0), nir_u2u32(b, addr1)));
 
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
    case nir_address_format_64bit_bounded_global:
+   case nir_address_format_64bit_bounded_global_map:
       return nir_isub(b, addr_to_global(b, addr0, addr_format),
                       addr_to_global(b, addr1, addr_format));
 
@@ -2434,8 +2464,10 @@ nir_build_addr_iadd(nir_builder *b, nir_def *addr,
       return nir_u2u64(b, nir_iadd(b, nir_u2u32(b, addr), offset));
 
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
    case nir_address_format_64bit_bounded_global:
-      assert(addr->num_components == 4);
+   case nir_address_format_64bit_bounded_global_map:
+      assert(addr->num_components == nir_address_format_num_components(addr_format));
       assert(addr->bit_size == offset->bit_size);
       return nir_vector_insert_imm(b, addr, nir_iadd(b, nir_channel(b, addr, 3), offset), 3);
 

@@ -134,6 +134,32 @@ lower(agx_builder *b, agx_instr *I)
 
    /* Various instructions are implemented as bitwise truth tables */
    case AGX_OPCODE_MOV:
+      if (agx3 && agx_channels(I->dest[0]) > 1) {
+         const unsigned channels = agx_channels(I->dest[0]);
+         const unsigned stride = agx_size_align_16(I->dest[0].size);
+         const agx_index dest = I->dest[0], src = I->src[0];
+         assert(!dest.memory && !src.memory);
+         assert(src.type == AGX_INDEX_IMMEDIATE ||
+                (src.size == dest.size && agx_channels(src) == channels));
+         const bool backwards = src.type == AGX_INDEX_REGISTER &&
+            dest.value > src.value &&
+            dest.value < src.value + channels * stride;
+
+         for (unsigned i = 0; i < channels; ++i) {
+            const unsigned c = backwards ? channels - 1 - i : i;
+            agx_index d = dest, s = src;
+            d.channels_m1 = s.channels_m1 = 0;
+            d.value += c * stride;
+            if (s.type != AGX_INDEX_IMMEDIATE)
+               s.value += c * stride;
+            agx_instr *copy = agx_mov_to(b, d, s);
+            agx_instr *lowered = lower(b, copy);
+            assert(lowered);
+            (void)lowered;
+            agx_remove_instruction(copy);
+         }
+         return I;
+      }
       if (agx3 && I->src[0].type == AGX_INDEX_IMMEDIATE)
          return agx_mov_imm_to(b, I->dest[0], I->src[0].value);
       /*
@@ -261,7 +287,7 @@ agx_lower_pseudo(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
-      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      if (ctx->key && agx_isa_is_agx3(ctx->key->dev.encoding))
          agx3_lower_constant_cf_compare(ctx, I);
 
       if (lower(&b, I))

@@ -119,11 +119,19 @@ struct hk_gen1_as_window {
    uint32_t used[8];
    uint32_t live;
 };
+struct hk_frame_anatomy;
 
 struct hk_device {
    struct vk_device vk;
    struct agx_device dev;
+   /* Scratch-filled sparse VA (M5: bounded by sparseAddressSpaceSize). */
+   uint64_t sparse_scratch_B;
+   /* One bit per main-heap page: only unbound sparse buffer pages are set. */
+   struct agx_bo *physical_sparse_map;
    struct agxdecode_ctx *decode_ctx;
+   /* Opt-in frame anatomy profiler (hk_frame_anatomy.h); NULL unless the
+    * HK_FRAME_ANATOMY environment variable is set. */
+   struct hk_frame_anatomy *frame_anatomy;
 
    struct hk_descriptor_table occlusion_queries;
    struct hk_sampler_heap samplers;
@@ -179,6 +187,33 @@ struct hk_device {
       struct hk_queue *queue;
       VkCommandPool pool;
    } host_as;
+   bool m5_native_as;
+   /* Explicit diagnostic runtime, loaded only from the caller's capture. */
+   bool m5_native_rq;
+   bool m5_rq_instances;
+   simple_mtx_t m5_as_lock;
+   struct util_dynarray m5_ases;
+   /* Stable native AS-ID -> address table. VA is reserved once; backing
+    * pages are added as IDs are allocated, so recorded/pending commands
+    * also see acceleration structures created after recording. */
+   struct agx_va *m5_as_table_va;
+   struct util_dynarray m5_as_table_pages;
+   /* Only AS objects created before their ordinary storage buffer is bound.
+    * Binding publishes their final addresses without a submit-time walk. */
+   struct util_dynarray m5_pending_as_ids;
+   uint32_t m5_pending_as_count;
+   struct agx_bo *m5_rq_code;
+   struct agx_va *m5_rq_code_alias;
+   struct agx_bo *m5_rq_ift;
+   struct agx_bo *m5_rq_diag;
+   /* Device-lifetime SCS state block (hk_cmd_dispatch.c). */
+   struct agx_bo *m5_rt_state_bo;
+   uint64_t m5_rt_state_packed, m5_rt_state_size;
+   char *m5_rq_diag_dump;
+   void *m5_rq_user_image;
+   uint32_t m5_rq_uniforms[80];
+   uint64_t m5_rq_default_program;
+   uint64_t m5_rq_default_control;
    struct agx_bg_eot_cache bg_eot;
    /* frg-codegen v4 BG/EOT device cache (hk_cmd_draw.c). */
    struct hk_g17p_bg_eot_dev_cache *g17p_bg_eot_dev_cache;

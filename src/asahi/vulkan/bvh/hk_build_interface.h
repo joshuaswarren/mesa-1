@@ -190,6 +190,23 @@ struct hk_agx3_refit_args {
    uint32_t no_leaves;
 };
 
+/* The separate M5 backend keeps its qualified IR-topology refit protocol.
+ * GEN1 uses hk_agx3_refit_args and the current retained-job protocol. */
+struct hk_m5_refit_args {
+   VOID_REF retained;
+   VOID_REF metadata;
+   VOID_REF intermediate_bvh;
+   REF(vk_ir_header) header;
+   VOID_REF parents;
+   uint32_t root_offset;
+   uint32_t leaf_bound;
+   uint32_t node_bound;
+   uint32_t phase;
+   VOID_REF plan_nodes;
+   VOID_REF plan_jobs;
+   VOID_REF plan_state;
+};
+
 /* Push constants of refit encoding. */
 struct hk_agx3_refit_encode_args {
    VOID_REF refit;
@@ -255,8 +272,8 @@ struct hk_encode_args {
  * so the build planner can select/reorder leaves without copying vertices.
  * Each job owns disjoint root and child regions. Slots are relative to its
  * output AS, not the job or the root. The caller supplies the AS metadata.
- * This covers inner nodes and the opaque, geometry-zero 1..8 leaf form;
- * it is not a complete acceleration-structure build implementation. */
+ * This covers inner nodes, triangle leaf clusters, instance records and
+ * procedural bounding-box leaf clusters. */
 struct hk_agx3_leaf_job {
    VOID_REF intermediate_bvh;
    VOID_REF output_bvh;
@@ -276,7 +293,8 @@ struct hk_agx3_leaf_args {
    REF(uint32_t) status;
    uint32_t job_count;
    /* Slots from the traversal base to output_bvh, added to every child
-    * reference (see libagx/gen1_as.h). Zero when output_bvh is the base. */
+    * reference (see libagx/gen1_as.h). Zero when output_bvh is the base.
+    * M5 uses this ABI word for its diagnostic bounding-box record stride. */
    uint32_t slot_bias;
    /* When nonzero, the number of jobs written by planning (its first word),
     * which the indirect dispatch rounds up to whole workgroups. */
@@ -294,6 +312,7 @@ struct hk_agx3_leaf_args {
 #define HK_AGX3_NODE_LEAF 0
 #define HK_AGX3_NODE_INNER 1
 #define HK_AGX3_NODE_INSTANCES 2
+/* Procedural (AABB) leaf cluster: 48-byte native bounding-box records. */
 #define HK_AGX3_NODE_AABBS 3
 
 /* Finish a single opaque triangle geometry after the node jobs. Bounds name
@@ -375,7 +394,10 @@ struct hk_agx3_plan_args {
    uint32_t phase;
    uint32_t resource_id;
    uint32_t geometry_type;
-   uint32_t padding0;
+   /* GEN1: phases 0..3 were replaced by a restored plan (an update): phase
+    * 4 rebuilds the jobs from the records in nodes. M5 uses this ABI word
+    * for its diagnostic bounding-box record stride, as m5_aabb_stride. */
+   uint32_t plan_restored;
    VOID_REF metadata;
    uint64_t retained_offset;
    uint32_t build_flags;
@@ -385,6 +407,49 @@ struct hk_agx3_plan_args {
    uint32_t pairs;
    uint32_t padding;
 };
+
+/* Independent ASs share dispatches, not their writable records. The planner
+ * allocates a dense job map after classification; each encoder workgroup
+ * still owns precisely the same native root/child region as the scalar path. */
+struct hk_agx3_batch_job {
+#ifdef VULKAN
+   hk_agx3_plan_args plan;
+#else
+   struct hk_agx3_plan_args plan;
+#endif
+   REF(uint32_t) node_status;
+   REF(uint32_t) envelope_status;
+   uint32_t single_leaf;
+   uint32_t first_job;
+   uint32_t encode_count;
+   uint32_t reserved;
+};
+struct hk_agx3_batch_map {
+   uint32_t build;
+   uint32_t node;
+};
+struct hk_agx3_batch_dispatch {
+   uint32_t x;
+   uint32_t y;
+   uint32_t z;
+   uint32_t reserved;
+};
+#ifdef VULKAN
+TYPE(hk_agx3_batch_job, 8);
+TYPE(hk_agx3_batch_map, 4);
+TYPE(hk_agx3_batch_dispatch, 4);
+#endif
+struct hk_agx3_batch_args {
+   REF(hk_agx3_batch_job) jobs;
+   REF(hk_agx3_batch_map) map;
+   REF(hk_agx3_batch_dispatch) dispatch;
+   uint32_t job_count;
+   uint32_t phase;
+};
+
+/* M5's name for hk_agx3_plan_args::plan_restored: 48, or 64 for the 64-byte
+ * bounding-box record diagnostic. */
+#define m5_aabb_stride plan_restored
 
 #define HK_AGX3_PLAN_ENCODE_DISPATCH 32u /* bytes after hk_agx3_plan_state */
 /* hk_agx3_plan_node.depth flags of an internal node whose two children are

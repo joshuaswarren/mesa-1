@@ -705,6 +705,44 @@ TEST(Tilebuffer, IndependentNativeStorageAndSampleLimits)
    EXPECT_FALSE(spilling.spilled[1]);
 }
 
+TEST(Tilebuffer, ResidentAttachmentsStayInTheTilebuffer)
+{
+   /* M5 at 4x: 64 bytes per sample. Four RGBA32F targets fill it, so the
+    * plain descending-alignment order spills the RGBA8 target. */
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,     PIPE_FORMAT_R32G32B32A32_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_FLOAT, PIPE_FORMAT_R32G32B32A32_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_FLOAT,
+   };
+   const auto plain = agx_build_tilebuffer_layout_resident(
+      formats, 5, 4, false, AGX_MAX_RENDER_TARGETS * 16, 65536, 2048, 0);
+   EXPECT_TRUE(plain.spilled[0]);
+   EXPECT_EQ(plain.resident_mask, 0u);
+
+   /* Asking for RT0 to stay resident moves it first; a filler spills. */
+   const auto resident = agx_build_tilebuffer_layout_resident(
+      formats, 5, 4, false, AGX_MAX_RENDER_TARGETS * 16, 65536, 2048, 0x1);
+   EXPECT_FALSE(resident.spilled[0]);
+   EXPECT_EQ(resident._offset_B[0], 0u);
+   EXPECT_EQ(resident._offset_B[1], 4u);
+   EXPECT_TRUE(resident.spilled[4]);
+   EXPECT_EQ(resident.resident_mask, 0x1u);
+
+   /* Rebuilding with the recorded mask reproduces the layout. */
+   const auto again = agx_build_tilebuffer_layout_resident(
+      formats, 5, 4, false, AGX_MAX_RENDER_TARGETS * 16, 65536, 2048,
+      resident.resident_mask);
+   EXPECT_EQ(memcmp(&again, &resident, sizeof(again)), 0);
+
+   /* A mask is ignored when the plain order keeps those targets resident. */
+   const auto fits = agx_build_tilebuffer_layout_resident(
+      formats, 2, 4, false, AGX_MAX_RENDER_TARGETS * 16, 65536, 2048, 0x1);
+   EXPECT_FALSE(agx_tilebuffer_spills(&fits));
+   EXPECT_EQ(fits.resident_mask, 0u);
+   EXPECT_EQ(fits._offset_B[1], 0u);
+   EXPECT_EQ(fits._offset_B[0], 16u);
+}
+
 class SampleDepthOrder : public ::testing::Test {
  protected:
    SampleDepthOrder()

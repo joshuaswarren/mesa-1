@@ -31,9 +31,13 @@ spirv_execution_mode(extensions = ["SPV_KHR_float_controls"],
 
 layout(local_size_x_id = SUBGROUP_SIZE_ID, local_size_y = 1, local_size_z = 1) in;
 
+#ifdef VK_BATCH_LEAVES
+leaf_args args;
+#else
 layout(push_constant) uniform CONSTS {
    leaf_args args;
 };
+#endif
 
 bool
 build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom_data, uint32_t global_id)

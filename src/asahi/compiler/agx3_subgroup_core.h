@@ -81,7 +81,12 @@ struct agx3_subgroup_ballot_desc {
    uint16_t src;
    /* The G17P SIMD integer form can compare against a 16-bit immediate. */
    bool compare_immediate;
+   bool compare_register;
    uint16_t compare_value;
+   bool compare_half;
+   bool compare_cache;
+   bool compare_discard;
+   bool src_cache;
    /* The immediate equal-to-zero form also takes a 16-bit source register
     * (f24 = 1), as Apple's simd_broadcast_first() compares the 16-bit active
     * thread index against zero. */
@@ -135,6 +140,15 @@ struct agx3_subgroup_reduce_desc {
    /* 16-bit destination and source, in half units (AGX3b only). */
    bool half;
 };
+
+bool agx3_subgroup_encode_active_mask(uint16_t dest, bool dest_cache,
+                                      uint8_t wait_mask,
+                                       uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
+                                       uint8_t *length);
+bool agx3_subgroup_encode_quad_ballot_imm(uint16_t dest, bool dest_cache,
+                                          uint16_t value, uint8_t wait_mask,
+                                          uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
+                                          uint8_t *length);
 
 bool agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
                                   const struct agx3_subgroup_shuffle_desc *desc,

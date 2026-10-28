@@ -1,0 +1,288 @@
+/* Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ * Native explicit-ID, single-geometry triangle AS header and descriptor.
+ * Matches agx_rt_blas_gen3_envelope and the native 2/4/8/64 captures.
+ */
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float32 : require
+
+#include "hk_build_interface.h"
+
+#ifndef HK_AGX3_GEN1
+#define HK_AGX3_GEN1 0
+#endif
+
+layout(local_size_x = 64) in;
+#ifdef HK_AGX3_BATCH
+layout(push_constant) uniform CONSTS
+{
+   hk_agx3_batch_args batch;
+};
+hk_agx3_envelope_args args;
+#else
+layout(push_constant) uniform CONSTS
+{
+   hk_agx3_envelope_args args;
+};
+#endif
+
+void
+store32(uint64_t address, uint value)
+{
+   DEREF(REF(uint32_t)(address)) = value;
+}
+
+void
+store64(uint64_t address, uint64_t value)
+{
+   store32(address, uint(value));
+   store32(address + 4ul, uint(value >> 32));
+}
+
+/* Use the reciprocal estimate only to locate an integer quotient. Its exact
+ * 48-bit product/remainder gives round-to-nearest-even without shader f64 or
+ * a general 64-bit division. A float/FMA refinement alone was insufficient
+ * on the current M5 compiler path for some captured-envelope scale tests. */
+uint
+reciprocal_rte(float value)
+{
+   uint bits = floatBitsToUint(value);
+   if ((bits & 0x80000000u) != 0 || (bits & 0x7fffffffu) == 0 ||
+       (bits & 0x7f800000u) == 0x7f800000u)
+      return 0x7f800000u;
+   int exponent = int((bits >> 23) & 255u);
+   uint mantissa = bits & 0x7fffffu;
+   if (exponent != 0) {
+      mantissa |= 0x800000u;
+   } else {
+      int shift = 23 - findMSB(mantissa);
+      mantissa <<= shift;
+      exponent = 1 - shift;
+   }
+   int result_exponent = max(253 - exponent, 0);
+   if (result_exponent >= 255)
+      return 0x7f800000u;
+   int numerator_bit = result_exponent == 0 ? 299 - exponent : 47;
+   uint64_t numerator = 1ul << numerator_bit;
+   uint estimate_bits = floatBitsToUint(1.0 / float(mantissa));
+   int estimate_exponent = int((estimate_bits >> 23) & 255u);
+   uint estimate_mantissa = 0x800000u | (estimate_bits & 0x7fffffu);
+   int estimate_shift = 150 - numerator_bit - estimate_exponent;
+   /* An exact power-of-two mantissa has a reciprocal exponent one higher
+    * than the other mantissas. Scale left in that case: a negative right
+    * shift otherwise loses the estimate and makes correction take millions
+    * of iterations (or wrap), hanging the envelope dispatch. */
+   uint quotient = estimate_shift < 0
+                      ? estimate_mantissa << uint(-estimate_shift)
+                      : estimate_mantissa >> uint(estimate_shift);
+   uint64_t product = uint64_t(mantissa) * uint64_t(quotient);
+   while (product > numerator) {
+      --quotient;
+      product -= uint64_t(mantissa);
+   }
+   while (product + uint64_t(mantissa) <= numerator) {
+      ++quotient;
+      product += uint64_t(mantissa);
+   }
+   uint64_t twice_remainder = (numerator - product) * 2ul;
+   if (twice_remainder > uint64_t(mantissa) ||
+       (twice_remainder == uint64_t(mantissa) && (quotient & 1u) != 0))
+      ++quotient;
+   if (quotient == 0x1000000u) {
+      quotient >>= 1;
+      ++result_exponent;
+   }
+   return result_exponent == 0
+             ? quotient
+             : (uint(result_exponent) << 23) | (quotient & 0x7fffffu);
+}
+
+void
+publish_metadata(hk_agx3_envelope_job job, uint64_t image_bytes)
+{
+   if (args.metadata == 0ul)
+      return;
+   libagx_gen1_as_metadata live;
+   live.native_base = job.output_bvh;
+   live.image_bytes = image_bytes;
+   live.retained_offset = 0ul;
+   live.retained_bytes = 0ul;
+   if (args.keep_retained != 0u) {
+      /* In-place UPDATE did not re-save IR at the build-bound offset. */
+      libagx_gen1_as_metadata previous =
+         DEREF(REF(libagx_gen1_as_metadata)(args.metadata));
+      live.retained_offset = previous.retained_offset;
+      live.retained_bytes = previous.retained_bytes;
+   } else if ((args.build_flags & 1u) != 0u) { /* Vulkan ALLOW_UPDATE */
+      live.retained_offset = args.retained_offset;
+      live.retained_bytes = uint64_t(SIZEOF(vk_ir_header)) +
+         uint64_t(DEREF(args.ir_header).ir_internal_node_count) * uint64_t(SIZEOF(vk_ir_box_node));
+   }
+   live.storage_bytes = max(image_bytes, live.retained_offset + live.retained_bytes);
+   live.build_flags = args.build_flags;
+   live.leaf_bound = job.leaf_bound;
+   live.node_bound = args.node_bound;
+   live.geometry_type = job.geometry_type;
+   live.resource_id = job.resource_id;
+   live.version = LIBAGX_GEN1_AS_METADATA_VERSION;
+   DEREF(REF(libagx_gen1_as_metadata)(args.metadata)) = live;
+}
+
+void
+clear_instance_pointers(uint job_index, uint lane)
+{
+   hk_agx3_envelope_job job = DEREF(INDEX(hk_agx3_envelope_job, args.jobs, job_index));
+   if (job.geometry_type != VK_GEOMETRY_TYPE_INSTANCES_KHR ||
+       job.primitive_count == 0 || job.end_slot < 3 ||
+       job.output_bvh == 0 || (job.output_bvh & 63ul) != 0)
+      return;
+   uint64_t pointers = uint64_t(job.end_slot) * 64ul + uint64_t(job.leaf_bound) * 64ul;
+   uint64_t size = pointers + uint64_t(job.leaf_bound) * 16ul + 184ul;
+   if (job.output_bvh >= (1ul << 48) || size > (1ul << 48) - job.output_bvh)
+      return;
+   for (uint i = lane; i < job.leaf_bound; i += 64u) {
+      store64(job.output_bvh + pointers + uint64_t(i)*16ul, 0ul);
+      store64(job.output_bvh + pointers + uint64_t(i)*16ul + 8ul, 0ul);
+   }
+}
+
+void
+main()
+{
+   if (HK_AGX3_GEN1 != 0)
+   for (uint i = gl_WorkGroupID.x; i < args.job_count; i += gl_NumWorkGroups.x)
+      clear_instance_pointers(i, gl_LocalInvocationID.x);
+   uint id = gl_GlobalInvocationID.x;
+#ifdef HK_AGX3_BATCH
+   if (id >= batch.job_count)
+      return;
+   hk_agx3_batch_job entry = DEREF(INDEX(hk_agx3_batch_job, batch.jobs, id));
+   args.jobs = entry.plan.envelope;
+   args.status = entry.envelope_status;
+   args.job_count = 1;
+   args.reserved = 0;
+   args.metadata = 0ul;
+   id = 0;
+#endif
+   if (id >= args.job_count)
+      return;
+   hk_agx3_envelope_job job = DEREF(INDEX(hk_agx3_envelope_job, args.jobs, id));
+   if (job.primitive_count == 0 &&
+       job.opaque_build_word == HK_AGX3_PLAN_EMPTY) {
+      if (job.output_bvh == 0 || (job.output_bvh & (HK_AGX3_GEN1 != 0 ? 63ul : 1023ul)) != 0 ||
+          job.output_bvh >= (1ul << 48) - 192ul) {
+         DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_RANGE;
+         return;
+      }
+      for (uint i = 0; i < 28; ++i)
+         store32(job.output_bvh + 64ul + uint64_t(i) * 4ul,
+                 i >= 4 && i < 10 ? 0x7fc00000u : 0u);
+      publish_metadata(job, 192ul);
+      DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_SUCCESS;
+      return;
+   }
+   uint64_t tail = uint64_t(job.end_slot) * 64ul;
+   bool instances = job.geometry_type == VK_GEOMETRY_TYPE_INSTANCES_KHR;
+   bool aabbs = job.geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR;
+   uint64_t transform_offset = tail;
+   uint64_t pointer_offset = tail + 64ul * uint64_t(job.leaf_bound);
+   uint64_t descriptor_offset = instances
+      ? pointer_offset + 16ul * uint64_t(job.leaf_bound) : tail;
+   uint64_t size = descriptor_offset + 184ul;
+   uint status = 0;
+   if (job.end_slot < 3 || job.primitive_count == 0 || job.node_count == 0 ||
+       job.depth == 0)
+      status |= HK_AGX3_LEAF_INVALID_COUNT;
+   if (job.output_bvh == 0 || (job.output_bvh & 63ul) != 0 ||
+       job.output_bvh >= (1ul << 48) || size > (1ul << 48) - job.output_bvh)
+      status |= HK_AGX3_LEAF_RANGE;
+   vec3 lo = DEREF(job.bounds).aabb.min, hi = DEREF(job.bounds).aabb.max;
+   precise vec3 extent = hi - lo;
+   for (uint a = 0; a < 3; ++a) {
+      if (isnan(lo[a]) || isinf(lo[a]) || isnan(hi[a]) || isinf(hi[a]))
+         status |= HK_AGX3_LEAF_NONFINITE;
+      if (lo[a] > hi[a])
+         status |= HK_AGX3_LEAF_RANGE;
+      if (HK_AGX3_GEN1 != 0 && extent[a] == 0.0) {
+         hi[a] = lo[a] + max(abs(lo[a]), 1.0) * 1.52587890625e-05;
+         extent[a] = hi[a] - lo[a];
+      }
+   }
+   precise float xy = extent.x * extent.y;
+   precise float xz = extent.x * extent.z;
+   precise float yz = extent.y * extent.z;
+   precise float area = (xy + xz) + yz;
+   uint inverse_bits = reciprocal_rte(area);
+   float inverse = uintBitsToFloat(inverse_bits);
+   if (!(area > 0.0) || isinf(area) || isinf(inverse))
+      status |= HK_AGX3_LEAF_RANGE;
+   if (status != 0) {
+      DEREF(INDEX(uint32_t, args.status, id)) = status;
+      return;
+   }
+   uint64_t h = job.output_bvh + 64ul;
+   for (uint i = 0; i < 32; ++i)
+      store32(h + uint64_t(i) * 4ul, 0);
+   store64(h, (instances ? 0x080000008000f032ul : 0x080000002000f032ul) |
+               (uint64_t(HK_AGX3_GEN1 != 0 && args.reserved == 2 ? 2 : 3) << 24));
+   store64(h + 8ul, size);
+   for (uint a = 0; a < 3; ++a) {
+      store32(h + 16ul + uint64_t(a) * 4ul, floatBitsToUint(lo[a]));
+      store32(h + 28ul + uint64_t(a) * 4ul, floatBitsToUint(hi[a]));
+   }
+   for (uint i = 40; i <= 88; i += 8) {
+      uint64_t offset = tail;
+      if (instances)
+         offset = (i == 48 || i == 56) ? descriptor_offset :
+                  i == 64 ? pointer_offset : transform_offset;
+      store64(h + uint64_t(i), i == 80 ? job.output_bvh : offset);
+   }
+   store32(h + 96ul, 1);
+   store32(h + 112ul, job.resource_id != 0 ? job.resource_id : 1);
+   store32(h + 120ul, instances ? 0x41d00000u : job.opaque_build_word);
+   store32(h + 124ul, 0x01000000);
+
+   uint descriptor[46] =
+      uint[46](job.primitive_count, job.primitive_count, 0, 0, job.node_count,
+               job.depth, 1, 0, 1, 0, 0, 0, 0, 0x3f800000, 0, 0, 2, 1, 0, 0, 2,
+               10, 0, 0, 0, 0, 0, inverse_bits, 0x01000000, 0x01000000,
+               0x00000101, 0x00010000, 0x00010000, 0x00ff0001, 0x02000000,
+               0x01000005, 0x03000000, 1, 0, 0x3f800000, 0, 0, 0, 0, 0, 0);
+   if (aabbs && HK_AGX3_GEN1 == 0) {
+      /* Descriptor word 16 selects the native geometry class: Apple's
+       * extractor maps 4 to BVHGeometryBoundingBox (8 is the instance class
+       * and 0/2/10 the triangle classes). Word 20 mirrors word 16 in both
+       * captured triangle and instance descriptors; the remaining words keep
+       * the triangle values, which no native bounding-box capture has yet
+       * confirmed or refuted. */
+      descriptor[16] = 4;
+      descriptor[20] = 4;
+   }
+   if (instances) {
+      const uint template_words[46] = uint[46](
+         0,0,0,0,0,0,0,0,1,0,0,0,0,0x3f800000,0,0,
+         8,0,0,0,8,18,0,6,1,1,1,0,0x01000000,0,0x100,0x10000,
+         0x10000,0x00ff0001,0x02000000,5,0x03000002,1,0,0x3f800000,
+         0,0,0,0,0,0);
+      for (uint i = 0; i < 46; ++i)
+         descriptor[i] = template_words[i];
+      descriptor[0] = job.primitive_count;
+      descriptor[3] = job.primitive_count;
+      descriptor[4] = job.node_count;
+      descriptor[5] = job.depth;
+      descriptor[7] = job.primitive_count;
+      descriptor[27] = inverse_bits;
+   }
+   for (uint i = 0; i < 46; ++i)
+      store32(job.output_bvh + descriptor_offset + uint64_t(i) * 4ul, descriptor[i]);
+   publish_metadata(job, size);
+   DEREF(INDEX(uint32_t, args.status, id)) = 0;
+}

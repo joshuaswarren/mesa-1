@@ -34,6 +34,11 @@ def declare_options():
         B("hk_enable_vertex_pipeline_stores_atomics", False,
           "Enable vertexPipelineStoresAndAtomics",
           c_name="enable_vertex_pipeline_stores_atomics"),
+        B("hk_mutable_format_srgb_pair", False,
+          "Assume a mutable-format colour image created without a format "
+          "list is only viewed as itself or its sRGB/UNORM twin, so that it "
+          "can be compressed",
+          c_name="mutable_format_srgb_pair"),
     ]
 
     debug_options = []

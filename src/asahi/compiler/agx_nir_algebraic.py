@@ -234,6 +234,14 @@ fuse_imad += [
     (('iadd', a, ('ishl(is_used_once)', b, '#c')), imad(b, ('ishl', 1, c), a)),
 ]
 
+# A value added twice is one shifted add: reassociation groups the duplicated
+# sources of a chain as x + (y + y), an accumulation it leaves alone adds
+# them in turn as (x + y) + y.
+fuse_doubled_add = [
+    (('iadd', 'a@32', ('iadd(is_used_once)', 'b@32', b)), iaddshl(a, b, 1)),
+    (('iadd', ('iadd(is_used_once)', 'a@32', 'b@32'), b), iaddshl(a, b, 1)),
+]
+
 # Discard lowering generates this pattern, clean it up
 ixor_bcsel = [
    (('ixor', ('bcsel', a, '#b', '#c'), '#d'),
@@ -439,6 +447,8 @@ agx_selected_f2i32_controls_match(const nir_alu_instr *instr)
                                       fold_pixel_coord).render())
     print(nir_algebraic.AlgebraicPass("agx_nir_fold_extract16_bfe",
                                       fold_extract16_bfe).render())
+    print(nir_algebraic.AlgebraicPass("agx_nir_fuse_doubled_add",
+                                      fuse_doubled_add).render())
     print(nir_algebraic.AlgebraicPass("agx_nir_fuse_algebraic_late",
                                       fuse_extr + fuse_ubfe +
                                       fuse_imad + ixor_bcsel +

@@ -50,6 +50,12 @@ bool agx3_cprog_input_publish_at(unsigned mask, unsigned tps_half,
                                 unsigned source_half, void *output,
                                 size_t capacity, size_t *written);
 
+/* Chip-aware forms preserve the classic ABI and encode M5's native TPS
+ * COPY/RLD forms. M5 capture uses slot6 and compact8B extended COPY. */
+bool agx3_cprog_input_publish_at_encoding(
+   enum agx_isa_encoding encoding, unsigned mask, unsigned tps_half,
+   unsigned source_half, void *output, size_t capacity, size_t *written);
+
 struct agx3_cprog_import {
    uint16_t uniform_half;
    uint16_t dest_half;
@@ -70,6 +76,12 @@ struct agx3_cprog_import {
 bool agx3_cprog_input_import(const struct agx3_cprog_inputs *inputs,
                              const struct agx3_cprog_import *desc,
                              void *output, size_t capacity, size_t *written);
+
+
+bool agx3_cprog_input_import_encoding(
+   enum agx_isa_encoding encoding, const struct agx3_cprog_inputs *inputs,
+   const struct agx3_cprog_import *desc, void *output, size_t capacity,
+   size_t *written);
 
 #ifdef __cplusplus
 }

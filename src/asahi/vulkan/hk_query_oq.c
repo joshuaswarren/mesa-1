@@ -175,12 +175,51 @@ hk_resolve_oq_forward(struct hk_cmd_buffer *cmd)
       hk_dispatch_imm_writes(cmd, movable);
 }
 
+/* Whether the stores of the deferred stream post can join into, a later
+ * movable stream: post carries nothing else, into waits on a render at or
+ * after the one post waits on (renders complete in order, as
+ * hk_resolve_oq_forward() also relies on), and nothing else in the command
+ * buffer waits on post, so dropping it moves its stores later without moving
+ * them past a consumer. Unlike in hk_stamp_oq_available(), compute waiting on
+ * the render does not prevent this: into is that compute, and it is the one
+ * command left for these stores. Stamping the render instead would make into
+ * wait for the host-side retirement of the render. */
+static bool
+hk_oq_joins(struct hk_cmd_buffer *cmd, struct hk_cs *post, struct hk_cs *into)
+{
+   if (post->timestamp.start.handle || post->timestamp.end.handle ||
+       post->stats.cmds || post->stats.flushes)
+      return false;
+
+   const struct hk_cs *render = post->sync.dep[HK_SYNC_VDM].cut;
+   const struct hk_cs *later = into->sync.dep[HK_SYNC_VDM].cut;
+   if (!render || !later || later->sync.seq < render->sync.seq)
+      return false;
+
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+      if (it == post || it == into)
+         continue;
+      if (hk_dep_reaches(&it->sync.dep[HK_SYNC_CDM], post) ||
+          hk_dep_reaches(&it->sync.dep_ta[HK_SYNC_CDM], post))
+         return false;
+   }
+
+   for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+      if (hk_dep_reaches(&cmd->sync.req[k][HK_SYNC_CDM], post))
+         return false;
+   }
+
+   return true;
+}
+
 /* From the end of the command buffer. A later stream whose render carries its
  * stores is dropped before earlier streams are judged, so it no longer counts
  * as compute waiting on the render subqueue, and an earlier render can carry
  * its own stores too. A stream that stays (kept, or movable) still counts.
- * Movable stores collect into the latest movable stream when it waits on a
- * render that completes after theirs. */
+ * Once a movable stream remains, every earlier stream that can join it does
+ * (hk_oq_joins()), whether or not its own render could have carried the
+ * stores: the movable stream is emitted anyway and waits on all of those
+ * renders, so one compute command serves the whole command buffer. */
 static void
 hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
 {
@@ -191,6 +230,12 @@ hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
          continue;
 
       cs->oq_avail_deferred = false;
+      if (movable && hk_oq_joins(cmd, cs, movable)) {
+         util_dynarray_append_dynarray(&movable->imm_writes, &cs->imm_writes);
+         hk_drop_oq_stream(cmd, cs);
+         continue;
+      }
+
       switch (hk_stamp_oq_available(cmd, cs)) {
       case HK_OQ_STAMPED:
          hk_drop_oq_stream(cmd, cs);

@@ -9,7 +9,7 @@
  * every combination Apple's G17P ray-query setup emits: direct-absolute, a
  * scalar register index plus a uniform-register base, a scalar register index
  * plus a register base, and a register base with no index -- each with a
- * signed 16-bit byte displacement.  Loads and stores may move one, two or four
+ * signed 16-bit byte displacement.  Loads and stores may move one through four
  * 32-bit components.
  *
  * AGX3c supports W32 vectors and direct, uniform-indexed, and register-base

@@ -23,6 +23,9 @@ void agx3_build_container_constant_program(
  * deliberately not part of this helper. */
 #define AGX3_CODE_BLOCK_HEADER_SIZE 0x40u
 #define AGX3_CODE_BLOCK_ENTRY_OFFSET 0x80u
+bool agx3_build_m5_container_lead(void *image, size_t capacity,
+                                  unsigned clusters);
+
 size_t agx3_code_block_size(size_t main_span);
 bool agx3_build_code_block(void *image, size_t capacity, const void *main,
                           size_t main_size, size_t main_span,

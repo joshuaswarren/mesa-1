@@ -212,7 +212,14 @@ enum agx3_barrier_scope {
    AGX3_BARRIER_SCOPE_DEVICE_FENCE,
    AGX3_BARRIER_SCOPE_TEXTURE_FENCE,
    AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT,
+   /* AGX3C only: a memory-only texture fence at threadgroup scope. */
+   AGX3_BARRIER_SCOPE_TEXTURE_FENCE_THREADGROUP,
+   /* Compiler ordering only: M5 subgroup shared memory needs no rendezvous. */
    AGX3_BARRIER_SCOPE_SUBGROUP_SHARED,
+   /* Captured native mesh_amplified entry before the payload device load. */
+   AGX3_BARRIER_SCOPE_MESH_PAYLOAD_ENTRY,
+   /* Captured object.write_childcount after the API workgroup barrier. */
+   AGX3_BARRIER_SCOPE_OBJECT_PAYLOAD_EXIT,
 };
 
 struct agx3_encoded_scoped_barrier {
@@ -869,6 +876,19 @@ bool agx3_pack_threadgroup_barrier(
 bool agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
                               enum agx3_barrier_scope scope,
                               struct agx3_encoded_scoped_barrier *out);
+
+/*
+ * AGX3C texture barriers carry their scoreboard wait in the first barrier
+ * word itself (fields 16..23 name slots 1..8). G17G waits there on the result
+ * slots of the image writes still in flight: Metal texture.fence(),
+ * atomic_thread_fence(mem_texture) at every scope and
+ * threadgroup_barrier(mem_texture) all do. Only the AGX3C texture scopes
+ * accept a wait; a zero wait gives agx3_pack_scoped_barrier()'s bytes.
+ */
+bool agx3_pack_scoped_barrier_wait(enum agx_isa_encoding encoding,
+                                   enum agx3_barrier_scope scope,
+                                   uint16_t wait_mask,
+                                   struct agx3_encoded_scoped_barrier *out);
 
 /*
  * Encode/decode the canonical unconditional shader terminator.  The exact

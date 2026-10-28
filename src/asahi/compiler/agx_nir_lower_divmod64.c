@@ -27,10 +27,14 @@
 
 /* G17P has no 64-bit add or subtract, and nir_lower_int64 only lowers those
  * for shaders whose source has a 64-bit add, so build them from 32-bit halves
- * here as nir_lower_int64 would. */
+ * here as nir_lower_int64 would. M5 adds and subtracts 64-bit values natively
+ * (native_add64). */
 static nir_def *
-iadd64(nir_builder *b, nir_def *x, nir_def *y)
+iadd64(nir_builder *b, nir_def *x, nir_def *y, bool native_add64)
 {
+   if (native_add64)
+      return nir_iadd(b, x, y);
+
    nir_def *x_lo = nir_unpack_64_2x32_split_x(b, x);
    nir_def *x_hi = nir_unpack_64_2x32_split_y(b, x);
    nir_def *y_lo = nir_unpack_64_2x32_split_x(b, y);
@@ -43,8 +47,11 @@ iadd64(nir_builder *b, nir_def *x, nir_def *y)
 }
 
 static nir_def *
-isub64(nir_builder *b, nir_def *x, nir_def *y)
+isub64(nir_builder *b, nir_def *x, nir_def *y, bool native_add64)
 {
+   if (native_add64)
+      return nir_isub(b, x, y);
+
    nir_def *x_lo = nir_unpack_64_2x32_split_x(b, x);
    nir_def *x_hi = nir_unpack_64_2x32_split_y(b, x);
    nir_def *y_lo = nir_unpack_64_2x32_split_x(b, y);
@@ -57,8 +64,8 @@ isub64(nir_builder *b, nir_def *x, nir_def *y)
 }
 
 static void
-udivmod64(nir_builder *b, nir_def *n, nir_def *d, nir_def **q_out,
-          nir_def **r_out)
+udivmod64(nir_builder *b, nir_def *n, nir_def *d, bool native_add64,
+          nir_def **q_out, nir_def **r_out)
 {
    nir_variable *q_var =
       nir_local_variable_create(b->impl, glsl_uint64_t_type(), "divmod64_q");
@@ -86,7 +93,7 @@ udivmod64(nir_builder *b, nir_def *n, nir_def *d, nir_def **q_out,
          nir_def *dd = nir_load_var(b, d_var);
          nir_def *ge = nir_uge(b, r, dd);
 
-         nir_store_var(b, r_var, nir_bcsel(b, ge, isub64(b, r, dd), r), 1);
+         nir_store_var(b, r_var, nir_bcsel(b, ge, isub64(b, r, dd, native_add64), r), 1);
          nir_store_var(b, q_var,
                        nir_ior(b, nir_ishl_imm(b, nir_load_var(b, q_var), 1),
                                nir_b2i64(b, ge)),
@@ -106,16 +113,17 @@ udivmod64(nir_builder *b, nir_def *n, nir_def *d, nir_def **q_out,
 }
 
 static nir_def *
-lower_scalar(nir_builder *b, nir_op op, nir_def *n, nir_def *d)
+lower_scalar(nir_builder *b, nir_op op, nir_def *n, nir_def *d,
+             bool native_add64)
 {
    nir_def *q, *r;
 
    switch (op) {
    case nir_op_udiv:
-      udivmod64(b, n, d, &q, &r);
+      udivmod64(b, n, d, native_add64, &q, &r);
       return q;
    case nir_op_umod:
-      udivmod64(b, n, d, &q, &r);
+      udivmod64(b, n, d, native_add64, &q, &r);
       return r;
    default:
       break;
@@ -126,7 +134,7 @@ lower_scalar(nir_builder *b, nir_op op, nir_def *n, nir_def *d)
    nir_def *d_neg = nir_ilt_imm(b, d, 0);
    nir_def *n_abs = nir_bcsel(b, n_neg, nir_ineg(b, n), n);
    nir_def *d_abs = nir_bcsel(b, d_neg, nir_ineg(b, d), d);
-   udivmod64(b, n_abs, d_abs, &q, &r);
+   udivmod64(b, n_abs, d_abs, native_add64, &q, &r);
 
    switch (op) {
    case nir_op_idiv:
@@ -141,7 +149,7 @@ lower_scalar(nir_builder *b, nir_op op, nir_def *n, nir_def *d)
       nir_def *rem = nir_bcsel(b, n_neg, nir_ineg(b, r), r);
       nir_def *fix = nir_iand(b, nir_ine_imm(b, rem, 0),
                               nir_ine(b, n_neg, d_neg));
-      return nir_bcsel(b, fix, iadd64(b, rem, d), rem);
+      return nir_bcsel(b, fix, iadd64(b, rem, d, native_add64), rem);
    }
    default:
       UNREACHABLE("checked by the caller");
@@ -149,7 +157,7 @@ lower_scalar(nir_builder *b, nir_op op, nir_def *n, nir_def *d)
 }
 
 static bool
-lower_divmod64(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
+lower_divmod64(nir_builder *b, nir_alu_instr *alu, bool native_add64)
 {
    switch (alu->op) {
    case nir_op_udiv:
@@ -171,7 +179,7 @@ lower_divmod64(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
    nir_def *comps[NIR_MAX_VEC_COMPONENTS];
    for (unsigned c = 0; c < alu->def.num_components; ++c) {
       comps[c] = lower_scalar(b, alu->op, nir_channel(b, n, c),
-                              nir_channel(b, d, c));
+                              nir_channel(b, d, c), native_add64);
    }
 
    nir_def_replace(&alu->def, nir_vec(b, comps, alu->def.num_components));
@@ -179,7 +187,7 @@ lower_divmod64(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
 }
 
 bool
-agx_nir_lower_divmod64(nir_shader *shader)
+agx_nir_lower_divmod64(nir_shader *shader, bool native_add64)
 {
    bool progress = false;
 
@@ -196,7 +204,7 @@ agx_nir_lower_divmod64(nir_shader *shader)
       bool impl_progress = false;
       nir_builder b = nir_builder_create(impl);
       util_dynarray_foreach(&sites, nir_alu_instr *, alu)
-         impl_progress |= lower_divmod64(&b, *alu, NULL);
+         impl_progress |= lower_divmod64(&b, *alu, native_add64);
       util_dynarray_fini(&sites);
 
       nir_progress(impl_progress, impl, nir_metadata_none);

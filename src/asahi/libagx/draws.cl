@@ -57,6 +57,32 @@ libagx_draw_indirect_byte_count(global VkDrawIndirectCommand *out,
  * requires a 32-bit load (D3D12 uses 64-bit predication), permits inversion,
  * and compute dispatch records contain three rather than four/five words.
  */
+/*
+ * M5 task (object) draws whose grid, draw count or predicate live in GPU
+ * memory. The VDM mesh dispatch record of such a draw is recorded with one
+ * object workgroup; patch its object thread counts before the render runs and
+ * publish whether the draw executes, which the task shader checks on entry
+ * (a disabled draw keeps one workgroup, which launches no mesh children).
+ */
+KERNEL(1)
+libagx_m5_task_dispatch(global uint32_t *record, global uint32_t *flag,
+                        constant uint32_t *grid, constant uint32_t *draw_count,
+                        constant uint32_t *predicate, uint32_t draw_index,
+                        uint32_t inverted, uint32_t local_x, uint32_t local_y,
+                        uint32_t local_z)
+{
+   bool enabled = grid[0] != 0 && grid[1] != 0 && grid[2] != 0;
+   if (draw_count)
+      enabled = enabled && draw_index < *draw_count;
+   if (predicate)
+      enabled = enabled && ((*predicate != 0) != (inverted != 0));
+
+   record[0] = enabled ? grid[0] * local_x : local_x;
+   record[1] = enabled ? grid[1] * local_y : local_y;
+   record[2] = enabled ? grid[2] * local_z : local_z;
+   *flag = enabled ? 1 : 0;
+}
+
 KERNEL(1)
 libagx_conditional_render(global uint32_t *out, constant uint32_t *in,
                           constant uint32_t *predicate, uint32_t words,
@@ -356,6 +382,137 @@ libagx_draw_robust_index_batch(constant struct libagx_robust_index_draw *draws,
  * only the dimensions), or zero when the application supplied the whole record
  * itself (vkCmdTraceRaysIndirect2KHR).
  */
+/*
+ * Per-raygen kernel selection for vkCmdTraceRays*.  A ray tracing pipeline
+ * compiles one compute kernel per ray-generation group, and the group that a
+ * trace runs is named only by the shader binding table record the application
+ * points at -- memory whose contents the specification requires to be valid
+ * at execution, not at record time (RayTracedGL1, for one, fills its SBT with
+ * a GPU copy recorded in the same command buffer).  So the selection happens
+ * here: read the raygen record's group handle, and publish one
+ * VkDispatchIndirectCommand per kernel: the launch's threadgroup count for the
+ * kernel whose raygen handle matches, zero for every other kernel.  The host
+ * then records one indirect dispatch per kernel.
+ *
+ * `record` is the VkTraceRaysIndirectCommand2KHR every trace form publishes
+ * (hk_cmd_trace_rays.c); its first quadword is raygenShaderRecordAddress and
+ * the group handle's index is the first dword of that record
+ * (hk_ray_tracing_core.h: hk_ray_tracing_group_handle).  `in_dims` is where the
+ * three launch dimensions live right now; `out_record_dims` is where they must
+ * be copied to for the kernels to read, or zero when the record already holds
+ * them.  `handles` lists each kernel's raygen handle index.
+ */
+KERNEL(1)
+libagx_trace_rays_select_setup(constant uint64_t *record,
+                               global uint32_t *out_record_dims,
+                               global VkDispatchIndirectCommand *out_groups,
+                               constant uint32_t *in_dims,
+                               constant uint32_t *handles,
+                               uint32_t kernel_count,
+                               uint32_t local_size_x_log2)
+{
+   uint32_t width = in_dims[0];
+   uint32_t height = in_dims[1];
+   uint32_t depth = in_dims[2];
+
+   if (out_record_dims) {
+      out_record_dims[0] = width;
+      out_record_dims[1] = height;
+      out_record_dims[2] = depth;
+   }
+
+   /* Same non-wrapping round-up as libagx_trace_rays_indirect_setup and
+    * hk_rt_launch_group_count. */
+   const uint32_t mask = (1u << local_size_x_log2) - 1u;
+   const uint32_t groups_x =
+      (width >> local_size_x_log2) + ((width & mask) ? 1u : 0u);
+
+   constant uint32_t *raygen_handle = (constant uint32_t *)(uintptr_t)record[0];
+   const uint32_t selected = *raygen_handle;
+
+   for (uint32_t k = 0; k < kernel_count; ++k) {
+      const bool run = handles[k] == selected;
+      out_groups[k] = (VkDispatchIndirectCommand){
+         .x = run ? groups_x : 0u,
+         .y = run ? height : 0u,
+         .z = run ? depth : 0u,
+      };
+   }
+}
+
+/*
+ * Single-kick variant of libagx_trace_rays_select_setup (opt-in
+ * ASAHI_M5_RT_SINGLE_KICK on M5). Instead of K indirect dispatches, the host
+ * records one Stream Link with return into `slot`, and this invocation writes
+ * the selected kernel's launch there, as Metal's indirect command buffers do
+ * (a GPU-written 40-byte direct launch reached through a barrier and a link).
+ *
+ * `templates` holds, per kernel, the 11 words the host encoded for that
+ * kernel: the 40-byte direct launch (sizes are overwritten here) and its
+ * trailing barrier. `slot` is {0x60000000, launch[10], barrier, return}; the
+ * host wrote words 0 and 12. With no matching kernel the launch keeps kernel
+ * 0's header with every size zero, the encoding Metal uses for an empty
+ * command. `out_groups` still receives the VkDispatchIndirectCommand the
+ * kernels' root descriptor points at.
+ */
+KERNEL(1)
+libagx_trace_rays_select_launch(constant uint64_t *record,
+                                global uint32_t *out_record_dims,
+                                global VkDispatchIndirectCommand *out_groups,
+                                constant uint32_t *in_dims,
+                                constant uint32_t *handles,
+                                constant uint32_t *templates,
+                                global uint32_t *slot,
+                                uint32_t kernel_count,
+                                uint32_t local_size_x_log2)
+{
+   uint32_t width = in_dims[0];
+   uint32_t height = in_dims[1];
+   uint32_t depth = in_dims[2];
+
+   if (out_record_dims) {
+      out_record_dims[0] = width;
+      out_record_dims[1] = height;
+      out_record_dims[2] = depth;
+   }
+
+   const uint32_t mask = (1u << local_size_x_log2) - 1u;
+   const uint32_t groups_x =
+      (width >> local_size_x_log2) + ((width & mask) ? 1u : 0u);
+
+   constant uint32_t *raygen_handle = (constant uint32_t *)(uintptr_t)record[0];
+   const uint32_t selected = *raygen_handle;
+
+   uint32_t chosen = kernel_count;
+   for (uint32_t k = 0; k < kernel_count; ++k) {
+      if (chosen == kernel_count && handles[k] == selected)
+         chosen = k;
+   }
+
+   const bool run = chosen < kernel_count && groups_x && height && depth;
+   *out_groups = (VkDispatchIndirectCommand){
+      .x = run ? groups_x : 0u,
+      .y = run ? height : 0u,
+      .z = run ? depth : 0u,
+   };
+
+   constant uint32_t *t = templates + 11u * (run ? chosen : 0u);
+   uint32_t word0 = t[0];
+   if (!run || (height < 2u && depth < 2u))
+      word0 &= 0xfff1ffffu;
+   slot[1] = word0;
+   slot[2] = t[1];
+   slot[3] = t[2];
+   slot[4] = t[3];
+   slot[5] = run ? (groups_x << local_size_x_log2) : 0u;
+   slot[6] = run ? height : 0u;
+   slot[7] = run ? depth : 0u;
+   slot[8] = run ? t[7] : 0u;
+   slot[9] = run ? t[8] : 0u;
+   slot[10] = run ? t[9] : 0u;
+   slot[11] = t[10];
+}
+
 KERNEL(1)
 libagx_trace_rays_indirect_setup(global uint32_t *out_record_dims,
                                  global VkDispatchIndirectCommand *out_groups,

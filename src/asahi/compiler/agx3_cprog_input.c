@@ -75,9 +75,9 @@ agx3_cprog_input_publish(const struct agx3_cprog_inputs *inputs,
 }
 
 bool
-agx3_cprog_input_publish_at(unsigned mask, unsigned tps_half,
-                            unsigned source_half, void *output,
-                            size_t capacity, size_t *written)
+agx3_cprog_input_publish_at_encoding(
+   enum agx_isa_encoding encoding, unsigned mask, unsigned tps_half,
+   unsigned source_half, void *output, size_t capacity, size_t *written)
 {
    if (!output || !written || mask > 3 || source_half >= 255 ||
        (source_half & 1) || tps_half < 8 || tps_half >= 520 ||
@@ -100,7 +100,7 @@ agx3_cprog_input_publish_at(unsigned mask, unsigned tps_half,
       /* The native loader uses extended COPY for both widths, including
        * the otherwise compact-encodable 16-bit form. */
       if (!agx3_static_spill_encode_store_form(
-             AGX_ISA_ENCODING_AGX3B, &desc, 1, bytes + size, &length))
+             encoding, &desc, 1, bytes + size, &length))
          return false;
       size += length;
       if (pair)
@@ -114,9 +114,10 @@ agx3_cprog_input_publish_at(unsigned mask, unsigned tps_half,
 }
 
 bool
-agx3_cprog_input_import(const struct agx3_cprog_inputs *inputs,
-                        const struct agx3_cprog_import *desc,
-                        void *output, size_t capacity, size_t *written)
+agx3_cprog_input_import_encoding(
+   enum agx_isa_encoding encoding, const struct agx3_cprog_inputs *inputs,
+   const struct agx3_cprog_import *desc, void *output, size_t capacity,
+   size_t *written)
 {
    if (!valid_inputs(inputs) || !desc || !output || !written ||
        (desc->width != AGX3_MEM_W16 && desc->width != AGX3_MEM_W32))
@@ -137,10 +138,28 @@ agx3_cprog_input_import(const struct agx3_cprog_inputs *inputs,
       .structural_flag = desc->structural_flag,
    };
    uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH], length;
-   if (!agx3_static_spill_encode_load(AGX_ISA_ENCODING_AGX3B, &load, bytes, &length) ||
+   if (!agx3_static_spill_encode_load(encoding, &load, bytes, &length) ||
        length > capacity)
       return false;
    memcpy(output, bytes, length);
    *written = length;
    return true;
+}
+
+bool
+agx3_cprog_input_publish_at(unsigned mask, unsigned tps_half,
+                            unsigned source_half, void *output,
+                            size_t capacity, size_t *written)
+{
+   return agx3_cprog_input_publish_at_encoding(AGX_ISA_ENCODING_AGX3B,
+      mask, tps_half, source_half, output, capacity, written);
+}
+
+bool
+agx3_cprog_input_import(const struct agx3_cprog_inputs *inputs,
+                        const struct agx3_cprog_import *desc,
+                        void *output, size_t capacity, size_t *written)
+{
+   return agx3_cprog_input_import_encoding(AGX_ISA_ENCODING_AGX3B, inputs,
+      desc, output, capacity, written);
 }

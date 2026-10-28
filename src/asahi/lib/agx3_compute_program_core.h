@@ -62,6 +62,7 @@ struct agx3_compute_program {
    /* Set only after a runtime G17P Ioto program has been composed in the
     * allocation named by program_va. */
    bool g17p_native_compute_live_bound;
+   bool m5_native_compute_live_bound;
 
    /* Only the live G17S minimal-resource preparation path sets this.  Keep
     * research composers and the zero-relocation witness out of a command
@@ -139,6 +140,22 @@ struct agx3_g17p_native_indirect_dispatch {
 bool agx3_g17p_native_compute_program_bind(
    const struct agx3_g17p_native_compute_program_desc *desc,
    struct agx3_compute_program *program);
+
+bool agx3_m5_native_compute_program_bind(
+   enum agx_chip chip,
+   const struct agx3_g17p_native_compute_program_desc *desc,
+   struct agx3_compute_program *program);
+
+bool agx3_m5_native_compute_dispatch_append(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink);
+
+/* local_size is NULL for an indirect-local grid and non-NULL for group counts. */
+bool agx3_m5_native_indirect_dispatch_append(
+   const struct agx3_compute_program *program, uint64_t grid_va,
+   const uint32_t local_size[3], uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink);
 
 /* Append one direct G17P launch and the flags=0 barrier used by the
  * output-positive native compute stream.  Direct global or threadgroup counts
