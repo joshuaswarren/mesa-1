@@ -20,8 +20,9 @@ check_modifier(bool g17p, bool widen)
    unsigned sizes[3] = {16, 0, 0};
    bool progress = agx_nir_opt_preamble(b.shader, sizes, g17p);
    const bool hoisted = g17p && !widen;
-   if (hoisted)
+   if (hoisted) {
       EXPECT_TRUE(progress);
+   }
    unsigned modifiers = 0, exported = 0;
    nir_function_impl *main = nir_shader_get_entrypoint(b.shader);
    nir_foreach_block(block, main) {
@@ -38,8 +39,9 @@ check_modifier(bool g17p, bool widen)
    }
    EXPECT_EQ(modifiers, hoisted ? 0u : 1u);
    EXPECT_EQ(exported, hoisted ? 1u : 0u);
-   if (hoisted)
+   if (hoisted) {
       EXPECT_EQ(sizes[0], 18u);
+   }
    ralloc_free(b.shader);
 }
 

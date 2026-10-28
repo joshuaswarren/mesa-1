@@ -131,8 +131,9 @@ TEST(MixedUniformALU, OptimizerFoldsUniformWideningOnlyIntoNativeShapes)
          agx_optimizer_forward(b->shader);
          EXPECT_EQ(I->src[1].type == AGX_INDEX_UNIFORM,
                    !uniform_other && !saturate);
-         if (!uniform_other && !saturate)
+         if (!uniform_other && !saturate) {
             EXPECT_EQ(I->src[1].size, AGX_SIZE_16);
+         }
          ralloc_free(mem);
       }
    }

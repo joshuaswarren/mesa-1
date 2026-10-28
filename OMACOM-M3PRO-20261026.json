@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "recorded_utc": "2026-10-26T10:44:41.216352+00:00",
+  "model": "J514S, Apple M3 Pro (G15S B1)",
+  "source_repository": "https://github.com/omacom/mesa",
+  "integration_base": "7c86130d26cecd50c7af1ac01ff3fa1705d58045",
+  "tested_source": "eaf69705c33249bd5e4f4ac2211bdcc6fad94f63",
+  "tested_tree": "4ef9418d79cd92a353c5beae0d9dcd89d6efb167",
+  "kernel": "7.2.11-m3plasma-16575aa-ARCH",
+  "kernel_source": "16575aa9c769e9bede0ab58dc26f9d91dc07182f",
+  "kernel_prs": [
+    "https://github.com/omacom/linux-aurora/pull/233",
+    "https://github.com/omacom/linux-aurora/pull/238"
+  ],
+  "package": "mesa-m3-pro-g15 26.3.0.omacom.eaf69705c3-1",
+  "package_sha256": "cad98edb9dcd296a6b6ba0eaecaf21771b1a912b2020446b61c817eebabef626",
+  "assertions_enabled": true,
+  "library_sha256": {
+    "opt/mesa-m3-pro-g15/lib/libvulkan_asahi.so": "22e5b5686b4d3e78c4a5c851a664683138fd895db814abf3e9a65b40d49e7ab5",
+    "opt/mesa-m3-pro-g15/lib/libasahi_noop_drm_shim.so": "5bf327deba3274d992ee20b92aff9271be09ad404178b2362a4240e1ea36afa2",
+    "opt/mesa-m3-pro-g15/lib/libgallium-26.3.0-devel.so": "8c739a31738042ff614fbacaba27e37317aa8b3859c16c872f4334595a04010d",
+    "opt/mesa-m3-pro-g15/lib/libGLX_mesa.so.0.0.0": "11cd754595287d5d6e49810502f2bcea06e3af41ab75307bb4ef8623968dbf20",
+    "opt/mesa-m3-pro-g15/lib/libgbm.so.1.0.0": "800a853315840ff5045666e2eccb5a52427abe7e6d39a65672d6c88101e01213",
+    "opt/mesa-m3-pro-g15/lib/libEGL_mesa.so.0.0.0": "6e00b003acbecef3cf577bea4fc663fd63180d0e3aa34c752ea4d30915400b6f"
+  },
+  "validation": {
+    "host_meson_suites": 139,
+    "host_failures": 0,
+    "production_cpu_programs": 5,
+    "shim_profiles": "G13G/G15S/G15C/G17P/G15G admitted; Air obsolete opt-in 0/1 unchanged; G16G refused; zero validation errors, no submits",
+    "red_before_fix": "G15S maxBoundDescriptorSets assertion fails at source 25fe0160a0",
+    "fresh_boot": true,
+    "kwin_uses_packaged_libraries": true,
+    "gl_readback": {
+      "frames": 64,
+      "incorrect_channels": 0
+    },
+    "vk_descriptor_sets": {
+      "indices": [
+        0,
+        7,
+        8,
+        15
+      ],
+      "dispatches_each": 8,
+      "words_each": 524288,
+      "incorrect_words": 0,
+      "validation_errors": 0
+    },
+    "cts": {
+      "reported": {
+        "Pass": 6,
+        "Flake": 1
+      },
+      "focused": {
+        "Pass": 561,
+        "Warn": 4,
+        "Skip": 5
+      },
+      "wider": {
+        "Pass": 7054,
+        "Skip": 5198
+      },
+      "capabilities": {
+        "Pass": 359,
+        "Skip": 1670
+      },
+      "sets16": {
+        "Pass": 2694,
+        "Skip": 4320
+      }
+    },
+    "wider_results_identical_to_previous_installed_mesa": true,
+    "plasma_settings_launches": 10,
+    "plasma_light_dark_cycles": 10,
+    "kwin_pid_unchanged_during_plasma_test": true,
+    "plasma_coredumps": 0,
+    "gpu_recoveries": 0,
+    "gpu_hang_kills": 0,
+    "theme_restored_via_desktop_manager": true
+  },
+  "benchmark": {
+    "capture_seconds": 10,
+    "resolution": [
+      1920,
+      1080
+    ],
+    "before_source": "ea2c18f45c496034fd97a833c027011d1216a9b1",
+    "before_fps": 370.24039515784386,
+    "after_fps": 416.4074536934211,
+    "same_game_pak_config_kernel": true,
+    "scope": "One matched sample each across the Mesa branch upgrade and reboot; not an isolated gain from the two new patches."
+  },
+  "limitations": [
+    "Full Vulkan 1.4 CTS not rerun; the user will run it separately.",
+    "Only J514S hardware was tested; other G15 profiles were preserved.",
+    "No full OpenGL conformance run.",
+    "The reported seven-case group contains one wrong-result flake (uaddcarry.uvec3_highp_geometry): outputs remained at the clear colour, then the automatic retry passed. Similar dropped draws predate this PR; cause unresolved.",
+    "All 384 conditional-rendering draw cases and all 60 clear-attachment cases skip; these paths are not hardware-qualified by this receipt."
+  ]
+}

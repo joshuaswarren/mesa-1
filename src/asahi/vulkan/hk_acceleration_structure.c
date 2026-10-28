@@ -184,7 +184,7 @@ hk_gen1_sparse_entry(struct hk_device *dev, struct hk_gen1_sparse_table *t,
       if (agx_bo_bind(&dev->dev, bo,
                       t->va->addr + (uint64_t)next * HK_GEN1_SPARSE_PAGE_BYTES,
                       HK_GEN1_SPARSE_PAGE_BYTES, 0, t->bind_flags)) {
-         util_dynarray_pop(&t->pages, struct agx_bo *);
+         (void)util_dynarray_pop_ptr(&t->pages, struct agx_bo *);
          agx_bo_unreference(&dev->dev, bo);
          return NULL;
       }

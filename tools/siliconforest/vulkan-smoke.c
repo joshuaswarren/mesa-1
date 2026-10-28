@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 #include <dlfcn.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,28 @@ int main(int argc, char **argv)
    REQUIRE(strstr(props.deviceName, "Apple") != NULL);
    printf("device: %s\n", props.deviceName);
 
+   const char *chip = getenv("ASAHI_SHIM_CHIP");
+   REQUIRE(chip != NULL);
+   const bool extended = strcmp(chip, "g15s") == 0 || strcmp(chip, "g17p") == 0;
+   REQUIRE(props.limits.maxBoundDescriptorSets == (extended ? 16u : 8u));
+   uint32_t extension_count = 0;
+   OK(vkEnumerateDeviceExtensionProperties(physical, NULL, &extension_count, NULL));
+   VkExtensionProperties *available = calloc(extension_count, sizeof(*available));
+   REQUIRE(available != NULL);
+   OK(vkEnumerateDeviceExtensionProperties(physical, NULL, &extension_count, available));
+   const char *profile_extensions[] = {
+      VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME,
+      VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
+      VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
+   };
+   for (unsigned e = 0; e < sizeof(profile_extensions) / sizeof(profile_extensions[0]); ++e) {
+      bool found = false;
+      for (unsigned i = 0; i < extension_count; ++i)
+         found |= strcmp(available[i].extensionName, profile_extensions[e]) == 0;
+      REQUIRE(found == extended);
+   }
+   free(available);
+
    VkPhysicalDeviceVulkan13Features f13 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
    };
@@ -59,12 +82,22 @@ int main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT,
       .pNext = &xfb,
    };
+   VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR unified = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR,
+      .pNext = &placed,
+   };
+   VkPhysicalDeviceConditionalRenderingFeaturesEXT conditional = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+      .pNext = &unified,
+   };
    VkPhysicalDeviceFeatures2 features = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &placed,
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &conditional,
    };
    vkGetPhysicalDeviceFeatures2(physical, &features);
    REQUIRE(placed.memoryMapPlaced && placed.memoryUnmapReserve && xfb.transformFeedback);
    REQUIRE(f13.dynamicRendering);
+   REQUIRE((conditional.conditionalRendering != VK_FALSE) == extended);
+   REQUIRE((unified.unifiedImageLayouts != VK_FALSE) == extended);
    f13 = (VkPhysicalDeviceVulkan13Features){
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
       .dynamicRendering = VK_TRUE,

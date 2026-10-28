@@ -568,8 +568,9 @@ TEST(NativeForms, PhiEdgeAffinityRespectsTileBankAndLiveValues)
       ASSERT_FALSE(b->shader->ra_failed);
       EXPECT_LT(use->src[0].value, agx3_tile_store_bank(b->shader));
       EXPECT_EQ(use->src[0].value, mode == 0 ? 10u : 1u);
-      if (held_use)
+      if (held_use) {
          EXPECT_EQ(held_use->src[0].value, 10u);
+      }
       unsigned copies = 0;
       agx_foreach_instr_global(b->shader, I)
          copies += I->op == AGX_OPCODE_MOV;
@@ -1729,10 +1730,12 @@ TEST(NativeForms, ScalarCubeAllocationPreservesSharedInputs)
             EXPECT_TRUE(I->dest[0].value + 8 <= keep->src[0].value ||
                         I->dest[0].value >= keep->src[0].value + 2);
          }
-         if (mode == 2)
+         if (mode == 2) {
             EXPECT_EQ(I->src[6].value, I->src[7].value);
-         if (mode == 0 || mode == 4)
+         }
+         if (mode == 0 || mode == 4) {
             EXPECT_EQ(I->dest[0].value, 8u);
+         }
       }
       EXPECT_EQ(samples, mode == 3 ? 2u : 1u);
       ralloc_free(mem);
@@ -2432,8 +2435,9 @@ TEST(NativeForms, TextureFmaStagingAdmission)
       const bool supported =
          invalid == 0 || invalid == 9 || invalid == 12 || invalid == 13;
       EXPECT_FALSE(sample->agx3_tex_coords_staged);
-      if (publication)
+      if (publication) {
          EXPECT_EQ(publication->agx3_tex_coords_staged, supported);
+      }
       if (supported) {
          ASSERT_NE(publication, nullptr);
          EXPECT_TRUE(first->agx3_tex_coord_start);
@@ -2516,8 +2520,9 @@ TEST(NativeForms, TextureFmaStagingPreservesDemand)
    unsigned index = 0;
    agx_foreach_instr_global(b->shader, I) {
       EXPECT_FALSE(I->agx3_tex_coords_staged);
-      if (I->op == AGX_OPCODE_FFMA)
+      if (I->op == AGX_OPCODE_FFMA) {
          EXPECT_EQ(I->dest[0].type, AGX_INDEX_NORMAL);
+      }
       if (agx_is_texture_publication(I)) {
          EXPECT_EQ(I->src[0].type, AGX_INDEX_NORMAL);
          EXPECT_EQ(I->src[1].type, AGX_INDEX_NORMAL);
@@ -2571,8 +2576,9 @@ TEST(NativeForms, MultipleTextureFmaPublications)
    unsigned stages = 0, publications = 0;
    agx_foreach_instr_global(b->shader, I) {
       stages += I->agx3_tex_coord_stage;
-      if (I->agx3_tex_coord_stage)
+      if (I->agx3_tex_coord_stage) {
          EXPECT_TRUE(agx_is_null(I->dest[0]));
+      }
       if (agx_is_texture_publication(I)) {
          publications++;
          EXPECT_TRUE(I->agx3_tex_coords_staged);
@@ -2631,8 +2637,9 @@ TEST(NativeForms, TextureFmaPublicationPrecedesEarlierSamples)
          EXPECT_TRUE(I->agx3_tex_coords_staged);
          published = true;
       }
-      if (I == samples[0])
+      if (I == samples[0]) {
          EXPECT_TRUE(published);
+      }
    }
    EXPECT_TRUE(published);
    ralloc_free(mem);
@@ -3312,8 +3319,9 @@ TEST(LegacySamplers, UnpromotedIndexNeedsHeap)
          agx_shader_part part = {};
          bool ok = agx_compile_shader_nir(b.shader, &key, &part);
          EXPECT_TRUE(ok);
-         if (ok)
+         if (ok) {
             EXPECT_TRUE(part.info.uses_sampler_heap);
+         }
          free(part.binary);
          ralloc_free(b.shader);
       }

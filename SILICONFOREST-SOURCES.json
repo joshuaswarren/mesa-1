@@ -2856,7 +2856,7 @@
       "review_hardening_commit": "db96168675f5464d5293caf48ed718792b2bed74"
     }
   ],
-  "last_integration_update": "2026-10-24",
+  "last_integration_update": "2026-10-26",
   "integration_followups_20261024": {
     "base": "7515336b3dfbe8943b555ffec9817b9ed64379a8",
     "aurora_merge": "5323fb87815718ca294ebe3c4f92b56cc18c577e",
@@ -2866,5 +2866,17 @@
     "kernel_header": "include/uapi/drm/asahi_drm.h",
     "hardware_qualified": false,
     "system_install_performed": false
+  },
+  "integration_followups_20261026": {
+    "base": "7c86130d26cecd50c7af1ac01ff3fa1705d58045",
+    "public_source_repository": "https://github.com/aurora-silicon/mesa",
+    "public_source_inspected": "f2c9dc3fb59c81fdaf51f19884175c856e3d1889",
+    "imported_commit": "141481c19964ac29dbd1707d4c99a2dfbc638999",
+    "local_import_commit": "25fe0160a04e8d56c5ed01e9892164e9ee3e7127",
+    "tested_source": "eaf69705c33249bd5e4f4ac2211bdcc6fad94f63",
+    "hardware_record": "OMACOM-M3PRO-20261026.json",
+    "hardware_scope": "J514S/G15S only; targeted checks and reboot; full CTS pending",
+    "existing_gs_fix": "d4b6840f7af8a25af48566589af41609e0871b9e",
+    "existing_select_guard_fix": "ae035d592921d018c9431c4b1810300387e7d48b"
   }
 }
