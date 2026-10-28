@@ -2862,7 +2862,7 @@
     "aurora_merge": "5323fb87815718ca294ebe3c4f92b56cc18c577e",
     "scott_merge": "44fe9cab321168c782babaeb0f035088b574d823",
     "kernel_repository": "https://github.com/omacom/linux-aurora",
-    "kernel_commit": "7b969982306e1498a8cbe6e5da9bde743acd8fc5",
+    "kernel_commit": "1032928116c13840efaf0ba6ae68fee4e1cd70ea",
     "kernel_header": "include/uapi/drm/asahi_drm.h",
     "hardware_qualified": false,
     "system_install_performed": false
