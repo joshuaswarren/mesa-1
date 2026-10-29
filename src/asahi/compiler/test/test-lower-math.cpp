@@ -178,6 +178,12 @@ TEST_F(LowerMathTest, GraphicsFdivLowersBothWidthsInEarlyAndLatePasses)
    EXPECT_EQ(count_alu(nir_op_frcp), 2u);
    EXPECT_EQ(count_alu(nir_op_ffma), 0u);
 
+   /* The early pass deleted the instruction the builder cursor was parked
+    * after: the pass lowers through nir_def_replace, which removes the fdiv.
+    * Rebuild the cursor from the shader so the late-half fdivs land in the
+    * implementation instead of behind a removed instruction. */
+   b.cursor = nir_after_impl(nir_shader_get_entrypoint(b.shader));
+
    for (unsigned bits : {16u, 32u}) {
       nir_fdiv(&b, nir_undef(&b, 1, bits), nir_undef(&b, 1, bits));
    }
