@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "util/u_atomic.h"
 #include "util/u_queue.h"
 
 #include "asahi/lib/agx_device.h"
@@ -126,6 +127,10 @@ struct hk_device {
    struct agx_device dev;
    /* Scratch-filled sparse VA (M5: bounded by sparseAddressSpaceSize). */
    uint64_t sparse_scratch_B;
+   /* Live buffers and image planes with a GPU virtual address of their own
+    * (sparse binding, capture/replay buffers), atomic. Their memory is also
+    * mapped at another address, see hk_cdm_alias_scope(). */
+   uint32_t va_alias_resources;
    /* One bit per main-heap page: only unbound sparse buffer pages are set. */
    struct agx_bo *physical_sparse_map;
    struct agxdecode_ctx *decode_ctx;
@@ -346,6 +351,26 @@ enum hk_perftest {
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
+
+/* G17P GPU caches are tagged by virtual address: a strong CDM flush makes a
+ * write visible only to reads through the same mapping. While any resource
+ * maps memory at a second address, an application dependency between
+ * compute or transfer work in one stream needs the memory-scope flush
+ * (hk_cdm_visibility_flush()). Devices that never create such a resource
+ * keep the ordinary strong flush.
+ *
+ * The state is read when a barrier is recorded. A resource the command
+ * buffer references exists by then, and it counts from creation, so later
+ * sparse binds are covered; the flush writes back every dirty line, so it
+ * also covers writes recorded in earlier command buffers. Not covered: a
+ * resource created after recording and reached only through a device
+ * address the command buffer reads indirectly. */
+static inline bool
+hk_cdm_alias_scope(const struct hk_device *dev)
+{
+   return dev->dev.chip == AGX_CHIP_G17P &&
+          p_atomic_read(&dev->va_alias_resources) != 0;
+}
 
 static inline struct hk_physical_device *
 hk_device_physical(struct hk_device *dev)
