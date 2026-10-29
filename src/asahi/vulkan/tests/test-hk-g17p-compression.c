@@ -518,6 +518,20 @@ check_m5_depth(void)
       };
       c.pNext = &external;
       CHECK(!hk_m5_depth_compression_eligible(AGX_CHIP_G17S, 0, &c));
+
+      /* Later links are read too: external memory or the WSI marker behind
+       * another structure still refuses compression. */
+      VkImageFormatListCreateInfo list = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+      };
+      VkBaseInStructure wsi = {.sType = HK_G17P_WSI_IMAGE_CREATE_INFO_MESA};
+      c = i;
+      c.pNext = &list;
+      CHECK(hk_m5_depth_compression_eligible(AGX_CHIP_G17S, 0, &c));
+      list.pNext = &external;
+      CHECK(!hk_m5_depth_compression_eligible(AGX_CHIP_G17S, 0, &c));
+      list.pNext = &wsi;
+      CHECK(!hk_m5_depth_compression_eligible(AGX_CHIP_G17S, 0, &c));
    }
 
    /* No stencil-only or other depth/stencil formats. */
