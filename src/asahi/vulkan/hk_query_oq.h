@@ -37,8 +37,8 @@
  * compute command is dropped. Otherwise the store is emitted as before.
  */
 /* Whether renders on @chip may carry occlusion availability in their
- * retirement timestamp slots. Only qualified on the G17P kernel; other chips
- * whose kernel writes the slots at retirement can be added once measured. */
+ * retirement timestamp slots: only chips whose kernel writes the slots at
+ * retirement, which is the G17 runtime (G17P and M5). */
 bool hk_oq_render_stamps_supported(enum agx_chip chip);
 
 struct hk_oq_stamp {

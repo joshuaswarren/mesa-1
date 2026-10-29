@@ -265,7 +265,12 @@ hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
 bool
 hk_oq_render_stamps_supported(enum agx_chip chip)
 {
-   return chip == AGX_CHIP_G17P;
+   /* G17P and M5 (G17G/G17S) both run the shared G17 kernel runtime: a render
+    * completes only once its completion stamps cover it, after the
+    * end-of-render maintenance, and the host then writes its four stage
+    * timestamps into the requested slots before signalling the fence
+    * (g17/queue/render/retirement.rs, g17/completion.rs). */
+   return chip == AGX_CHIP_G17P || agx_chip_g17_m5(chip);
 }
 
 void
