@@ -341,3 +341,46 @@ TEST_P(nir_opt_if_merge_test, opt_if_merge)
    ASSERT_EQ(exec_list_length((&nir_if_first_then_block(next_if)->instr_list)), instr_in_2nd_then);
    ASSERT_EQ(exec_list_length((&nir_if_first_else_block(next_if)->instr_list)), instr_in_2nd_else);
 }
+
+TEST_F(nir_opt_if_test, opt_if_merge_run)
+{
+   /* nir_opt_if_merge folds a run of same-condition ifs, separated by nothing
+    * but phis, into the first one in a single call:
+    *
+    * if (c) { a = in + 1 } else {}  p = phi(a, 0)
+    * if (c) { b = p + 2 } else {}   q = phi(b, 0)
+    * if (c) { d = q + 3 } else {}   r = phi(d, 0)
+    */
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *cond = nir_ine(b, in_def, zero);
+   nir_def *value = in_def;
+   nir_if *first = NULL;
+
+   for (int i = 1; i <= 3; ++i) {
+      nir_if *nif = nir_push_if(b, cond);
+      first = first ? first : nif;
+      nir_def *sum = nir_iadd_imm(b, value, i);
+      nir_pop_if(b, NULL);
+      value = nir_if_phi(b, sum, zero);
+   }
+
+   nir_store_var(b, out_var, value, 1);
+
+   ASSERT_TRUE(nir_opt_if_merge(b->shader));
+   nir_validate_shader(b->shader, NULL);
+
+   unsigned ifs = 0;
+   foreach_list_typed(nir_cf_node, node, node, &b->impl->body)
+      ifs += node->type == nir_cf_node_if;
+   ASSERT_EQ(ifs, 1u);
+
+   /* The three additions now chain inside the merged then-branch. */
+   unsigned adds = 0;
+   nir_foreach_instr(instr, nir_if_first_then_block(first)) {
+      adds += instr->type == nir_instr_type_alu &&
+              nir_instr_as_alu(instr)->op == nir_op_iadd;
+   }
+   ASSERT_EQ(adds, 3u);
+
+   ASSERT_FALSE(nir_opt_if_merge(b->shader));
+}

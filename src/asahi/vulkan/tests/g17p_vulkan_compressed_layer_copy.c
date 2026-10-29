@@ -47,6 +47,36 @@ static VkDevice dev;
 static VkQueue queue;
 static VkCommandPool pool;
 
+static FILE *driver_log;
+static int saved_stderr = -1;
+
+static void
+restore_stderr(void)
+{
+   if (saved_stderr < 0)
+      return;
+   fflush(stderr);
+   dup2(saved_stderr, STDERR_FILENO);
+   close(saved_stderr);
+   saved_stderr = -1;
+}
+
+/* CHECK() exits during setup too. Keep the loader error and the failing
+ * Vulkan call visible even when the normal log checks are never reached. */
+static void
+replay_driver_log(void)
+{
+   restore_stderr();
+   if (!driver_log)
+      return;
+   rewind(driver_log);
+   char line[1024];
+   while (fgets(line, sizeof(line), driver_log))
+      fputs(line, stderr);
+   fclose(driver_log);
+   driver_log = NULL;
+}
+
 static uint32_t
 memory_type(uint32_t bits, VkMemoryPropertyFlags flags)
 {
@@ -358,10 +388,15 @@ main(int argc, char **argv)
 
    /* Capture the driver's log to check it below. */
    fflush(stderr);
-   const int saved_stderr = dup(2);
-   FILE *log = tmpfile();
-   if (saved_stderr < 0 || !log || dup2(fileno(log), 2) < 0)
+   saved_stderr = dup(STDERR_FILENO);
+   driver_log = tmpfile();
+   if (saved_stderr < 0 || !driver_log ||
+       atexit(replay_driver_log) != 0 ||
+       dup2(fileno(driver_log), STDERR_FILENO) < 0) {
+      replay_driver_log();
+      fprintf(stderr, "could not capture driver log\n");
       return 2;
+   }
 
    const VkApplicationInfo app = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -435,17 +470,19 @@ main(int argc, char **argv)
    vkDestroyDevice(dev, NULL);
    vkDestroyInstance(instance, NULL);
 
-   fflush(stderr);
-   dup2(saved_stderr, 2);
-   rewind(log);
+   restore_stderr();
+   rewind(driver_log);
    bool partial_view = false, dst_compressed = false;
    char line[1024];
-   while (fgets(line, sizeof(line), log)) {
+   while (fgets(line, sizeof(line), driver_log)) {
       fputs(line, stderr);
       partial_view |= strstr(line, "addresses only the first") != NULL;
       dst_compressed |=
          strstr(line, "compression enabled: r32g32_float 129x127") != NULL;
    }
+
+   fclose(driver_log);
+   driver_log = NULL;
 
    if (partial_view) {
       fprintf(stderr, "FAIL: a copy viewed several layers through an "

@@ -197,6 +197,9 @@ struct agx3_rgb10a2_desc {
    bool neg[4];
    uint8_t layout; /* enum agx3_packed_layout */
 };
+bool agx3_rgb10a2_encode_for_encoding(enum agx_isa_encoding enc,
+                        const struct agx3_rgb10a2_desc *desc,
+                        uint8_t out[16], uint8_t *length);
 bool agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *desc,
                         uint8_t out[14], uint8_t *length);
 
@@ -204,10 +207,12 @@ struct agx3_rgb10a2_unpack_desc {
    uint16_t dest, source; /* half indices: four f32 outputs, one u32 input */
    uint16_t wait_mask;
    bool discard;
+   bool dest_hint; /* AGX3C f11 */
    uint8_t layout; /* enum agx3_packed_layout */
 };
-bool agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *desc,
-                               uint8_t out[8], uint8_t *length);
+bool agx3_rgb10a2_unpack_encode(
+   enum agx_isa_encoding enc, const struct agx3_rgb10a2_unpack_desc *desc,
+   uint8_t out[16], uint8_t *length);
 
 struct agx3_fltnorm_desc {
    uint16_t dest;                 /* 16-bit (half) register index */
@@ -215,7 +220,7 @@ struct agx3_fltnorm_desc {
    struct agx3_fltnorm_src src[2];
    bool two_lanes;                /* pack both sources; false = one lane */
    bool snorm;                    /* signed-normalized target */
-   bool is_16bit;                 /* 16-bit normalized lane, G17P only */
+   bool is_16bit;                 /* 16-bit normalized lane */
    uint8_t srgb;                  /* enum agx3_fltnorm_srgb */
    uint16_t wait_mask;            /* bit i waits scoreboard slot i + 1 */
    bool first_instruction;       /* G17P f68, first main instruction only */
@@ -236,8 +241,8 @@ bool agx3_fltnorm_relocate_start(uint8_t *code, size_t size,
 struct agx3_colour_link_info {
    /* Producer-recorded native pixel-entry provenance for part linking.
     * straight_line admits a derivative-consumer entry gate in this part;
-    * branch_free says no branch crosses any byte of the part, so the
-    * linker may remove this part's entry gate. */
+    * entry_unspanned proves that deleting the entry leaves every relative
+    * branch displacement unchanged. */
    bool rt_query_write_acquired;
    uint8_t rt_query_wait_count;
    bool rt_query_wait_unsupported;
@@ -245,8 +250,14 @@ struct agx3_colour_link_info {
    uint32_t rt_query_wait_offset;
    bool entry_emitted;
    bool straight_line;
-   bool branch_free;
+   bool entry_unspanned;
    uint32_t entry_offset;
+   /* M5: this part ends a covered-sample depth/stencil loop with a plain
+    * class-1 release at zs_loop_release_offset. When this part's entry is
+    * the linked program's, agx_fast_link drops that release and marks the
+    * entry with f34, the native form. */
+   bool zs_loop_release;
+   uint32_t zs_loop_release_offset;
 
    /* Colour pixel classes consumed by this part: bit n is the class of the
     * tile partitions n, n + 3, ...  The linked fragment state loader must keep

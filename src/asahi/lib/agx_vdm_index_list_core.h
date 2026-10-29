@@ -148,12 +148,10 @@ static inline bool
 agx_vdm_index_list_index_size_supported_inline(enum agx_chip chip,
                                                 uint8_t index_size)
 {
-   /* U8 is grounded by the native G17P/HAL200 golden.  The HAL300 captures
-    * cover U16/U32 only, so keep that distinct encoding family fail-closed. */
-   return index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 ||
-          index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U32 ||
-          (index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U8 &&
-           !agx_vdm_index_list_direct_is_hal300_inline(chip));
+   (void)chip;
+   return index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U8 ||
+          index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 ||
+          index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U32;
 }
 
 static inline bool

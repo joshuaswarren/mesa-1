@@ -5,6 +5,7 @@
 
 #include "agx_tilebuffer.h"
 #include <assert.h>
+#include <string.h>
 #include "util/bitset.h"
 #include "util/format/u_format.h"
 #include "util/u_debug.h"
@@ -88,36 +89,35 @@ agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
       formats, nr_cbufs, nr_samples, layered, max_sample_size_B, 0, 0);
 }
 
-struct agx_tilebuffer_layout
-agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
-                                      uint8_t nr_cbufs, uint8_t nr_samples,
-                                      bool layered, uint8_t max_sample_size_B,
-                                      uint16_t max_bytes_per_tile,
-                                      uint16_t max_samples_per_tile)
+/* Whether render target a is allocated before b: the targets in first_mask
+ * ahead of the others, and within each group in descending order of
+ * alignment, which leaves no padding inside a group. */
+static bool
+agx_tilebuffer_allocate_before(const enum pipe_format *formats,
+                               uint8_t first_mask, unsigned a, unsigned b)
 {
-   struct agx_tilebuffer_layout tib = {
-      .nr_samples = nr_samples,
-      .layered = layered,
-      .max_sample_size_B = max_sample_size_B,
-      .max_bytes_per_tile = max_bytes_per_tile,
-      .max_samples_per_tile = max_samples_per_tile,
-   };
-   const unsigned max_bytes_per_sample =
-      MIN2(max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE,
-           MAX_ENCODABLE_BYTES_PER_SAMPLE);
-   const unsigned tile_capacity =
-      max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE;
+   const bool first_a = first_mask & BITFIELD_BIT(a);
+   const bool first_b = first_mask & BITFIELD_BIT(b);
+   if (first_a != first_b)
+      return first_a;
+   return format_align_B(formats[a]) > format_align_B(formats[b]);
+}
 
+/* Allocate each render target a tilebuffer offset in the order above, or
+ * spill it once it no longer fits. Returns the bytes used per sample. */
+static uint32_t
+agx_tilebuffer_allocate(struct agx_tilebuffer_layout *tib,
+                        const enum pipe_format *formats, uint8_t nr_cbufs,
+                        uint8_t nr_samples, unsigned max_bytes_per_sample,
+                        unsigned tile_capacity, uint8_t first_mask)
+{
    uint32_t offset_B = 0;
    uint8_t order[] = {0, 1, 2, 3, 4, 5, 6, 7};
 
-   /* Sort render targets in descending order of alignment, eliminating padding
-    * and giving the optimal order of render targets. We use insertion sort
-    * because it is simple, stable, fast for small n, and free for n=1.
-    */
+   /* Insertion sort: simple, stable, fast for small n, and free for n=1. */
    for (int i = 1; i < nr_cbufs; ++i) {
-      for (int j = i; j > 0 && format_align_B(formats[order[j - 1]]) <
-                                  format_align_B(formats[order[j]]);
+      for (int j = i; j > 0 && agx_tilebuffer_allocate_before(
+                                  formats, first_mask, order[j], order[j - 1]);
            --j) {
          SWAP(order[j], order[j - 1]);
       }
@@ -126,10 +126,16 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
    for (unsigned i = 0; i < nr_cbufs; ++i) {
       unsigned rt = order[i];
       enum pipe_format format = formats[rt];
-      tib.logical_format[rt] = format;
+      tib->logical_format[rt] = format;
+      tib->spilled[rt] = false;
+      tib->_offset_B[rt] = 0;
 
-      assert(util_is_aligned(offset_B, MAX2(format_align_B(formats[rt]), 1)) &&
+      /* Padding only arises between the two groups. */
+      const uint32_t aligned_B =
+         align(offset_B, MAX2(format_align_B(format), 1));
+      assert((first_mask || aligned_B == offset_B) &&
              "loop invariant ensured by the sort");
+      offset_B = aligned_B;
 
       unsigned size_B = format_size_B(format);
 
@@ -141,11 +147,58 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
                   (ALIGN_POT(new_offset_B, 8) * MIN_TILE_SIZE_PX *
                    nr_samples) <= tile_capacity;
       if (fits) {
-         tib._offset_B[rt] = offset_B;
+         tib->_offset_B[rt] = offset_B;
          offset_B = new_offset_B;
       } else {
-         tib.spilled[rt] = true;
+         tib->spilled[rt] = true;
       }
+   }
+
+   return offset_B;
+}
+
+static struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_internal(const enum pipe_format *formats,
+                                      uint8_t nr_cbufs, uint8_t nr_samples,
+                                      bool layered, uint8_t max_sample_size_B,
+                                      uint32_t max_bytes_per_tile,
+                                      uint16_t max_samples_per_tile,
+                                      bool native_imageblock,
+                                      uint8_t resident_mask)
+{
+   struct agx_tilebuffer_layout tib = {
+      .nr_samples = nr_samples,
+      .layered = layered,
+      .native_imageblock = native_imageblock,
+      .max_sample_size_B = max_sample_size_B,
+      .max_bytes_per_tile = max_bytes_per_tile,
+      .max_samples_per_tile = max_samples_per_tile,
+   };
+   const unsigned max_bytes_per_sample =
+      native_imageblock ? max_sample_size_B :
+      MIN2(max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE,
+           MAX_ENCODABLE_BYTES_PER_SAMPLE);
+   const unsigned tile_capacity =
+      max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE;
+
+   uint32_t offset_B =
+      agx_tilebuffer_allocate(&tib, formats, nr_cbufs, nr_samples,
+                              max_bytes_per_sample, tile_capacity, 0);
+
+   /* Keep the requested render targets in the tilebuffer if the plain order
+    * would spill one of them (M5 compressed multisample attachments: their
+    * in-pass memory reads do not observe the pass's own stores). */
+   uint8_t spilled_mask = 0;
+   for (unsigned rt = 0; rt < nr_cbufs; ++rt) {
+      if (tib.spilled[rt])
+         spilled_mask |= BITFIELD_BIT(rt);
+   }
+   resident_mask &= BITFIELD_MASK(nr_cbufs);
+   if (resident_mask & spilled_mask) {
+      offset_B = agx_tilebuffer_allocate(&tib, formats, nr_cbufs, nr_samples,
+                                         max_bytes_per_sample, tile_capacity,
+                                         resident_mask);
+      tib.resident_mask = resident_mask;
    }
 
    assert(offset_B <= max_bytes_per_sample && "loop invariant");
@@ -156,6 +209,13 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
    if (nr_samples > 1)
       offset_B = MAX2(offset_B, 1);
 
+   /* M5 likewise reserves one eight-byte sample for a layered pass with no
+    * colour attachment: native layered attachmentless and depth-only passes
+    * carry imageblock sample size 8 (command +0x1fb0) at one and four samples
+    * (native-window/item1-layered). */
+   if (native_imageblock && layered)
+      offset_B = MAX2(offset_B, 1);
+
    tib.sample_size_B = align(offset_B, 8);
    tib.tile_size = agx_select_tile_size(
       tib.sample_size_B, nr_samples,
@@ -164,6 +224,41 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
 
    agx_tilebuffer_pack_usc(&tib);
    return tib;
+}
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_with_limits(
+   const enum pipe_format *formats, uint8_t nr_cbufs, uint8_t nr_samples,
+   bool layered, uint8_t max_sample_size_B, uint32_t max_bytes_per_tile,
+   uint16_t max_samples_per_tile)
+{
+   return agx_build_tilebuffer_layout_internal(
+      formats, nr_cbufs, nr_samples, layered, max_sample_size_B,
+      max_bytes_per_tile, max_samples_per_tile, false, 0);
+}
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_for_imageblock(
+   const enum pipe_format *formats, uint8_t nr_cbufs, uint8_t nr_samples,
+   bool layered, uint8_t max_sample_size_B, uint32_t max_bytes_per_tile,
+   uint16_t max_samples_per_tile)
+{
+   return agx_build_tilebuffer_layout_resident(
+      formats, nr_cbufs, nr_samples, layered, max_sample_size_B,
+      max_bytes_per_tile, max_samples_per_tile, 0);
+}
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_resident(
+   const enum pipe_format *formats, uint8_t nr_cbufs, uint8_t nr_samples,
+   bool layered, uint8_t max_sample_size_B, uint32_t max_bytes_per_tile,
+   uint16_t max_samples_per_tile, uint8_t resident_mask)
+{
+   assert(max_sample_size_B && !(max_sample_size_B & 7));
+   assert(max_bytes_per_tile);
+   return agx_build_tilebuffer_layout_internal(
+      formats, nr_cbufs, nr_samples, layered, max_sample_size_B,
+      max_bytes_per_tile, max_samples_per_tile, true, resident_mask);
 }
 
 /*
@@ -180,7 +275,8 @@ agx_tilebuffer_set_samples(struct agx_tilebuffer_layout *tib,
 {
    assert(tib->nr_samples == 0 && "must not be initialized");
 
-   *tib = agx_build_tilebuffer_layout_with_limits(
+   *tib = (tib->native_imageblock ? agx_build_tilebuffer_layout_for_imageblock
+                                  : agx_build_tilebuffer_layout_with_limits)(
       tib->logical_format, ARRAY_SIZE(tib->logical_format), nr_samples,
       tib->layered, tib->max_sample_size_B, tib->max_bytes_per_tile,
       tib->max_samples_per_tile);
@@ -215,6 +311,11 @@ agx_tilebuffer_total_size(struct agx_tilebuffer_layout *tib)
 void
 agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
 {
+   if (tib->native_imageblock) {
+      memset(&tib->usc, 0, sizeof(tib->usc));
+      return;
+   }
+
    agx_pack(&tib->usc, USC_SHARED, cfg) {
       if (tib->nr_samples > 0) {
          cfg.uses_shared_memory = true;
@@ -542,7 +643,7 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
 
    /* Multisample multi-target layouts take the general mixed-format
     * programs, whose end-of-tile builtin has a multisample form. */
-   if (tib->nr_samples == 2 || tib->nr_samples == 4)
+   if (tib->nr_samples == 2 || tib->nr_samples == 4 || tib->nr_samples == 8)
       return agx_g17p_classify_mixed_mrt(tib, active_count);
    if (tib->nr_samples != 1)
       return AGX_G17P_MRT_NONE;

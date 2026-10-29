@@ -51,11 +51,19 @@ static void subnormal_coordinate(struct stream *s,unsigned coordinate){
  assert(agx3_alu_shift_imm32(AGX_ISA_ENCODING_AGX3B,false,98,98,24,AGX3_ALU_HINT_NONE,true,0,bytes,&n));append(s,bytes,n,"coordinate-exponent",-1);
  isel(s,97,98,0,false,97,false,0,true,"coordinate-is-subnormal");setflag(s,32768,"preserve-native-subnormal-coordinate");
 }
-static void prepare_policy(struct stream *s){
+/* Edge and vertex ownership of the record's triangle A = (v0, v1, v2), or
+ * of triangle B = (v2, v1, v3), whose projected vertex v3 occupies v0's
+ * registers when B is tested. B's edges run the other way round: an edge
+ * shared with a neighbour has opposite directions in the two triangles, so
+ * exactly one of them owns it. Projected coordinates: v0/v3 (0, 18),
+ * v1 (14, 2), v2 (4, 22). */
+static void prepare_policy(struct stream *s,bool second){
  imm16(s,96,0,"ownership-state-init");
  subnormal_coordinate(s,0);subnormal_coordinate(s,18);subnormal_coordinate(s,14);subnormal_coordinate(s,2);subnormal_coordinate(s,4);subnormal_coordinate(s,22);
- edge(s,14,2,4,22,8);edge(s,4,22,0,18,16);edge(s,0,18,14,2,32);
- vertex(s,0,14,4,64);vertex(s,14,4,0,128);vertex(s,4,0,14,256);
+ if(!second){edge(s,14,2,4,22,8);edge(s,4,22,0,18,16);edge(s,0,18,14,2,32);
+  vertex(s,0,14,4,64);vertex(s,14,4,0,128);vertex(s,4,0,14,256);}
+ else{edge(s,4,22,14,2,8);edge(s,0,18,4,22,16);edge(s,14,2,0,18,32);
+  vertex(s,0,4,14,64);vertex(s,14,0,4,128);vertex(s,4,14,0,256);}
  zero_factor(s,2,4,512);zero_factor(s,22,14,1024);zero_factor(s,22,0,2048);zero_factor(s,18,4,4096);zero_factor(s,18,14,8192);zero_factor(s,2,0,16384);
 }
 static void finite_product(struct stream *s,unsigned product){
@@ -73,28 +81,91 @@ static void residual_zero(struct stream *s,unsigned p0,unsigned p1,unsigned q0,u
  bitreg(s,AGX3_ALU_BAND,97,97,99,"both-products-qualified");finite_product(s,p0);finite_product(s,p1);
  imm16(s,98,flag,"exact-edge-mask");bitreg(s,AGX3_ALU_BAND,98,96,98,"exact-edge-test");isel(s,97,97,0,true,98,false,0,true,"unsafe-exact-edge");setflag(s,32768,"preserve-native-unsafe-edge");
 }
-static void finish_policy(struct stream *s){
- isel(s,99,72,0,true,0,true,1,true,"save-native-valid");
+static void finish_policy(struct stream *s,unsigned valid){
+ isel(s,99,valid,0,true,0,true,1,true,"save-native-valid");
  bitimm(s,97,96,9,"u-zero-and-eligible");isel(s,97,97,9,true,1,true,0,true,"u-owned");
  bitimm(s,98,96,18,"v-zero-and-eligible");isel(s,97,98,18,true,1,true,97,false,"v-owned-or-u");
  bitimm(s,98,96,36,"w-zero-and-eligible");isel(s,97,98,36,true,1,true,97,false,"w-owned-or-uv");
- bitimm(s,98,96,7,"zero-edge-mask");isel(s,97,98,0,true,1,true,97,false,"no-zero-edge-preserves-native");bitreg(s,AGX3_ALU_BAND,72,72,97,"edge-owner-valid");
+ bitimm(s,98,96,7,"zero-edge-mask");isel(s,97,98,0,true,1,true,97,false,"no-zero-edge-preserves-native");bitreg(s,AGX3_ALU_BAND,valid,valid,97,"edge-owner-valid");
  bitimm(s,97,96,7,"vertex-zero-mask");
- bitimm(s,98,96,64,"vertex-a-owner");isel(s,98,97,6,true,98,false,1,true,"vertex-a-only-on-vw-zero");isel(s,72,98,0,true,0,true,72,false,"vertex-a-valid");
- bitimm(s,98,96,128,"vertex-b-owner");isel(s,98,97,5,true,98,false,1,true,"vertex-b-only-on-uw-zero");isel(s,72,98,0,true,0,true,72,false,"vertex-b-valid");
- imm16(s,98,256,"vertex-c-mask");bitreg(s,AGX3_ALU_BAND,98,96,98,"vertex-c-owner");isel(s,98,97,3,true,98,false,1,true,"vertex-c-only-on-uv-zero");isel(s,72,98,0,true,0,true,72,false,"vertex-c-valid");
- imm16(s,98,32768,"unsafe-edge-mask");bitreg(s,AGX3_ALU_BAND,98,96,98,"unsafe-edge-test");isel(s,72,98,0,true,72,false,99,false,"qualified-policy-or-native");isel(s,72,97,7,true,99,false,72,false,"degenerate-projection-preserves-native");
+ bitimm(s,98,96,64,"vertex-a-owner");isel(s,98,97,6,true,98,false,1,true,"vertex-a-only-on-vw-zero");isel(s,valid,98,0,true,0,true,valid,false,"vertex-a-valid");
+ bitimm(s,98,96,128,"vertex-b-owner");isel(s,98,97,5,true,98,false,1,true,"vertex-b-only-on-uw-zero");isel(s,valid,98,0,true,0,true,valid,false,"vertex-b-valid");
+ imm16(s,98,256,"vertex-c-mask");bitreg(s,AGX3_ALU_BAND,98,96,98,"vertex-c-owner");isel(s,98,97,3,true,98,false,1,true,"vertex-c-only-on-uv-zero");isel(s,valid,98,0,true,0,true,valid,false,"vertex-c-valid");
+ imm16(s,98,32768,"unsafe-edge-mask");bitreg(s,AGX3_ALU_BAND,98,96,98,"unsafe-edge-test");isel(s,valid,98,0,true,valid,false,99,false,"qualified-policy-or-native");isel(s,valid,97,7,true,99,false,valid,false,"degenerate-projection-preserves-native");
+}
+static void fmul(struct stream *s,unsigned dest,unsigned a,unsigned b,const char *name){
+ const uint16_t src[3]={a,b,0};const enum agx3_alu_hint hints[3]={AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
+ uint8_t bytes[AGX3_ALU_MAX_LENGTH],n;assert(agx3_alu_float_reg(AGX_ISA_ENCODING_AGX3B,AGX3_ALU_FMUL,dest,src,hints,0,bytes,&n));append(s,bytes,n,name,-1);
+}
+static void ffma(struct stream *s,unsigned dest,unsigned a,unsigned b,unsigned c,const char *name){
+ const uint16_t src[3]={a,b,c};const enum agx3_alu_hint hints[3]={AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
+ uint8_t bytes[AGX3_ALU_MAX_LENGTH],n;assert(agx3_alu_float_reg(AGX_ISA_ENCODING_AGX3B,AGX3_ALU_FMA,dest,src,hints,0,bytes,&n));append(s,bytes,n,name,-1);
+}
+/* Rounded product a * b in p and its exact residual a * b - p in q. */
+static void two_product(struct stream *s,unsigned p,unsigned q,unsigned a,unsigned b){
+ fmul(s,p,a,b,"product");fmul(s,q,p,92,"negated-product");ffma(s,q,a,b,q,"product-residual");
+}
+/* Triangle B's exact path forms the products of its own edges v2-v3 and
+ * v1-v3 but not of the edge v1-v2 it shares with A; form those first, in
+ * registers the rest of the body never reads (84..93), while the projected
+ * coordinates are intact. */
+static void prepare_second(struct stream *s){
+ prepare_policy(s,true);
+ imm32(s,92,UINT32_C(0xbf800000),"negative-one");
+ two_product(s,84,86,2,4);two_product(s,88,90,22,14);
+ residual_zero(s,84,88,86,90,1,512,1024);
+}
+/* B's validity (16) when one of its edge functions is exactly zero. The
+ * native B test applies its own edge rule there, which disagrees with A's
+ * policy and leaves holes along the edges B shares, so decide from the
+ * policy alone: B owns an edge or vertex point by the ownership rules, and
+ * a point on one edge lies on B when its other two edge functions agree in
+ * sign (U 66, V' 44, W' 6 from the native B test). Unsafe products and a
+ * degenerate projection keep the native result, as for A. */
+static void owned(struct stream *s,unsigned mask,unsigned owner,const char *name){
+ if(owner<=255)bitimm(s,98,96,owner,name);else{imm16(s,98,owner,name);bitreg(s,AGX3_ALU_BAND,98,96,98,name);}
+ isel(s,98,98,0,true,0,true,1,true,name);isel(s,16,97,mask,true,98,false,16,false,name);
+}
+static void finish_second(struct stream *s){
+ isel(s,99,16,0,true,0,true,1,true,"save-native-valid");
+ bitimm(s,97,96,7,"zero-edge-mask");
+ imm32(s,92,0,"zero");
+ fsel(s,98,66,92,1,1,true,0,true,false,"u-negative");
+ fsel(s,94,6,92,1,1,true,0,true,false,"w-negative");bitreg(s,AGX3_ALU_BXOR,94,98,94,"u-w-disagree");
+ fsel(s,95,44,92,1,1,true,0,true,false,"v-negative");bitreg(s,AGX3_ALU_BXOR,95,98,95,"u-v-disagree");
+ bitimm(s,98,96,16,"v-edge-eligible");isel(s,98,98,0,true,0,true,1,true,"v-edge-owner");isel(s,98,94,0,true,98,false,0,true,"v-edge-point-on-b");isel(s,16,97,2,true,98,false,16,false,"v-edge-valid");
+ bitimm(s,98,96,32,"w-edge-eligible");isel(s,98,98,0,true,0,true,1,true,"w-edge-owner");isel(s,98,95,0,true,98,false,0,true,"w-edge-point-on-b");isel(s,16,97,4,true,98,false,16,false,"w-edge-valid");
+ bitreg(s,AGX3_ALU_BXOR,94,94,95,"v-w-disagree");
+ bitimm(s,98,96,8,"u-edge-eligible");isel(s,98,98,0,true,0,true,1,true,"u-edge-owner");isel(s,98,94,0,true,98,false,0,true,"u-edge-point-on-b");isel(s,16,97,1,true,98,false,16,false,"u-edge-valid");
+ owned(s,6,64,"vertex-v3");owned(s,5,128,"vertex-v1");owned(s,3,256,"vertex-v2");
+ /* U rounds to zero but is not exactly zero: its exact sign is that of the
+  * residual difference (84/88 products, 86/90 residuals, see
+  * prepare_second); the native B test does not form it. B holds the point
+  * when that sign agrees with V' and W'. */
+ fsel(s,95,86,90,1,1,true,0,true,false,"u-exact-negative");
+ fsel(s,94,44,92,1,1,true,0,true,false,"v-negative-again");bitreg(s,AGX3_ALU_BXOR,95,95,94,"u-v-disagree-exact");
+ fsel(s,98,6,92,1,1,true,0,true,false,"w-negative-again");bitreg(s,AGX3_ALU_BXOR,94,94,98,"v-w-disagree");
+ bitreg(s,AGX3_ALU_BOR,95,95,94,"exact-u-outside");isel(s,95,95,0,true,1,true,0,true,"exact-u-inside");
+ fsel(s,98,84,88,0,1,true,0,true,false,"u-rounds-to-zero");fsel(s,94,86,90,0,0,true,1,true,false,"u-not-exactly-zero");
+ bitreg(s,AGX3_ALU_BAND,98,98,94,"u-sign-from-residuals");isel(s,98,97,0,true,98,false,0,true,"no-exact-zero-edge");
+ isel(s,16,98,0,true,16,false,95,false,"exact-u-valid");
+ imm16(s,98,32768,"unsafe-edge-mask");bitreg(s,AGX3_ALU_BAND,98,96,98,"unsafe-edge-test");isel(s,16,98,0,true,16,false,99,false,"qualified-policy-or-native");isel(s,16,97,7,true,99,false,16,false,"degenerate-projection-preserves-native");
 }
 static void body(struct stream *s,bool corrected){
  size_t positions[TRI_COUNT];
  for(unsigned j=0;j<TRI_COUNT;j++){
   const struct agx3_rt_gen1_native_op *op=&agx3_rt_gen1_triangle_ops[j];positions[j]=s->size;
-  if(corrected&&op->offset==620)prepare_policy(s);
+  if(corrected&&op->offset==620)prepare_policy(s,false);
+  if(corrected&&op->offset==1096)prepare_second(s);
   uint8_t bytes[16],n;
   if(op->target!=UINT32_MAX)assert(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B,true,bytes,&n));
   else assert(agx3_bind_compose(AGX_ISA_ENCODING_AGX3B,op->name,op->ep,op->fields,op->nfields,NULL,0,bytes,&n));
   assert(n==op->size);append(s,bytes,n,op->name,op->offset);
-  if(corrected){switch(op->offset){case 648:residual_zero(s,72,10,76,78,1,512,1024);break;case 700:residual_zero(s,80,82,84,86,2,2048,4096);break;case 722:residual_zero(s,88,18,90,92,4,8192,16384);break;case 908:finish_policy(s);break;default:break;}}
+  if(corrected){switch(op->offset){case 648:residual_zero(s,72,10,76,78,1,512,1024);break;case 700:residual_zero(s,80,82,84,86,2,2048,4096);break;case 722:residual_zero(s,88,18,90,92,4,8192,16384);break;case 908:finish_policy(s,72);break;
+   /* Triangle B: edge v2-v3 (products 38/16, residuals 24/4), edge v1-v3
+    * (76/14, residuals 48/2), then its validity, which the native code
+    * leaves in 16. */
+   case 1148:residual_zero(s,38,16,24,4,2,2048,4096);break;case 1170:residual_zero(s,76,14,48,2,4,8192,16384);break;case 1390:finish_second(s);break;default:break;}}
  }
  for(unsigned j=0;j<TRI_COUNT;j++)if(agx3_rt_gen1_triangle_ops[j].target!=UINT32_MAX){size_t at=positions[j],target=positions[agx3_rt_gen1_triangle_ops[j].target];assert(agx3_cf_patch_branch(AGX_ISA_ENCODING_AGX3B,true,s->bytes+at,(int64_t)target-(int64_t)at));}
 }

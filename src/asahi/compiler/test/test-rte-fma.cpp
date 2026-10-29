@@ -92,8 +92,12 @@ check_fma_case(fma_case t)
       agx_nir_fma_rte_fixup(&b, nir_imm_int(&b, t.a), nir_imm_int(&b, t.c),
                             nir_imm_int(&b, t.z), nir_imm_int(&b, t.native));
    nir_store_global(&b, fixed, nir_imm_int64(&b, 0), .align_mul = 4);
-   while (nir_opt_constant_folding(b.shader)) {
-   }
+   bool progress;
+   do {
+      progress = nir_opt_constant_folding(b.shader);
+      progress |= nir_opt_dead_cf(b.shader);
+      progress |= nir_opt_remove_phis(b.shader);
+   } while (progress);
    nir_intrinsic_instr *store =
       nir_instr_as_intrinsic(nir_block_last_instr(nir_start_block(b.impl)));
    ASSERT_TRUE(nir_src_is_const(store->src[0]));
@@ -119,6 +123,42 @@ TEST(NativeFMA, NormalAddendAndCancellation)
    };
    for (auto t : cases)
       check_fma_case(t);
+}
+
+TEST(NativeFMA, NonzeroResultSkipsWideRepair)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "FMA normal-result fast path");
+   nir_def *a = agx_test_load_preamble(&b, 1, 32, 4);
+   nir_def *c = agx_test_load_preamble(&b, 1, 32, 6);
+   nir_def *z = agx_test_load_preamble(&b, 1, 32, 8);
+   nir_def *native = agx_test_load_preamble(&b, 1, 32, 10);
+   nir_def *fixed = agx_nir_fma_rte_fixup(&b, a, c, z, native);
+   nir_store_global(&b, fixed, nir_imm_int64(&b, 0), .align_mul = 4);
+   nir_validate_shader(b.shader, "guarded FMA tininess repair");
+
+   nir_block *entry = nir_start_block(b.impl);
+   nir_cf_node *next = nir_cf_node_next(&entry->cf_node);
+   ASSERT_NE(next, nullptr);
+   ASSERT_EQ(next->type, nir_cf_node_if);
+   nir_if *guard = nir_cf_node_as_if(next);
+   nir_alu_instr *eq = nir_def_as_alu(guard->condition.ssa);
+   ASSERT_EQ(eq->op, nir_op_ieq);
+   nir_alu_instr *abs_bits = nir_src_as_alu(eq->src[0].src);
+   ASSERT_EQ(abs_bits->op, nir_op_iand);
+   EXPECT_EQ(abs_bits->src[0].src.ssa, native);
+   EXPECT_EQ(nir_alu_src_as_uint(abs_bits->src[1]), 0x7fffffffu);
+
+   unsigned wide_products = 0;
+   nir_foreach_instr(instr, nir_if_first_then_block(guard)) {
+      if (instr->type == nir_instr_type_alu &&
+          nir_instr_as_alu(instr)->op == nir_op_imul &&
+          nir_instr_as_alu(instr)->def.bit_size == 64)
+         wide_products++;
+   }
+   EXPECT_EQ(wide_products, 1u);
+   EXPECT_TRUE(exec_list_is_empty(&nir_if_first_else_block(guard)->instr_list));
+   ralloc_free(b.shader);
 }
 
 TEST(NativeFMA, ExactDyadicOracle)

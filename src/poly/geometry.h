@@ -283,6 +283,9 @@ struct poly_geometry_params {
    /* Address of the primitives generated counters */
    DEVICE(uint) prims_generated_counter[POLY_MAX_VERTEX_STREAMS];
    DEVICE(uint) xfb_prims_generated_counter[POLY_MAX_VERTEX_STREAMS];
+   /* VK_EXT_primitives_generated_query, alongside a transform feedback
+    * query on the same stream. */
+   DEVICE(uint) query_prims_generated_counter[POLY_MAX_VERTEX_STREAMS];
    DEVICE(uint) xfb_overflow[POLY_MAX_VERTEX_STREAMS];
    DEVICE(uint) xfb_any_overflow;
 
@@ -343,8 +346,8 @@ struct poly_geometry_params {
     */
    uint32_t input_topology;
 } PACKED;
-static_assert(sizeof(struct poly_geometry_params) == 79 * 4,
-              "struct poly_geometry_params must be 79 words");
+static_assert(sizeof(struct poly_geometry_params) == 87 * 4,
+              "struct poly_geometry_params must be 87 words");
 
 static inline void
 poly_geometry_params_init(struct poly_geometry_params *p,

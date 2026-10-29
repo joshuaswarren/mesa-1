@@ -128,6 +128,10 @@ agx_shader_equal(agx_context *A, agx_context *B)
       ASSERT_SHADER_EQUAL(A->shader, B->shader);                               \
    } while (0)
 
+#ifdef __cplusplus
+/* The helpers below use C++ default arguments; C tests (for example
+ * test-agx3-m5-instructions.c) only need the builder helpers above. */
+
 /* nir_builder's named-argument macros expand to an initializer that mixes a
  * positional element with designators, which C++ rejects as a C99 extension.
  * Build the intrinsic first and set its indices through the accessors. */
@@ -212,5 +216,7 @@ agx_test_store_local_pixel_agx(nir_builder *b, nir_def *value, nir_def *mask,
    nir_intrinsic_set_format(intr, format);
    return intr;
 }
+
+#endif /* __cplusplus */
 
 #endif

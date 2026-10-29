@@ -107,7 +107,8 @@ check_split(bool dynamic_count, bool instances)
    };
    nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
    struct poly_gs_info info;
-   CHECK(hk_nir_lower_gs(b.shader, &count, &rast, &pre_gs, &info, &layout));
+   CHECK(hk_nir_lower_gs(b.shader, &count, &rast, &pre_gs, &info, &layout, false,
+                         NULL));
    CHECK(rast && rast->info.stage == MESA_SHADER_VERTEX);
    CHECK(!!count == dynamic_count);
    CHECK(check_variant(rast, true, true, instances));
@@ -189,7 +190,7 @@ check_atomic_guard(bool native, bool instances)
       .graphics_stage = true,
    };
    CHECK(hk_nir_lower_gs(b.shader, &count, &rast, &pre, &info,
-                        native ? &layout : NULL));
+                        native ? &layout : NULL, false, NULL));
    CHECK(!count);
    unsigned atomics = 0, queries = 0;
    nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {

@@ -42,6 +42,21 @@ cost_instr(agx_instr *I)
 }
 
 /*
+ * A coverage update that runs the depth/stencil tests (AGX3 MOVMSK with
+ * flag 2) must not execute with an empty EXEC. agx_nir_split_g17p_sample_tests
+ * puts it in its own arm on every AGX3 encoding (G17P and M5), and a SIMD
+ * group whose live lanes all take the kill arms instead otherwise still runs
+ * the arm's pixel wait, update and release with no active lane, which stops
+ * the 3D stage.
+ */
+static bool
+testing_coverage_update(const agx_context *ctx, const agx_instr *I)
+{
+   return agx_isa_is_agx3(ctx->key->dev.encoding) &&
+          I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 && (I->imm & 2);
+}
+
+/*
  * Estimate the cost between the instruction and the branch target. This is an
  * input for our heuristic. The branch target is guaranteed to be a forward
  * branch.
@@ -60,8 +75,7 @@ cost_between(agx_context *ctx, agx_block *from, agx_instr *from_I,
              J == agx_last_instr(target))
             break;
 
-         *must_skip |= ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-                       J->op == AGX_OPCODE_SAMPLE_MASK_AGX3 && (J->imm & 2);
+         *must_skip |= testing_coverage_update(ctx, J);
          cost += cost_instr(J);
       }
    }
@@ -81,8 +95,7 @@ cost_between(agx_context *ctx, agx_block *from, agx_instr *from_I,
          if (block == target && I == agx_last_instr(target))
             break;
 
-         *must_skip |= ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-                       I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 && (I->imm & 2);
+         *must_skip |= testing_coverage_update(ctx, I);
          cost += cost_instr(I);
       }
 

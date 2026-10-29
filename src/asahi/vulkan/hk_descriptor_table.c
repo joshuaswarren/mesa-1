@@ -134,7 +134,7 @@ hk_descriptor_table_reserve(struct hk_device *dev,
    }
 
    if (agx_bo_bind(&dev->dev, dev->dev.zero_bo, table->va->addr, size_B, 0,
-                   DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_SINGLE_PAGE)) {
+                   DRM_ASAHI_BIND_READ | agx_fill_bind_flags(&dev->dev))) {
       agx_va_free(&dev->dev, table->va, false);
       table->va = NULL;
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,

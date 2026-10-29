@@ -7,6 +7,7 @@
 #include <string.h>
 #include "util/ralloc.h"
 #include "hk_cmd_buffer.h"
+#include "hk_device.h"
 #include "hk_drm_prior_core.h"
 #include "hk_queue.h"
 _Static_assert(sizeof(struct drm_asahi_cmd_render) == 320, "legacy render");
@@ -75,6 +76,9 @@ static struct hk_cmd_buffer *
 new_cmd(void)
 {
    struct hk_cmd_buffer *c = test_alloc(sizeof(*c));
+   /* Stream creation reads device-wide options (the frame anatomy flag):
+    * give each fixture a zeroed device. */
+   c->vk.base.device = test_alloc(sizeof(struct hk_device));
    list_inithead(&c->control_streams);
    util_dynarray_init(&c->sync_pass_records, NULL);
    return c;
@@ -94,9 +98,142 @@ submit(struct hk_queue *q, struct hk_cmd_buffer *c)
    struct hk_cmd_buffer *cs[] = {c};
    return hk_sync_resolve_submit(q, cs, 1, false, false, 0);
 }
+
+static struct hk_cmd_buffer *
+timestamp_cmd(enum agx_chip chip, bool exact)
+{
+   struct hk_cmd_buffer *cmd = new_cmd();
+   struct hk_device *dev = test_alloc(sizeof(*dev));
+   dev->dev.chip = chip;
+   dev->dev.params.features = exact ? DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS : 0;
+   cmd->vk.base.device = &dev->vk;
+   return cmd;
+}
+
+static void
+end_timestamp(struct hk_cmd_buffer *cmd, uint32_t query)
+{
+   const struct agx_timestamp_req req = {
+      .handle = 1, .addr = 0x10000 + 8 * query, .offset_B = 8 * query};
+   hk_sync_write_timestamp(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, req);
+}
+
+/* Exercise actual timestamp placement, barriers and the submission resolver.
+ * Existing query-command scopes are not removed by the timestamp scope's
+ * redundant same-engine execution edge. No command payload or GPU is needed.
+ */
+static void
+test_timestamp_execution_scopes(void)
+{
+   for (unsigned exact = 0; exact < 2; ++exact) {
+      struct hk_queue *queue = new_queue(exact);
+      struct hk_cmd_buffer *first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, true);
+      end_timestamp(first, 0);
+      T("first timed compute resolves", submit(queue, first));
+      struct hk_cmd_buffer *second = timestamp_cmd(AGX_CHIP_G17P, exact);
+      struct hk_cs *timed = add(second, true);
+      end_timestamp(second, 1);
+      T("next timed compute resolves", submit(queue, second));
+      T("timestamp execution scope follows the exact-prior capability",
+        exact ? timed->sync.barrier[HK_SYNC_CDM] == DRM_ASAHI_BARRIER_NONE &&
+                   timed->sync.prior[HK_SYNC_CDM] == 0
+              : timed->sync.barrier[HK_SYNC_CDM] == 0);
+
+      /* Query copy/reset commands use an ALL earlier-work scope. Record
+       * that genuine scope through the production barrier entry point before
+       * the consumer, then add a timestamp to it and resolve both submissions.
+       */
+      struct hk_cmd_buffer *query = timestamp_cmd(AGX_CHIP_G17P, exact);
+      hk_sync_barrier(query, HK_SYNC_ALL, HK_SYNC_ALL);
+      struct hk_cs *copy = add(query, true);
+      copy->g17p_timestamp_query = true;
+      end_timestamp(query, 2);
+      T("query consumer plus timestamp resolves", submit(queue, query));
+      T("query memory consumer retains the completed producer prefix",
+        exact ? copy->sync.prior[HK_SYNC_CDM] == 2
+              : copy->sync.barrier[HK_SYNC_CDM] == 0);
+
+      struct hk_cmd_buffer *barrier = timestamp_cmd(AGX_CHIP_G17P, exact);
+      hk_sync_barrier(barrier, HK_SYNC_ALL, HK_SYNC_ALL);
+      T("standalone query ordering resolves", submit(queue, barrier));
+      struct hk_cmd_buffer *after = timestamp_cmd(AGX_CHIP_G17P, exact);
+      struct hk_cs *inherited = add(after, true);
+      end_timestamp(after, 3);
+      T("later timestamp with carried requirements resolves", submit(queue, after));
+      T("timestamp preserves a carried query-memory requirement",
+        exact ? inherited->sync.prior[HK_SYNC_CDM] == 3
+              : inherited->sync.barrier[HK_SYNC_CDM] == 0);
+
+      queue = new_queue(exact);
+      first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, false);
+      T("earlier render resolves", submit(queue, first));
+      second = timestamp_cmd(AGX_CHIP_G17P, exact);
+      timed = add(second, true);
+      end_timestamp(second, 4);
+      T("timestamp after render resolves", submit(queue, second));
+      T("timestamp cross-engine scope is preserved",
+        exact ? timed->sync.prior[HK_SYNC_VDM] == 1
+              : timed->sync.barrier[HK_SYNC_VDM] == 0);
+
+      queue = new_queue(exact);
+      first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, true);
+      end_timestamp(first, 5);
+      T("reset producer timestamp resolves", submit(queue, first));
+      struct hk_cmd_buffer *reset_cmd = timestamp_cmd(AGX_CHIP_G17P, exact);
+      hk_sync_barrier(reset_cmd, HK_SYNC_ALL, HK_SYNC_ALL);
+      struct hk_cs *reset = add(reset_cmd, true);
+      reset->g17p_timestamp_query = true;
+      hk_sync_after_stream(reset_cmd, reset, HK_SYNC_ALL);
+      struct hk_cs *later = add(reset_cmd, true);
+      end_timestamp(reset_cmd, 6);
+      T("reset then later stamped stream resolves", submit(queue, reset_cmd));
+      T("reset keeps the earlier timestamp publication requirement",
+        exact ? reset->sync.prior[HK_SYNC_CDM] == 1
+              : reset->sync.barrier[HK_SYNC_CDM] == 0);
+      T("later stamp keeps reset stream ordering",
+        later->sync.barrier[HK_SYNC_CDM] == 1);
+
+      queue = new_queue(exact);
+      first = timestamp_cmd(AGX_CHIP_G17P, exact);
+      add(first, true);
+      T("render timestamp compute source resolves", submit(queue, first));
+      second = timestamp_cmd(AGX_CHIP_G17P, exact);
+      struct hk_cs *render = add(second, false);
+      end_timestamp(second, 7);
+      T("render end timestamp resolves", submit(queue, second));
+      T("render timestamp keeps the original compute scope",
+        exact ? render->sync.prior[HK_SYNC_CDM] == 1
+              : render->sync.barrier[HK_SYNC_CDM] == 0);
+   }
+
+   for (unsigned chip = 0; chip < 2; ++chip) {
+      const enum agx_chip target = chip ? AGX_CHIP_G16G : AGX_CHIP_G13G;
+      struct hk_queue *queue = new_queue(true);
+      struct hk_cmd_buffer *first = timestamp_cmd(target, true);
+      add(first, true);
+      T("other target source resolves", submit(queue, first));
+      struct hk_cmd_buffer *second = timestamp_cmd(target, true);
+      struct hk_cs *timed = add(second, true);
+      end_timestamp(second, 0);
+      T("other target timestamp resolves", submit(queue, second));
+      T("unqualified target retains the original timestamp prefix",
+        timed->sync.prior[HK_SYNC_CDM] == 1);
+   }
+}
 /* The fixture has no open compute stream. A request to close one is a bug. */
 void
 hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+bool
+hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    (void)cmd;
    (void)cs;
@@ -110,6 +247,58 @@ hk_flush_query_resets(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    (void)cmd;
    if (cs->query_reset_pending)
       abort();
+}
+
+/* Timestamp recording references payload/allocation entry points for other
+ * branches. These tests attach end stamps to already-created closed streams;
+ * reaching a payload emission branch would invalidate that fixture contract.
+ */
+void
+hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
+                       uint64_t address, uint64_t size, uint32_t value)
+{
+   (void)cmd; (void)target; (void)address; (void)size; (void)value;
+   abort();
+}
+
+struct agx_ptr
+hk_pool_alloc_from_slow(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
+                         uint32_t size, uint32_t alignment,
+                         enum hk_cmd_bo_type type)
+{
+   (void)cmd; (void)uploader; (void)size; (void)alignment; (void)type;
+   abort();
+}
+
+struct agx_ptr
+hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
+{
+   (void)cmd; (void)size; (void)alignment;
+   abort();
+}
+
+void
+hk_drm_attachment_set_init(struct hk_drm_attachment_set *set)
+{
+   (void)set;
+   abort();
+}
+
+void
+hk_flush_deferred_clears_why(struct hk_cmd_buffer *cmd, const char *why)
+{
+   (void)cmd;
+   (void)why;
+   abort();
+}
+
+void
+hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                     enum agx_barrier barrier, enum libagx_program idx,
+                     void *data, size_t data_size)
+{
+   (void)cmd; (void)grid; (void)barrier; (void)idx; (void)data; (void)data_size;
+   abort();
 }
 
 /* Record a real full-frame pass with a sparse-mask preservation footprint.
@@ -128,6 +317,83 @@ render_pass(struct hk_cmd_buffer *cmd, const void *image, uint32_t layers,
    list_addtail(&cs->node, &cmd->control_streams);
    hk_sync_end_rendering(cmd);
    return cs;
+}
+
+
+static void
+test_precise_tile_evictions(void)
+{
+   const void *image = (void *)0x9876;
+   struct hk_cmd_buffer *full = new_cmd(), *partial = new_cmd();
+   struct hk_cs *write = render_pass(full, image, 1, false);
+   struct hk_cs *preserve = render_pass(partial, image, 1, true);
+   struct hk_cmd_buffer *one[] = {full};
+   struct hk_queue *q = new_queue(true);
+   q->sync.precise_tile_evictions = true;
+   bool no_query = true, no_barrier = true, resolved = true;
+   for (unsigned i = 1; i <= HK_SYNC_RECENT_FOOTPRINTS + 2; ++i) {
+      q->drm.timeline_value = i;
+      no_query &= !hk_sync_submit_needs_completed(q, one, 1);
+      resolved &= submit(q, full);
+      no_barrier &= write->sync.barrier[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE;
+   }
+   T("complete writes skip retirement query through ring wrap", no_query);
+   T("complete writes keep overlap through ring wrap", resolved && no_barrier);
+   T("complete history retained for later partial pass",
+     q->sync.recent_count == HK_SYNC_RECENT_FOOTPRINTS && q->sync.evicted > 0 &&
+     q->sync.last_preserve == 0 && q->sync.evicted_preserve == 0);
+   struct hk_cmd_buffer *p[] = {partial};
+   T("later preserving pass queries complete history",
+     hk_sync_submit_needs_completed(q, p, 1));
+   const uint64_t point = ++q->drm.timeline_value;
+   T("later preserving pass resolves", submit(q, partial));
+   T("later preserving pass waits on evicted complete writes",
+     preserve->sync.barrier[HK_SYNC_VDM] == 0 && q->sync.last_preserve == point);
+   T("complete pass queries preserving history",
+     hk_sync_submit_needs_completed(q, one, 1));
+   ++q->drm.timeline_value;
+   T("complete pass resolves against preserving history", submit(q, full));
+   T("complete pass waits on live preserving pass",
+     write->sync.barrier[HK_SYNC_VDM] == 0);
+
+   /* Evict the preserving entry, then retire only through that entry. Later
+    * complete writes still run. They must remain independent of a full write,
+    * while a new partial write must wait for those same complete writes. */
+   for (unsigned i = 0; i < HK_SYNC_RECENT_FOOTPRINTS; ++i) {
+      ++q->drm.timeline_value;
+      resolved &= submit(q, full);
+   }
+   T("preserving eviction tracked separately from complete writes",
+     resolved && q->sync.evicted_preserve == point && q->sync.evicted > point);
+   ++q->drm.timeline_value;
+   T("retired preserving pass allows complete write",
+     hk_sync_resolve_submit(q, one, 1, false, false, point) &&
+     write->sync.barrier[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE);
+   ++q->drm.timeline_value;
+   T("partial pass still waits on live evicted complete writes",
+     hk_sync_resolve_submit(q, p, 1, false, false, point) &&
+     preserve->sync.barrier[HK_SYNC_VDM] == 0);
+
+   q = new_queue(true);
+   q->sync.precise_tile_evictions = true;
+   q->drm.timeline_value = 1;
+   struct hk_cmd_buffer *pair[] = {partial, full};
+   T("partial then full in one submit retains dependency",
+     hk_sync_resolve_submit(q, pair, 2, false, false, 0) &&
+     write->sync.barrier[HK_SYNC_VDM] == preserve->sync.index);
+   q = new_queue(true);
+   q->sync.precise_tile_evictions = true;
+   q->drm.timeline_value = 1;
+   struct hk_cmd_buffer *reverse[] = {full, partial};
+   T("full then partial in one submit retains dependency",
+     hk_sync_resolve_submit(q, reverse, 2, false, false, 0) &&
+     preserve->sync.barrier[HK_SYNC_VDM] == write->sync.index);
+
+   q = new_queue(true);
+   q->drm.timeline_value = 1;
+   T("other-device complete history resolves", submit(q, full));
+   T("other devices retain retirement query policy",
+     hk_sync_submit_needs_completed(q, one, 1));
 }
 
 
@@ -880,6 +1146,122 @@ test_classic_submission_order(void)
       DRM_ASAHI_BARRIER_NONE && compute->sync.prior[0] == 0);
 }
 
+static void
+test_barrier_chains_without_work(void)
+{
+   struct hk_cmd_buffer *cmd = new_cmd();
+   cmd->sync.kind_override = HK_SYNC_XFER;
+   struct hk_cs *copy = add(cmd, true);
+   cmd->sync.kind_override = 0;
+   hk_sync_barrier(cmd, HK_SYNC_XFER, HK_SYNC_COMPUTE);
+   hk_sync_barrier(cmd, HK_SYNC_COMPUTE, HK_SYNC_GFX);
+   struct hk_cs *draw = add(cmd, false);
+   T("transfer-compute-graphics chain retains transfer source",
+     draw->sync.dep[HK_SYNC_CDM].cut == copy);
+   T("transfer-compute-graphics chain reaches vertex work",
+     draw->sync.dep_ta[HK_SYNC_CDM].cut == copy);
+
+   cmd = new_cmd();
+   cmd->sync.kind_override = HK_SYNC_XFER;
+   copy = add(cmd, true);
+   cmd->sync.kind_override = 0;
+   hk_sync_barrier(cmd, HK_SYNC_XFER, HK_SYNC_COMPUTE);
+   hk_sync_barrier(cmd, HK_SYNC_GFX, HK_SYNC_GFX);
+   draw = add(cmd, false);
+   T("disjoint barrier scopes do not serialize unrelated graphics",
+     draw->sync.dep[HK_SYNC_CDM].cut == NULL);
+
+   cmd = new_cmd();
+   cmd->sync.kind_override = HK_SYNC_XFER;
+   copy = add(cmd, true);
+   cmd->sync.kind_override = 0;
+   hk_sync_barrier(cmd, HK_SYNC_XFER, HK_SYNC_GFX_FRAG);
+   hk_sync_barrier(cmd, HK_SYNC_GFX, HK_SYNC_COMPUTE);
+   struct hk_cs *compute = add(cmd, true);
+   T("fragment destination chains into a later graphics source",
+     compute->sync.dep[HK_SYNC_CDM].cut == copy);
+}
+
+/* Differential check of production resolution and history, including ring
+ * wrap, retired points, mixed engines, empty buffers and multi-buffer fallback.
+ * The two queues consume the same immutable recordings in the same order.
+ */
+static void
+test_direct_single_footprints(void)
+{
+   const unsigned sizes[] = {0, 1, 2, HK_SYNC_RECENT_FOOTPRINTS + 1};
+   for (unsigned exact = 0; exact < 2; ++exact) {
+      for (unsigned serialized = 0; serialized < 2; ++serialized) {
+         for (unsigned count = 0; count <= 2; ++count) {
+            for (unsigned s = 0; s < ARRAY_SIZE(sizes); ++s) {
+               struct hk_queue *a = new_queue(exact), *b = new_queue(exact);
+               a->sync.serialize = b->sync.serialize = serialized;
+               a->sync.precise_tile_evictions = b->sync.precise_tile_evictions = true;
+               b->sync.direct_single_footprints = true;
+               struct hk_cmd_buffer *cmds[] = {new_cmd(), new_cmd()};
+               struct hk_cs **streams = test_alloc(
+                  sizeof(*streams) * MAX2(1, 2 * sizes[s]));
+               struct hk_sync_stream *saved = test_alloc(
+                  sizeof(*saved) * MAX2(1, 2 * sizes[s]));
+               unsigned n = 0;
+               for (unsigned c = 0; c < count; ++c) {
+                  for (unsigned p = 0; p < sizes[s]; ++p) {
+                     const void *image = (void *)(uintptr_t)(0x1000 + (p % 3) * 16);
+                     streams[n++] = (p & 1)
+                        ? compute_clear_pass(cmds[c], image, 0, true)
+                        : render_pass(cmds[c], image, 1, p % 3 == 0);
+                  }
+               }
+               bool same = true;
+               const unsigned rounds = sizes[s]
+                  ? HK_SYNC_RECENT_FOOTPRINTS / sizes[s] + 3 : 3;
+               for (unsigned r = 0; r < rounds; ++r) {
+                  a->drm.timeline_value = b->drm.timeline_value = r + 1;
+                  const uint64_t completed = r % 4 ? 0 : r;
+                  const bool flush = r % 7 == 0, chain = r % 3 == 0;
+                  same &= hk_sync_resolve_submit(a, cmds, count, flush, chain, completed);
+                  for (unsigned j = 0; j < n; ++j)
+                     saved[j] = streams[j]->sync;
+                  same &= hk_sync_resolve_submit(b, cmds, count, flush, chain, completed);
+                  for (unsigned j = 0; j < n; ++j) {
+                     same &= saved[j].index == streams[j]->sync.index &&
+                             saved[j].ta_split == streams[j]->sync.ta_split;
+                     for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+                        same &= saved[j].barrier[sq] == streams[j]->sync.barrier[sq] &&
+                                saved[j].prior[sq] == streams[j]->sync.prior[sq] &&
+                                saved[j].barrier_ta[sq] == streams[j]->sync.barrier_ta[sq] &&
+                                saved[j].prior_ta[sq] == streams[j]->sync.prior_ta[sq];
+                     }
+                  }
+                  same &= a->sync.recent_count == b->sync.recent_count &&
+                          a->sync.recent_next == b->sync.recent_next &&
+                          a->sync.recent_max == b->sync.recent_max &&
+                          a->sync.evicted == b->sync.evicted &&
+                          a->sync.last_preserve == b->sync.last_preserve &&
+                          a->sync.evicted_preserve == b->sync.evicted_preserve;
+                  same &= memcmp(a->sync.ever, b->sync.ever, sizeof(a->sync.ever)) == 0 &&
+                          memcmp(a->sync.tail, b->sync.tail, sizeof(a->sync.tail)) == 0 &&
+                          memcmp(a->sync.last_absolute, b->sync.last_absolute,
+                                 sizeof(a->sync.last_absolute)) == 0 &&
+                          memcmp(a->sync.submitted, b->sync.submitted,
+                                 sizeof(a->sync.submitted)) == 0;
+                  for (unsigned j = 0; j < a->sync.recent_count; ++j) {
+                     const struct hk_sync_recent *x = &a->sync.recent[j], *y = &b->sync.recent[j];
+                     same &= x->point == y->point && x->sq == y->sq &&
+                             x->fp.image == y->fp.image && x->fp.level == y->fp.level &&
+                             x->fp.preserve == y->fp.preserve &&
+                             x->fp.layer0 == y->fp.layer0 && x->fp.layer1 == y->fp.layer1 &&
+                             x->fp.cx0 == y->fp.cx0 && x->fp.cx1 == y->fp.cx1 &&
+                             x->fp.cy0 == y->fp.cy0 && x->fp.cy1 == y->fp.cy1;
+                  }
+               }
+               T("direct single-buffer footprint resolution/history matches", same);
+            }
+         }
+      }
+   }
+}
+
 int
 main(void)
 {
@@ -887,7 +1269,10 @@ main(void)
    test_classic_submission_order();
    if (!test_context)
       return EXIT_FAILURE;
+   test_precise_tile_evictions();
+   test_direct_single_footprints();
    test_xfer_write_order();
+   test_barrier_chains_without_work();
    test_multiview_layer_preservation();
    test_compute_clear_layer_preservation();
    test_loaded_color_preservation();
@@ -895,6 +1280,7 @@ main(void)
    test_image_barrier_vertex_class();
    test_chain_first_skips_empty_buffers();
    test_rt_kernel_gate();
+   test_timestamp_execution_scopes();
    /* Each matching destination retains the exact old source prefix, including
     * reuse of a recording and independent physical destinations on the queue. */
    struct hk_queue *q = new_queue(true);

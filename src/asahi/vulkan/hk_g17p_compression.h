@@ -5,6 +5,7 @@
 #pragma once
 #include "asahi/lib/agx_chip.h"
 #include "hk_g17p_meta_copy_core.h"
+#include "drm-uapi/asahi_drm.h"
 #include "vulkan/vulkan_core.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -128,17 +129,27 @@ hk_g17p_compression_depth_format(VkFormat format)
  * compatibility, ail_can_compress, the AGX-wide nocompress debug flag) still
  * apply. */
 static inline bool
-hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
-                             const VkImageCreateInfo *info)
+hk_hal200_compression_eligible(enum agx_chip chip, unsigned plane,
+                               const VkImageCreateInfo *info, bool g16s)
 {
    if (chip != AGX_CHIP_G17P || !info ||
        (plane != 0 && !(plane == 1 &&
                         info->format == VK_FORMAT_D32_SFLOAT_S8_UINT)))
       return false;
 
-   /* Shared images keep their plain layout contract. Read each header by
-    * copy: the chain's structures have other types, and Mesa builds with
-    * strict aliasing (gcc -O2 dropped the stores of a stack chain). */
+   /* Keep depth/stencil on the existing single-level/layer/sample policy.
+    * The expanded G16S ZLS allocation shapes also reach colour-alias transfer
+    * and clear paths; those do not yet support every compressed D/S shape.
+    * Admitting them at allocation makes legal commands fail at EndCommandBuffer.
+    * Colour's layered/MSAA packet support is independent of this restriction.
+    */
+   g16s = g16s && hk_g17p_compression_color_format(info->format);
+
+   /* Shared images keep their plain layout contract. Read each header field
+    * by copy: the chain's structures have other types, and Mesa builds with
+    * strict aliasing (gcc -O2 dropped the stores of a stack chain). Copy pNext
+    * straight into next: through a copied VkBaseInStructure, GCC 16's
+    * points-to analysis loses the chain and drops its stores again. */
    for (const void *next = info->pNext; next;) {
       VkStructureType type;
       const void *following;
@@ -158,6 +169,11 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
 
    VkImageCreateFlags allowed_flags =
       VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   if (g16s && info->imageType == VK_IMAGE_TYPE_2D)
+      allowed_flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+   if (g16s && info->imageType == VK_IMAGE_TYPE_3D)
+      allowed_flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT |
+                       VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT;
    /* Zink marks every depth attachment sample-location compatible, including
     * single-sample images. This changes sample-location tracking, not the
     * depth plane's storage class. The one-sample restriction below remains.
@@ -182,14 +198,41 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
    if (hk_g17p_compression_depth_format(info->format))
       allowed_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
-   if (info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||
-       info->arrayLayers != 1 || info->samples != VK_SAMPLE_COUNT_1_BIT ||
-       info->tiling != VK_IMAGE_TILING_OPTIMAL || info->mipLevels < 1 ||
-       (info->flags & ~allowed_flags) || (info->usage & ~allowed_usage) ||
-       info->extent.width < 16 || info->extent.height < 16)
+   const bool multisampled = info->samples != VK_SAMPLE_COUNT_1_BIT;
+   const bool three_d = info->imageType == VK_IMAGE_TYPE_3D;
+   if (!g16s) {
+      if (info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||
+          info->arrayLayers != 1 || info->samples != VK_SAMPLE_COUNT_1_BIT ||
+          info->tiling != VK_IMAGE_TILING_OPTIMAL || info->mipLevels < 1 ||
+          (info->flags & ~allowed_flags) || (info->usage & ~allowed_usage) ||
+          info->extent.width < 16 || info->extent.height < 16)
+         return false;
+   } else if ((info->imageType != VK_IMAGE_TYPE_2D && !three_d) ||
+              !info->extent.depth || !info->arrayLayers ||
+              (three_d ? (info->arrayLayers != 1 || multisampled)
+                       : info->extent.depth != 1) ||
+              (multisampled &&
+               ((info->samples != VK_SAMPLE_COUNT_2_BIT &&
+                 info->samples != VK_SAMPLE_COUNT_4_BIT) || info->mipLevels != 1)) ||
+              ((info->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
+               (multisampled || info->extent.width != info->extent.height ||
+                info->arrayLayers % 6)) ||
+              info->tiling != VK_IMAGE_TILING_OPTIMAL || info->mipLevels < 1 ||
+              (info->flags & ~allowed_flags) || (info->usage & ~allowed_usage) ||
+              info->extent.width < 16 || info->extent.height < 16) {
       return false;
+   }
 
    if (hk_g17p_compression_color_format(info->format)) {
+      if (g16s && (three_d || info->arrayLayers > 1) && info->mipLevels != 1)
+         return false;
+      /* #66: a legal MRT mix can spill any MSAA colour attachment. Keep
+       * those plain until transient backing has a measured performance case. */
+      if (g16s && multisampled &&
+          (info->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                         VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)))
+         return false;
+
       /* An RGBA8/BGRA8 UNORM mip chain the application never renders to is
        * written only by uploads and mip blits. A plain image takes each
        * upload as one raw compute copy and each mip level as a raw compute
@@ -214,16 +257,33 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
       return true;
    }
 
+   if (g16s) {
+      return (hk_g17p_compression_depth_format(info->format) ||
+              (info->format == VK_FORMAT_S8_UINT && !multisampled)) &&
+             !three_d && info->extent.width <= 16384 &&
+             info->extent.height <= 16384 && info->mipLevels <= 16;
+   }
    return hk_g17p_compression_depth_format(info->format) &&
           info->mipLevels == 1;
 }
 
-/* G17P colour images shared through DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED.
+/* Preserve the qualified Neo policy for every pre-existing caller. T6040's
+ * extended shapes are selected by physical identity at image allocation. */
+static inline bool
+hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
+                             const VkImageCreateInfo *info)
+{
+   return hk_hal200_compression_eligible(chip, plane, info, false);
+}
+
+/* G17P and M5 colour images shared through
+ * DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED.
  *
  * The modifier is the sharing contract. With one level, one layer and one
  * sample, the G17P (legacy AIL policy) compressed allocation is a function of
  * the format's block size and the extent alone: GPU tiling, the image, then
- * its metadata, in one memory plane. Exporter and importer therefore derive
+ * its metadata, in one memory plane. The M5 allocation (AIL_LAYOUT_POLICY_M5
+ * and its metadata, one memory plane) is too. Exporter and importer therefore derive
  * the same layout, and import already follows the modifier through
  * hk_map_compression(). The packets that read and write it are the ones the
  * private policy above uses for single-level colour images: the compressed
@@ -256,7 +316,8 @@ hk_g17p_shared_compression_shape(enum agx_chip chip, VkFormat format,
       VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
-   return chip == AGX_CHIP_G17P && type == VK_IMAGE_TYPE_2D &&
+   return (chip == AGX_CHIP_G17P || agx_chip_g17_m5(chip)) &&
+          type == VK_IMAGE_TYPE_2D &&
           !(flags & ~allowed_flags) && !(usage & ~allowed_usage) &&
           hk_g17p_compression_color_format(format);
 }
@@ -273,4 +334,280 @@ hk_g17p_shared_compression_eligible(enum agx_chip chip, unsigned plane,
           info->extent.depth == 1 && info->mipLevels == 1 &&
           info->arrayLayers == 1 && info->samples == VK_SAMPLE_COUNT_1_BIT &&
           info->extent.width >= 16 && info->extent.height >= 16;
+}
+
+/* M5 lossless compression of colour render targets.
+ *
+ * The Gen10 compressed PBE (write) packet and texture (read) descriptor are
+ * native-verified for GPU-tiled one-layer 2D images (byte-identical to
+ * the native M5 PBE and texture descriptor encoders), and the allocation is
+ * the measured M5 layout with its metadata (AIL_LAYOUT_POLICY_M5). Every
+ * write of such an image then goes through the PBE: end-of-tile stores,
+ * and the graphics meta paths hk_xfer_copyimage2() and the buffer uploads
+ * take for a compressed destination (the raw tiled copiers refuse one).
+ *
+ * Admitted: the G17P colour formats (1-8 byte texels, so a single-sample
+ * tilebuffer never spills a compressed target), one layer, any mip count
+ * (one level for one-byte texels, see hk_m5_compression_one_byte()),
+ * one sample, a colour attachment, and otherwise only sampled,
+ * input-attachment and transfer usages. Shared images (external memory,
+ * WSI) stay plain.
+ *
+ * Every level of a compressed mip chain is described by the level-0 surface
+ * and metadata addresses plus the level fields, in the PBE and
+ * texture packets alike, as native does; the hardware finds the
+ * level, so AIL_LAYOUT_POLICY_M5's per-level metadata placement must be the
+ * hardware's.
+ */
+/* One-byte texels. The M5 hardware places a compressed level after a 32x32
+ * one-byte level 2 KiB on, where AIL_LAYOUT_POLICY_M5 puts it 1 KiB on: the
+ * end-of-tile store and texture reads use the hardware's offset, AIL-addressed
+ * writes (fast clears, copies) the other. Two- to eight-byte texels agree with
+ * the hardware at every level tested (64x64 to 2976x1872, odd sizes). */
+static inline bool
+hk_m5_compression_one_byte(VkFormat format)
+{
+   return format == VK_FORMAT_R8_UNORM || format == VK_FORMAT_R8_SNORM ||
+          format == VK_FORMAT_R8_UINT || format == VK_FORMAT_R8_SINT;
+}
+
+static inline bool
+hk_m5_color_compression_eligible(enum agx_chip chip, unsigned plane,
+                                 const VkImageCreateInfo *info)
+{
+   if (!agx_chip_g17_m5(chip) || plane != 0 || !info)
+      return false;
+
+   /* Read the chain as hk_g17p_compression_eligible() does. */
+   for (const void *next = info->pNext; next;) {
+      VkStructureType type;
+      const void *following;
+      memcpy(&type, next, sizeof(type));
+      memcpy(&following, (const char *)next + offsetof(VkBaseInStructure, pNext),
+             sizeof(following));
+      if (type == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) {
+         VkExternalMemoryImageCreateInfo external;
+         memcpy(&external, next, sizeof(external));
+         if (external.handleTypes)
+            return false;
+      }
+      if (type == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
+         return false;
+      next = following;
+   }
+
+   const VkImageCreateFlags allowed_flags =
+      VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   const VkImageUsageFlags allowed_usage =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+
+   return info->imageType == VK_IMAGE_TYPE_2D && info->extent.depth == 1 &&
+          info->arrayLayers == 1 &&
+          (info->mipLevels == 1 || !hk_m5_compression_one_byte(info->format)) &&
+          info->samples == VK_SAMPLE_COUNT_1_BIT &&
+          info->tiling == VK_IMAGE_TILING_OPTIMAL &&
+          !(info->flags & ~allowed_flags) &&
+          (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+          !(info->usage & ~allowed_usage) && info->extent.width >= 16 &&
+          info->extent.height >= 16 &&
+          hk_g17p_compression_color_format(info->format);
+}
+
+/* Multisample colour formats with a qualified compressed metadata shape:
+ * RGBA16F, and the 4-byte RGBA8/BGRA8 UNORM and sRGB formats, which share the
+ * R32_UINT texel size of the witnessed raw copy packet. */
+static inline bool
+hk_m5_msaa_color_compression_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_R16G16B16A16_SFLOAT:
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_SRGB:
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_B8G8R8A8_SRGB:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* Qualified multisample metadata shapes. The sample mask retains an
+ * explicit diagnostic opt-out. Sharing and aliasing flags are not admitted;
+ * a mutable format is, and hk_can_compress() then requires a format list of
+ * compression-compatible views.
+ */
+static inline bool
+hk_m5_msaa_color_compression_eligible(enum agx_chip chip, unsigned plane,
+                                     const VkImageCreateInfo *info,
+                                     unsigned enabled_samples)
+{
+   const VkImageUsageFlags allowed_usage =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+   if (chip != AGX_CHIP_G17S || plane != 0 || !info)
+      return false;
+
+   for (const void *next = info->pNext; next;) {
+      VkStructureType type;
+      memcpy(&type, next, sizeof(type));
+      if (type != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO)
+         return false;
+      memcpy(&next, (const char *)next + offsetof(VkBaseInStructure, pNext),
+             sizeof(next));
+   }
+
+   return !(info->flags & ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+          info->imageType == VK_IMAGE_TYPE_2D &&
+          info->extent.depth == 1 && info->extent.width >= 16 &&
+          info->extent.height >= 16 && info->arrayLayers == 1 &&
+          info->mipLevels == 1 &&
+          hk_m5_msaa_color_compression_format(info->format) &&
+          (info->samples == VK_SAMPLE_COUNT_2_BIT ||
+           info->samples == VK_SAMPLE_COUNT_4_BIT) &&
+          (enabled_samples & info->samples) &&
+          info->tiling == VK_IMAGE_TILING_OPTIMAL &&
+          (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+          !(info->usage & ~allowed_usage);
+}
+
+/* M5 lossless compression of depth attachments.
+ *
+ * The native HAL300 framebuffer setup sets ZLS control bits 2 and
+ * 6 exactly when the attached depth level has compression metadata, bits 4
+ * and 8 for stencil metadata and bit 26 for Depth16Unorm, and programs the
+ * metadata address and its cache-line layer stride beside the surface: the
+ * encoding agx_pack_zls_control() and hk's render setup already produce.
+ * Depth is read through the same Gen10 texture descriptor as colour, and the
+ * copy paths write it through its R16/R32_UINT colour alias with the
+ * compressed PBE.
+ *
+ * Admitted: D16_UNORM, D32_SFLOAT and both planes of D32_SFLOAT_S8_UINT
+ * (stencil is read through its R8_UINT alias and copied through the same
+ * graphics path), one layer, one mip, one sample,
+ * a depth attachment, and otherwise only sampled, input-attachment,
+ * feedback-loop and transfer usages. Zink marks its depth attachments
+ * sample-location compatible and feedback-loop capable, which changes
+ * neither. Shared images (external memory, WSI) stay plain.
+ */
+static inline bool
+hk_m5_depth_compression_eligible(enum agx_chip chip, unsigned plane,
+                                 const VkImageCreateInfo *info)
+{
+   if (!agx_chip_g17_m5(chip) || !info ||
+       (plane != 0 && !(plane == 1 &&
+                        info->format == VK_FORMAT_D32_SFLOAT_S8_UINT)))
+      return false;
+
+   /* Read the chain as hk_g17p_compression_eligible() does. */
+   for (const void *next = info->pNext; next;) {
+      VkStructureType type;
+      const void *following;
+      memcpy(&type, next, sizeof(type));
+      memcpy(&following, (const char *)next + offsetof(VkBaseInStructure, pNext),
+             sizeof(following));
+      if (type == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) {
+         VkExternalMemoryImageCreateInfo external;
+         memcpy(&external, next, sizeof(external));
+         if (external.handleTypes)
+            return false;
+      }
+      if (type == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
+         return false;
+      next = following;
+   }
+
+   const VkImageCreateFlags allowed_flags =
+      VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT |
+      VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+   const VkImageUsageFlags allowed_usage =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+
+   return info->imageType == VK_IMAGE_TYPE_2D && info->extent.depth == 1 &&
+          info->arrayLayers == 1 && info->mipLevels == 1 &&
+          info->samples == VK_SAMPLE_COUNT_1_BIT &&
+          info->tiling == VK_IMAGE_TILING_OPTIMAL &&
+          !(info->flags & ~allowed_flags) &&
+          (info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+          !(info->usage & ~allowed_usage) && info->extent.width >= 16 &&
+          info->extent.height >= 16 &&
+          hk_g17p_compression_depth_format(info->format);
+}
+
+/* Stage-one experiment: native ZLS plus texture reads, no PBE destination.
+ * The capability is advertised only by an explicitly enabled private kernel.
+ * Transfer/image-copy and additional image semantics require separate gates.
+ */
+static inline bool
+hk_m5_depth_msaa_compression_eligible(enum agx_chip chip, unsigned plane,
+                                     const VkImageCreateInfo *info,
+                                     uint64_t kernel_features, bool opted_in)
+{
+   const uint64_t capability = DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION;
+   const VkImageUsageFlags allowed_usage =
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+   /* The stencil plane of D32_SFLOAT_S8_UINT compresses with depth where the
+    * kernel admits compressed multisample stencil. */
+   const bool plane_ok =
+      plane == 0 ||
+      (plane == 1 && info && info->format == VK_FORMAT_D32_SFLOAT_S8_UINT &&
+       (kernel_features & DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION));
+   return opted_in && (kernel_features & capability) &&
+          agx_chip_g17_m5(chip) && plane_ok && info && !info->pNext &&
+          info->imageType == VK_IMAGE_TYPE_2D && info->extent.depth == 1 &&
+          info->arrayLayers == 1 && info->mipLevels == 1 &&
+          (info->samples == VK_SAMPLE_COUNT_2_BIT ||
+           info->samples == VK_SAMPLE_COUNT_4_BIT) &&
+          info->tiling == VK_IMAGE_TILING_OPTIMAL && info->flags == 0 &&
+          (info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+          !(info->usage & ~allowed_usage) && info->extent.width >= 16 &&
+          info->extent.height >= 16 &&
+          (info->format == VK_FORMAT_D32_SFLOAT ||
+           info->format == VK_FORMAT_D32_SFLOAT_S8_UINT);
+}
+
+/* Private transfer qualification: preserve the stage-one shape and capability
+ * checks while admitting only the complete DS/sampled/transfer usage set.
+ * Stencil stays plain; its sole permitted extension excludes sampled usage.
+ */
+static inline bool
+hk_m5_depth_msaa_transfer_eligible(enum agx_chip chip, unsigned plane,
+                                  const VkImageCreateInfo *info,
+                                  uint64_t kernel_features,
+                                  bool compression_opted_in,
+                                  bool transfer_opted_in)
+{
+   const VkImageUsageFlags usage =
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+   if (!compression_opted_in || !transfer_opted_in || !info ||
+       info->usage != usage)
+      return false;
+
+   if (info->pNext) {
+      VkBaseInStructure extension;
+      memcpy(&extension, info->pNext, sizeof(extension));
+      if (info->format != VK_FORMAT_D32_SFLOAT_S8_UINT ||
+          extension.sType != VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO ||
+          extension.pNext)
+         return false;
+      VkImageStencilUsageCreateInfo stencil;
+      memcpy(&stencil, info->pNext, sizeof(stencil));
+      if (stencil.stencilUsage != (usage & ~VK_IMAGE_USAGE_SAMPLED_BIT))
+         return false;
+   }
+
+   VkImageCreateInfo base = *info;
+   base.pNext = NULL;
+   base.usage &= ~(VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                   VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+   return hk_m5_depth_msaa_compression_eligible(
+      chip, plane, &base, kernel_features, compression_opted_in);
 }

@@ -31,6 +31,13 @@ struct agx_ioto_state {
    uint64_t f[AGX_IOTO_STATE_FIELD_COUNT];
 };
 
+bool agx_ioto_state_pack_speclm(enum agx_chip chip,
+                              const struct agx_ioto_state *state,
+                              void *output, size_t capacity);
+bool agx_ioto_state_pack_ldshdr(enum agx_chip chip,
+                              const struct agx_ioto_state *state,
+                              void *output, size_t capacity);
+
 bool agx_ioto_state_pack_spectpr(enum agx_chip chip,
                                  const struct agx_ioto_state *state,
                                  void *output, size_t capacity);

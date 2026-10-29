@@ -44,26 +44,39 @@ agx3_copy_encode_reg16(enum agx_isa_encoding encoding, uint16_t dest_half,
                        bool src_discard, uint16_t wait_mask,
                        uint8_t out[AGX3_COPY_MAX_LENGTH], uint8_t *len)
 {
-   if (out == NULL || len == NULL || encoding != AGX_ISA_ENCODING_AGX3B ||
-       dest_half >= AGX3_COPY_REG16_DEST_HALVES || src_half >= 256 ||
-       wait_mask >= (1u << 6) || (src_cache && src_discard))
+   const bool agx3c = encoding == AGX_ISA_ENCODING_AGX3C;
+   const unsigned slots = agx3c ? 8 : 6;
+   if (out == NULL || len == NULL ||
+       (encoding != AGX_ISA_ENCODING_AGX3B && !agx3c) ||
+       dest_half >= (agx3c ? 256 : AGX3_COPY_REG16_DEST_HALVES) || src_half >= 256 ||
+       wait_mask >= (1u << slots) || (src_cache && src_discard))
       return false;
 
-   const struct agx3_field_kv baseline[] = {
+   const struct agx3_field_kv baseline_b[] = {
       KV(9, 2), KV(10, 1), KV(23, 2), KV(24, 1),
    };
-   struct agx3_field_kv overrides[11] = {
-      KV(2, dest_half),  KV(16, src_half),    KV(11, dest_cache),
+   const struct agx3_field_kv baseline_c[] = {
+      KV(9, 2), KV(10, 1), KV(23, 2), KV(24, 1), KV(28, 3), KV(29, 35),
+   };
+   struct agx3_field_kv overrides[13] = {
+      KV(2, dest_half), KV(16, src_half), KV(11, dest_cache),
       KV(25, src_cache), KV(27, src_discard),
    };
    unsigned n = 5;
-   for (unsigned i = 0; i < 6; ++i) {
+   for (unsigned i = 0; i < slots; ++i) {
       if (wait_mask & (1u << i))
          overrides[n++] = (struct agx3_field_kv)KV(30 + i, 1);
    }
-   return agx3_bind_compose(encoding, "copy", 0, baseline,
-                            AGX3_COPY_ARRAY_SIZE(baseline), overrides, n, out,
-                            len);
+   for (int ep = dest_half >= AGX3_COPY_REG16_DEST_HALVES ? 1 : 0;
+        ep <= (agx3c ? 1 : 0); ++ep) {
+      if (agx3_bind_compose(encoding, "copy", ep,
+                            agx3c ? baseline_c : baseline_b,
+                            agx3c ? AGX3_COPY_ARRAY_SIZE(baseline_c)
+                                  : AGX3_COPY_ARRAY_SIZE(baseline_b),
+                            overrides, n, out, len))
+         return true;
+   }
+   return false;
 }
 
 bool
@@ -107,7 +120,23 @@ agx3_copy_encode_reg_to_uniform(enum agx_isa_encoding encoding,
    if (out == NULL || len == NULL)
       return false;
 
-   /* Only AGX3b is witnessed. */
+   if (encoding == AGX_ISA_ENCODING_AGX3C) {
+      if ((uniform_half & 1) || uniform_half + 2 > 512 || (src_half & 1) ||
+          src_half + 2 > 256)
+         return false;
+      /* Same M5 COPY uniform destination as the captured IOTO publisher.
+       * Retain its exact domain tags and caller-owned last-use hint. */
+      const struct agx3_field_kv fields[] = {
+         KV(3, uniform_half), KV(9, 3), KV(10, 2), KV(16, src_half),
+         KV(23, 2), KV(24, 2), KV(27, kill), KV(28, 1), KV(29, 35),
+      };
+      for (unsigned ep = 0; ep <= 1; ++ep) {
+         if (agx3_bind_compose(encoding, "copy", ep, NULL, 0, fields,
+                              AGX3_COPY_ARRAY_SIZE(fields), out, len))
+            return true;
+      }
+      return false;
+   }
    if (encoding != AGX_ISA_ENCODING_AGX3B)
       return false;
 
@@ -161,9 +190,10 @@ agx3_copy_encode_uniform_to_reg16(enum agx_isa_encoding encoding,
                                   uint8_t out[AGX3_COPY_MAX_LENGTH],
                                   uint8_t *len)
 {
-   /* Only AGX3b is witnessed; the AGX3c corpus has no 16-bit uniform copy. */
-   if (out == NULL || len == NULL || encoding != AGX_ISA_ENCODING_AGX3B ||
-       dest_half >= 128 || uniform_half >= 512)
+   const bool m5 = encoding == AGX_ISA_ENCODING_AGX3C;
+   if (out == NULL || len == NULL ||
+       (encoding != AGX_ISA_ENCODING_AGX3B && !m5) ||
+       dest_half >= (m5 ? 256 : 128) || uniform_half >= 512)
       return false;
 
    /* The 16-bit widths of agx3_copy_encode_reg16() with the uniform source
@@ -175,9 +205,12 @@ agx3_copy_encode_uniform_to_reg16(enum agx_isa_encoding encoding,
    };
    const struct agx3_field_kv overrides[] = {
       KV(2, dest_half), KV(17, uniform_half), KV(11, dest_cache),
+      KV(28, m5 ? 3 : 0), KV(29, m5 ? 35 : 0),
    };
 
-   return agx3_bind_compose(encoding, "copy", 0, baseline,
+   return agx3_bind_compose(encoding, "copy",
+                            dest_half >= AGX3_COPY_REG16_DEST_HALVES ? 1 : 0,
+                            baseline,
                             AGX3_COPY_ARRAY_SIZE(baseline), overrides,
                             AGX3_COPY_ARRAY_SIZE(overrides), out, len);
 }
@@ -216,8 +249,7 @@ agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
       KV(17, uniform_half),
    };
 
-   if (dest_half < AGX3_COPY_REG16_DEST_HALVES ||
-       encoding != AGX_ISA_ENCODING_AGX3B)
+   if (dest_half < AGX3_COPY_REG16_DEST_HALVES)
       return agx3_bind_compose(encoding, "copy", 0, baseline, nbaseline,
                                overrides,
                                AGX3_COPY_ARRAY_SIZE(overrides), out, len);
@@ -248,9 +280,9 @@ agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
     * pressure register allocation placed those destinations at halves
     * 134-154, refusing the whole shader.
     *
-    * AGX3c has a copy.ep1 too (eight bytes) and its tables accept the same
-    * wide destinations, but no G17S witness establishes it, so that encoding
-    * still fails closed rather than being assumed from the AGX3b result.
+    * AGX3c carries the same high destination bit in its eight-byte ep1.
+    * The source kind and index fields are independent of that destination
+    * extension, as with the corresponding extended half-register copy.
     */
    return agx3_bind_compose(encoding, "copy", 1, baseline, nbaseline,
                             overrides,

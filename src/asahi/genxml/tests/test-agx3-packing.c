@@ -5,6 +5,7 @@
 
 #include "asahi/genxml/agx3_cmdstream.h"
 #include "asahi/libagx/libagx_dgc.h"
+#include "asahi/lib/agx_m5_va.h"
 #include "agx_pack.h"
 
 #include <stdio.h>
@@ -571,6 +572,23 @@ test_agx3_live_vdm_draw(void)
    static const uint32_t empty_jump_without_state[] = {
       UINT32_C(0x8000005a), UINT32_C(0x12345678),
    };
+   for (enum agx_chip chip = AGX_CHIP_G17G; chip <= AGX_CHIP_G17C; ++chip) {
+      uint64_t compact;
+      CHECK_EQ(agx_m5_vdm_compact(UINT64_C(0x5a12345678), &compact), true);
+      CHECK_EQ(compact, UINT64_C(0x4a12345678));
+      for (unsigned count = 0; count < 2; ++count) {
+         struct agx_draw empty = robust_draw;
+         empty.b.count[count] = 0;
+         memset(robust_packed, 0xcd, sizeof(robust_packed));
+         robust_end = agx_vdm_draw_robust_index(
+            robust_packed, chip, empty, (enum agx_primitive)9,
+            UINT32_MAX, UINT32_C(0x48000), true, compact);
+         CHECK_EQ(robust_end - robust_packed, 2);
+         CHECK_EQ(robust_packed[0], UINT32_C(0x8000004a));
+         CHECK_EQ(robust_packed[1], UINT32_C(0x12345678));
+         CHECK_EQ(robust_packed[2], UINT32_C(0xcdcdcdcd));
+      }
+   }
    memset(robust_packed, 0xcd, sizeof(robust_packed));
    robust_end = agx_vdm_draw_robust_index(
       robust_packed, AGX_CHIP_G17P, empty_draw,
@@ -631,11 +649,11 @@ test_agx3_live_vdm_draw(void)
    CHECK_EQ(
       agx_vdm_draw_supported(AGX_CHIP_G17S, rejected, (enum agx_primitive)6),
       false);
-   rejected = agx_draw_indexed(1, 1, 0, 0, 0, UINT64_C(0x1000), 4,
+   struct agx_draw byte_indexed = agx_draw_indexed(1, 1, 0, 0, 0, UINT64_C(0x1000), 4,
                                AGX_INDEX_SIZE_U8, false);
    CHECK_EQ(
-      agx_vdm_draw_supported(AGX_CHIP_G17S, rejected, (enum agx_primitive)6),
-      false);
+      agx_vdm_draw_supported(AGX_CHIP_G17S, byte_indexed, (enum agx_primitive)6),
+      true);
 }
 
 static void
@@ -864,6 +882,22 @@ test_agx3_cdm_barrier(void)
                   true);
          CHECK_EQ(decoded.flags, flags);
       }
+   }
+
+   /* Native HAL300 full-memory record. Ordering flags alone do not make
+    * writes visible through another virtual mapping of the same memory. */
+   for (unsigned i = 0; i < ARRAY_SIZE(gen7); ++i) {
+      struct agx3_cdm_barrier_info full = {
+         .chip = gen7[i], .flags = 5, .flush_memory = true,
+      }, decoded;
+      uint8_t packed[AGX3_CDM_BARRIER_SIZE];
+      CHECK_EQ(agx3_cdm_barrier_pack(&full, packed), true);
+      CHECK_EQ(agx3_cmdstream_load_le32(packed), 0x6000157c);
+      CHECK_EQ(agx3_cdm_barrier_unpack(full.chip, packed, sizeof(packed), &decoded), true);
+      CHECK_EQ(decoded.flush_memory, true);
+      CHECK_EQ(decoded.flags, 5);
+      full.chip = AGX_CHIP_G17P;
+      CHECK_EQ(agx3_cdm_barrier_pack(&full, packed), false);
    }
 
    const enum agx_chip unsupported[] = {

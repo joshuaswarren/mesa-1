@@ -39,7 +39,8 @@
 static bool
 lower_write(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
 {
-   if (intr->intrinsic != nir_intrinsic_store_output)
+   const bool mesh = intr->intrinsic == nir_intrinsic_store_per_vertex_output;
+   if (intr->intrinsic != nir_intrinsic_store_output && !mesh)
       return false;
 
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
@@ -47,7 +48,7 @@ lower_write(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
        sem.location != VARYING_SLOT_CLIP_DIST1)
       return false;
 
-   signed loc = sem.location + nir_src_as_uint(intr->src[1]);
+   signed loc = sem.location + nir_src_as_uint(intr->src[mesh ? 2 : 1]);
    unsigned total_component =
       (loc - VARYING_SLOT_CLIP_DIST0) * 4 +
       nir_intrinsic_component(intr);
@@ -67,10 +68,18 @@ lower_write(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
    nir_def *offs = nir_imm_int(b, component / 4);
    nir_def *v = nir_b2f32(b, nir_fge_imm(b, intr->src[0].ssa, 0.0));
 
-   nir_store_output(b, v, offs, .component = component % 4,
-                    .src_type = nir_type_float32,
-                    .io_semantics.location = VARYING_SLOT_CULL_PRIMITIVE,
-                    .io_semantics.num_slots = 2);
+   if (mesh) {
+      nir_store_per_vertex_output(b, v, intr->src[1].ssa, offs,
+                                 .component = component % 4,
+                                 .src_type = nir_type_float32,
+                                 .io_semantics.location = VARYING_SLOT_CULL_PRIMITIVE,
+                                 .io_semantics.num_slots = 2);
+   } else {
+      nir_store_output(b, v, offs, .component = component % 4,
+                       .src_type = nir_type_float32,
+                       .io_semantics.location = VARYING_SLOT_CULL_PRIMITIVE,
+                       .io_semantics.num_slots = 2);
+   }
 
    return true;
 }
@@ -79,7 +88,8 @@ bool
 agx_nir_lower_cull_distance_vs(nir_shader *s)
 {
    assert(s->info.stage == MESA_SHADER_VERTEX ||
-          s->info.stage == MESA_SHADER_TESS_EVAL);
+          s->info.stage == MESA_SHADER_TESS_EVAL ||
+          s->info.stage == MESA_SHADER_MESH);
 
    nir_shader_intrinsics_pass(s, lower_write, nir_metadata_control_flow, NULL);
 

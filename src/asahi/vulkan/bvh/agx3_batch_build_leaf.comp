@@ -1,0 +1,31 @@
+/* SPDX-License-Identifier: MIT */
+#version 460
+#include "vk_bvh_defines.h"
+#define VK_USED_BUILD_FLAGS VK_LEAF_BUILD_FLAGS
+#define VK_BATCH_LEAVES 1
+uvec3 batch_global_id;
+#define gl_GlobalInvocationID batch_global_id
+#define main build_leaf_body
+#include "leaf.h"
+#undef main
+#undef gl_GlobalInvocationID
+
+/* One subgroup handles a chunk of one geometry. Retain the original geometry
+ * base and primitive IDs; only argument transport and launch grouping change. */
+struct hk_leaf_task {
+   leaf_args leaf;
+   uint first;
+   uint count;
+};
+TYPE(hk_leaf_task, 8);
+layout(push_constant) uniform BATCH_CONSTS {
+   REF(hk_leaf_task) tasks;
+};
+void main()
+{
+   hk_leaf_task task = DEREF(INDEX(hk_leaf_task, tasks, gl_WorkGroupID.x));
+   args = task.leaf;
+   batch_global_id = uvec3(task.first + gl_LocalInvocationID.x, 0, 0);
+   if (gl_LocalInvocationID.x < task.count)
+      build_leaf_body();
+}

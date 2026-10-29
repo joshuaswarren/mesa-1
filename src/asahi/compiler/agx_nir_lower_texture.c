@@ -22,6 +22,7 @@
 
 struct agx_texture_lower_options {
    bool gen9;
+   bool gen10;
    bool buffer_metadata;
    agx_buffer_texture_metadata_cb buffer_metadata_cb;
    /* Formatless image loads still need view-bounds robustness. */
@@ -172,6 +173,16 @@ lower_tex_crawl(nir_builder *b, nir_instr *instr, void *data)
       res = libagx_texture_levels_gen9(b, ptr);
    } else if (gen9 && tex->op == nir_texop_texture_samples) {
       res = libagx_texture_samples_gen9(b, ptr);
+   } else if (options && options->gen10 && tex->op == nir_texop_txs) {
+      res = libagx_txs_gen10(b, ptr, lod, nir_imm_int(b, nr_comps),
+                           nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_1D),
+                           nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_2D),
+                           nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE),
+                           nir_imm_bool(b, tex->is_array));
+   } else if (options && options->gen10 && tex->op == nir_texop_query_levels) {
+      res = libagx_texture_levels_gen10(b, ptr);
+   } else if (options && options->gen10 && tex->op == nir_texop_texture_samples) {
+      res = libagx_texture_samples_gen10(b, ptr);
    } else if (tex->op == nir_texop_txs) {
       res =
          libagx_txs(b, ptr, lod, nir_imm_int(b, nr_comps),
@@ -736,6 +747,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_tex_instr *tex = nir_instr_as_tex(instr);
    const struct agx_texture_lower_options *options = data;
    const bool gen9 = options && options->gen9;
+   const bool native_bounds = options && (options->gen9 || options->gen10);
    const bool robust_texel_fetch = !options || options->robust_texel_fetch;
    b->cursor = nir_before_instr(instr);
 
@@ -779,16 +791,36 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
     * access explicitly, fetch texel (0,0) of level 0 for an invalid one so the
     * hardware access itself stays inside the view, and select the
     * robustImageAccess2 value after the fetch. */
-   if (gen9 && robust_texel_fetch && tex->op == nir_texop_txf &&
+   if (native_bounds && robust_texel_fetch && tex->op == nir_texop_txf &&
        (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
         tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
        nir_tex_instr_src_index(tex, nir_tex_src_min_lod) < 0 &&
        !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP)) {
-      /* The size at the fetched level also counts array layers. */
-      const unsigned n = tex->coord_components;
-      nir_def *size = nir_trim_vector(b, nir_get_texture_size(b, tex), n);
-      nir_def *checked = nir_trim_vector(b, coord, n);
-      g17p_txf_oob = nir_bany(b, nir_uge(b, checked, size));
+      /* The size at the fetched level also counts array layers. A constant
+       * zero component lies inside every valid level and layer, so only the
+       * level check below can fail for it; a null descriptor already swizzles
+       * every channel to zero. Skipping those components drops the size query,
+       * which depends on a varying level, from a fetch of texel 0. */
+      if (options->gen10) {
+         nir_def *size = NULL;
+         g17p_txf_oob = nir_imm_false(b);
+         for (unsigned c = 0; c < tex->coord_components; ++c) {
+            if (nir_scalar_is_zero(nir_get_scalar(coord, c)))
+               continue;
+
+            size = size ?: nir_get_texture_size(b, tex);
+            g17p_txf_oob = nir_ior(
+               b, g17p_txf_oob,
+               nir_uge(b, nir_channel(b, coord, c), nir_channel(b, size, c)));
+         }
+      } else {
+         /* Gen9 keeps the whole-vector check: the zero-component skip is
+          * qualified on M5 only. */
+         const unsigned n = tex->coord_components;
+         nir_def *size = nir_trim_vector(b, nir_get_texture_size(b, tex), n);
+         nir_def *checked = nir_trim_vector(b, coord, n);
+         g17p_txf_oob = nir_bany(b, nir_uge(b, checked, size));
+      }
 
       if (has_nonzero_lod(tex)) {
          /* The fetch consumes a 32-bit level, see the end of lower_texture().
@@ -829,10 +861,13 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
       unsigned lidx = coord->num_components - 1;
       nir_def *layer = nir_channel(b, coord, lidx);
 
+      /* Gen9/10 share the mip range, layout and layer-bound fields this
+       * helper reads. Their width/height fields differ and are not read here.
+       * Legacy mip fields overlap Gen10's sample/mipmap flags. */
       nir_def *(*lower)(nir_builder *, nir_def *, nir_def *, nir_def *,
                          nir_def *, nir_def *, nir_def *, nir_def *, nir_def *) =
-         data && *(const bool *)data ? libagx_lower_txf_robustness_gen9
-                                    : libagx_lower_txf_robustness;
+         native_bounds ? libagx_lower_txf_robustness_gen9
+                       : libagx_lower_txf_robustness;
       nir_def *replaced = lower(
          b, texture_descriptor_ptr(b, tex),
          nir_imm_bool(b, has_nonzero_lod(tex)), lod,
@@ -934,7 +969,39 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_def *offset = nir_steal_tex_src(tex, nir_tex_src_offset);
 
    if (offset != NULL) {
-      if (gen9 && !g17p_offset_is_constant(offset)) {
+      /* G17G (generation 10) runtime offsets use the same PACK_SMPIR into
+       * bank 6 as G17P, reading X and Y as separate 16-bit sources (native
+       * texwit3/texwit4 d_auto, d_lvl2, d_bias1, d_grad, d_cmp*, d_gath*).
+       * Keep the component vector, or the 2x16 pair for a gather, wherever
+       * no array layer or register LOD/bias shares that bank. Those share
+       * G17P's complete bank-6 word below: native G17G builds the same
+       * layout (texwit3 d_lvlr: LOD f74=2 at bit 16, d_arr: layer f74=4 at
+       * bit 0, X/Y f74=f76=5 at bits 12/28) with a register PACK_SMPIR
+       * (f56=3) that the bank-6 PACK_SMPIR then merges (f51=2, f55=1). */
+      if (options && options->gen10 && !g17p_offset_is_constant(offset) &&
+          !tex->is_array && offset->num_components == 2) {
+         const int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+         const int bias_idx = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+         const int min_idx = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+         const bool register_level =
+            (lod_idx >= 0 && !nir_src_is_const(tex->src[lod_idx].src)) ||
+            (bias_idx >= 0 && !nir_src_is_const(tex->src[bias_idx].src)) ||
+            min_idx >= 0;
+         if (tex->op == nir_texop_tg4) {
+            nir_def *packed = nir_pack_32_2x16_split(
+               b, nir_i2i16(b, nir_channel(b, offset, 0)),
+               nir_i2i16(b, nir_channel(b, offset, 1)));
+            nir_tex_instr_add_src(tex, nir_tex_src_backend2, packed);
+            goto offset_lowered;
+         }
+         if (!register_level) {
+            nir_tex_instr_add_src(tex, nir_tex_src_backend2, offset);
+            goto offset_lowered;
+         }
+      }
+
+      if ((gen9 || (options && options->gen10)) &&
+          !g17p_offset_is_constant(offset)) {
          /* Gather's PACK_SMPIR form consumes X and Y as adjacent 16-bit
           * inputs.  Keep them in one 32-bit SSA value so register allocation
           * preserves that exact pair.  The generic runtime-offset path below
@@ -942,7 +1009,10 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
           * it for an array gather made the layer occupy X's low nibble and
           * produced wrong texels, while a plain gather arrived as two 32-bit
           * channels and was refused by the packer. */
-         if (tex->op == nir_texop_tg4) {
+         /* AGX3C (generation 10) stages an array gather's offset like an
+          * array sample's: the layer word below (native texwit6 g_arr). */
+         if (tex->op == nir_texop_tg4 &&
+             !(options && options->gen10 && tex->is_array)) {
             assert(offset->num_components == 2);
             nir_def *packed = nir_pack_32_2x16_split(
                b, nir_i2i16(b, nir_channel(b, offset, 0)),
@@ -1164,7 +1234,8 @@ txs_for_image(nir_builder *b, nir_intrinsic_instr *intr,
 
 static nir_def *
 image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
-                    bool return_index, bool gen9, bool buffer_metadata)
+                    bool return_index, bool gen9, bool gen10,
+                    bool buffer_metadata)
 {
    /* First, calculate the address of the PBE descriptor */
    nir_def *desc_address =
@@ -1188,7 +1259,7 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
 
    if (dim == GLSL_SAMPLER_DIM_BUF && return_index) {
       return nir_channel(b, coord, 0);
-   } else if (dim == GLSL_SAMPLER_DIM_BUF && (buffer_metadata || gen9)) {
+   } else if (dim == GLSL_SAMPLER_DIM_BUF && (buffer_metadata || gen9 || gen10)) {
       /* Buffer atomics receive the PBE handle, but Gen9 has no AGX2
        * software address/offset fields. Use the same sideband as buffer
        * loads and stores, relative to the start of the descriptor.
@@ -1205,7 +1276,7 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
                                nir_u2u64(b, blocksize_B)));
    } else if (dim == GLSL_SAMPLER_DIM_BUF) {
       return libagx_buffer_texel_address(b, desc_address, coord, blocksize_B);
-   } else if (gen9) {
+   } else if (gen9 || gen10) {
       nir_def *sw_address =
          nir_iadd_imm(b, desc_address, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE);
       if (dim == GLSL_SAMPLER_DIM_MS) {
@@ -1234,7 +1305,7 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
          b, desc_address, sw_address, coord, nir_u2u32(b, intr->src[2].ssa),
          blocksize_B, nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
          nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_MS), nir_imm_bool(b, layered),
-         nir_imm_bool(b, return_index));
+         nir_imm_bool(b, return_index), nir_imm_bool(b, gen10));
    } else {
       return libagx_image_texel_address(
          b, desc_address, coord, nir_u2u32(b, intr->src[2].ssa), blocksize_B,
@@ -1457,7 +1528,8 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       } else if (intr->intrinsic == nir_intrinsic_image_load ||
                  intr->intrinsic == nir_intrinsic_bindless_image_load ||
                  intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
-         lower_image_load_robustness(b, intr, gen9);
+         lower_image_load_robustness(b, intr,
+                                      gen9 || (options && options->gen10));
       }
 
       switch (nir_intrinsic_image_dim(intr)) {
@@ -1488,6 +1560,7 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_bindless_image_texel_address:
       nir_def_rewrite_uses(&intr->def,
                            image_texel_address(b, intr, false, gen9,
+                                               options && options->gen10,
                                                options && options->buffer_metadata));
       return true;
 
@@ -1839,6 +1912,7 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
    const bool gen9 = generation == 9;
    const struct agx_texture_lower_options options = {
       .gen9 = gen9,
+      .gen10 = generation == 10,
       .buffer_metadata = buffer_metadata,
       .buffer_metadata_cb = buffer_metadata_cb,
       .robust_formatless_images = robust_formatless_images,
@@ -1895,8 +1969,8 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
    NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
             nir_metadata_control_flow, (void *)&options);
 
-   if (gen9) {
-      /* HAL200's texture2d::read consumes a full uint LOD through the integer
+   if (gen9 || generation == 10) {
+      /* AGX3's texture2d::read consumes a full uint LOD through the integer
        * PACK_SMPIR operand. Keep the shared 16-bit lowering above for its
        * robustness arithmetic, then restore the hardware ABI on the final
        * texel-fetch instruction. */
@@ -1979,7 +2053,7 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
          intr->src[1].ssa, nir_u2u32(b, intr->src[2].ssa),
          nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))));
    } else {
-      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false, false));
+      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false, false, false));
    }
    nir_def *coord2d = coords_for_buffer_texture(b, index_px);
 

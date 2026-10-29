@@ -51,7 +51,7 @@ test_flags(unsigned reports, bool timestamp, bool indexed)
          unsigned q = i + 1;
          libagx_copy_query_g17p_result(
             timestamp ? NULL : availability, values, indexed ? remap : NULL,
-            (uintptr_t)output + 16, stride, 1, flags, reports, i);
+            (uintptr_t)output + 16, stride, 1, flags, reports, 0, i);
 
          uint8_t *dst = (uint8_t *)expected + 16 + i * stride;
          if (availability[q] || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {
@@ -110,7 +110,7 @@ test_wait(bool timestamp)
       VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
          VK_QUERY_RESULT_WAIT_BIT |
          (timestamp ? 0 : VK_QUERY_RESULT_PARTIAL_BIT),
-      timestamp ? 1 : 2, 0);
+      timestamp ? 1 : 2, 0, 0);
    alarm(0);
    assert(p->output[0] == UINT64_C(0x1122334455667788));
    if (!timestamp)
@@ -120,6 +120,34 @@ test_wait(bool timestamp)
    assert(waitpid(child, &status, 0) == child);
    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
    assert(munmap(p, sizeof(*p)) == 0);
+}
+
+static void
+test_stamp_slots(void)
+{
+   /* 64-bit availability slots: a retirement timestamp may have either half
+    * zero, the queued store writes 1 to the low half, a reset writes both. */
+   uint64_t availability[] = {0, 1, UINT64_C(0x100000000),
+                              UINT64_C(0x1234567800000000), 0,
+                              UINT64_C(0x00000000deadbeef)};
+   uint64_t values[6];
+   for (unsigned q = 0; q < 6; ++q)
+      values[q] = 1000 + q;
+
+   for (unsigned q = 0; q < 6; ++q) {
+      uint64_t output[2];
+      memset(output, 0xa5, sizeof(output));
+      libagx_copy_query_g17p_result(
+         (uint32_t *)availability, values, NULL, (uintptr_t)output, 0, q,
+         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT, 1, 1,
+         0);
+      const bool available = availability[q] != 0;
+      assert(output[1] == available);
+      if (available)
+         assert(output[0] == values[q]);
+      else
+         assert(output[0] == UINT64_C(0xa5a5a5a5a5a5a5a5));
+   }
 }
 
 static void
@@ -138,7 +166,8 @@ test_large_stride(void)
    for (unsigned i = 0; i < 3; ++i) {
       libagx_copy_query_g17p_result(
          NULL, values, NULL, (uintptr_t)dst, stride, 0,
-         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT, 1, i);
+         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT, 1, 0,
+         i);
       assert(*(uint64_t *)(dst + i * stride) == values[i]);
       assert(*(uint64_t *)(dst + i * stride + 8) == 1);
    }
@@ -154,8 +183,10 @@ main(void)
    test_flags(1, true, false);   /* Timestamp sentinel availability. */
    test_wait(false);
    test_wait(true);
+   test_stamp_slots();
    test_large_stride();
    puts(
-      "query range copies: flags, remaps, tuples, WAIT and 64-bit strides passed");
+      "query range copies: flags, remaps, tuples, WAIT, stamp slots and 64-bit "
+      "strides passed");
    return 0;
 }

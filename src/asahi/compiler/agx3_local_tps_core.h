@@ -42,6 +42,7 @@ struct agx3_local_desc {
 
    bool index_is_register;
    uint16_t index;
+   bool index_immediate;
    bool index_kill;
    uint16_t byte_offset;
 
@@ -72,9 +73,10 @@ struct agx3_tps_desc {
    uint8_t shift;
    uint16_t byte_offset;
 
-   /* All ldtps/sttps witnesses use the grounded dynamic 32-bit index path.
-    * Static spills use the separate copy/rld remote-file forms. */
+   /* Byte accesses also support zero plus an immediate byte offset.
+    * Static whole-word spills use the separate copy/rld forms. */
    uint16_t index;
+   bool index_immediate;
    bool index_kill;
    bool index_signed;
 

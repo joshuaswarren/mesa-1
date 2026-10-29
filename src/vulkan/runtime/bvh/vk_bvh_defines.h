@@ -446,10 +446,13 @@ TYPE(vk_prefix_scan_partition, 4);
 #define VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS (1 << 1)
 #define VK_BUILD_FLAG_64BIT_KEYS (1 << 2)
 #define VK_BUILD_FLAG_HAS_QUADS (1 << 3)
-#define VK_BUILD_FLAG_COUNT 4
+/* Leaf generation for a refit of retained topology: no Morton codes follow,
+ * so the header scene bounds are not accumulated. */
+#define VK_BUILD_FLAG_NO_HEADER_BOUNDS (1 << 4)
+#define VK_BUILD_FLAG_COUNT 5
 
 #define VK_LEAF_BUILD_FLAGS (VK_BUILD_FLAG_ALWAYS_ACTIVE | VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | \
-                             VK_BUILD_FLAG_HAS_QUADS)
+                             VK_BUILD_FLAG_HAS_QUADS | VK_BUILD_FLAG_NO_HEADER_BOUNDS)
 
 struct leaf_args {
    VOID_REF bvh;

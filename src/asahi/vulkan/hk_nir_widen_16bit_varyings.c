@@ -29,7 +29,8 @@ widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
 
    switch (intr->intrinsic) {
    case nir_intrinsic_store_output:
-   case nir_intrinsic_store_per_vertex_output: {
+   case nir_intrinsic_store_per_vertex_output:
+   case nir_intrinsic_store_per_primitive_output: {
       if (!(mode & HK_NIR_WIDEN_16BIT_OUTPUTS) ||
           stage == MESA_SHADER_FRAGMENT || intr->src[0].ssa->bit_size != 16)
          return false;
@@ -46,12 +47,15 @@ widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
 
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_per_vertex_input:
+   case nir_intrinsic_load_per_primitive_input:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_output:
-   case nir_intrinsic_load_per_vertex_output: {
+   case nir_intrinsic_load_per_vertex_output:
+   case nir_intrinsic_load_per_primitive_output: {
       const bool output =
          intr->intrinsic == nir_intrinsic_load_output ||
-         intr->intrinsic == nir_intrinsic_load_per_vertex_output;
+         intr->intrinsic == nir_intrinsic_load_per_vertex_output ||
+         intr->intrinsic == nir_intrinsic_load_per_primitive_output;
       const unsigned required_mode = output ? HK_NIR_WIDEN_16BIT_OUTPUTS
                                             : HK_NIR_WIDEN_16BIT_INPUTS;
       if (!(mode & required_mode) ||

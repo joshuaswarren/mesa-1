@@ -140,8 +140,6 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
       return false;
    if (d->two_lanes != (d->src[1].kind != AGX3_FLTNORM_SRC_NONE))
       return false;
-   if (d->is_16bit && enc != AGX_ISA_ENCODING_AGX3B)
-      return false;
 
    static const struct src_fields s0 = {
       .f_kind = 23, .f_imm = 15, .f_reg = 16, .f_uniform = 17,
@@ -308,9 +306,9 @@ agx3_persp_rcp_encode(enum agx_isa_encoding enc,
                        const struct agx3_persp_rcp_desc *d,
                        uint8_t out[AGX3_FLTNORM_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || !d || !b_only(enc) || d->dest >= 192 ||
-       d->rhw >= 192 || ((d->dest | d->rhw) & 1) ||
-       d->coef_index > 0x7f || (d->wait_mask & ~UINT16_C(0x3f)))
+   if (!out || !len || !d || !enc_ok(enc) || d->dest >= (enc == AGX_ISA_ENCODING_AGX3C ? 256 : 192) ||
+       d->rhw >= (enc == AGX_ISA_ENCODING_AGX3C ? 256 : 192) || ((d->dest | d->rhw) & 1) ||
+       d->coef_index > 0x7f || (d->wait_mask & ~wait_limit(enc)))
       return false;
 
    /* Fresh native smooth_scalar: af005400030000482001 (r0 -> r0).
@@ -321,12 +319,16 @@ agx3_persp_rcp_encode(enum agx_isa_encoding enc,
       KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2),
       KV(42, 6), KV(43, 2), KV(57, 1),
    };
-   struct agx3_field_kv ov[11] = {
+   struct agx3_field_kv ov[15] = {
       KV(2, d->dest), KV(11, 1), KV(18, d->rhw),
       KV(27, d->rhw_cache), KV(39, d->coef_index),
    };
    unsigned n = 5;
-   for (unsigned i = 0; i < 6; ++i)
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      ov[n++] = (struct agx3_field_kv)KV(47, 3);
+      ov[n++] = (struct agx3_field_kv)KV(48, 64);
+   }
+   for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(49 + i, 1);
    return agx3_bind_compose(enc, "f32rcp", 0, base, 7, ov, n, out, len);
@@ -342,12 +344,12 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
    memset(out, 0, AGX3_FLTNORM_MAX_LENGTH);
    *len = 0;
 
-   if (!b_only(enc))
+   if (!enc_ok(enc))
       return false;
    if ((d->dest & 1) || d->dest >= 256 || (d->reciprocal & 1) ||
        d->reciprocal >= 256 || (d->raw & 1) || d->raw >= 256)
       return false;
-   if ((d->wait_mask & ~(uint16_t)0x3f) != 0)
+   if ((d->wait_mask & ~wait_limit(enc)) != 0)
       return false;
    /* f70 is seven bits wide. */
    if (d->vary_index > 0x7f)
@@ -364,7 +366,7 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
       KV(59, 6), KV(60, 2), KV(73, 6), KV(74, 2), KV(88, 1),
    };
 
-   struct agx3_field_kv ov[16];
+   struct agx3_field_kv ov[20];
    unsigned n = 0;
    if (d->stage_dest) {
       ov[n++] = (struct agx3_field_kv)KV(9, 5);
@@ -387,7 +389,11 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
    }
    ov[n++] = (struct agx3_field_kv)KV(70, d->vary_index);
 
-   for (unsigned i = 0; i < 6; ++i)
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      ov[n++] = (struct agx3_field_kv)KV(78, 3);
+      ov[n++] = (struct agx3_field_kv)KV(79, 62);
+   }
+   for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(80 + i, 1);
 
@@ -416,8 +422,6 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
    *len = 0;
 
    if (!enc_ok(enc) || (d->dest & 1) || d->dest >= 256 || d->src >= 256)
-      return false;
-   if (d->is_16bit && enc != AGX_ISA_ENCODING_AGX3B)
       return false;
    if ((d->wait_mask & ~wait_limit(enc)) != 0)
       return false;
@@ -468,11 +472,12 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
  * One native conversion replaces per-channel multiply/convert/shift/or work.
  */
 bool
-agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
-                    uint8_t out[14], uint8_t *length)
+agx3_rgb10a2_encode_for_encoding(enum agx_isa_encoding enc,
+                    const struct agx3_rgb10a2_desc *d,
+                    uint8_t out[16], uint8_t *length)
 {
-   if (!d || !out || !length || d->dest >= 256 || (d->dest & 1) ||
-       (d->wait_mask & ~0x3f) || d->layout > AGX3_PACKED_RG11B10)
+   if (!enc_ok(enc) || !d || !out || !length || d->dest >= 256 || (d->dest & 1) ||
+       (d->wait_mask & ~wait_limit(enc)) || d->layout > AGX3_PACKED_RG11B10)
       return false;
    const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 2)};
    struct agx3_field_kv fields[48];
@@ -505,39 +510,63 @@ agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
       }
    }
    /* Fresh texture-to-RGB10 native main waits for smp slot1 at field84. */
-   for (unsigned i = 0; i < 6; ++i)
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      fields[n++] = (struct agx3_field_kv)KV(82, 3);
+      fields[n++] = (struct agx3_field_kv)KV(83, 116);
+   }
+   for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))
          fields[n++] = (struct agx3_field_kv)KV(84 + i, 1);
    fields[n++] = (struct agx3_field_kv)KV(102, d->first_instruction);
    fields[n++] = (struct agx3_field_kv)KV(94, 0);
    fields[n++] = (struct agx3_field_kv)KV(95, 0);
    fields[n++] = (struct agx3_field_kv)KV(96, 0);
-   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "pack", 0,
+   return agx3_bind_compose(enc, "pack", 0,
                            base, 2, fields, n, out, length);
+}
+
+bool
+agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
+                    uint8_t out[14], uint8_t *length)
+{
+   uint8_t bytes[16];
+   if (!agx3_rgb10a2_encode_for_encoding(AGX_ISA_ENCODING_AGX3B,
+                                        d, bytes, length))
+      return false;
+   memcpy(out, bytes, *length);
+   return true;
 }
 
 /* Fresh single- and two-attachment fetch programs identify the source register
  * and slot1/slot6 wait fields independently. The result is four contiguous f32s. */
 bool
-agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *d,
-                         uint8_t out[8], uint8_t *length)
+agx3_rgb10a2_unpack_encode(
+   enum agx_isa_encoding enc, const struct agx3_rgb10a2_unpack_desc *d,
+   uint8_t out[16], uint8_t *length)
 {
-   if (!d || !out || !length || d->dest > 248 || d->source > 254 ||
-       ((d->dest | d->source) & 1) || (d->wait_mask & ~0x3f) ||
+   if (!enc_ok(enc) || !d || !out || !length || d->dest > 248 ||
+       d->source > 254 || ((d->dest | d->source) & 1) ||
+       (d->wait_mask & ~wait_limit(enc)) ||
        d->layout > AGX3_PACKED_RG11B10)
       return false;
-   const struct agx3_field_kv base[] = {
+   struct agx3_field_kv base[7] = {
       KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2),
    };
-   /* Seven fixed fields plus all six scoreboard wait bits. */
-   struct agx3_field_kv fields[13] = {
+   unsigned nbase = 4;
+   /* G17G UInt1010102Normalized and FloatRG11B10 vertex witnesses. */
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      base[nbase++] = (struct agx3_field_kv)KV(11, d->dest_hint);
+      base[nbase++] = (struct agx3_field_kv)KV(30, 3);
+      base[nbase++] = (struct agx3_field_kv)KV(31, 191);
+   }
+   struct agx3_field_kv fields[15] = {
       KV(2, d->dest), KV(18, d->source), KV(29, d->discard),
       KV(40, d->layout), KV(41, 0), KV(42, 0), KV(43, 0),
    };
    unsigned n = 7;
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))
          fields[n++] = (struct agx3_field_kv)KV(32 + i, 1);
-   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "unpack", 0,
-                           base, 4, fields, n, out, length);
+   return agx3_bind_compose(enc, "unpack", 0,
+                           base, nbase, fields, n, out, length);
 }

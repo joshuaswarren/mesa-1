@@ -5,22 +5,29 @@
 #define HK_AGX3_AS_LAYOUT_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "hk_agx3_as_format.h"
 
 /* Encoding scratch aliases the common builder's finished sort workspace.
  * All offsets are relative to the first byte after vk_ir_header. */
 struct hk_agx3_as_layout {
    uint32_t nodes, jobs, envelope, state, node_status, envelope_status;
+   /* An update's dispatches of inner jobs, one per depth (see
+    * HK_AGX3_REFIT_LEVELS). */
+   uint32_t refit_levels;
    uint32_t encode_bytes, node_bound, slot_bound;
    uint64_t as_bytes;
 };
 
 static inline bool
-hk_agx3_as_layout_init(uint32_t leaves, struct hk_agx3_as_layout *out)
+hk_agx3_as_layout_init_format(enum hk_agx3_as_format format, uint32_t leaves,
+                              struct hk_agx3_as_layout *out)
 {
    if (!out)
       return false;
+   const uint32_t alignment = hk_agx3_as_image_align(format);
    if (!leaves) {
-      *out = (struct hk_agx3_as_layout){.slot_bound = 3, .as_bytes = 192};
+      *out = (struct hk_agx3_as_layout){.slot_bound = 3,
+         .as_bytes = 192 + (alignment == HK_AGX3_GEN1_IMAGE_ALIGN ? 0 : alignment - 1)};
       return true;
    }
    const uint64_t nodes = (uint64_t)leaves + (leaves > 1 ? leaves : 2) - 1;
@@ -32,17 +39,38 @@ hk_agx3_as_layout_init(uint32_t leaves, struct hk_agx3_as_layout *out)
    const uint64_t jobs = nodes * 16;
    const uint64_t envelope = jobs + nodes * 64;
    const uint64_t state = envelope + 48;
-   const uint64_t status = state + 32;
-   const uint64_t end = (status + nodes * 4 + 4 + 7) & ~UINT64_C(7);
+   /* GEN1 keeps the indirect encode arguments after the plan state. */
+   const uint64_t status = state + hk_agx3_as_plan_tail(format);
+   const uint64_t refit_levels = (status + nodes * 4 + 4 + 7) & ~UINT64_C(7);
+   /* GEN1's current refit uses per-level dispatches. The M5 backend keeps
+    * its independent IR-topology refit and needs no level-dispatch tail. */
+   const uint64_t end = refit_levels +
+      (format == HK_AGX3_AS_FORMAT_GEN1 ? 16 * 12 : 0);
    if (nodes > UINT32_MAX / 8 || slots > UINT32_MAX || end > UINT32_MAX)
       return false;
    *out = (struct hk_agx3_as_layout){
       .nodes = 0, .jobs = jobs, .envelope = envelope, .state = state,
       .node_status = status, .envelope_status = status + nodes * 4,
+      .refit_levels = refit_levels,
       .encode_bytes = end, .node_bound = nodes, .slot_bound = slots,
-      .as_bytes = slots * 64 + 184,
+      .as_bytes = slots * HK_AGX3_AS_SLOT_B + 184 +
+                  (alignment == HK_AGX3_GEN1_IMAGE_ALIGN ? 0 : alignment - 1),
    };
    return true;
+}
+/* The nonempty envelope publishes readiness at native AS byte0xa0. Empty
+ * metadata clears that word and publishes NaN bounds so parent builders
+ * discard references to empty BLAS. This is not a hardware empty-node ABI. */
+static inline bool
+hk_agx3_as_layout_init(uint32_t leaves, struct hk_agx3_as_layout *out)
+{
+   return hk_agx3_as_layout_init_format(HK_AGX3_AS_FORMAT_M5, leaves, out);
+}
+
+static inline bool
+hk_gen1_as_layout_init(uint32_t leaves, struct hk_agx3_as_layout *out)
+{
+   return hk_agx3_as_layout_init_format(HK_AGX3_AS_FORMAT_GEN1, leaves, out);
 }
 
 static inline void

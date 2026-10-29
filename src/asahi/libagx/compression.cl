@@ -155,12 +155,82 @@ stretched_sa_to_px(ushort2 px, uint samples)
    /* clang-format on */
 }
 
+/* A half promoted exactly to float needs no rounding to recover its bits. */
+static uint
+libagx_m5_recover_half(uint value)
+{
+   const uint sign = (value >> 16) & 0x8000u;
+   const uint exponent = (value >> 23) & 0xffu;
+   const uint fraction = value & 0x7fffffu;
+   if (exponent == 255)
+      return sign | 0x7c00u | (fraction >> 13);
+   if (exponent < 103)
+      return sign;
+   if (exponent < 113)
+      return sign | ((fraction | 0x800000u) >> (126u - exponent));
+   return sign | ((exponent - 112u) << 10) | (fraction >> 13);
+}
+
+/* Native RGBA16F spill conversion. The texture heap index names the existing
+ * compressed view; the native fetch promotes its half lanes exactly to float.
+ * Each workgroup reads a complete metadata tile before overwriting its body.
+ */
+KERNEL(32)
+libagx_m5_decompress_rgba16f(global void *texture_heap,
+                            global void *sampler_heap,
+                            global uint64_t *metadata, global uint2 *body,
+                            uint read_index, uint metadata_width_tl,
+                            uint metadata_height_tl, uint aligned_width_px,
+                            ushort tile_width_px, ushort tile_height_px,
+                            uint samples_log2__2)
+{
+   const uint samples = 2u << samples_log2__2;
+   const uint index_tl = index_metadata(cl_group_id, metadata_width_tl,
+                                        metadata_height_tl, 0);
+   if (metadata[index_tl] == ~(uint64_t)0)
+      return;
+
+   const uint handle = nir_bindless_image_agx(read_index, 0);
+   const uint2 origin = cl_group_id.xy * 16u;
+   const uint2 lane = (uint2)((cl_local_id.x & 1u) * 8u,
+                              cl_local_id.x >> 1);
+   uint2 values[8];
+   for (uint i = 0; i < 8; i++) {
+      const int4 sample_coord = (int4)(origin.x + lane.x + i,
+                                       origin.y + lane.y, 0, 0);
+      const uint4 v = nir_bindless_image_load(
+         handle, decompose_px(sample_coord, samples),
+         sample_id(sample_coord, samples), 0, GLSL_SAMPLER_DIM_MS, false,
+         0, ACCESS_IN_BOUNDS, nir_type_uint32);
+      values[i] = (uint2)(libagx_m5_recover_half(v.x) |
+                            (libagx_m5_recover_half(v.y) << 16),
+                          libagx_m5_recover_half(v.z) |
+                            (libagx_m5_recover_half(v.w) << 16));
+   }
+
+   sub_group_barrier(CLK_LOCAL_MEM_FENCE);
+   for (uint i = 0; i < 8; i++) {
+      const int4 sample_coord = (int4)(origin.x + lane.x + i,
+                                       origin.y + lane.y, 0, 0);
+      const int4 pixel = decompose_px(sample_coord, samples);
+      const uint offset = libagx_twiddle_coordinates(
+         convert_ushort2(pixel.xy), tile_width_px, tile_height_px,
+         aligned_width_px);
+      body[offset * samples + sample_id(sample_coord, samples)] =
+         values[i];
+   }
+   if (cl_local_id.x == 0)
+      metadata[index_tl] = ~(uint64_t)0;
+}
+
 /*
  * Compute kernel to clear a compressed image to a solid colour by filling the
  * compression metadata to all solid and writing the colour to each tile.
  *
- * Invoked as <width in 16x16 tiles, height in 16x16 tiles, layers>. Each
- * invocation clears a single 16x16 compression tile.
+ * Invoked as <width in compression tiles, height in compression tiles,
+ * layers>. Each invocation clears a single compression tile: 16x16 samples,
+ * or 16x8 for M5 16-byte formats (ail_metadata_tile, given here as the log2
+ * of its height).
  *
  * Despite the ALU complexity, this is twice as fast as clearing with the
  * 3D pipe for a few reasons.
@@ -190,7 +260,8 @@ KERNEL(32)
 libagx_fast_clear(global uint2 *meta, global uint4 *body, uint width_tl,
                   uint height_tl, uint tile_w_el, uint tile_h_el,
                   uint meta_layer_stride_tl, uint body_layer_stride_uint4,
-                  uint blocksize_B_log2__5, uint samples_log2__3, uint a,
+                  uint meta_tile_h_log2, uint blocksize_B_log2__5,
+                  uint samples_log2__3, uint a,
                   uint b, uint c, uint d, uint solid_mode)
 {
    uint samples = 1 << samples_log2__3;
@@ -200,12 +271,11 @@ libagx_fast_clear(global uint2 *meta, global uint4 *body, uint width_tl,
    meta[index_metadata(cl_global_id, width_tl, height_tl, meta_layer_stride_tl)] =
       solid_mode;
 
-   /* SWAR vectorized multiply by 16, we know this won't overflow */
-   ushort2 coord_el =
-      as_ushort2(as_uint(convert_ushort2(cl_global_id.xy)) << 4);
+   ushort2 coord_el = (ushort2)(cl_global_id.x << 4,
+                                cl_global_id.y << meta_tile_h_log2);
 
    /* Calculate the offset of the tile in the body buffer */
-   ushort2 dim_sa = (ushort2)(width_tl, height_tl) * (ushort)16;
+   ushort2 dim_sa = (ushort2)(width_tl << 4, height_tl << meta_tile_h_log2);
    uint aligned_width_px =
       align(stretched_sa_to_px(dim_sa, samples).x, tile_w_el);
 

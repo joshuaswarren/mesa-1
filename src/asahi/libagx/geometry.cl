@@ -176,7 +176,8 @@ libagx_prefix_sum_geom(constant struct poly_geometry_params *p)
 
 KERNEL(1024)
 libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
-                       global uint *c_invs, uint increment_stats__2)
+                       global uint *c_invs, global uint *prims_generated,
+                       uint increment_stats__2)
 {
    local uint scratch[32];
    poly_prefix_sum(scratch, p->counts, p->nr_patches, 1 /* words */,
@@ -217,6 +218,6 @@ libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
                    : p->isolines  ? (total / 2)
                                   : (total / 3);
 
-      poly_increment_counters(c_prims, c_invs, NULL, prims);
+      poly_increment_counters(c_prims, c_invs, prims_generated, prims);
    }
 }

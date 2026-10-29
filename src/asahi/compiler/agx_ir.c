@@ -43,7 +43,7 @@ agx_reconverged_mrt_tail(agx_context *ctx)
 {
    const bool multisample_epilog = ctx->key->secondary &&
       (ctx->key->fs.nr_samples == 2 || ctx->key->fs.nr_samples == 4);
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   if (!agx_isa_is_agx3(ctx->key->dev.encoding) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        (ctx->key->secondary && !multisample_epilog) || ctx->key->no_stop ||
        ctx->key->fs.ignore_tib_dependencies ||

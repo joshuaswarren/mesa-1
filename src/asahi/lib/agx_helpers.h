@@ -151,6 +151,8 @@ agx_translate_sample_count(unsigned samples)
       return AGX_SAMPLE_COUNT_2;
    case 4:
       return AGX_SAMPLE_COUNT_4;
+   case 8:
+      return AGX_SAMPLE_COUNT_8;
    default:
       UNREACHABLE("Invalid sample count");
    }

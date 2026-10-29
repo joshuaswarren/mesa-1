@@ -1058,7 +1058,11 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
 
    enum pipe_format buf_pfmt = vk_format_to_pipe_format(buf_fmt);
    nir_def *out_coord_xy = nir_f2u32(b, nir_load_frag_coord(b));
-   nir_def *out_layer = nir_load_layer_id(b);
+   const bool single_layer =
+      meta->specialize_single_layer_buffer_upload &&
+      key->img.view.type == VK_IMAGE_VIEW_TYPE_2D;
+   nir_def *out_layer = single_layer ? nir_imm_int(b, 0)
+                                    : nir_load_layer_id(b);
 
    nir_def *img_offs = nir_vec3(b,
       load_info(b, struct vk_meta_copy_buffer_image_info, img.offset.x),
@@ -1090,7 +1094,9 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
    nir_def *extent = nir_vec3(b,
       load_info(b, struct vk_meta_copy_buffer_image_info, copy_id_range.end.x),
       load_info(b, struct vk_meta_copy_buffer_image_info, copy_id_range.end.y),
-      load_info(b, struct vk_meta_copy_buffer_image_info, copy_id_range.end.z));
+      single_layer ? nir_imm_int(b, 1)
+                   : load_info(b, struct vk_meta_copy_buffer_image_info,
+                               copy_id_range.end.z));
    nir_def *in_bounds = nir_ball(b, nir_ult(b, coords, extent));
    coords = nir_bcsel(b, in_bounds, coords, nir_imm_ivec3(b, 0, 0, 0));
 
@@ -1620,11 +1626,24 @@ copy_buffer_to_image_region_gfx(
    /* We only special-case 1D_ARRAY to move the layer ID to the second
     * component instead of the third. For all other view types, let's pick an
     * invalid VkImageViewType value so we don't end up creating the same
-    * pipeline multiple times. */
+    * pipeline multiple times. The opted-in single-layer specialization below
+    * gets a separate key. */
    VkImageViewType view_type =
       img->image_type == VK_IMAGE_TYPE_1D && img->array_layers > 1
          ? VK_IMAGE_VIEW_TYPE_1D_ARRAY
          : (VkImageViewType)-1;
+
+   /* A single-layer attachment view has Layer == 0. Keep the source bounds
+    * protection for helpers, but avoid loading and checking a varying layer
+    * coordinate and multiplying it by the source image stride. Drivers that
+    * split array/3D uploads have already rebased the source address per slice.
+    */
+   if (meta->specialize_single_layer_buffer_upload &&
+       !meta->use_layered_rendering &&
+       img->image_type != VK_IMAGE_TYPE_1D &&
+       region->imageExtent.depth == 1 &&
+       vk_image_subresource_layer_count(img, &region->imageSubresource) == 1)
+      view_type = VK_IMAGE_VIEW_TYPE_2D;
 
    struct vk_meta_copy_buffer_image_key key = {
       .key_type = VK_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE_GFX,

@@ -9,6 +9,7 @@
 #include "util/u_debug.h"
 #include "agx_compile.h"
 #include "agx3_code_container_core.h"
+#include "agx3_tile_core.h"
 #include "agx_device.h"
 #include "agx_linker.h"
 #include "agx_nir.h"
@@ -80,7 +81,9 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
 {
    /* Match the standalone allocation lead already used for G17P main
     * shaders. Native packed CODE blocks do not each own such a lead. */
-   const size_t lead_size = 0x340;
+   const bool m5 = agx_chip_g17_m5(cache->dev->chip);
+   const size_t lead_size = m5
+      ? (size_t)cache->dev->params.num_clusters_total * 0x300u + 0x40u : 0x340;
    /* LDSHDR's existing auxiliary fetch-span metadata is based on compiler
     * text size. Reserve at least that span after the main entry too, so the
     * EOT text128/main64 case cannot prefetch outside this CODE block. */
@@ -108,8 +111,15 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
    if (!image)
       return false;
 
-   agx3_build_container_lead(image, cache->dev->chip,
-                             cache->dev->params.num_cores_per_cluster);
+   if (m5) {
+      if (!agx3_build_m5_container_lead(image, lead_size,
+                                       cache->dev->params.num_clusters_total)) {
+         free(image);
+         return false;
+      }
+   } else {
+      agx3_build_container_lead(image, cache->dev->chip, cache->dev->params.num_cores_per_cluster);
+   }
    const uint8_t *text = bin->binary;
    const bool built = agx3_build_code_block(
       image + lead_size, block_size, text + main_offset, bin->info.main_size,
@@ -191,13 +201,15 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 
       unsigned bindless_base = 0;
       NIR_PASS(_, shader, agx_nir_lower_tilebuffer, tib, NULL, &bindless_base,
-               NULL, NULL, false, agx_chip_native_agx3(cache->dev->chip));
+               NULL, NULL, false, agx_chip_native_agx3(cache->dev->chip) ||
+                                 agx_chip_g17_m5(cache->dev->chip));
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
       NIR_PASS(_, shader, agx_nir_lower_texture);
       NIR_PASS(_, shader, nir_shader_intrinsics_pass, lower_tex_handle_to_u0,
                nir_metadata_control_flow, &descriptor_size);
-      if (agx_chip_native_agx3(cache->dev->chip)) {
+      if (agx_chip_native_agx3(cache->dev->chip) ||
+          (agx_chip_g17_m5(cache->dev->chip) && tib->nr_samples > 1)) {
          /* Monolithic MSAA introduces a small sample loop after the common
           * preprocessing pass has already run. Fold that loop here so each
           * local-pixel access has the static one-hot sample mask required by
@@ -238,7 +250,7 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
    }
 
    res->info = bin.info;
-   if (agx_chip_native_agx3(cache->dev->chip)) {
+   if (agx_chip_native_agx3(cache->dev->chip) || agx_chip_g17_m5(cache->dev->chip)) {
       if (!agx_g17p_upload_bg_eot(cache, &bin, res)) {
          free(bin.binary);
          ralloc_free(shader);
@@ -258,7 +270,7 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 static nir_def *
 build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
                     unsigned nr, bool source_msaa, bool layered,
-                    bool wide_coords)
+                    bool wide_coords, unsigned clear_base)
 {
    if (op == AGX_BG_LOAD) {
       nir_def *coord = nir_load_pixel_coord(b);
@@ -294,7 +306,7 @@ build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
    } else {
       assert(op == AGX_BG_CLEAR);
 
-      return nir_load_preamble(b, nr, 32, 4 + (rt * 8));
+      return nir_load_preamble(b, nr, 32, clear_base + (rt * 8));
    }
 }
 
@@ -302,18 +314,58 @@ static struct agx_bg_eot_shader *
 agx_build_background_shader(struct agx_bg_eot_cache *cache,
                             struct agx_bg_eot_key *key)
 {
+   if (agx_chip_g17_m5(cache->dev->chip) && !key->tib.sample_size_B &&
+       key->tib.nr_samples <= 1 && !key->tib.layered &&
+       !key->reserved_preamble && !agx_tilebuffer_spills(&key->tib)) {
+      bool empty = true;
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+         empty &= key->op[rt] == AGX_BG_EOT_NONE;
+      if (empty) {
+         /* Fresh G17G's no-op compute object is exactly END, with common
+          * field0=1 GPR dword and absent field38/42 (zero staging bytes).
+          * BG and EOT loaders use the same empty executable; their release
+          * policy remains in the native stage-specific Ioto program. */
+         uint8_t text[] = {0x0e, 0, 0, 0};
+         const struct agx_shader_part bin = {
+            .binary = text,
+            .info = {
+               .stage = MESA_SHADER_COMPUTE,
+               .binary_size = sizeof(text),
+               .main_size = sizeof(text),
+               .nr_gprs = 2,
+               .agx3_staging_known = true,
+               .agx3_staging_halfs = 0,
+            },
+         };
+         struct agx_bg_eot_shader *res =
+            rzalloc(cache->ht, struct agx_bg_eot_shader);
+         if (!res || !agx_g17p_upload_bg_eot(cache, &bin, res)) {
+            ralloc_free(res);
+            return NULL;
+         }
+         res->info = bin.info;
+         return res;
+      }
+   }
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "agx_background");
    b.shader->info.fs.untyped_color_outputs = true;
 
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
-      .fs.ignore_tib_dependencies = true,
-      /* G17P multisample backgrounds store through the coverage register. */
+      /* M5 multisample backgrounds retain the colour tile transaction. */
+      .fs.ignore_tib_dependencies =
+         !agx_chip_g17_m5(cache->dev->chip) || key->tib.nr_samples == 1,
+      .fs.background = true,
+      /* Native multisample backgrounds store through the coverage register. */
       .fs.nr_samples =
-         agx_chip_native_agx3(cache->dev->chip) ? key->tib.nr_samples : 0,
+         agx_chip_native_agx3(cache->dev->chip) ||
+               agx_chip_g17_m5(cache->dev->chip)
+            ? key->tib.nr_samples : 0,
       .reserved_preamble = key->reserved_preamble,
-      .no_preamble = agx_chip_native_agx3(cache->dev->chip),
+      .no_preamble = agx_chip_native_agx3(cache->dev->chip) ||
+                     agx_chip_g17_m5(cache->dev->chip),
    };
 
    /* The multi-target background protocol is keyed, not inferred: without
@@ -325,6 +377,14 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
       background_targets += key->op[rt] != AGX_BG_EOT_NONE;
    compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
+   unsigned clear_base = 4;
+   if (agx_chip_g17_m5(cache->dev->chip) &&
+       (key->mixed_mrt || background_targets > 1)) {
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+         if (key->op[rt] == AGX_BG_LOAD)
+            clear_base = 8;
+      }
+   }
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)
@@ -353,7 +413,8 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
 
       nir_def *color = build_background_op(
          &b, key->op[rt], rt, nr, source_msaa, layered,
-         agx_chip_native_agx3(cache->dev->chip));
+         agx_chip_native_agx3(cache->dev->chip) ||
+            agx_chip_g17_m5(cache->dev->chip), clear_base);
       if (key->preserve_resolve_outside) {
          assert(rt == 0 && key->op[rt] == AGX_BG_LOAD);
          nir_def *xy = nir_u2u32(&b, nir_load_pixel_coord(&b));
@@ -362,7 +423,7 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
             nir_ball(&b, nir_uge(&b, xy, nir_channels(&b, rect, 0x3))),
             nir_ball(&b, nir_ult(&b, xy, nir_channels(&b, rect, 0xc))));
          nir_def *saved = build_background_op(
-            &b, AGX_BG_LOAD, 1, nr, false, layered, true);
+            &b, AGX_BG_LOAD, 1, nr, false, layered, true, clear_base);
          color = nir_bcsel(&b, inside, color, saved);
       }
 
@@ -383,6 +444,62 @@ static struct agx_bg_eot_shader *
 agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
+   unsigned m5_stores = 0;
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+      m5_stores += key->op[rt] == AGX_EOT_STORE;
+   const bool m5_layered_pair = agx_chip_g17_m5(cache->dev->chip) &&
+      key->tib.layered && key->m5_store_and_resolve;
+   if (agx_chip_g17_m5(cache->dev->chip) && m5_stores &&
+       (m5_stores > 1 || key->op[0] != AGX_EOT_STORE || m5_layered_pair)) {
+      if (agx_tilebuffer_spills(&key->tib))
+         return NULL;
+      uint8_t selectors[8];
+      unsigned active = 0;
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+         if (key->op[rt] != AGX_EOT_STORE)
+            continue;
+         const unsigned selector =
+            agx_g17p_mrt_eot_selector(key->tib.logical_format[rt]);
+         if (selector != 0x15 && selector != 0x35 && selector != 0x55 &&
+             selector != 0x75 && selector != 0x95)
+            return NULL;
+         selectors[active++] = selector;
+      }
+      uint8_t text[AGX3_M5_MRT_EOT_MAX_LENGTH];
+      size_t size;
+      if (m5_layered_pair) {
+         if (m5_stores != 1 || !key->multisample_store)
+            return NULL;
+         selectors[1] = selectors[0];
+         m5_stores = 2;
+      }
+      const unsigned sample_mask = m5_layered_pair ? 1 :
+         key->multisample_store ? (1u << m5_stores) - 1 : 0;
+      if (!agx3_m5_mrt_eot_generate_sample_mask(m5_stores, selectors,
+             sample_mask, key->tib.layered, text, sizeof(text), &size))
+         return NULL;
+      const struct agx_shader_part bin = {
+         .binary = text,
+         .info = {
+            .stage = MESA_SHADER_COMPUTE,
+            .binary_size = size,
+            .main_size = size,
+            /* Native ordinary register extent fits the qualified RT0
+             * allocation; each per-target wire needs eight staging halves. */
+            .nr_gprs = agx3_m5_mrt_eot_nr_gprs(m5_stores),
+            .agx3_staging_known = true,
+            .agx3_staging_halfs = agx3_m5_mrt_eot_staging_halfs(m5_stores),
+         },
+      };
+      struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
+      if (!res || !agx_g17p_upload_bg_eot(cache, &bin, res)) {
+         ralloc_free(res);
+         return NULL;
+      }
+      res->info = bin.info;
+      return res;
+   }
+
    const unsigned rgba8_mask = agx_g17p_rgba8_mrt_mask(&key->tib);
    const unsigned active_count = util_bitcount(rgba8_mask);
    if (agx_chip_native_agx3(cache->dev->chip) && rgba8_mask) {
@@ -430,6 +547,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
     * target really is multisample.
     */
    const bool g17p = agx_chip_native_agx3(cache->dev->chip);
+   const bool native_eot = g17p || agx_chip_g17_m5(cache->dev->chip);
    if (key->store_and_resolve) {
       /* This bounded path has two memory outputs from one physical tile. */
       assert(g17p && key->multisample_store && key->tib.nr_samples > 1 &&
@@ -439,17 +557,17 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          assert(key->op[rt] == AGX_BG_EOT_NONE);
    }
    const bool store_multisample =
-      key->tib.nr_samples > 1 && (!g17p || key->multisample_store);
+      key->tib.nr_samples > 1 && (!native_eot || key->multisample_store);
 
    /* AGX2 carries the sample in the store's coordinate vector, so its
     * multisample block store is a three-component GLSL_SAMPLER_DIM_MS one.
-    * Apple's G17P builtins do not: both the resolving and the unresolved
+    * Apple's native G17P/G17G builtins do not: both the 2D and multisample
     * end-of-tile programs read exactly the same two grid coordinates and
     * differ only in the IMGWBLK dimension class the packer deposits. Keep
-    * the two-coordinate 2D shape on G17P and let the compiler key select
+    * the two-coordinate 2D shape on these targets and let the compiler key select
     * which of the two Apple programs is meant, the same way every other
     * G17P end-of-tile selector is chosen. */
-   enum glsl_sampler_dim dim = (store_multisample && !g17p)
+   enum glsl_sampler_dim dim = (store_multisample && !native_eot)
                                   ? GLSL_SAMPLER_DIM_MS
                                   : GLSL_SAMPLER_DIM_2D;
 
@@ -473,7 +591,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 
       bool explicit = false;
       nir_def *coords = layer;
-      if (agx_chip_native_agx3(cache->dev->chip)) {
+      if (agx_chip_native_agx3(cache->dev->chip) ||
+          agx_chip_g17_m5(cache->dev->chip)) {
          /* AGX3's EOT imgwblk has no implicit pixel-coordinate form.  Apple's
           * G17P compiler reads the hardware grid X/Y SRs explicitly.  Array
           * stores append the hardware layer ID; dropping it here made every
@@ -491,13 +610,17 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 
       enum pipe_format physical =
          agx_tilebuffer_physical_format(&key->tib, rt);
-      if (agx_chip_native_agx3(cache->dev->chip) &&
+      if ((agx_chip_native_agx3(cache->dev->chip) ||
+           agx_chip_g17_m5(cache->dev->chip)) &&
           (key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT ||
            key->tib.logical_format[rt] == PIPE_FORMAT_R9G9B9E5_FLOAT)) {
          /* G17P keeps packed-float tiles as one raw 32-bit word. The matching
-          * PBE descriptor also uses R32_UINT to preserve those exact bits. */
+          * PBE descriptor also uses R32_UINT to preserve those exact bits.
+          * G17G stores RG11B10Float and RGB9E5Float tiles the same way: one
+          * 32-bit lane (port/fbwit lstcol/lldcol W32 mask1). */
          physical = PIPE_FORMAT_R32_UINT;
-      } else if (agx_chip_native_agx3(cache->dev->chip) &&
+      } else if ((agx_chip_native_agx3(cache->dev->chip) ||
+                  agx_chip_g17_m5(cache->dev->chip)) &&
           util_format_is_srgb(key->tib.logical_format[rt])) {
          /* G17P applies the sRGB transfer in the fragment's own packs
           * (fltnorm/normflt sRGB modes) and stores the resulting bytes in a
@@ -529,14 +652,18 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .reserved_preamble = key->reserved_preamble,
-      .no_preamble = agx_chip_native_agx3(cache->dev->chip),
+      .no_preamble = agx_chip_native_agx3(cache->dev->chip) ||
+                     agx_chip_g17_m5(cache->dev->chip),
+      .m5_rt0_eot = agx_chip_g17_m5(cache->dev->chip),
+      .m5_rt0_eot_store_and_resolve = key->m5_store_and_resolve,
    };
 
-   if (agx_chip_native_agx3(cache->dev->chip)) {
-      agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
-                                    &compiler_key);
+   if (native_eot) {
+      agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0], &compiler_key);
       compiler_key.g17p_rt0_eot_multisample = store_multisample;
+   }
 
+   if (agx_chip_native_agx3(cache->dev->chip)) {
       /* A mixed layout storing several targets uses the multi-target
        * builtin, selecting each target's IMGWBLK tail by its format. A
        * single stored target keeps its format's own program. */
@@ -661,8 +788,12 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       agx_workgroup(info->workgroup_size[0], info->workgroup_size[1],
                     info->workgroup_size[2]);
 
-   if (agx_chip_native_agx3(cache->dev->chip)) {
-      const size_t lead_size = 0x340;
+   if (agx_chip_native_agx3(cache->dev->chip) ||
+       agx_chip_g17_m5(cache->dev->chip)) {
+      const bool m5 = agx_chip_g17_m5(cache->dev->chip);
+      const size_t lead_size = m5
+         ? (size_t)cache->dev->params.num_clusters_total * 0x300u + 0x40u
+         : 0x340;
       const size_t main_span = MAX2(info->main_size, info->binary_size);
       const size_t block_size = agx3_code_block_size(main_span);
       /* Promoted constants live in the binary and are published as a uniform
@@ -694,12 +825,14 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
          ralloc_free(p);
          return NULL;
       }
-      agx3_build_container_lead(image, cache->dev->chip,
-                             cache->dev->params.num_cores_per_cluster);
-      const bool built = agx3_build_code_block(
+      const bool lead_ok = m5
+         ? agx3_build_m5_container_lead(image, lead_size,
+                                        cache->dev->params.num_clusters_total)
+         : (agx3_build_container_lead(image, cache->dev->chip, cache->dev->params.num_cores_per_cluster), true);
+      const bool built = lead_ok && agx3_build_code_block(
          image + lead_size, block_size,
          (const uint8_t *)binary + info->main_offset, info->main_size,
-         main_span, NULL, false);
+         main_span, NULL, m5);
       if (rodata_size) {
          memcpy(image + lead_size + block_size,
                 (const uint8_t *)binary + info->rodata.offset, rodata_size);
@@ -721,7 +854,8 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       return NULL;
    }
 
-   if (agx_chip_native_agx3(cache->dev->chip)) {
+   if (agx_chip_native_agx3(cache->dev->chip) ||
+       agx_chip_g17_m5(cache->dev->chip)) {
       /* HAL200 consumes the CODE entry through a dispatch-local Ioto program;
        * none of the legacy USC launch words below are part of that ABI. */
       p_atomic_set(&cache->precomp[program], p);

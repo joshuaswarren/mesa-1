@@ -105,10 +105,19 @@ TEST(AGX3SrCore, CoverageEntryMarker)
    ASSERT_EQ(len, sizeof(later));
    EXPECT_EQ(0, memcmp(out, later, len));
 
-   /* The marker is witnessed on nothing else. */
+   /* Native G17G 2x/4x/8x constant-colour fragments all read marked SR39
+    * into h2 at offset 64. Its extended RLD encoding differs from G17P. */
+   static const uint8_t m5_h2[] = {0x34, 0x82, 0x01, 0x00,
+                                   0x20, 0x00, 0xb0, 0x02};
+   d.dest = 2;
    d.first = true;
-   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   ASSERT_EQ(len, sizeof(m5_h2));
+   EXPECT_EQ(0, memcmp(out, m5_h2, len));
+
+   /* Other system registers still reject the coverage entry marker. */
    d.sr = 41;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
    EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
 }
 

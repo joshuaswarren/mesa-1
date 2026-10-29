@@ -12,6 +12,7 @@
 #include "util/u_debug.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 /* Exact fixed regions surrounding the runtime state tail in the SPDX-MIT
  * m1n1 NATIVE_ADD3_SHADER witness. */
@@ -861,4 +862,240 @@ agx_ioto_g17s_minimal_compute_program_compose_resources(
 
    return agx_ioto_g17s_minimal_compute_program_compose_internal(
       program_va, shader_va, resources, output, capacity, written);
+}
+
+
+bool
+agx_ioto_program_copy_suffix_offset(enum agx_chip chip, const void *body,
+                                      size_t body_size, size_t *offset)
+{
+   if (!offset || (body_size && !body))
+      return false;
+
+   const uint8_t *bytes = body;
+   size_t cursor = 0, suffix = 0;
+   while (cursor < body_size) {
+      if (agx_ioto_program_gpu0_inline_lddev(chip, bytes + cursor,
+                                             body_size - cursor)) {
+         cursor += AGX_IOTO_GPU0_INLINE_LDDEV_SIZE;
+         suffix = cursor;
+         continue;
+      }
+      struct agx_ioto_record record;
+      size_t consumed = 0;
+      if (!agx_ioto_decode_one(chip, bytes + cursor, body_size - cursor,
+                                 &record, &consumed) || consumed == 0 ||
+          !agx_ioto_straight_line_body_kind(record.kind))
+         return false;
+      cursor += consumed;
+      if (record.kind != AGX_IOTO_KIND_COPY_EP0 &&
+          record.kind != AGX_IOTO_KIND_COPY_EP1)
+         suffix = cursor;
+   }
+   *offset = suffix;
+   return true;
+}
+
+/* Loader allocation can finish an early round before more LDIMM/LDDEVs.
+ * State setup must precede those early uniform writes as well as the final
+ * contiguous COPY suffix. A one-round body keeps its original ordering. */
+bool
+agx_ioto_program_first_copy_offset(enum agx_chip chip, const void *body,
+                                    size_t body_size, size_t *offset)
+{
+   if (!offset || (body_size && !body))
+      return false;
+   const uint8_t *bytes = body;
+   size_t cursor = 0;
+   *offset = body_size;
+   while (cursor < body_size) {
+      struct agx_ioto_record record;
+      size_t consumed = 0;
+      if (!agx_ioto_decode_one(chip, bytes + cursor, body_size - cursor,
+                               &record, &consumed) || !consumed ||
+          !agx_ioto_straight_line_body_kind(record.kind))
+         return false;
+      if (*offset == body_size &&
+          (record.kind == AGX_IOTO_KIND_COPY_EP0 ||
+           record.kind == AGX_IOTO_KIND_COPY_EP1))
+         *offset = cursor;
+      cursor += consumed;
+   }
+   return true;
+}
+
+static bool
+type0_tail_records_valid(enum agx_chip chip,
+                         const struct agx_ioto_state_tail_output *packed_tail)
+{
+   if (!packed_tail || packed_tail->length != AGX_IOTO_STATE_TAIL_TYPE0_SIZE)
+      return false;
+
+   static const enum agx_ioto_kind kinds[] = {
+      AGX_IOTO_KIND_SPECLM_EP0,
+      AGX_IOTO_KIND_LDSHDR_EP0,
+      AGX_IOTO_KIND_SPECTPR_EP0,
+   };
+   static const size_t sizes[] = {
+      AGX_IOTO_SPECLM_SIZE,
+      AGX_IOTO_LDSHDR_SIZE,
+      AGX_IOTO_SPECTPR_SIZE,
+   };
+   size_t offset = 0;
+   for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
+      struct agx_ioto_record record;
+      size_t consumed = 0;
+      if (!agx_ioto_validate_kind(
+             chip, kinds[i], packed_tail->bytes + offset,
+             packed_tail->length - offset, &record, &consumed) ||
+          consumed != sizes[i])
+         return false;
+      offset += consumed;
+   }
+
+   return offset == packed_tail->length;
+}
+
+static bool
+m5_no_resource_program_compose(
+   enum agx_chip chip, uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
+   bool fragment, void *output, size_t capacity, size_t *written)
+{
+   const size_t size = fragment
+      ? AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE
+      : AGX_IOTO_G17G_VERTEX_NO_RESOURCE_PROGRAM_SIZE;
+   if (!output || !written ||
+       !type0_tail_records_valid(AGX_CHIP_G17G, packed_tail) ||
+       program_va == 0 || program_va > UINT64_C(0x1000000000000) - size ||
+       (program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 || capacity < size)
+      return false;
+
+   const uint8_t *ldshdr = packed_tail->bytes + AGX_IOTO_SPECLM_SIZE;
+   if (!(agx_load_le16(ldshdr) & UINT16_C(0xffc0)) &&
+       !agx_load_le16(ldshdr + 6) && !agx_load_le16(ldshdr + 8))
+      return false;
+
+   uint8_t staged[AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE] = {0};
+   memcpy(staged, packed_tail->bytes, packed_tail->length);
+   size_t offset = packed_tail->length;
+
+   if (!agx_ioto_g17s_minimal_profile_loader_pack(staged + offset,
+                                                sizeof(staged) - offset))
+      return false;
+
+   staged[offset + 20] = (fragment ? 4 : 8) *
+                         (chip == AGX_CHIP_G17S ? 2 : 1);
+   offset += AGX_IOTO_G17S_MINIMAL_PROFILE_LOADER_SIZE;
+   if (fragment) {
+      static const uint8_t pixrel[] = {0x9f, 0x17, 0x00, 0x04, 0x00, 0x00};
+      memcpy(staged + offset, pixrel, sizeof(pixrel));
+      offset += sizeof(pixrel);
+   }
+   staged[offset] = 0x0e;
+   offset += AGX_IOTO_PROGRAM_TERMINATE_SIZE;
+   if (offset != size)
+      return false;
+
+   memcpy(output, staged, size);
+   *written = size;
+   return true;
+}
+
+bool
+agx_ioto_m5_resource_program_compose_classes(
+   enum agx_chip chip, uint64_t program_va, const void *body, size_t body_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17g_program_stage stage, unsigned colour_classes,
+   void *output, size_t capacity, size_t *written)
+{
+   if (!agx_chip_g17_m5(chip) || !output || !written ||
+       (colour_classes == 0 || (colour_classes & ~7u)) ||
+       (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
+        stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
+        stage != AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT &&
+        stage != AGX_IOTO_G17G_PROGRAM_EOT &&
+        stage != AGX_IOTO_G17G_PROGRAM_BACKGROUND &&
+        stage != AGX_IOTO_G17G_PROGRAM_COMPUTE &&
+        stage != AGX_IOTO_G17G_PROGRAM_MESH &&
+        stage != AGX_IOTO_G17G_PROGRAM_OBJECT))
+      return false;
+
+   size_t copy_offset;
+   if (!agx_ioto_program_first_copy_offset(AGX_CHIP_G17G, body, body_size,
+                                            &copy_offset))
+      return false;
+
+   uint8_t base[AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE];
+   size_t base_size;
+   if (!m5_no_resource_program_compose(
+          chip, program_va, packed_tail, stage != AGX_IOTO_G17G_PROGRAM_VERTEX,
+          base, sizeof(base), &base_size))
+      return false;
+
+   const size_t prefix_size = AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
+                             AGX_IOTO_G17S_MINIMAL_PROFILE_LOADER_SIZE;
+   const bool pixel_release = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
+                              stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT ||
+                              stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND;
+   if (stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
+       stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT) {
+      /* HAL300 PIXREL::emit for 0x2ff with the shader's colour classes
+       * removed. Sparse targets retain their own class pair. */
+      static const uint8_t release[8][6] = {
+         {0},
+         {0x9f, 0x17, 0, 4, 0, 0},
+         {0x7f, 0x16, 0, 4, 0, 0},
+         {0x1f, 0x16, 0, 4, 0, 0},
+         {0xff, 0x11, 0, 4, 0, 0},
+         {0x9f, 0x11, 0, 4, 0, 0},
+         {0x7f, 0x10, 0, 4, 0, 0},
+         {0x1f, 0x10, 0, 4, 0, 0},
+      };
+      memcpy(base + prefix_size, release[colour_classes], sizeof(release[0]));
+      /* Depth/coverage consumes class 0 as well. HAL300 clears descriptor
+       * bit 0, encoded as bit 3 of the first PIXREL byte. */
+      if (stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT)
+         base[prefix_size] &= ~8u;
+   }
+   if (stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND) {
+
+      static const uint8_t background_pixrel[] = {7, 0x10, 0, 4, 0, 0};
+      memcpy(base + prefix_size, background_pixrel, sizeof(background_pixrel));
+   }
+   const size_t suffix_size = pixel_release
+                                ? base_size - prefix_size
+                                : AGX_IOTO_PROGRAM_TERMINATE_SIZE;
+   const size_t fixed_size = prefix_size + suffix_size;
+   if (body_size > SIZE_MAX - fixed_size)
+      return false;
+   const size_t size = body_size + fixed_size;
+   if (capacity < size || size > UINT64_C(0x1000000000000) ||
+       program_va > UINT64_C(0x1000000000000) - size)
+      return false;
+
+   uint8_t *staged = malloc(size);
+   if (!staged)
+      return false;
+   /* The compute profile helper must run after the uniform uploads. On M5,
+    * calling it before COPY leaves the probe's uniforms zero, even when
+    * those copies follow in the Ioto stream. Keep shader-state setup
+    * before the first copy, but defer the helper until all uploads finish.
+    */
+   const size_t before_copy = stage == AGX_IOTO_G17G_PROGRAM_COMPUTE
+                                ? AGX_IOTO_STATE_TAIL_TYPE0_SIZE : prefix_size;
+   if (copy_offset)
+      memcpy(staged, body, copy_offset);
+   memcpy(staged + copy_offset, base, before_copy);
+   if (body_size != copy_offset)
+      memcpy(staged + copy_offset + before_copy,
+             (const uint8_t *)body + copy_offset, body_size - copy_offset);
+   if (before_copy != prefix_size)
+      memcpy(staged + body_size + before_copy, base + before_copy,
+             prefix_size - before_copy);
+   memcpy(staged + body_size + prefix_size,
+          base + base_size - suffix_size, suffix_size);
+   memcpy(output, staged, size);
+   free(staged);
+   *written = size;
+   return true;
 }

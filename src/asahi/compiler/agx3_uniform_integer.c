@@ -4,14 +4,15 @@
 #include "agx3_binder.h"
 
 static bool
-source_valid(struct agx3_uniform_integer_src s, bool half, bool addend)
+source_valid(struct agx3_uniform_integer_src s, bool half, bool addend,
+              unsigned gprs)
 {
    if (s.kind == AGX3_UI_ZERO)
       return addend && !s.value && !s.cache && !s.discard;
    if (s.kind != AGX3_UI_REGISTER && s.kind != AGX3_UI_UNIFORM)
       return false;
    if (s.value >=
-          (s.kind == AGX3_UI_REGISTER ? AGX3_UNIFORM_INTEGER_GPRS : 512) ||
+          (s.kind == AGX3_UI_REGISTER ? gprs : 512) ||
        (!half && (s.value & 1)) || (s.cache && s.discard))
       return false;
    return s.kind != AGX3_UI_UNIFORM || (!s.cache && !s.discard);
@@ -22,20 +23,32 @@ agx3_uniform_integer_encode(enum agx_isa_encoding encoding,
                             const struct agx3_uniform_integer_desc *d,
                             uint8_t output[16], uint8_t *length)
 {
-   if (encoding != AGX_ISA_ENCODING_AGX3B || !d || !output || !length ||
+   const bool m5 = encoding == AGX_ISA_ENCODING_AGX3C;
+   const unsigned gprs = m5 ? AGX3_UNIFORM_INTEGER_M5_GPRS :
+                             AGX3_UNIFORM_INTEGER_GPRS;
+   if ((encoding != AGX_ISA_ENCODING_AGX3B && !m5) || !d || !output || !length ||
        d->op > AGX3_UI_ANDC || (int)d->op < 0 ||
-       d->dest >= AGX3_UNIFORM_INTEGER_GPRS || (!d->half && (d->dest & 1)) ||
-       d->wait_mask >= 64 ||
+       d->dest >= gprs || (!d->half && (d->dest & 1)) ||
+       (!m5 && d->wait_mask >= 64) ||
        (d->shift && (d->op != AGX3_UI_ADD || d->shift != 3)))
       return false;
 
+   /* M5 witnesses: full-width unshifted ADD in either operand order;
+    * SUB has a varying first operand and uniform second operand. */
+   if (m5 && (d->half || d->shift ||
+              (d->op != AGX3_UI_ADD && d->op != AGX3_UI_SUB &&
+               d->op != AGX3_UI_MAD) ||
+              (d->op == AGX3_UI_SUB &&
+               (d->src[0].kind != AGX3_UI_REGISTER ||
+                d->src[1].kind != AGX3_UI_UNIFORM))))
+      return false;
    const bool mad = d->op == AGX3_UI_MAD;
    const bool bitwise = d->op >= AGX3_UI_AND;
    const unsigned count = mad ? 3 : 2, width = d->half ? 1 : 2;
    struct agx3_uniform_integer_src src[3];
    memcpy(src, d->src, sizeof(src));
    for (unsigned i = 0; i < count; ++i)
-      if (!source_valid(src[i], d->half, mad && i == 2))
+      if (!source_valid(src[i], d->half, mad && i == 2, gprs))
          return false;
 
    /* Main-program witnesses have one varying multiplicand/binary operand.
@@ -43,7 +56,7 @@ agx3_uniform_integer_encode(enum agx_isa_encoding encoding,
    if (!((src[0].kind == AGX3_UI_UNIFORM && src[1].kind == AGX3_UI_REGISTER) ||
          (src[0].kind == AGX3_UI_REGISTER && src[1].kind == AGX3_UI_UNIFORM)))
       return false;
-   if (src[1].kind == AGX3_UI_UNIFORM && d->op != AGX3_UI_SUB &&
+   if (!m5 && src[1].kind == AGX3_UI_UNIFORM && d->op != AGX3_UI_SUB &&
        d->op != AGX3_UI_ANDC) {
       /* A shifted ADD is src0 + (src1 << shift); swapping would change it. */
       if (d->shift)
@@ -52,6 +65,19 @@ agx3_uniform_integer_encode(enum agx_isa_encoding encoding,
       src[0] = src[1];
       src[1] = tmp;
    }
+   if (m5 && mad) {
+      /* Native full-width endpoints: R/U/U (cs_loop, ld_constant) and
+       * U/R/R (sr_ids). Keep absent/immediate C and narrow operands closed. */
+      if (src[2].kind != AGX3_UI_REGISTER &&
+          src[2].kind != AGX3_UI_UNIFORM)
+         return false;
+      const bool uniform_first = src[2].kind == AGX3_UI_REGISTER;
+      if ((src[0].kind == AGX3_UI_UNIFORM) != uniform_first) {
+         struct agx3_uniform_integer_src tmp = src[0];
+         src[0] = src[1];
+         src[1] = tmp;
+      }
+   }
    if (d->op == AGX3_UI_ANDC && src[0].kind != AGX3_UI_UNIFORM)
       return false;
 
@@ -59,13 +85,13 @@ agx3_uniform_integer_encode(enum agx_isa_encoding encoding,
    unsigned endpoint = 0;
    switch (d->op) {
    case AGX3_UI_ADD:
-      mnemonic = "iadd";
+      mnemonic = m5 ? "iadd32" : "iadd";
       break;
    case AGX3_UI_SUB:
-      mnemonic = "isub";
+      mnemonic = m5 ? "isub32" : "isub";
       break;
    case AGX3_UI_MAD:
-      mnemonic = "imadd";
+      mnemonic = m5 ? "imadd32" : "imadd";
       break;
    case AGX3_UI_AND:
       mnemonic = "bit_and";
@@ -111,8 +137,12 @@ agx3_uniform_integer_encode(enum agx_isa_encoding encoding,
    }
    if (d->shift)
       FIELD(54, d->shift);
-   for (unsigned slot = 0; slot < 6; ++slot)
-      FIELD((mad       ? 60
+   if (m5) {
+      FIELD(mad ? 59 : 44, 3);
+      FIELD(mad ? 60 : 45, mad ? 84 : d->op == AGX3_UI_SUB ? 100 : 80);
+   }
+   for (unsigned slot = 0; slot < (m5 ? 8 : 6); ++slot)
+      FIELD((m5 ? (mad ? 61 : 46) : mad       ? 60
              : bitwise ? 44
                        : 45) +
                slot,

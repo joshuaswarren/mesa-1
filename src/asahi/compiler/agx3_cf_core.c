@@ -72,6 +72,34 @@ agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
    return false;
 }
 
+bool
+agx3_cf_icmp_width_m5(enum agx3_cf_icond cond, unsigned slot,
+                      const uint16_t src[2], const bool half[2],
+                      const struct agx3_cf_source_hints hints[2],
+                      uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   if (!icond_ok(cond) || !slot_ok(slot) || !src || !half || !hints || !out || !len)
+      return false;
+   for (unsigned i = 0; i < 2; ++i)
+      if (src[i] >= 256 || (!half[i] && (src[i] & 1)) ||
+          (hints[i].cache && hints[i].discard))
+         return false;
+   const bool sign = cond == AGX3_CF_ICOND_SLT || cond == AGX3_CF_ICOND_SGT;
+   const struct agx3_field_kv base[] = {
+      KV(9,2), KV(10,half[0]?1:2), KV(24,2), KV(25,half[1]?1:2),
+      KV(32,3), KV(33,82),
+   };
+   const struct agx3_field_kv fields[] = {
+      KV(2,src[0]), KV(17,src[1]), KV(31,slot), KV(42,cond),
+      KV(11,hints[0].cache), KV(13,hints[0].discard), KV(14,sign && half[0]),
+      KV(26,hints[1].cache), KV(28,hints[1].discard), KV(29,sign && half[1]),
+   };
+   for (unsigned ep = 0; ep < 3; ++ep)
+      if (agx3_bind_compose(AGX_ISA_ENCODING_AGX3C,"icmp",ep,base,6,fields,10,out,len))
+         return true;
+   return false;
+}
+
 /*
  * The source fields of every comparison form are HALF-register indices with
  * eight bits, so halves 0..255 -- all 128 architectural 32-bit registers --
@@ -122,24 +150,26 @@ agx3_cf_icmp_reg(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
  * point as the register/register compare:
  *   fs-apple.bin +0xbc  0a832307060007020000  i == u6, cached i, slot 0
  *   cs-apple.bin +0x9e  0a03230b060007020000  i == u10, slot 0
- * f13 is the register's discard hint, as on the register forms. */
+ * f13 is the register's discard hint, as on the register forms. The fresh
+ * G17G native ALU probe at main+0x9a uses this shape with f32=3/f33=82. */
 bool
 agx3_cf_icmp_reg_uniform32(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                            unsigned slot, uint16_t src0, uint16_t uniform,
                            struct agx3_cf_source_hints hint,
                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || src0 >= 256 ||
+   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
+       !icond_ok(cond) || !slot_ok(slot) || src0 >= 256 ||
        (src0 & 1) || uniform >= 256 || (uniform & 1) ||
        (hint.cache && hint.discard) || !out || !len)
       return false;
    const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 2), KV(24, 3),
-                                        KV(25, 2)};
+                                        KV(25, 2), KV(32, 3), KV(33, 82)};
    const struct agx3_field_kv ov[] = {KV(2, src0), KV(18, uniform),
                                       KV(31, slot), KV(42, cond),
                                       KV(11, hint.cache),
                                       KV(13, hint.discard)};
-   return agx3_bind_compose(enc, "icmp", 1, base, 4, ov, 6, out, len);
+   return agx3_bind_compose(enc, "icmp", 1, base, agx3b(enc) ? 4 : 6, ov, 6, out, len);
 }
 
 /* An aligned 32-bit uniform against an 8-bit immediate: Apple's G17P loop
@@ -148,20 +178,22 @@ agx3_cf_icmp_reg_uniform32(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
  * the first operand's class f9 = 3 selects the uniform, whose half index is
  * f3 (the register form's f2 is absent):
  *   fs-apple.bin +0x0c  0a072380060087020000  u6 == 0, slot 0
- * AGX3B only; no AGX3c witness. */
+ * G17G native ALU main+0x18 witnesses the same operands with its M5
+ * f32=3/f33=82 selectors. */
 bool
 agx3_cf_icmp_uniform_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                          unsigned slot, uint16_t uniform, uint8_t imm,
                          uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || uniform >= 256 ||
+   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
+       !icond_ok(cond) || !slot_ok(slot) || uniform >= 256 ||
        (uniform & 1) || !out || !len)
       return false;
    const struct agx3_field_kv base[] = {KV(9, 3), KV(10, 2), KV(24, 1),
-                                        KV(25, 1)};
+                                        KV(25, 1), KV(32, 3), KV(33, 82)};
    const struct agx3_field_kv ov[] = {KV(3, uniform), KV(16, imm),
                                       KV(42, cond), KV(31, slot)};
-   return agx3_bind_compose(enc, "icmp", 1, base, 4, ov, 4, out, len);
+   return agx3_bind_compose(enc, "icmp", 1, base, agx3b(enc) ? 4 : 6, ov, 4, out, len);
 }
 
 bool
@@ -187,13 +219,28 @@ agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                            struct agx3_cf_source_hints hint, uint16_t wait_mask,
                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || src >= 256 ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!agx3b(enc) && !gpu1) || !icond_ok(cond) || !slot_ok(slot) ||
+       src >= 256 ||
        !out || !len || (hint.cache && hint.discard) ||
-       (wait_mask != 0 && wait_mask != 32))
+       (gpu1 ? wait_mask > 255 : (wait_mask != 0 && wait_mask != 32)))
       return false;
-   /* Unsigned ordered comparisons against nonzero constants use the compact
-    * form. Unlike the ten-byte signed/equality form, it has no source
-    * lifetime fields. Fresh dead/live witnesses produce identical bytes. */
+   if (gpu1) {
+      const bool sign = cond == AGX3_CF_ICOND_SLT || cond == AGX3_CF_ICOND_SGT;
+      const struct agx3_field_kv base[] = {
+         KV(9,2), KV(10,1), KV(14,sign), KV(24,1), KV(25,1), KV(32,3), KV(33,82),
+      };
+      struct agx3_field_kv fields[14] = {
+         KV(2,src), KV(16,imm), KV(42,cond), KV(31,slot),
+         KV(11,hint.cache), KV(13,hint.discard),
+      };
+      for (unsigned i = 0; i < 8; ++i)
+         fields[6+i] = (struct agx3_field_kv)KV(34+i, !!(wait_mask & (1u << i)));
+      for (unsigned ep = 0; ep < 3; ++ep)
+         if (agx3_bind_compose(enc,"icmp",ep,base,7,fields,14,out,len))
+            return true;
+      return false;
+   }
    if (imm != 0 &&
        (cond == AGX3_CF_ICOND_ULT || cond == AGX3_CF_ICOND_UGT)) {
       const struct agx3_field_kv base[] = {
@@ -206,17 +253,14 @@ agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
       return agx3_bind_compose(enc, "icmp", 0, base, 4, fields, 5, out,
                                len);
    }
-   /* Native signed and unsigned zero tests both sign-extend the half.
-    * This preserves equality and every relation to zero. Live witnesses
-    * retain the source for the taken branch instead of discarding it. */
    const struct agx3_field_kv base[] = {
-      KV(9,2), KV(10,1), KV(14,1), KV(24,1), KV(25,1),
+      KV(9,2), KV(10,1), KV(14,1), KV(24,1), KV(25,1), KV(32,3), KV(33,82),
    };
    const struct agx3_field_kv fields[] = {
       KV(2,src), KV(16,imm), KV(42,cond), KV(31,slot), KV(11,hint.cache),
       KV(13,hint.discard), KV(39,wait_mask == 32),
    };
-   return agx3_bind_compose(enc,"icmp",1,base,5,fields,7,out,len);
+   return agx3_bind_compose(enc,"icmp",1,base,gpu1 ? 7 : 5,fields,7,out,len);
 }
 
 /*
@@ -271,9 +315,11 @@ agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                      const struct agx3_cf_source_hints hints_in[2],
                      uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !src_in || !neg_in || !hints_in ||
-       !out || !len || !slot_ok(slot) || or_nan ||
-       (cond != AGX3_CF_FCOND_LT && cond != AGX3_CF_FCOND_GT) ||
+   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) || !src_in || !neg_in || !hints_in ||
+       !out || !len || !slot_ok(slot) ||
+       (or_nan && enc != AGX_ISA_ENCODING_AGX3C) ||
+       (cond != AGX3_CF_FCOND_LT && cond != AGX3_CF_FCOND_GT &&
+        !(enc == AGX_ISA_ENCODING_AGX3C && cond == AGX3_CF_FCOND_EQ)) ||
        (neg_in[0] == neg_in[1]) || src_in[0] >= 256 || src_in[1] >= 256 ||
        (src_in[0] & 1) || (src_in[1] & 1) ||
        (hints_in[0].cache && hints_in[0].discard) ||
@@ -289,16 +335,31 @@ agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
       const struct agx3_cf_source_hints hint = hints[0];
       hints[0] = hints[1];
       hints[1] = hint;
-      cond = cond == AGX3_CF_FCOND_LT ? AGX3_CF_FCOND_GT
-                                      : AGX3_CF_FCOND_LT;
+      if (cond != AGX3_CF_FCOND_EQ)
+         cond = cond == AGX3_CF_FCOND_LT ? AGX3_CF_FCOND_GT
+                                       : AGX3_CF_FCOND_LT;
    }
 
    const struct agx3_field_kv base[] = {
       KV(9, 2), KV(10, 2), KV(26, 2), KV(27, 2), KV(38, 1)};
-   const struct agx3_field_kv ov[] = {
+   struct agx3_field_kv ov[] = {
       KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
       KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
-      KV(32, 1), KV(35, slot), KV(46, cond)};
+      KV(32, 1), KV(35, slot), KV(46, cond), KV(34, 0)};
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      /* Metal537/540: ordered and unordered comparisons with a negated
+       * f32 source use the M5 selector plus independent negate
+       * and NaN fields. CF boundaries have already retired producer waits. */
+      ov[8].value = (unsigned)cond + (or_nan && cond != AGX3_CF_FCOND_EQ ? 4 : 0);
+      ov[9].value = or_nan;
+      const struct agx3_field_kv m5_base[] = {
+         KV(9,2), KV(10,2), KV(26,2), KV(27,2), KV(36,3), KV(37,69),
+      };
+      for (unsigned ep=0; ep<4; ep++)
+         if (agx3_bind_compose(enc, "fcmp", ep, m5_base, 6, ov, 10, out, len))
+            return true;
+      return false;
+   }
    return agx3_bind_compose(enc, "fcmp", 0, base, 5, ov, 9, out, len);
 }
 
@@ -317,11 +378,12 @@ agx3_cf_fcmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                    uint16_t wait_mask, uint8_t out[AGX3_CF_MAX_LENGTH],
                    uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !src || !hints || !out || !len ||
        !slot_ok(slot) || !fcond_ok(cond) || src[0] >= 256 || src[1] >= 256 ||
        (hints[0].cache && hints[0].discard) ||
        (hints[1].cache && hints[1].discard) ||
-       (wait_mask & ~UINT16_C(0x3f)))
+       (wait_mask & ~(m5 ? UINT16_C(0xff) : UINT16_C(0x3f))))
       return false;
 
    /* Same condition folding as the f32 form: lt/gt or unordered are codes
@@ -336,13 +398,17 @@ agx3_cf_fcmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
 
    const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 1), KV(26, 2),
                                         KV(27, 1)};
-   struct agx3_field_kv ov[16] = {
+   struct agx3_field_kv ov[19] = {
       KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
       KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
       KV(34, or_nan), KV(35, slot), KV(46, fcond),
    };
    unsigned n = 9;
-   for (unsigned wait_slot = 0; wait_slot < 6; ++wait_slot)
+   if (m5) {
+      ov[n++] = (struct agx3_field_kv){36, 3};
+      ov[n++] = (struct agx3_field_kv){37, 69};
+   }
+   for (unsigned wait_slot = 0; wait_slot < (m5 ? 8 : 6); ++wait_slot)
       ov[n++] = (struct agx3_field_kv){38 + wait_slot,
                                        !!(wait_mask & (1u << wait_slot))};
 
@@ -377,6 +443,50 @@ agx3_cf_fcmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
  * f38..f43 are the six producer wait slots on this form; Apple's kernels
  * above wait on slot 6 because their operands come from a load.
  */
+bool
+agx3_cf_fcmp_width_m5(enum agx3_cf_fcond cond, bool or_nan, unsigned slot,
+                     const uint16_t src[2], const bool half[2],
+                     const bool absolute[2],
+                     const struct agx3_cf_source_hints hints[2],
+                     uint16_t wait_mask,
+                     uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   if (!src || !half || !absolute || !hints || !out || !len ||
+       !slot_ok(slot) || !fcond_ok(cond) || wait_mask > 0xff)
+      return false;
+   for (unsigned i = 0; i < 2; ++i) {
+      if (src[i] >= 256 || (!half[i] && (src[i] & 1)) ||
+          (hints[i].cache && hints[i].discard))
+         return false;
+   }
+   unsigned condition = cond;
+   if (or_nan && cond == AGX3_CF_FCOND_LT)
+      condition = 5;
+   else if (or_nan && cond == AGX3_CF_FCOND_GT)
+      condition = 6;
+   else if (or_nan)
+      return false;
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(26, 2), KV(36, 3), KV(37, 69),
+   };
+   struct agx3_field_kv fields[22] = {
+      KV(2, src[0]), KV(10, half[0] ? 1 : 2),
+      KV(11, hints[0].cache), KV(13, hints[0].discard), KV(14, absolute[0]),
+      KV(19, src[1]), KV(27, half[1] ? 1 : 2),
+      KV(28, hints[1].cache), KV(30, hints[1].discard), KV(31, absolute[1]),
+      KV(34, or_nan), KV(35, slot), KV(46, condition),
+   };
+   unsigned count = 13;
+   for (unsigned i = 0; i < 8; ++i)
+      fields[count++] = (struct agx3_field_kv)KV(38 + i, (wait_mask >> i) & 1);
+   for (unsigned ep = 0; ep < 4; ++ep) {
+      if (agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "fcmp", ep, base, 4,
+                           fields, count, out, len))
+         return true;
+   }
+   return false;
+}
+
 bool
 agx3_cf_fcmp_reg_abs(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                      bool or_nan, unsigned slot, const uint16_t src[2],
@@ -562,18 +672,19 @@ bool agx3_cf_fcmp_zero_imm(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                         uint16_t wait_mask,
                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!agx3b(enc) || !out || !len || !fcond_ok(cond) || !slot_ok(slot) ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!agx3b(enc) && !m5) || !out || !len || !fcond_ok(cond) || !slot_ok(slot) ||
        source >= 256 || (!source_16 && (source & 1)) || (hint.cache && hint.discard) ||
-       (wait_mask & ~0x3fu) || (or_nan && cond == AGX3_CF_FCOND_EQ))
+       (wait_mask >> (m5 ? 8 : 6)) || (or_nan && cond == AGX3_CF_FCOND_EQ))
       return false;
-   const struct agx3_field_kv base[]={KV(9,2),KV(10,source_16?1:2),KV(26,1),KV(27,2)};
-   struct agx3_field_kv fields[13]={
+   const struct agx3_field_kv base[]={KV(9,2),KV(10,source_16?1:2),KV(26,1),KV(27,2),KV(36,3),KV(37,69)};
+   struct agx3_field_kv fields[15]={
       KV(2,source),KV(18,minifloat),KV(11,hint.cache),KV(13,hint.discard),
       KV(34,or_nan),KV(35,slot),KV(46,(unsigned)cond+(or_nan?4:0)),
    };
-   for(unsigned i=0;i<6;i++)fields[7+i]=(struct agx3_field_kv)KV(38+i,!!(wait_mask&(1u<<i)));
-   for(unsigned ep=0;ep<=1;ep++)
-      if(agx3_bind_compose(enc,"fcmp",ep,base,4,fields,13,out,len))return true;
+   for(unsigned i=0;i<(m5?8:6);i++)fields[7+i]=(struct agx3_field_kv)KV(38+i,!!(wait_mask&(1u<<i)));
+   for(unsigned ep=0;ep<=(m5?3:1);ep++)
+      if(agx3_bind_compose(enc,"fcmp",ep,base,m5?6:4,fields,m5?15:13,out,len))return true;
    return false;
 }
 

@@ -296,6 +296,9 @@ struct vk_queue_submit {
    VkSparseImageMemoryBind *_image_bind_entries;
 
    bool _has_binary_permanent_semaphore_wait;
+   /* Set once the signals of a submission that never reached the driver were
+    * signalled on the CPU (lost queue); see vk_queue_submit_signal_dropped. */
+   bool _signals_dropped;
    struct vk_sync **_wait_temps;
    struct vk_sync_timeline_point **_wait_points;
    struct vk_sync_timeline_point **_signal_points;

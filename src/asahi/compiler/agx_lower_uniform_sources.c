@@ -3,15 +3,19 @@
  * SPDX-License-Identifier: MIT
  */
 #include "agx_builder.h"
+#include "util/half_float.h"
 #include "agx_compiler.h"
 #include "agx_debug.h"
+#include "util/u_debug.h"
 #include "agx3_uniform_integer_instr.h"
 #include "util/u_debug.h"
+#include "agx3_uniform_alu.h"
+#include "agx3_isel_core.h"
 
 /*
  * Not all instructions can take uniforms. Memory instructions can take
- * uniforms, but only for their base (first) source and only in the
- * low-half of the uniform file.
+ * uniforms for their base source. Most forms use the lower half of the
+ * uniform file; M5 device loads also accept aligned bases in the upper half.
  *
  * This pass lowers invalid uniforms.
  */
@@ -27,7 +31,11 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    bool is_64 = size == AGX_SIZE_64;
    /* AGX3 memory bases address four-half uniform groups. A pointer packed
     * at a two-half boundary must be copied to a GPR pair before use. */
-   bool memory_base = !high &&
+   const bool m5_high_load_base =
+      encoding == AGX_ISA_ENCODING_AGX3C && op == AGX_OPCODE_DEVICE_LOAD &&
+      size == AGX_SIZE_64 && value <= 508 &&
+      debug_get_bool_option("ASAHI_M5_HIGH_UNIFORM_LOAD", true);
+   bool memory_base = (!high || m5_high_load_base) &&
       (encoding == AGX_ISA_ENCODING_AGX2 || !(value & 3));
 
    switch (op) {
@@ -61,6 +69,13 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
              size == AGX_SIZE_32 && value < 512 && !(value & 1);
    case AGX_OPCODE_IMAGE_LOAD:
    case AGX_OPCODE_TEXTURE_LOAD:
+      /* The saved G17S Atrous programs read texture handles directly from
+       * aligned 64-bit uniforms (SMP kind 3), without per-lane copies.
+       * Keep the environment override for isolated regression controls. */
+      if (encoding == AGX_ISA_ENCODING_AGX3C && op == AGX_OPCODE_TEXTURE_LOAD &&
+          src_index == 3 &&
+          debug_get_bool_option("ASAHI_M5_UNIFORM_TEXTURE_OPERANDS", true))
+         return !high && !(value & 3) && value <= 252 && size == AGX_SIZE_64;
       /* G17P publishes a dynamic integer LOD through PACK_SMPIR from a GPR;
        * there is no witnessed uniform-file source for that operand.  Keep
        * the heap in uniforms, but materialize the LOD into a register. */
@@ -91,9 +106,13 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    case AGX_OPCODE_INTERSECT_RAY_GEN1:
       return encoding == AGX_ISA_ENCODING_AGX3B && src_index < 2 &&
              !high && !(value & 1) && value <= 508 && size == AGX_SIZE_64;
+   case AGX_OPCODE_INTERSECT_RAY_M5:
+      return encoding == AGX_ISA_ENCODING_AGX3C && src_index == 1 &&
+             size == AGX_SIZE_64 && !(value & 1) && value < 512;
    case AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3:
    case AGX_OPCODE_SCS_STORE_UNIFORM_INDEXED_AGX3:
-      return encoding != AGX_ISA_ENCODING_AGX2 && !high &&
+      return (encoding == AGX_ISA_ENCODING_AGX3C ||
+              (encoding == AGX_ISA_ENCODING_AGX3B && !high)) &&
              src_index == (op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 ? 0 : 1) &&
              size == AGX_SIZE_64 && !(value & 1) && value < 512;
    case AGX_OPCODE_DEVICE_LOAD:
@@ -161,7 +180,9 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
        * (fs-apple.bin +0xbc 0a832307060007020000: f18 = u6, f24 = 3), so
        * keep the uniform as the second operand instead of copying it into
        * a GPR on every iteration. */
-      return encoding == AGX_ISA_ENCODING_AGX3B &&
+      return (encoding == AGX_ISA_ENCODING_AGX3B ||
+              (encoding == AGX_ISA_ENCODING_AGX3C &&
+               debug_get_bool_option("ASAHI_M5_UNIFORM_BRANCH", true))) &&
              src_index == 1 && size == AGX_SIZE_32 && !(value & 1) &&
              value < 256;
    case AGX_OPCODE_PHI:
@@ -263,18 +284,417 @@ agx3_move_uniform_negation(agx_context *ctx, agx_instr *I)
    return I;
 }
 
+/* Modified M5 FMA uses the witnessed register-only modifier encoder.
+ * Convert minifloats exactly before RA, preserving the one fused operation.
+ * Unmodified immediate FMA keeps its existing compact operand forms. */
+static void
+agx3_lower_m5_modified_fma_immediates(agx_context *ctx, agx_instr *I)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       I->op != AGX_OPCODE_FFMA || I->nr_dests != 1 || I->nr_srcs != 3)
+      return;
+
+   bool modified = I->saturate;
+   agx_foreach_src(I, s)
+      modified |= I->src[s].abs || I->src[s].neg;
+   if (!modified)
+      return;
+
+   /* Native G17G terrain fragments saturate a*b + 0.5 with the
+    * minifloat addend in place (f51 = 32, f14 = 1, both multipliers plain
+    * GPRs): agx3_falu_fma_addend_imm_width_mod encodes exactly that, so
+    * keep the literal instead of rematerializing it before every use. */
+   if (I->saturate && I->dest[0].size == AGX_SIZE_32 &&
+       I->src[2].type == AGX_INDEX_IMMEDIATE && !I->src[2].abs &&
+       !I->src[2].neg) {
+      bool plain = true;
+      for (unsigned s = 0; s < 2; ++s) {
+         const agx_index x = I->src[s];
+         plain &= x.type == AGX_INDEX_NORMAL && x.size == AGX_SIZE_32 &&
+                  agx_channels(x) == 1 && !x.abs && !x.neg && !x.memory;
+      }
+      if (plain)
+         return;
+   }
+
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   agx_foreach_src(I, s) {
+      const agx_index literal = I->src[s];
+      if (literal.type != AGX_INDEX_IMMEDIATE)
+         continue;
+
+      agx_index value = agx_mov_imm(
+         &b, 32, fui(agx_minifloat_decode(literal.value)));
+      value.abs = literal.abs;
+      value.neg = literal.neg;
+      I->src[s] = value;
+   }
+}
+
+/* The direct M5 scalar LOD publisher consumes its half-float source.
+ * Final physical divergence disables discard hints, and post-optimizer SSA
+ * reuse may differ from the original NIR use count. Pack only those operands
+ * that cannot use the consuming publisher, after optimization and before RA. */
+DEBUG_GET_ONCE_BOOL_OPTION(m5_fold_constant_lod,
+                           "ASAHI_M5_FOLD_CONSTANT_LOD", true)
+
+static bool
+agx3_m5_exact_lod_immediate(float value, bool explicit_lod, uint8_t *immediate)
+{
+   if (!isfinite(value) || !agx_minifloat_exact(value) ||
+       value * 64.0f < -2048.0f || value * 64.0f > 2047.0f ||
+       (explicit_lod && value < 0.0f))
+      return false;
+
+   const uint8_t imm = agx_minifloat_encode(value);
+   const float decoded = agx_minifloat_decode(imm);
+   const int encoded = (int)(decoded * 64.0f);
+   /* Reject signed zero or fractions lost by the hardware immediate. */
+   if (fui(decoded) != fui(value) ||
+       fui((float)encoded / 64.0f) != fui(value))
+      return false;
+
+   *immediate = imm;
+   return true;
+}
+
+/* Recover an exactly representable immediate before live-parameter
+ * legalization gives a constant a register lifetime. */
+static void
+agx3_fold_m5_constant_lods(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->stage != MESA_SHADER_FRAGMENT ||
+       !debug_get_option_m5_fold_constant_lod())
+      return;
+
+   agx_instr **defs = calloc(ctx->alloc, sizeof(*defs));
+   if (!defs)
+      return;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         defs[I->dest[d].value] = I;
+   }
+
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_TEXTURE_SAMPLE || I->nr_srcs != 6 ||
+          (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_3D) ||
+          I->shadow || I->offset || I->sparse || I->query_lod ||
+          I->gather != AGX_GATHER_NONE ||
+          (I->lod_mode != AGX_LOD_MODE_LOD_MIN &&
+           I->lod_mode != AGX_LOD_MODE_AUTO_LOD_BIAS))
+         continue;
+
+      agx_index lod = I->src[1];
+      if (lod.type != AGX_INDEX_NORMAL || lod.abs || lod.neg || lod.memory ||
+          agx_channels(lod) != 1)
+         continue;
+      agx_instr *def = defs[lod.value];
+      if (I->memory_is_packed) {
+         if (!def || def->op != AGX_OPCODE_PACK_SAMPLER_LOD_AGX3 ||
+             def->nr_srcs != 1 || lod.size != AGX_SIZE_32)
+            continue;
+         lod = def->src[0];
+         if (lod.type != AGX_INDEX_NORMAL || lod.abs || lod.neg || lod.memory ||
+             agx_channels(lod) != 1)
+            continue;
+         def = defs[lod.value];
+      }
+      if (!def || def->op != AGX_OPCODE_MOV_IMM ||
+          lod.size != AGX_SIZE_16 || def->nr_dests != 1 ||
+          def->dest[0].size != AGX_SIZE_16 || def->imm > UINT16_MAX)
+         continue;
+
+      uint8_t immediate;
+      if (!agx3_m5_exact_lod_immediate(_mesa_half_to_float(def->imm),
+                                      I->lod_mode == AGX_LOD_MODE_LOD_MIN,
+                                      &immediate))
+         continue;
+
+      I->src[1] = agx_immediate(immediate);
+      I->memory_is_packed = false;
+   }
+   free(defs);
+}
+
+static void
+agx3_lower_m5_live_scalar_lods(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C)
+      return;
+
+   bool needed = false;
+   agx_foreach_instr_global(ctx, I) {
+      needed |= I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->nr_srcs == 6 &&
+                !I->memory_is_packed &&
+                (I->dim == AGX_DIM_2D || I->dim == AGX_DIM_3D) &&
+                (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+                 I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+                I->src[1].type == AGX_INDEX_NORMAL &&
+                I->src[1].size == AGX_SIZE_16;
+   }
+   if (!needed)
+      return;
+
+   const unsigned alloc = ctx->alloc;
+   unsigned *uses = calloc(alloc, sizeof(*uses));
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_src(I, s)
+         uses[I->src[s].value]++;
+   }
+
+   agx_index *packed = NULL;
+   agx_block **owner = NULL;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_TEXTURE_SAMPLE || I->nr_srcs != 6 ||
+          I->memory_is_packed ||
+          (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_3D) ||
+          (I->lod_mode != AGX_LOD_MODE_LOD_MIN &&
+           I->lod_mode != AGX_LOD_MODE_AUTO_LOD_BIAS))
+         continue;
+
+      const agx_index lod = I->src[1];
+      if (lod.type != AGX_INDEX_NORMAL || lod.size != AGX_SIZE_16 ||
+          agx_channels(lod) != 1 ||
+          (!v_block->cf_divergent && uses[lod.value] == 1))
+         continue;
+
+      if (!owner) {
+         packed = calloc(alloc, sizeof(*packed));
+         owner = calloc(alloc, sizeof(*owner));
+      }
+
+      /* Share identical pure producers within this block. Sibling blocks
+       * cannot share a producer inserted at a use without dominance proof. */
+      if (owner[lod.value] != v_block) {
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         packed[lod.value] = agx_temp(ctx, AGX_SIZE_32);
+         agx_pack_sampler_lod_agx3_to(&b, packed[lod.value], lod);
+         owner[lod.value] = v_block;
+      }
+      I->src[1] = packed[lod.value];
+      I->memory_is_packed = true;
+   }
+   free(owner);
+   free(packed);
+   free(uses);
+}
+
+/* Validate the narrow native M5 FALU forms before retaining uniform
+ * operands. The encoder owns the exact source/modifier domain; dummy GPRs
+ * suffice here because allocation has not assigned their indices yet. */
+static bool
+m5_native_float_uniform(const agx_context *ctx, const agx_instr *I)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->is_preamble || I->nr_dests != 1 ||
+       I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+       (I->op != AGX_OPCODE_FADD && I->op != AGX_OPCODE_FMUL &&
+        I->op != AGX_OPCODE_FFMA))
+      return false;
+   const bool fma = I->op == AGX_OPCODE_FFMA;
+   if (I->nr_srcs != (fma ? 3 : 2))
+      return false;
+   struct agx3_uniform_float_src src[3] = {0};
+   agx_foreach_src(I, s) {
+      const agx_index v = I->src[s];
+      const bool uniform = v.type == AGX_INDEX_UNIFORM;
+      if (v.memory || agx_channels(v) != 1 ||
+          (v.type == AGX_INDEX_IMMEDIATE ? v.value > 255
+           : v.type != AGX_INDEX_NORMAL && !uniform) ||
+          (v.type != AGX_INDEX_IMMEDIATE && v.size != AGX_SIZE_32 &&
+           !(uniform && v.size == AGX_SIZE_16)))
+         return false;
+      src[s] = (struct agx3_uniform_float_src){
+         .kind = uniform ? AGX3_FLOAT_UNIFORM
+                 : v.type == AGX_INDEX_IMMEDIATE ? AGX3_FLOAT_IMMEDIATE
+                                                 : AGX3_FLOAT_REGISTER,
+         .value = v.type == AGX_INDEX_NORMAL ? 0 : v.value,
+         .abs = v.abs, .neg = v.neg,
+         .half = uniform && v.size == AGX_SIZE_16,
+      };
+   }
+   uint8_t out[16], length;
+   return agx3_uniform_float_encode(AGX_ISA_ENCODING_AGX3C,
+      fma ? AGX3_UNIFORM_FMA
+          : I->op == AGX_OPCODE_FMUL ? AGX3_UNIFORM_FMUL : AGX3_UNIFORM_FADD,
+      0, src, I->saturate, false, 0, out, &length);
+}
+
+/*
+ * Every native M5 float form with a uniform operand also has a GPR operand,
+ * so an operation on uniforms and immediates alone has to copy a uniform. One
+ * copy suffices whenever the rest is then a native form: u0 - u1 is R + -U
+ * after copying u0, whereas copying u1 would leave U - R, which has none.
+ * Mark the uniforms that can stay when one is copied.
+ */
+static bool
+m5_float_uniforms_to_keep(const agx_context *ctx, const agx_instr *I,
+                          bool keep[3])
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->is_preamble || I->nr_srcs > 3 ||
+       (I->op != AGX_OPCODE_FADD && I->op != AGX_OPCODE_FMUL &&
+        I->op != AGX_OPCODE_FFMA))
+      return false;
+
+   unsigned uniforms = 0;
+   agx_foreach_src(I, s)
+      uniforms += I->src[s].type == AGX_INDEX_UNIFORM;
+   if (uniforms < 2)
+      return false;
+
+   agx_foreach_src(I, s) {
+      if (I->src[s].type != AGX_INDEX_UNIFORM)
+         continue;
+
+      /* The copy is a register of the uniform's size. The encoder query
+       * looks at a register's size and modifiers, not at its index. */
+      agx_instr candidate = *I;
+      agx_index sources[3];
+      memcpy(sources, I->src, I->nr_srcs * sizeof(*sources));
+      candidate.src = sources;
+      sources[s] =
+         agx_replace_index(sources[s], agx_get_index(0, I->src[s].size));
+
+      if (m5_native_float_uniform(ctx, &candidate)) {
+         agx_foreach_src(I, t)
+            keep[t] = t != s && I->src[t].type == AGX_INDEX_UNIFORM;
+         return true;
+      }
+   }
+
+   return false;
+}
+
+bool
+agx3_m5_float_accepts_uniform(const agx_context *ctx, const agx_instr *I,
+                              unsigned s, unsigned uniform,
+                              enum agx_size size)
+{
+   if (s >= I->nr_srcs || I->nr_srcs > 3 || uniform >= 512)
+      return false;
+   agx_instr candidate = *I;
+   agx_index sources[3];
+   memcpy(sources, I->src, I->nr_srcs * sizeof(*sources));
+   candidate.src = sources;
+   sources[s] = agx_replace_index(sources[s], agx_uniform(uniform, size));
+   return m5_native_float_uniform(ctx, &candidate);
+}
+
+/*
+ * M5 adds a uniform to a register with the uniform optionally negated, not
+ * the register: u - r has no native form and would copy u into a GPR. When
+ * every use of u - r is a float operation reading it as a plain register
+ * operand, compute r - u instead (a native R + -U) and negate it at each use,
+ * only when NIR permits a zero result of either sign. Equal finite operands
+ * otherwise change from +0 to -0. Minecraft's fog mixes the fragment colour
+ * toward the fog colour as (fog - c) * t + c, three times per fragment.
+ */
+static bool
+agx3_m5_negate_uniform_difference(agx_context *ctx, agx_instr *I)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C || ctx->is_preamble ||
+       I->op != AGX_OPCODE_FADD || I->nr_dests != 1 || I->nr_srcs != 2 ||
+       I->saturate || !I->no_signed_zero ||
+       I->dest[0].type != AGX_INDEX_NORMAL || I->dest[0].size != AGX_SIZE_32)
+      return false;
+   unsigned u = I->src[0].type == AGX_INDEX_UNIFORM ? 0 : 1;
+   const agx_index uni = I->src[u], reg = I->src[!u];
+   if (uni.type != AGX_INDEX_UNIFORM || uni.neg || uni.abs ||
+       reg.type != AGX_INDEX_NORMAL || !reg.neg || reg.abs)
+      return false;
+
+   const unsigned value = I->dest[0].value;
+   agx_foreach_instr_global(ctx, J) {
+      agx_foreach_ssa_src(J, s) {
+         if (J->src[s].value != value)
+            continue;
+         if ((J->op != AGX_OPCODE_FADD && J->op != AGX_OPCODE_FMUL &&
+              J->op != AGX_OPCODE_FFMA) || J->src[s].abs)
+            return false;
+      }
+   }
+
+   agx_index r = reg, n = uni;
+   r.neg = false;
+   n.neg = true;
+   I->src[0] = r;
+   I->src[1] = n;
+   agx_foreach_instr_global(ctx, J) {
+      agx_foreach_ssa_src(J, s) {
+         if (J->src[s].value == value)
+            J->src[s].neg = !J->src[s].neg;
+      }
+   }
+   return true;
+}
+
+/* Native M5 bounded-buffer code uses uniform compare/select operands.
+ * Query the encoder's full32 contract before retaining any of them. */
+static bool
+m5_native_isel_uniform(const agx_context *ctx, const agx_instr *I)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->is_preamble || I->op != AGX_OPCODE_ICMPSEL || I->saturate ||
+       I->invert_cond || I->nr_dests != 1 ||
+       I->nr_srcs != 4 || I->dest[0].size != AGX_SIZE_32 ||
+       agx_channels(I->dest[0]) != 1 || I->src[0].type != AGX_INDEX_NORMAL)
+      return false;
+   bool uniform = false;
+   for (unsigned i = 0; i < 4; ++i) {
+      const agx_index x = I->src[i];
+      uniform |= x.type == AGX_INDEX_UNIFORM;
+      if (x.memory || x.abs || x.neg || agx_channels(x) != 1 ||
+          (x.type != AGX_INDEX_IMMEDIATE && x.size != AGX_SIZE_32) ||
+          (x.type != AGX_INDEX_NORMAL && x.type != AGX_INDEX_UNIFORM &&
+           x.type != AGX_INDEX_IMMEDIATE))
+         return false;
+   }
+   if (!uniform)
+      return false;
+   struct agx3_isel_desc d = {
+      .dest = 0, .cmp0 = 0,
+      .cmp1 = I->src[1].type == AGX_INDEX_NORMAL ? 0 : I->src[1].value,
+      .cmp1_immediate = I->src[1].type == AGX_INDEX_IMMEDIATE,
+      .cmp1_uniform = I->src[1].type == AGX_INDEX_UNIFORM,
+      .cond = I->icond == AGX_ICOND_UEQ ? AGX3_ISEL_ICOND_EQ :
+                                       (enum agx3_isel_icond)I->icond,
+      .explicit_hints = true,
+   };
+   enum agx3_isel_operand *kind[2] = {&d.true_kind, &d.false_kind};
+   uint16_t *value[2] = {&d.sel_true, &d.sel_false};
+   for (unsigned i = 0; i < 2; ++i) {
+      const agx_index x = I->src[2 + i];
+      *kind[i] = x.type == AGX_INDEX_UNIFORM ? AGX3_ISEL_UNIFORM :
+                 x.type == AGX_INDEX_IMMEDIATE ? AGX3_ISEL_IMMEDIATE :
+                                                AGX3_ISEL_REGISTER;
+      *value[i] = x.type == AGX_INDEX_NORMAL ? 0 : x.value;
+   }
+   uint8_t bytes[AGX3_ISEL_MAX_LENGTH], length;
+   return agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length);
+}
+
 void
 agx_lower_uniform_sources(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
+      agx3_lower_m5_modified_fma_immediates(ctx, I);
+
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
          I = agx3_move_uniform_negation(ctx, I);
 
       agx_instr *at = I;
       struct agx3_uniform_integer_desc integer_desc;
       const bool native_integer =
-         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-         agx3_uniform_integer_instruction(I, false, &integer_desc);
+         agx3_uniform_integer_for_encoding(ctx->key->dev.encoding,
+                                           I, false, &integer_desc);
+      if (!m5_native_float_uniform(ctx, I))
+         agx3_m5_negate_uniform_difference(ctx, I);
+      const bool native_m5_float = m5_native_float_uniform(ctx, I);
+      bool keep_m5_float_uniform[3] = {false};
+      if (!native_m5_float)
+         m5_float_uniforms_to_keep(ctx, I, keep_m5_float_uniform);
       bool copy_float_uniforms = false;
       unsigned first_uniform = UINT_MAX;
       const bool half_float = I->op == AGX_OPCODE_HADD ||
@@ -333,6 +753,16 @@ agx_lower_uniform_sources(agx_context *ctx)
        * GPR per use; prefer the selects when both kinds are present, since
        * a uniform comparand is only witnessed beside register selects. */
       bool keep_isel_uniform[4] = {false};
+      unsigned m5_fsel_cond;
+      bool m5_fsel_swap;
+      const bool m5_fsel_uniform =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+         !ctx->is_preamble &&
+         agx3_m5_fcmpsel_uniform_cmp0(I, &m5_fsel_cond, &m5_fsel_swap);
+      if (m5_native_isel_uniform(ctx, I)) {
+         for (unsigned i = 0; i < 4; ++i)
+            keep_isel_uniform[i] = I->src[i].type == AGX_INDEX_UNIFORM;
+      }
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           !ctx->is_preamble &&
           I->op == AGX_OPCODE_ICMPSEL && I->nr_dests == 1 &&
@@ -365,6 +795,22 @@ agx_lower_uniform_sources(agx_context *ctx)
       const bool copy_tex_uniform =
          I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
          agx3_tex_uniform_pair_unwitnessed(ctx, I, I->src[3], I->src[4]);
+
+      /* M5 fragment SMP reads both its texture and its sampler handle from
+       * aligned 64-bit uniforms (f97/f103=3 and f126/f132=3) when Metal
+       * passes them through an argument buffer; the native
+       * G17G compiler compiles texture2d::sample, level and bias that way.
+       * Only that pair is witnessed: keep both or copy both. */
+      bool m5_tex_uniform_pair =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+         ctx->stage == MESA_SHADER_FRAGMENT && !ctx->is_preamble &&
+         I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->nr_srcs >= 5;
+      for (unsigned j = 3; m5_tex_uniform_pair && j < 5; ++j) {
+         const agx_index x = I->src[j];
+         m5_tex_uniform_pair = x.type == AGX_INDEX_UNIFORM &&
+            x.size == AGX_SIZE_64 && !(x.value & 3) && x.value <= 252 &&
+            !x.abs && !x.neg && !x.memory;
+      }
 
       /* Exports end the block and admit no instruction between them; place
        * their materialized sources before the first export of the run. */
@@ -432,7 +878,10 @@ agx_lower_uniform_sources(agx_context *ctx)
           * in place instead of copying it into a GPR first; the packer
           * emits agx3_cf_icmp_uniform_imm() for either operand order. */
          const bool uniform_imm_compare =
-            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+             (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+              ctx->stage == MESA_SHADER_COMPUTE && !ctx->is_preamble &&
+              debug_get_bool_option("ASAHI_M5_UNIFORM_BRANCH", true))) &&
             is_int_compare && I->nr_srcs == 2 &&
             I->src[s].type == AGX_INDEX_UNIFORM &&
             I->src[s].size == AGX_SIZE_32 && !(I->src[s].value & 1) &&
@@ -445,7 +894,9 @@ agx_lower_uniform_sources(agx_context *ctx)
             is_int_compare && !uniform_imm_compare &&
             (I->src[0].type != AGX_INDEX_NORMAL ||
              I->src[0].size != AGX_SIZE_32 || I->src[0].abs ||
-             I->src[0].neg);
+             I->src[0].neg ||
+             (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+              (ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble)));
          const bool copy_tex = copy_tex_uniform && (s == 3 || s == 4);
          /* A G17P select compares a uniform (a half, or an aligned word)
           * against an immediate zero directly, as Apple does for constant
@@ -528,8 +979,11 @@ agx_lower_uniform_sources(agx_context *ctx)
              (s == first_uniform ||
               copy_minmax || copy_float_uniforms || copy_float_modifier ||
               copy_compare_uniform || copy_tex ||
-              !(native_integer || uniform_imm_compare ||
+              !(native_integer || native_m5_float || uniform_imm_compare ||
+                (s < 3 && keep_m5_float_uniform[s]) ||
                 (s < 4 && keep_isel_uniform[s]) ||
+                (m5_tex_uniform_pair && (s == 3 || s == 4)) ||
+                (m5_fsel_uniform && s == 0) ||
                 agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];
@@ -572,4 +1026,9 @@ agx_lower_uniform_sources(agx_context *ctx)
          }
       }
    }
+
+   agx3_fold_m5_constant_lods(ctx);
+
+   /* Uniform materialization can also create a scalar LOD SSA source. */
+   agx3_lower_m5_live_scalar_lods(ctx);
 }

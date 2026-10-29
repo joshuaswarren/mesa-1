@@ -301,3 +301,164 @@ libagx_fill_uint4(global uint4 *address, uint layer_stride_uint4, uint a,
    uint offs = cl_global_id.x + cl_global_id.y * layer_stride_uint4;
    address[offs] = (uint4)(a, b, c, d);
 }
+
+/*
+ * Native M5 acceleration structures (vulkan/bvh/agx3_envelope.comp). An
+ * image starts at a 1KiB-aligned base. Slot 0 holds the root and the header
+ * starts at byte 64: byte 72 is the image size from the base, 112 the
+ * descriptor offset, 128 the instance pointer-table offset, 144 the absolute
+ * base address and 176 the device-wide structure ID. Driver-only empty
+ * metadata has a zero size and occupies bytes 0..191. Every other offset is
+ * relative to the base and instance records reference bottom-level images by
+ * address, so a word copy that rewrites the base and ID words relocates an
+ * image.
+ *
+ * The serialized form is the Vulkan header (driver UUID twice, serialized
+ * size, deserialized size, handle count), one bottom-level handle per
+ * instance in instance-index order, then the image.
+ */
+#define AGX3_AS_EMPTY_BYTES      192
+#define AGX3_AS_SERIAL_WORDS     7
+#define AGX3_AS_SLACK            1023
+#define AGX3_AS_INSTANCE_RECORD  26
+
+static uint64_t
+agx3_as_bytes(global uint64_t *image)
+{
+   return image[9] ? image[9] : AGX3_AS_EMPTY_BYTES;
+}
+
+static uint32_t
+agx3_as_instance_slots(global uint64_t *image)
+{
+   global uint32_t *words = (global uint32_t *)image;
+   if (!image[9] || (words[16] >> 24) != 0x83)
+      return 0;
+   return (image[14] - image[16]) / 16;
+}
+
+/* Instance pointer-table entries are written only for encoded instances, so
+ * an entry counts only when it names a record carrying its own index. */
+static global uint64_t *
+agx3_as_instance_record(global uint64_t *image, uint32_t index)
+{
+   global uint64_t *table =
+      (global uint64_t *)((global uint8_t *)image + image[16]);
+   uint64_t offset = table[2 * index];
+   uint64_t bytes = agx3_as_bytes(image);
+   if (table[2 * index + 1] != 1 || offset < 4 || offset - 4 > bytes ||
+       bytes - (offset - 4) < 128 || ((offset - 4) & 63))
+      return NULL;
+
+   global uint64_t *record =
+      (global uint64_t *)((global uint8_t *)image + offset - 4);
+   global uint32_t *words = (global uint32_t *)record;
+   if (words[0] != AGX3_AS_INSTANCE_RECORD || words[25] != index)
+      return NULL;
+   return record;
+}
+
+static void
+agx3_as_copy_words(global uint64_t *dst, global uint64_t *src, uint32_t chunk,
+                   uint64_t bytes, uint32_t dst_id, bool relocate)
+{
+   for (uint32_t w = chunk * 2; w < chunk * 2 + 2; ++w) {
+      if ((uint64_t)w * 8 >= bytes)
+         return;
+      uint64_t value = src[w];
+      if (relocate && w == 18)
+         value = (uint64_t)dst;
+      else if (relocate && w == 22)
+         value = (value & 0xffffffff00000000ul) | dst_id;
+      dst[w] = value;
+   }
+}
+
+KERNEL(32)
+libagx_agx3_as_copy(global uint64_t *dst, global uint64_t *src,
+                    uint32_t dst_id)
+{
+   agx3_as_copy_words(dst, src, cl_global_id.x, agx3_as_bytes(src), dst_id,
+                      src[9] != 0);
+}
+
+KERNEL(32)
+libagx_agx3_as_serialize(global uint64_t *dst, global uint64_t *src,
+                         uint32_t uuid0, uint32_t uuid1, uint32_t uuid2,
+                         uint32_t uuid3)
+{
+   uint32_t i = cl_global_id.x;
+   uint64_t bytes = agx3_as_bytes(src);
+   uint32_t handles = agx3_as_instance_slots(src);
+
+   if (i == 0) {
+      dst[0] = dst[2] = uuid0 | ((uint64_t)uuid1 << 32);
+      dst[1] = dst[3] = uuid2 | ((uint64_t)uuid3 << 32);
+      dst[4] = AGX3_AS_SERIAL_WORDS * 8 + (uint64_t)handles * 8 + bytes;
+      dst[5] = bytes + AGX3_AS_SLACK;
+      dst[6] = handles;
+   }
+
+   if (i < handles) {
+      global uint64_t *record = agx3_as_instance_record(src, i);
+      dst[AGX3_AS_SERIAL_WORDS + i] = record ? record[11] : 0;
+   }
+
+   agx3_as_copy_words(dst + AGX3_AS_SERIAL_WORDS + handles, src, i, bytes, 0,
+                      false);
+}
+
+KERNEL(32)
+libagx_agx3_as_deserialize(global uint64_t *dst, global uint64_t *src,
+                           uint32_t dst_id)
+{
+   uint64_t handles = src[6];
+   global uint64_t *image = src + AGX3_AS_SERIAL_WORDS + handles;
+   uint64_t bytes = src[4] - AGX3_AS_SERIAL_WORDS * 8 - handles * 8;
+   agx3_as_copy_words(dst, image, cl_global_id.x, bytes, dst_id,
+                      image[9] != 0);
+}
+
+/* After deserialization, point each instance at the bottom-level handle the
+ * application left in the serialized header. IDs come from the driver's
+ * created-object table: replacement BLAS need not have been built yet. Bounds
+ * remain those of the serialized geometry, which must be compatible. */
+KERNEL(32)
+libagx_agx3_as_relink(global uint64_t *dst, global uint64_t *src,
+                      global uint64_t *table, uint32_t table_count)
+{
+   uint32_t i = cl_global_id.x;
+   if (i >= src[6] || i >= agx3_as_instance_slots(dst))
+      return;
+
+   global uint64_t *record = agx3_as_instance_record(dst, i);
+   uint64_t blas = src[AGX3_AS_SERIAL_WORDS + i];
+   if (!record)
+      return;
+
+   record[11] = blas;
+   if (blas) {
+      global uint32_t *words = (global uint32_t *)record;
+      for (uint32_t id = 1; id <= table_count; ++id) {
+         if (table[2 * id] == blas) {
+            words[1] = id;
+            break;
+         }
+      }
+   }
+}
+
+/* kind: 0 compacted/structure size, 1 serialization size, 2 pointer count. */
+KERNEL(1)
+libagx_agx3_as_property(global uint64_t *image, global uint64_t *report,
+                        uint32_t kind)
+{
+   uint64_t bytes = agx3_as_bytes(image);
+   uint64_t handles = agx3_as_instance_slots(image);
+   if (kind == 2)
+      *report = handles;
+   else if (kind == 1)
+      *report = AGX3_AS_SERIAL_WORDS * 8 + handles * 8 + bytes;
+   else
+      *report = bytes + AGX3_AS_SLACK;
+}

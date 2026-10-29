@@ -55,6 +55,8 @@ libasahi_lib_files = files(
   'agx_ppp_hal200_raster_core.h',
   'agx_ppp_hal300_depth_bias_scissor_core.c',
   'agx_ppp_hal300_depth_bias_scissor_core.h',
+  'agx_ppp_hal300_graphics_core.c',
+  'agx_ppp_hal300_graphics_core.h',
   'agx_ppp_hal300_depth_stencil_core.c',
   'agx_ppp_hal300_depth_stencil_core.h',
   'agx_ppp_decode_core.c',
@@ -65,6 +67,8 @@ libasahi_lib_files = files(
   'agx_ppp_w_clamp_cull2_core.h',
   'agx_pbe_agx3_core.c',
   'agx_pbe_agx3_core.h',
+  'agx_scs_layout.c',
+  'agx_scs_layout.h',
   'agx_scratch.c',
   'agx_texture_side_entry.c',
   'agx_texture_side_entry.h',
@@ -110,6 +114,8 @@ libasahi_decode_files = files(
   'agx_ppp_decode_core.c',
   'agx_ppp_hal200_graphics_core.c',
   'agx_ppp_hal300_depth_bias_scissor_core.c',
+  'agx_ppp_hal300_graphics_core.c',
+  'agx_ppp_hal300_graphics_core.h',
   'agx_ppp_hal300_depth_stencil_core.c',
   'agx_ppp_viewport_payload_core.c',
   'agx_ppp_w_clamp_cull2_core.c',
@@ -245,6 +251,9 @@ if with_tests
         'tests/test-packing.cpp',
         'tests/test-tilebuffer.cpp',
         'tests/test-g17p-msaa-epilog.cpp',
+        'tests/test-m5-depth-export.cpp',
+        'tests/test-primitive-varyings.cpp',
+        '../vulkan/hk_nir_widen_16bit_varyings.c',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
@@ -252,7 +261,8 @@ if with_tests
         idep_gtest, idep_agx_pack, idep_mesautil, idep_nir,
       ],
       include_directories: [inc_asahi],
-      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout,
+                   libagx3c_disasm],
     ),
     suite : ['asahi'],
     protocol : 'gtest',
@@ -287,12 +297,72 @@ if with_tests
     c_args : ['-ffp-contract=off'],
     include_directories : include_directories('.'),
     dependencies : [dep_m]), suite : ['asahi'])
-  test('asahi-rt-blas-gen3', executable('asahi-rt-blas-gen3',
-    'tests/test-rt-blas-gen3.c',
-    c_args : ['-ffp-contract=off'],
-    include_directories : include_directories('.')), suite : ['asahi'])
-  test('asahi-rt-envelope', executable('asahi-rt-envelope',
+  test('agx3_m5_programs', executable('agx3_m5_programs',
+    '../compiler/test/test-agx3-m5-program.c',
+    include_directories: [inc_include, inc_src, inc_asahi],
+    dependencies: [idep_mesautil, idep_nir],
+    link_with: [libasahi_compiler, libasahi_lib]), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx_rt_envelope', executable('agx_rt_envelope',
     'tests/test-rt-envelope.c',
-    c_args : ['-ffp-contract=off'],
-    include_directories : include_directories('.')), suite : ['asahi'])
+    c_args: ['-ffp-contract=off'],
+    include_directories: include_directories('.')), suite: ['asahi'])
+  test('agx_rt_blas_gen3', executable('agx_rt_blas_gen3',
+    'tests/test-rt-blas-gen3.c',
+    include_directories: include_directories('.')), suite: ['asahi'])
+  test('agx_rt_bvh', executable('agx_rt_bvh',
+    'tests/test-rt-bvh.c',
+    include_directories: include_directories('.')), suite: ['asahi'])
+  test('agx_m5_layout', executable('agx_m5_layout',
+    ['tests/test-agx-m5-layout.c', 'agx3_code_container_core.c'],
+    include_directories: include_directories('.')), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx3_m5_instructions', executable('agx3_m5_instructions',
+    '../compiler/test/test-agx3-m5-instructions.c',
+    include_directories: [inc_include, inc_src, inc_asahi],
+    dependencies: [idep_mesautil, idep_nir, idep_agx_opcodes_h],
+    link_with: [libasahi_compiler, libasahi_lib]), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx_scs_nir', executable('agx_scs_nir',
+    '../compiler/test/test-scs-nir.c',
+    c_args: ['-UNDEBUG'],
+    include_directories: [inc_include, inc_src, inc_asahi],
+    dependencies: [idep_mesautil, idep_nir, idep_agx_opcodes_h],
+    link_with: [libasahi_compiler, libasahi_lib]), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx3-m5-mesh-program', executable('agx3-m5-mesh-program',
+    '../compiler/test/test-native-mesh-program.c',
+    include_directories: [inc_include, inc_src, inc_asahi],
+    dependencies: [idep_mesautil, idep_nir, idep_agx_opcodes_h],
+    link_with: [libasahi_compiler, libasahi_lib]), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx_scs_query', executable('agx_scs_query',
+    '../compiler/test/test-scs-query.c',
+    c_args: ['-UNDEBUG'],
+    include_directories: [inc_include, inc_src, inc_asahi],
+    dependencies: [idep_mesautil, idep_nir, idep_agx_opcodes_h],
+    link_with: [libasahi_compiler, libasahi_lib]), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx_scs_layout', executable('agx_scs_layout',
+    ['tests/test-scs-layout.c', 'agx_scs_layout.c'],
+    c_args: ['-UNDEBUG'],
+    include_directories: include_directories('.')), suite: ['asahi'])
+endif
+
+if with_tests
+  test('agx_rt_ift', executable('agx_rt_ift', 'tests/test-rt-ift.c',
+    c_args: ['-UNDEBUG'],
+    include_directories: include_directories('.')), suite: ['asahi'])
 endif

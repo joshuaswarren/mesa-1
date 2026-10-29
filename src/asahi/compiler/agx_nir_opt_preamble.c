@@ -61,6 +61,23 @@ def_size_g17p(nir_def *def, unsigned *size, unsigned *align,
    *size = *align = 4;
 }
 
+/* The AGX3C constant-program export is a 32-bit uniform COPY: a lone half
+ * is published as one pair-aligned copy whose upper half is padding (Apple
+ * widens scalar half preamble results the same way), and no half-width
+ * copy-to-uniform form is witnessed. Give a scalar 16-bit value its own
+ * aligned pair so the export never lands on an odd half. */
+static void
+def_size_agx3c(nir_def *def, unsigned *size, unsigned *align,
+               nir_preamble_class *class)
+{
+   def_size_g17p(def, size, align, class);
+   if (*class == nir_preamble_class_general && def->num_components == 1 &&
+       def->bit_size <= 16) {
+      *size = 2;
+      *align = 2;
+   }
+}
+
 static bool
 all_uses_float(nir_def *def)
 {
@@ -361,6 +378,17 @@ rewrite_cost_g17p(nir_def *def, const void *data)
    return rewrite_cost_impl(def, true);
 }
 
+/* AGX3C publishes constant-program results with 32-bit uniform copies only
+ * (agx3_pack_binary), so a narrow vector has no export form there: keep it
+ * out of the preamble and let its scalar or 32-bit uses be hoisted instead. */
+static float
+rewrite_cost_agx3c(nir_def *def, const void *data)
+{
+   if (def->bit_size < 32 && def->num_components > 1)
+      return 1e30f;
+   return rewrite_cost_impl(def, true);
+}
+
 static bool
 avoid_instr(const nir_instr *instr, const void *data)
 {
@@ -622,14 +650,21 @@ agx_nir_export_select_flags_as_halves(nir_shader *nir)
 }
 
 bool
-agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p)
+agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p,
+                     bool agx3c)
 {
    bool progress = false;
    nir_opt_preamble_options options = preamble_options;
+   /* Native M5 compiler specimens leave texture operations in main even
+    * for uniform coordinates. Keep their dependent expressions there too;
+    * invariant ALU and buffer loads remain eligible for the CProg. */
+   options.no_textures = agx3c;
    if (g17p) {
-      options.def_size = def_size_g17p;
-      options.instr_cost_cb = instr_cost_g17p;
-      options.rewrite_cost_cb = rewrite_cost_g17p;
+      /* The G17P uniform fabs cost is not an M5 witness; keep the
+       * generic instruction cost there. */
+      options.def_size = agx3c ? def_size_agx3c : def_size_g17p;
+      options.instr_cost_cb = agx3c ? instr_cost : instr_cost_g17p;
+      options.rewrite_cost_cb = agx3c ? rewrite_cost_agx3c : rewrite_cost_g17p;
    }
    NIR_PASS(progress, nir, nir_opt_preamble, &options, sizes);
    if (progress && g17p)

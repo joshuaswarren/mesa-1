@@ -21,10 +21,17 @@ struct hk_query_pool {
    struct agx_bo *bo;
    void *bo_map;
 
-   /* For timestamp queries, the kernel-assigned timestamp buffer handle. Unused
-    * for all other query types
+   /* For timestamp queries, the kernel-assigned timestamp buffer handle. On
+    * the native AGX3 path, occlusion pools bind their availability slots the
+    * same way, so the render that ends a query can mark it available through
+    * its own retirement timestamp (0 if binding failed). Unused for all other
+    * query types.
     */
    uint32_t handle;
+
+   /* log2 of the availability slot size in 32-bit words: 1 for native AGX3
+    * occlusion pools (64-bit timestamp slots), 0 otherwise. */
+   uint8_t avail_shift;
 
    unsigned oq_queries;
 

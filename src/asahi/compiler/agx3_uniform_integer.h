@@ -8,6 +8,8 @@
 /* Matches the AGX3B_NUM_REGS allocation limit in agx_compiler.h. Encodable
  * eight-bit register indices above this limit are not allocatable GPRs. */
 #define AGX3_UNIFORM_INTEGER_GPRS 192
+/* M5's allocator uses halves 0..251; the operand encoding is unchanged. */
+#define AGX3_UNIFORM_INTEGER_M5_GPRS 252
 enum agx3_uniform_integer_op {
    AGX3_UI_ADD,
    AGX3_UI_SUB,

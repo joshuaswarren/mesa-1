@@ -237,7 +237,7 @@ agx_ioto_constant_program_emit(
          return false;
 
       if (program->absolute_branch) {
-         if (!agx_chip_native_preamble(chip))
+         if (!agx_chip_native_preamble(chip) && !agx_chip_g17_m5(chip))
             return false;
          desc.external_va = program->code_va;
       } else {
@@ -264,7 +264,11 @@ agx_ioto_constant_program_emit(
        * cloneProgramInfo changes the code VA without subtracting a B PC.
        * Witnesses: 0x218780f48/f4c, 0x218737b8c, 0x2188416d8/e0/e4 in
        * AGXMetalG17P UUID 4A1B0ACE-B7E3-3B5B-A594-84289B937288. */
-      staged.bytes[staged.branch_offset + 3] |= 1;
+      if (!agx_chip_g17_m5(chip))
+         staged.bytes[staged.branch_offset + 3] |= 1;
+      else
+         /* Captured G17S BLAS loader+512: B_EP1 f11 is bit61. */
+         staged.bytes[staged.branch_offset + 7] |= 0x20;
    }
 
    *output = staged;

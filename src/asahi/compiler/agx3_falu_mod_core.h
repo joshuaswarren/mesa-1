@@ -121,6 +121,30 @@ bool agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                               uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
                               uint8_t *len);
 
+/* Native add/multiply with a single rounding to a scalar half result. */
+bool agx3_falu_add_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+                            const struct agx3_falu_mods *mods,
+                            const struct agx3_falu_runtime *runtime,
+                            uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+bool agx3_falu_mul_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+                            const struct agx3_falu_mods *mods,
+                            const struct agx3_falu_runtime *runtime,
+                            uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+
+/* Native F32 arithmetic with one final rounding directly to a half result. */
+bool agx3_falu_fma_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+                            uint16_t addend, const struct agx3_falu_mods *m,
+                            const struct agx3_falu_runtime *runtime,
+                            uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+
+/* C FMA32 also consumes half GPRs with an immediate addend. Preserve the
+ * independent widths, modifiers, lifetime and saturation in one instruction. */
+bool agx3_falu_fma_addend_imm_width_mod(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src0, uint16_t src1,
+   uint8_t immediate, const struct agx3_falu_mods *m,
+   const struct agx3_falu_runtime *runtime,
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+
 bool agx3_falu_fma_addend_imm_mod(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src0, uint16_t src1,
    uint8_t immediate, bool src0_abs, bool src0_neg, bool src1_abs,
@@ -132,6 +156,11 @@ bool agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t src, uint8_t multiplier, uint8_t addend,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+
+bool agx3_falu_fma_two_imm_narrow_m5(
+   uint16_t dest, uint16_t src, uint8_t multiplier, uint8_t addend,
+   bool src_abs, bool saturate, const struct agx3_falu_runtime *runtime,
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
 
 /*
  * FMA whose MULTIPLIER is a minifloat immediate while the multiplicand and the
@@ -168,6 +197,27 @@ bool agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
                               const struct agx3_falu_runtime *runtime,
                               uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
                               uint8_t *len);
+/* The same G17G form narrowing its result into a scalar half (f10=1). */
+bool agx3_falu_fma_mul_imm_narrow_m5(uint16_t dest, uint8_t multiplier,
+                                     uint16_t src1, uint16_t addend,
+                                     const struct agx3_falu_mods *m,
+                                     const struct agx3_falu_runtime *runtime,
+                                     uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
+                                     uint8_t *len);
+
+bool agx3_falu_add_imm_m5(uint16_t dest, uint16_t src, uint8_t immediate,
+                         bool src_abs, bool src_neg, bool saturate,
+                         const struct agx3_falu_runtime *runtime,
+                         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+
+bool agx3_falu_add_imm_narrow_m5(uint16_t dest, uint16_t src, uint8_t immediate,
+   bool src_abs, bool src_neg, bool saturate,
+   const struct agx3_falu_runtime *runtime,
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+bool agx3_falu_fma_addend_imm_narrow_m5(uint16_t dest, uint16_t src0, uint16_t src1,
+   uint8_t immediate, const struct agx3_falu_mods *mods,
+   const struct agx3_falu_runtime *runtime,
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
 
 #ifdef __cplusplus
 }

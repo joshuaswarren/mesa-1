@@ -7085,6 +7085,7 @@ typedef enum {
 
 bool nir_opt_if(nir_shader *shader, nir_opt_if_options options);
 bool nir_opt_if_empty_then(nir_shader *shader);
+bool nir_opt_if_merge(nir_shader *shader);
 
 bool nir_opt_intrinsics(nir_shader *shader);
 
@@ -7210,6 +7211,14 @@ typedef enum {
     * ALU, since non-divergence is a decent proxy for uniformity.
     */
    nir_reassociate_scalar_math = (1 << 1),
+
+   /* Within each of the classes above, rank sources that are invariant in
+    * the innermost loop around a chain below the sources varying with it.
+    * The invariant part of the chain is then computed first and can leave
+    * the loop through nir_opt_preamble or loop-invariant code motion, for
+    * example the per-iteration constants of an accumulation.
+    */
+   nir_reassociate_loop_invariant = (1 << 2),
 } nir_reassociate_options;
 
 bool nir_opt_reassociate(nir_shader *shader, nir_reassociate_options opts);
@@ -7361,6 +7370,10 @@ typedef struct nir_opt_preamble_options {
 
    /* True if load_workgroup_size is supported in the preamble. */
    bool load_workgroup_size_allowed;
+
+   /* Keep texture instructions in the main program, including when they are
+    * dependencies of another candidate. Default false. */
+   bool no_textures;
 
    /* size/align/class for load/store_preamble.
     *

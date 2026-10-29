@@ -55,9 +55,65 @@ check_chip(enum agx_chip chip, enum agx_sampler_generation generation,
    }
 }
 
+/* Full sampler words from the native HAL300 Gen5 constructor at
+ * macOS 26A428, with normalized
+ * coordinates, linear min/mag filters, no mip filter and clamp-to-edge.
+ * Exercise reduction alongside both LOD bias signs and anisotropy. */
+static void
+check_native_minmax(void)
+{
+   static const struct {
+      unsigned reduction, anisotropy;
+      float bias;
+      uint64_t word;
+   } cases[] = {
+      {1, 1, 0.00f, UINT64_C(0x00000080028e0000)},
+      {1, 4, 0.00f, UINT64_C(0x0000008002ae0000)},
+      {1, 16, 0.00f, UINT64_C(0x0000008002ce0000)},
+      {1, 1, 1.50f, UINT64_C(0x00030080028e0000)},
+      {1, 4, 1.50f, UINT64_C(0x0003008002ae0000)},
+      {1, 16, 1.50f, UINT64_C(0x0003008002ce0000)},
+      {1, 1, -2.25f, UINT64_C(0x003b8080028e0000)},
+      {1, 4, -2.25f, UINT64_C(0x003b808002ae0000)},
+      {1, 16, -2.25f, UINT64_C(0x003b808002ce0000)},
+      {2, 1, 0.00f, UINT64_C(0x00000100028e0000)},
+      {2, 4, 0.00f, UINT64_C(0x0000010002ae0000)},
+      {2, 16, 0.00f, UINT64_C(0x0000010002ce0000)},
+      {2, 1, 1.50f, UINT64_C(0x00030100028e0000)},
+      {2, 4, 1.50f, UINT64_C(0x0003010002ae0000)},
+      {2, 16, 1.50f, UINT64_C(0x0003010002ce0000)},
+      {2, 1, -2.25f, UINT64_C(0x003b8100028e0000)},
+      {2, 4, -2.25f, UINT64_C(0x003b810002ae0000)},
+      {2, 16, -2.25f, UINT64_C(0x003b810002ce0000)},
+   };
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      struct hk_native_sampler_state state = {
+         .maximum_lod = 14.0f,
+         .maximum_anisotropy = cases[i].anisotropy,
+         .lod_bias = cases[i].bias,
+         .magnify = AGX_FILTER_LINEAR,
+         .minify = AGX_FILTER_LINEAR,
+         .reduction_mode = (enum hk_sampler_reduction_mode)cases[i].reduction,
+      };
+      struct hk_native_sampler_descriptor out;
+      assert(hk_pack_native_sampler(AGX_CHIP_G17G, &out, &state));
+      uint64_t word;
+      memcpy(&word, out.opaque, sizeof(word));
+      assert(word == cases[i].word);
+
+      /* hk_nir_lower_descriptors' Gen10 compute LOD query reads the
+       * descriptor's copy of this word: bias is signed 5:6 at bits 43..53
+       * of the high half (bits 11..21), and max LOD is 4:6 at bits 10..19. */
+      const uint32_t high = (uint32_t)(word >> 32);
+      assert((int32_t)(high << 10) >> 21 == (int32_t)(cases[i].bias * 64));
+      assert(((uint32_t)word >> 10 & 0x3ff) == 14 * 64);
+   }
+}
+
 int
 main(void)
 {
+   check_native_minmax();
    check_chip(AGX_CHIP_G13G, AGX_SAMPLER_GENERATION_GEN4, 8);
    check_chip(AGX_CHIP_G13X, AGX_SAMPLER_GENERATION_GEN4, 8);
    check_chip(AGX_CHIP_G14G, AGX_SAMPLER_GENERATION_GEN4, 8);
@@ -98,6 +154,14 @@ main(void)
    for (unsigned i = sizeof(expected_hal200); i < sizeof(g17p); ++i)
       assert(((const uint8_t *)&g17p)[i] == 0);
    assert(memcmp(&gen5, expected_gen5, sizeof(expected_gen5)) == 0);
+   {
+      /* The fields the Gen10 compute LOD query decodes from this word. */
+      const uint32_t lo = gen5.opaque[0], hi = gen5.opaque[1];
+      assert((lo & 0x3ff) == 64);                             /* min LOD 1 */
+      assert((lo >> 10 & 0x3ff) == 15 * 64);       /* max LOD 100 -> 15 */
+      assert((lo >> 27 & 3) == AGX_MIP_FILTER_LINEAR);
+      assert((int32_t)(hi << 10) >> 21 == -65);     /* bias -1.015625 */
+   }
 
    /* A disabled compare must retain the exact mature Gen4 bytes: compare
     * function bits were historically left at their header default. */

@@ -90,7 +90,13 @@ constant_use_accepts_uniform(agx_context *ctx, const agx_instr *I, unsigned s,
    if (agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s, uniform, size))
       return true;
 
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B || I->nr_srcs > 3 ||
+   /* M5 floating-point operations read an aligned f32 uniform exactly where
+    * the native uniform-operand encoder admits it. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       agx3_m5_float_accepts_uniform(ctx, I, s, uniform, size))
+      return true;
+
+   if (I->nr_srcs > 3 ||
        uniform >= AGX_NUM_UNIFORMS)
       return false;
 
@@ -100,11 +106,56 @@ constant_use_accepts_uniform(agx_context *ctx, const agx_instr *I, unsigned s,
    candidate.src = sources;
    sources[s] = agx_replace_index(sources[s], agx_uniform(uniform, size));
    struct agx3_uniform_integer_desc desc;
-   return agx3_uniform_integer_instruction(&candidate, false, &desc);
+   return agx3_uniform_integer_for_encoding(ctx->key->dev.encoding,
+                                            &candidate, false, &desc);
+}
+
+/* The native R/U/U IMADD endpoint can promote two constants together.
+ * Probing C alone would falsely reject it before the multiplier is promoted.
+ * Do not admit the unwitnessed R/R/U endpoint to make that probe pass. */
+static bool
+m5_constant_mad_pair(agx_context *ctx, const agx_instr *I,
+                     const BITSET_WORD *is_immediate, unsigned uniform,
+                     unsigned *multiplier)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       I->op != AGX_OPCODE_IMAD || I->nr_srcs != 3 || uniform > 508 ||
+       I->src[0].type != AGX_INDEX_NORMAL ||
+       I->src[1].type != AGX_INDEX_NORMAL ||
+       I->src[2].type != AGX_INDEX_NORMAL ||
+       !BITSET_TEST(is_immediate, I->src[2].value))
+      return false;
+   const bool a = BITSET_TEST(is_immediate, I->src[0].value);
+   const bool b = BITSET_TEST(is_immediate, I->src[1].value);
+   if (a == b)
+      return false;
+   *multiplier = a ? 0 : 1;
+   agx_instr candidate = *I;
+   agx_index sources[3];
+   memcpy(sources, I->src, sizeof(sources));
+   candidate.src = sources;
+   sources[*multiplier] = agx_replace_index(
+      sources[*multiplier], agx_uniform(uniform, I->src[*multiplier].size));
+   sources[2] = agx_replace_index(sources[2],
+                                agx_uniform(uniform + 2, I->src[2].size));
+   struct agx3_uniform_integer_desc desc;
+   return agx3_uniform_integer_for_encoding(ctx->key->dev.encoding,
+                                            &candidate, false, &desc);
+}
+
+/* The late M5 round promotes only float constants that M5 constant
+ * materialization left in GPRs for native uniform-operand forms. */
+static bool
+late_m5_float_use(agx_context *ctx, const agx_instr *I, unsigned s,
+                  unsigned uniform, enum agx_size size)
+{
+   return (I->op == AGX_OPCODE_FADD || I->op == AGX_OPCODE_FMUL ||
+           I->op == AGX_OPCODE_FFMA) &&
+          agx3_m5_float_accepts_uniform(ctx, I, s, uniform, size);
 }
 
 static void
-pass(agx_context *ctx, void *memctx)
+pass(agx_context *ctx, void *memctx, bool late_m5_float)
 {
    /* Map from SSA indices to struct constant_info */
    struct hash_table_u64 *constants = _mesa_hash_table_u64_create(memctx);
@@ -132,7 +183,23 @@ pass(agx_context *ctx, void *memctx)
          assert(I->dest[0].type == AGX_INDEX_NORMAL);
          BITSET_SET(is_immediate, I->dest[0].value);
          values[I->dest[0].value] = I->imm;
+      } else if (late_m5_float) {
+         agx_foreach_ssa_src(I, s) {
+            if (BITSET_TEST(is_immediate, I->src[s].value) &&
+                late_m5_float_use(ctx, I, s, probe_uniform, I->src[s].size))
+               record_use(memctx, constants, values[I->src[s].value],
+                          I->src[s].size);
+         }
       } else {
+         unsigned multiplier;
+         if (m5_constant_mad_pair(ctx, I, is_immediate, probe_uniform,
+                                 &multiplier)) {
+            record_use(memctx, constants, values[I->src[multiplier].value],
+                       I->src[multiplier].size);
+            record_use(memctx, constants, values[I->src[2].value],
+                       I->src[2].size);
+            continue;
+         }
          agx_foreach_ssa_src(I, s) {
             if (BITSET_TEST(is_immediate, I->src[s].value) &&
                 constant_use_accepts_uniform(ctx, I, s, probe_uniform,
@@ -189,7 +256,7 @@ pass(agx_context *ctx, void *memctx)
        * zero if we needed to pad, compared to doing this before the loop. Same
        * shader code, but slightly more efficient USC record.
        */
-      if (i == 0) {
+      if (i == 0 && !(late_m5_float && ctx->out->rodata.size_16)) {
          ctx->out->rodata.base_uniform = uniform;
       }
 
@@ -253,6 +320,34 @@ pass(agx_context *ctx, void *memctx)
 
    /* Promote in the IR */
    agx_foreach_instr_global(ctx, I) {
+      if (late_m5_float) {
+         agx_foreach_ssa_src(I, s) {
+            if (!BITSET_TEST(is_immediate, I->src[s].value))
+               continue;
+            struct constant_info *info =
+               _mesa_hash_table_u64_search(constants, values[I->src[s].value]);
+            if (info && info->promoted &&
+                late_m5_float_use(ctx, I, s, info->uniform, I->src[s].size))
+               agx_replace_src(I, s,
+                               agx_uniform(info->uniform, I->src[s].size));
+         }
+         continue;
+      }
+      unsigned multiplier;
+      if (m5_constant_mad_pair(ctx, I, is_immediate, probe_uniform,
+                              &multiplier)) {
+         struct constant_info *m = _mesa_hash_table_u64_search(
+            constants, values[I->src[multiplier].value]);
+         struct constant_info *c = _mesa_hash_table_u64_search(
+            constants, values[I->src[2].value]);
+         if (m && c && m->promoted && c->promoted) {
+            /* Both values own aligned uniforms before either source changes. */
+            agx_replace_src(I, multiplier,
+                            agx_uniform(m->uniform, I->src[multiplier].size));
+            agx_replace_src(I, 2, agx_uniform(c->uniform, I->src[2].size));
+            continue;
+         }
+      }
       agx_foreach_ssa_src(I, s) {
          if (!BITSET_TEST(is_immediate, I->src[s].value))
             continue;
@@ -280,6 +375,30 @@ agx_opt_promote_constants(agx_context *ctx)
       return;
 
    void *memctx = ralloc_context(NULL);
-   pass(ctx, memctx);
+   pass(ctx, memctx, false);
+   ralloc_free(memctx);
+}
+
+/*
+ * M5 constant materialization (agx_materialize_agx3_alu_constants) runs after
+ * the ordinary round and moves immediates that no M5 form can read into GPRs,
+ * e.g. the 0.25 multiplicand of Minecraft's RGSS fma(x, 0.25, -y). Apple keeps
+ * such constants in uniforms. Promote those feeding a native M5 float
+ * uniform-operand form, appending to the ordinary round's constant range so
+ * the program keeps one contiguous rodata upload.
+ */
+void
+agx_opt_promote_m5_float_constants(agx_context *ctx)
+{
+   const struct agx_rodata *rodata = &ctx->out->rodata;
+   if (ctx->is_preamble ||
+       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       (ctx->key->g17p_rodata_hint && ctx->key->g17p_rodata_hint_size_16) ||
+       (rodata->size_16 &&
+        ctx->out->push_count != rodata->base_uniform + rodata->size_16))
+      return;
+
+   void *memctx = ralloc_context(NULL);
+   pass(ctx, memctx, true);
    ralloc_free(memctx);
 }

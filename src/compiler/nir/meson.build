@@ -458,6 +458,7 @@ if with_tests and not with_nir_headers_only
           'tests/opt_licm_tests.cpp',
           'tests/opt_loop_tests.cpp',
           'tests/opt_peephole_select.cpp',
+          'tests/opt_reassociate_tests.cpp',
           'tests/opt_shrink_vectors_tests.cpp',
           'tests/opt_vectorize_tests.cpp',
           'tests/opt_varyings_tests_bicm_binary_alu.cpp',

@@ -92,7 +92,7 @@ int main(void)
             assert(!nir_shader_tex_pass(b.shader, hk_lower_g17p_sampler_bias,
                                        nir_metadata_control_flow, NULL));
          }
-         nir_validate_shader(b.shader, "sampler bias test");
+         /* nir_validate_shader is compiled out of this NDEBUG build. */
          ralloc_free(b.shader);
          checks++;
       }

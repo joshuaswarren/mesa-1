@@ -126,6 +126,12 @@ main(void)
             if (prev_range == 0xffffffff) {
                is_active = false;
             } else {
+               /* The sibling subtree's invocations stored its cluster ids and
+                * box nodes before their exchange (and released them with the
+                * barrier at the end of their iteration). Acquire them before
+                * the merge phase loads them. */
+               memoryBarrier(gl_ScopeDevice, gl_StorageSemanticsBuffer,
+                             gl_SemanticsAcquire | gl_SemanticsMakeVisible);
                if (use_right_parent)
                   range_end = prev_range;
                else

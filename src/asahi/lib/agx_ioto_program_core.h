@@ -32,6 +32,8 @@ extern "C" {
 #define AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE 86u
 /* Two root LDIMMs, two high-uniform carrier COPYs, state/profile, and the
  * external request prelude plus long branch currently occupy 124 bytes. */
+#define AGX_IOTO_G17G_VERTEX_NO_RESOURCE_PROGRAM_SIZE 84u
+#define AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE 90u
 #define AGX_IOTO_G17P_EXTERNAL_LAUNCHER_MAX_SIZE   128u
 #define AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE       140u
 #define AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE 158u
@@ -185,6 +187,29 @@ bool agx_ioto_g17s_minimal_compute_program_compose(
 bool agx_ioto_g17s_minimal_compute_program_compose_resources(
    uint64_t program_va, uint64_t shader_va,
    const struct agx_ioto_g17s_minimal_compute_resources *resources,
+   void *output, size_t capacity, size_t *written);
+
+enum agx_ioto_g17g_program_stage {
+   AGX_IOTO_G17G_PROGRAM_VERTEX,
+   AGX_IOTO_G17G_PROGRAM_FRAGMENT,
+   AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT,
+   AGX_IOTO_G17G_PROGRAM_EOT,
+   AGX_IOTO_G17G_PROGRAM_BACKGROUND,
+   AGX_IOTO_G17G_PROGRAM_COMPUTE,
+   AGX_IOTO_G17G_PROGRAM_MESH,
+   AGX_IOTO_G17G_PROGRAM_OBJECT,
+};
+
+bool agx_ioto_program_copy_suffix_offset(enum agx_chip chip, const void *body,
+                                        size_t body_size, size_t *offset);
+/* M5 state must precede copies from every loader allocation round. */
+bool agx_ioto_program_first_copy_offset(enum agx_chip chip, const void *body,
+                                       size_t body_size, size_t *offset);
+
+bool agx_ioto_m5_resource_program_compose_classes(
+   enum agx_chip chip, uint64_t program_va, const void *body, size_t body_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17g_program_stage stage, unsigned colour_classes,
    void *output, size_t capacity, size_t *written);
 
 #ifdef __cplusplus

@@ -57,6 +57,9 @@ struct hk_image_plane {
    uint64_t addr;
    struct agx_va *va;
 
+   /* Bytes of that VA counted in hk_device::sparse_scratch_B. */
+   uint64_t sparse_scratch_B;
+
    /* For host image copy */
    void *map;
    uint32_t rem;

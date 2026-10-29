@@ -1,0 +1,470 @@
+/* Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * Native M5 Gen3 nodes, derived from the saved 2/4/8/64-triangle AGX
+ * captures and agx_rt_blas_gen3.h. One workgroup encodes one independent
+ * node: one lane per triangle, two lanes for QTBs, lane zero for the root.
+ * Inner nodes read child bounds from the same common build IR.
+ * No CPU readback, cross-workgroup synchronization, or global allocator.
+ *
+ * Procedural leaves use the 48-byte native bounding-box record (marker 0x18,
+ * minimum at 4, maximum at 16, geometry id/opaque bit at 28, primitive id at
+ * 32) captured from public Metal on M5 Pro and read at those offsets by the
+ * native runtime's agx.bounding_box_test. Records are packed at a 48-byte
+ * stride directly in the child region: Apple's Gen1 extractor derives the
+ * record stride from root word0 bits 5..7 (class 4 = 48 bytes) and dispatches
+ * on record marker low five bits (24 = bounding box).
+ */
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float32 : require
+
+#include "hk_build_interface.h"
+
+#ifndef HK_AGX3_GEN1
+#define HK_AGX3_GEN1 0
+#endif
+
+layout(local_size_x = 8) in;
+#ifdef HK_AGX3_BATCH
+layout(push_constant) uniform CONSTS
+{
+   hk_agx3_batch_args batch;
+};
+hk_agx3_leaf_args args;
+#else
+layout(push_constant) uniform CONSTS
+{
+   hk_agx3_leaf_args args;
+};
+#endif
+
+shared vec3 vertices[24];
+shared vec3 lower[8], upper[8];
+shared uint primitive[8];
+shared uint geometry_id[8];
+shared uint triangle_type[8];
+shared uint bad;
+shared uint64_t root[8];
+
+bool
+finite(float x)
+{
+   return !isnan(x) && !isinf(x);
+}
+float
+origin_down(float x)
+{
+   uint bits = floatBitsToUint(x);
+   uint upper_bits = bits >> 16;
+   if ((bits & 0x80000000u) != 0 && (bits & 65535u) != 0)
+      ++upper_bits;
+   return uintBitsToFloat(upper_bits << 16);
+}
+
+float
+step(uint exponent)
+{
+   return uintBitsToFloat(exponent << 23);
+}
+
+bool
+fit_root(vec3 lo, vec3 hi, out vec3 base, out uvec3 exponent)
+{
+   for (uint a = 0; a < 3; ++a) {
+      base[a] = origin_down(lo[a]);
+      precise float extent = hi[a] - base[a];
+      if (!finite(base[a]) || !finite(extent))
+         return false;
+      precise float unit = extent / 127.0;
+      uint bits = floatBitsToUint(unit);
+      uint e = (bits >> 23) & 255u;
+      if (e != 0 && (bits & 0x7fffffu) != 0)
+         ++e;
+      e = max(e, 1u);
+      while (e < 255u && ceil(extent / step(e)) > 127.0)
+         ++e;
+      if (e == 255u)
+         return false;
+      exponent[a] = e;
+   }
+   return true;
+}
+
+bool
+fit_qtb(uint first, uint count, out vec3 base, out uvec3 exponent)
+{
+   vec3 lo = lower[first], hi = upper[first];
+   for (uint t = first + 1; t < first + count; ++t) {
+      lo = min(lo, lower[t]);
+      hi = max(hi, upper[t]);
+   }
+   for (uint a = 0; a < 3; ++a) {
+      base[a] = origin_down(lo[a]);
+      precise float extent = hi[a] - base[a];
+      if (!finite(base[a]) || !finite(extent))
+         return false;
+      uint e = (floatBitsToUint(extent) >> 23) & 255u;
+      exponent[a] = e > 8u ? e - 7u : 1u;
+   }
+   return true;
+}
+
+void
+store32(uint64_t address, uint value)
+{
+   DEREF(REF(uint32_t)(address)) = value;
+}
+
+uint
+quantize_vertex(float value, float base, uint exponent)
+{
+   /* A binary32 subtraction can round an exact coordinate just below a
+    * grid line onto that line. Retain its residual (TwoDiff) so truncation
+    * agrees with the reference's binary64 arithmetic without shaderFloat64.
+    * All operations must remain separate; contraction/reassociation would
+    * discard the very residual we are recovering. */
+   precise float delta = value - base;
+   precise float virtual_base = value - delta;
+   precise float virtual_value = delta + virtual_base;
+   precise float base_error = virtual_base - base;
+   precise float value_error = value - virtual_value;
+   precise float error = value_error + base_error;
+   precise float q = ldexp(delta, 127 - int(exponent));
+   float whole = floor(q);
+   if (q == whole && error < 0.0)
+      whole -= 1.0;
+   return uint(clamp(whole, 0.0, 255.0));
+}
+
+mat3x4
+invert_affine(mat3x4 otw)
+{
+   vec3 r0 = vec3(otw[0][0], otw[0][1], otw[0][2]);
+   vec3 r1 = vec3(otw[1][0], otw[1][1], otw[1][2]);
+   vec3 r2 = vec3(otw[2][0], otw[2][1], otw[2][2]);
+   vec3 t = vec3(otw[0][3], otw[1][3], otw[2][3]);
+
+   vec3 c0 = cross(r1, r2);
+   vec3 c1 = cross(r2, r0);
+   vec3 c2 = cross(r0, r1);
+
+   float det = dot(r0, c0);
+   /* A singular instance transform is undefined behaviour in Vulkan.  Fall
+    * back to something finite so the traversal cannot fault on a NaN
+    * address computation. */
+   float inv_det = det == 0.0 ? 0.0 : 1.0 / det;
+
+   /* Rows of R^-1 are the columns of the cofactor matrix, scaled. */
+   vec3 i0 = vec3(c0.x, c1.x, c2.x) * inv_det;
+   vec3 i1 = vec3(c0.y, c1.y, c2.y) * inv_det;
+   vec3 i2 = vec3(c0.z, c1.z, c2.z) * inv_det;
+
+   mat3x4 wto;
+   wto[0] = vec4(i0, -dot(i0, t));
+   wto[1] = vec4(i1, -dot(i1, t));
+   wto[2] = vec4(i2, -dot(i2, t));
+   return wto;
+}
+
+void
+store64(uint64_t address, uint64_t value)
+{
+   store32(address, uint(value));
+   store32(address + 4ul, uint(value >> 32));
+}
+
+void
+encode_instance(hk_agx3_leaf_job job, uint lane)
+{
+   REF(vk_ir_instance_node) src = REF(vk_ir_instance_node)(
+      OFFSET(job.intermediate_bvh, job.triangle_offsets[lane]));
+   uint64_t blas = DEREF(src).base_ptr;
+   uint64_t record_offset = uint64_t(job.child_slot + 2u * lane) * 64ul;
+   uint64_t record = job.output_bvh + record_offset;
+   uint index = DEREF(src).instance_id;
+   uint64_t transforms = DEREF(REF(uint64_t)(job.output_bvh + 104ul));
+   uint64_t pointers = DEREF(REF(uint64_t)(job.output_bvh + 128ul));
+   uint64_t transform = transforms + uint64_t(index) * 64ul;
+   mat3x4 otw = DEREF(src).otw_matrix;
+   mat3x4 wto = invert_affine(otw);
+   for (uint i = 0; i < 32; ++i)
+      store32(record + uint64_t(i) * 4ul, 0);
+   store32(record, 26);
+   store32(record + 4ul, DEREF(REF(uint32_t)(blas + 176ul)));
+   store32(record + 8ul, DEREF(src).sbt_offset_and_flags >> 24);
+   store32(record + 12ul, DEREF(src).custom_instance_and_mask >> 24);
+   for (uint c = 0; c < 4; ++c)
+      for (uint r = 0; r < 3; ++r) {
+         uint offset = 4u * (c * 3u + r);
+         store32(record + 16ul + uint64_t(offset), floatBitsToUint(wto[r][c]));
+         store32(job.output_bvh + transform + uint64_t(offset),
+                 floatBitsToUint(otw[r][c]));
+      }
+   for (uint i = 0; i < 6; ++i)
+      store32(record + 64ul + uint64_t(i) * 4ul,
+              DEREF(REF(uint32_t)(blas + 80ul + uint64_t(i) * 4ul)));
+   store64(record + 88ul, blas);
+   store32(record + 96ul, DEREF(src).custom_instance_and_mask & 0xffffffu);
+   /* Native Metal user_instance_id reads this independent32-bit field. */
+   store32(record + 100ul, index);
+   /* Vulkan-only metadata lives outside the native128-byte instance record. */
+   store32(job.output_bvh + transform + 48ul, DEREF(src).sbt_offset_and_flags);
+   store64(record + 104ul, transform - record_offset);
+   store64(job.output_bvh + pointers + 16ul * uint64_t(index), record_offset + 4ul);
+   store64(job.output_bvh + pointers + 16ul * uint64_t(index) + 8ul, 1ul);
+}
+
+void
+main()
+{
+   uint id = gl_WorkGroupID.x, lane = gl_LocalInvocationID.x;
+#ifdef HK_AGX3_BATCH
+   hk_agx3_batch_map mapping = DEREF(INDEX(hk_agx3_batch_map, batch.map, id));
+   if (mapping.build >= batch.job_count)
+      return;
+   hk_agx3_batch_job entry = DEREF(INDEX(hk_agx3_batch_job, batch.jobs, mapping.build));
+   if (DEREF(entry.plan.state).error != 0)
+      return;
+   args.jobs = entry.plan.jobs;
+   args.status = entry.node_status;
+   args.job_count = DEREF(entry.plan.state).job_count;
+   args.slot_bias = entry.plan.m5_aabb_stride;
+   id = mapping.node;
+#endif
+   if (id >= args.job_count)
+      return;
+   hk_agx3_leaf_job job = DEREF(INDEX(hk_agx3_leaf_job, args.jobs, id));
+   uint count = job.child_count;
+   bool leaf = job.node_kind == HK_AGX3_NODE_LEAF;
+   bool instances = job.node_kind == HK_AGX3_NODE_INSTANCES;
+   bool aabbs = job.node_kind == HK_AGX3_NODE_AABBS;
+   /* Bounding-box record stride: 48 (native record class 4) by default; 64
+    * (class 5, one record per slot) is the ASAHI_M5_AABB_RECORD_STRIDE
+    * diagnostic. Both decode in Apple's extractor; only hardware traversal
+    * distinguishes them. */
+   uint aabb_stride = HK_AGX3_GEN1 != 0 || args.slot_bias == 64u ? 64u : 48u;
+   if (count < 1u || count > 8 ||
+       job.node_kind > HK_AGX3_NODE_AABBS) {
+      if (lane == 0)
+         DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_INVALID_COUNT;
+      return;
+   }
+   uint capacity = min(count, 4u), blocks = (count + capacity - 1u) / capacity;
+   if (lane == 0)
+      bad = 0;
+   barrier();
+   if (lane < count) {
+      if (!leaf) {
+         REF(vk_ir_node)
+         src = REF(vk_ir_node)(
+            OFFSET(job.intermediate_bvh, job.triangle_offsets[lane]));
+         if (aabbs) {
+            REF(vk_ir_aabb_node) box = REF(vk_ir_aabb_node)(src);
+            geometry_id[lane] = DEREF(box).geometry_id_and_flags;
+            primitive[lane] = DEREF(box).primitive_id;
+         }
+         lower[lane] = DEREF(src).aabb.min;
+         upper[lane] = DEREF(src).aabb.max;
+         for (uint a = 0; a < 3; ++a) {
+            if (!finite(lower[lane][a]) || !finite(upper[lane][a]))
+               atomicOr(bad, HK_AGX3_LEAF_NONFINITE);
+            if (lower[lane][a] > upper[lane][a])
+               atomicOr(bad, HK_AGX3_LEAF_RANGE);
+         }
+         if (aabbs && HK_AGX3_GEN1 == 0) {
+            REF(vk_ir_aabb_node) box = REF(vk_ir_aabb_node)(
+               OFFSET(job.intermediate_bvh, job.triangle_offsets[lane]));
+            /* The native record keeps the geometry id in the low 30 bits and
+             * the opaque flag in bit 31, matching VK_GEOMETRY_OPAQUE. */
+            geometry_id[lane] = DEREF(box).geometry_id_and_flags & 0xbfffffffu;
+            primitive[lane] = DEREF(box).primitive_id & 0x3fffffffu;
+         }
+      } else {
+         REF(vk_ir_triangle_node)
+         src = REF(vk_ir_triangle_node)(
+            OFFSET(job.intermediate_bvh, job.triangle_offsets[lane]));
+         uint geometry_flags = DEREF(src).geometry_id_and_flags;
+         geometry_id[lane] = geometry_flags & ~VK_GEOMETRY_OPAQUE;
+         /* Native Gen1 extractor 0x218e084c4..0x218e087f4 accepts the
+          * same triangle record for types8 and16, then compares type8
+          * to set the extracted geometry's opaque field. */
+         triangle_type[lane] =
+            (geometry_flags & VK_GEOMETRY_OPAQUE) != 0 ? 8u : 16u;
+         primitive[lane] = DEREF(src).triangle_id;
+         for (uint v = 0; v < 3; ++v) {
+            vec3 p;
+            for (uint a = 0; a < 3; ++a) {
+               p[a] = DEREF(src).coords[v][a];
+               if (!finite(p[a]))
+                  atomicOr(bad, HK_AGX3_LEAF_NONFINITE);
+            }
+            vertices[lane * 3u + v] = p;
+         }
+         lower[lane] = min(vertices[lane * 3u], min(vertices[lane * 3u + 1u],
+                                                    vertices[lane * 3u + 2u]));
+         upper[lane] = max(vertices[lane * 3u], max(vertices[lane * 3u + 1u],
+                                                    vertices[lane * 3u + 2u]));
+      }
+   }
+   barrier();
+   if (bad != 0) {
+      if (lane == 0)
+         DEREF(INDEX(uint32_t, args.status, id)) = bad;
+      return;
+   }
+
+   vec3 qbase = vec3(0);
+   uvec3 qexp = uvec3(0);
+   if (leaf && lane < blocks &&
+       !fit_qtb(lane * capacity, min(capacity, count - lane * capacity), qbase,
+                qexp))
+      atomicOr(bad, HK_AGX3_LEAF_RANGE);
+   if (lane == 0) {
+      vec3 lo = lower[0], hi = upper[0], base;
+      uvec3 exponent;
+      for (uint t = 1; t < count; ++t) {
+         lo = min(lo, lower[t]);
+         hi = max(hi, upper[t]);
+      }
+      if (!fit_root(lo, hi, base, exponent)) {
+         atomicOr(bad, HK_AGX3_LEAF_RANGE);
+      } else {
+         for (uint t = 0; t < 8; ++t)
+            root[t] = uint64_t(0);
+         /* Word0 bits 5..7 select the native leaf record stride: class 5
+          * (0xa0) is the 64-byte triangle record, class 7 (0xe1) the 128-byte
+          * instance record and class 4 (0x80) the 48-byte bounding-box record.
+          * Leaves without quantized blocks have slot capacity 0 and, like the
+          * native instance roots, use indexed lane fields (bit 0): the header
+          * codec rejects capacity 0 in count mode, and a count-mode box
+          * cluster returned every lane as record 0 on hardware (only
+          * single-AABB geometries passed). */
+         root[0] =
+            uint64_t((instances ? 0xe1u
+                      : aabbs ? (HK_AGX3_GEN1 != 0 ? 0xa0u : ((aabb_stride == 64u ? 0xa0u : 0x80u) | 1u))
+                      : 0xa0u) |
+                     (leaf ? capacity << 1 : 0u) | (exponent.x << 8));
+         for (uint a = 0; a < 3; ++a)
+            root[a + 1] = uint64_t(floatBitsToUint(base[a]) >> 16);
+         root[4] = uint64_t((exponent.y << 8) | exponent.z);
+         uint child = job.child_slot + (HK_AGX3_GEN1 != 0 ? args.slot_bias : 0);
+         root[5] = uint64_t(child >> 16);
+         root[6] = uint64_t(child & 65535u);
+         /* Leaf type 24 is the native bounding-box record marker. Bits 6..7
+          * (0xc0) follow the captured triangle roots; the QTB-only bit 14 is
+          * not set because no quantized triangle block exists. */
+         root[7] = instances ? uint64_t(0x1a00u | (count == 8u ? 0x3fu : count << 3))
+                   : aabbs ? uint64_t(0x18c0u | (count == 8u ? 0x3fu : count << 3))
+                   : leaf ? uint64_t(0x40c0u | (triangle_type[0] << 8) |
+                                             (count == 8u ? 0x3fu : count << 3))
+                          : uint64_t(0x1f00u | (count == 8u ? 0u : count));
+         const uint shifts[6] = uint[6](57, 50, 43, 36, 29, 22);
+         for (uint t = 0; t < count; ++t) {
+            if (leaf || instances || aabbs)
+               root[t] |= uint64_t((t << 16) | (1u << 20));
+            for (uint a = 0; a < 3; ++a) {
+               float s = step(exponent[a]);
+               uint qlo =
+                  uint(clamp(floor((lower[t][a] - base[a]) / s), 0.0, 127.0));
+               uint qhi =
+                  uint(clamp(ceil((upper[t][a] - base[a]) / s), 0.0, 127.0));
+               precise float rlo = base[a] + float(qlo) * s;
+               precise float rhi = base[a] + float(qhi) * s;
+               while (rlo > lower[t][a] && qlo > 0u) {
+                  --qlo;
+                  rlo = base[a] + float(qlo) * s;
+               }
+               while (rhi < upper[t][a] && qhi < 127u) {
+                  ++qhi;
+                  rhi = base[a] + float(qhi) * s;
+               }
+               if (rlo > lower[t][a] || rhi < upper[t][a])
+                  atomicOr(bad, HK_AGX3_LEAF_RANGE);
+               root[t] |= uint64_t(qlo) << shifts[a];
+               root[t] |= uint64_t(qhi) << shifts[a + 3];
+            }
+         }
+      }
+   }
+   barrier();
+   if (bad != 0) {
+      if (lane == 0)
+         DEREF(INDEX(uint32_t, args.status, id)) = bad;
+      return;
+   }
+
+   uint64_t children =
+      uint64_t(job.output_bvh) + uint64_t(job.child_slot) * 64ul;
+   if (instances && lane < count)
+      encode_instance(job, lane);
+   if (aabbs && lane < count) {
+      if (HK_AGX3_GEN1 != 0)
+         for (uint i = 0; i < 16; ++i)
+            store32(children + uint64_t(lane) * 64ul + uint64_t(i) * 4ul, 0);
+      /* 48-byte native bounding-box record at the selected record stride. */
+      uint64_t record = children + uint64_t(lane) * uint64_t(aabb_stride);
+      store32(record, 0x18u);
+      for (uint a = 0; a < 3; ++a) {
+         store32(record + 4ul + uint64_t(a) * 4ul, floatBitsToUint(lower[lane][a]));
+         store32(record + 16ul + uint64_t(a) * 4ul, floatBitsToUint(upper[lane][a]));
+      }
+      store32(record + 28ul, geometry_id[lane]);
+      store32(record + 32ul, primitive[lane]);
+      /* No optional primitive data: bit 62 of the packed id word is clear
+       * and the relative pointer stays zero. */
+      store32(record + 36ul, 0);
+      store64(record + 40ul, 0ul);
+   }
+   if (leaf && lane < count) {
+      uint64_t geometry = children + uint64_t(blocks + lane) * 64ul;
+      store32(geometry, 0x40u | triangle_type[lane]);
+      for (uint a = 0; a < 3; ++a)
+         for (uint v = 0; v < 4; ++v)
+            store32(geometry + uint64_t(4u + a * 16u + v * 4u),
+                    floatBitsToUint(vertices[lane * 3u + min(v, 2u)][a]));
+      store32(geometry + 52ul, geometry_id[lane]);
+      store32(geometry + 56ul, primitive[lane]);
+      store32(geometry + 60ul, primitive[lane]);
+   }
+   if (leaf && lane < blocks) {
+      /* Each QTB writer owns all sixteen words, avoiding byte-store races. */
+      uint words[16];
+      for (uint w = 0; w < 16; ++w)
+         words[w] = 0;
+      words[0] = 6u | (qexp.z << 8) | (floatBitsToUint(qbase.x) & 0xffff0000u);
+      words[1] = (floatBitsToUint(qbase.y) >> 16) |
+                 (floatBitsToUint(qbase.z) & 0xffff0000u);
+      words[2] = qexp.x | (qexp.y << 8);
+      uint first = lane * capacity, n = min(capacity, count - first);
+      const uint order[4] = uint[4](2, 2, 1, 0);
+      for (uint t = 0; t < n; ++t)
+         for (uint v = 0; v < 4; ++v)
+            for (uint a = 0; a < 3; ++a) {
+               /* Power-of-two scaling avoids reciprocal overflow on small
+                * axes, including the minimum normal binary32 exponent. */
+               uint q = quantize_vertex(
+                  vertices[(first + t) * 3u + order[v]][a], qbase[a], qexp[a]);
+               uint byte_offset = 16u + t * 12u + v * 3u + 2u - a;
+               words[byte_offset / 4u] |= q << ((byte_offset % 4u) * 8u);
+            }
+      for (uint w = 0; w < 16; ++w)
+         store32(children + uint64_t(lane * 64u + w * 4u), words[w]);
+   }
+   if (lane == 0) {
+      for (uint w = 0; w < 8; ++w) {
+         uint64_t address = uint64_t(job.output_bvh) +
+                            uint64_t(job.root_slot) * 64ul + uint64_t(w) * 8ul;
+         store32(address, uint(root[w]));
+         store32(address + 4ul, uint(root[w] >> 32));
+      }
+      DEREF(INDEX(uint32_t, args.status, id)) = HK_AGX3_LEAF_SUCCESS;
+   }
+}

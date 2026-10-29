@@ -280,9 +280,11 @@ KERNEL(1)
 libagx_gen1_as_empty(global uint64_t *image, global uint64_t *metadata,
                     uint32_t resource_id, uint32_t build_flags, uint32_t geometry_type)
 {
-   global uint32_t *header = (global uint32_t *)image + 16;
-   for (uint32_t i = 0; i < 28; ++i)
-      header[i] = i >= 4 && i < 10 ? 0x7fc00000u : 0;
+   global uint32_t *header = (global uint32_t *)image;
+   for (uint32_t i = 0; i < LIBAGX_GEN1_AS_EMPTY_BYTES / 4; ++i)
+      header[i] = i >= 20 && i < 26 ? 0x7fc00000u : 0;
+   image[LIBAGX_GEN1_AS_BASE_WORD] = (uint64_t)image;
+   image[LIBAGX_GEN1_AS_ID_WORD] = resource_id;
    struct libagx_gen1_as_metadata live = {
       .native_base = (uint64_t)image,
       .image_bytes = LIBAGX_GEN1_AS_EMPTY_BYTES,

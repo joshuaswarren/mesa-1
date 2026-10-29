@@ -15,6 +15,7 @@ libasahi_noop_drm_shim = shared_library(
     'agx_vdm_decode_core.c',
     'agx_vdm_hal200_bind_tail_core.c',
     'agx_vdm_index_list_core.c',
+    'agx_vdm_mesh_core.c',
     'agx_vdm_ppp_state_core.c',
     'agx_vdm_state_core.c',
     'agx_vdm_state_update_core.c',

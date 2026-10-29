@@ -35,12 +35,24 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * shifted adds witness 1..4; shift 0 is the unshifted form. */
    if (d->shift > 4 || d->wait_mask >= (1u << slots))
       return false;
-   if ((d->subtract || d->saturate || d->src_a_cache || d->src_cache) &&
-       !agx3b)
+   const bool m5_imm_sub = !agx3b && d->subtract &&
+      !d->src_a_is_register && !d->saturate && !d->shift;
+   const bool m5_reg_sub = !agx3b && d->subtract &&
+      d->src_a_is_register && !d->saturate;
+   /* Native G17G (port/cwit3) addsat/subsat on uint and int: the iadd32 or
+    * isub32 register point with f54; the signed form also sets f28/f43:
+    *   2f00041a2100a30238812000  r0 <- ^r0 +sat ^r2, unsigned
+    *   2f00041a2100a3023881e000  r0 <- ^r0 +sat ^r2, signed
+    *   2f00041a2500a20218812000  r0 <- ^r0 -sat ^r2, unsigned */
+   const bool m5_sat = !agx3b && d->src_a_is_register &&
+      !d->src_a_16 && !d->src_16 && !d->shift && d->saturate &&
+      d->src_a_sign_extend == d->sign_extend;
+   if (!agx3b && (d->subtract || d->saturate) &&
+       !m5_imm_sub && !m5_reg_sub && !m5_sat)
       return false;
    if ((d->saturate || d->src_a_cache) && !d->src_a_is_register)
       return false;
-   if (d->src_cache && !d->src_a_is_register)
+   if (d->src_cache && !d->src_a_is_register && agx3b)
       return false;
    if ((d->src_a_cache && d->src_a_kill) || (d->src_cache && d->src_kill))
       return false;
@@ -82,11 +94,11 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     */
    const struct agx3_field_kv baseline_c_reg[] = {
       KV(9, 2),  KV(10, 2), KV(23, 2), KV(24, d->src_a_16 ? 1 : 2),
-      KV(38, 2), KV(39, d->src_16 ? 1 : 2), KV(44, 3), KV(45, 80),
+      KV(38, 2), KV(39, d->src_16 ? 1 : 2), KV(44, 3), KV(45, d->subtract ? 100 : 80),
    };
    const struct agx3_field_kv baseline_c[] = {
       KV(9, 2),  KV(10, 2), KV(23, 1), KV(24, 1),
-      KV(38, 2), KV(42, 1), KV(44, 3),  KV(45, 80),
+      KV(38, 2), KV(42, 1), KV(44, 3),  KV(45, d->subtract ? 100 : 80),
    };
    const struct agx3_field_kv *baseline =
       d->src_a_is_register ? (agx3b ? baseline_b_reg : baseline_c_reg)
@@ -113,16 +125,16 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
          ov[n++] = (struct agx3_field_kv)KV(25, 1);
       if (d->src_cache)
          ov[n++] = (struct agx3_field_kv)KV(40, 1);
-      if (d->saturate)
+      if (d->saturate && agx3b)
          ov[n++] = (struct agx3_field_kv)KV(53, 1);
    }
    else
       ov[n++] = (struct agx3_field_kv)KV(15, d->immediate);
-   /* f42 is source liveness for both immediate and register slot A.
-    * In particular, an address add must preserve an ID used by later stores.
-    * Keep the separately witnessed AGX3c baseline unchanged here. */
-   if (agx3b && !d->src_a_is_register)
+   /* The immediate form must preserve live inputs, like the register form. */
+   if (!d->src_a_is_register)
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
+   if (!d->src_a_is_register && d->src_cache)
+      ov[n++] = (struct agx3_field_kv)KV(40, 1);
    ov[n++] = (struct agx3_field_kv)KV(31, d->src);
    if (!d->src_a_is_register)
       ov[n++] = (struct agx3_field_kv)KV(39, d->src_16 ? 1 : 2);
@@ -130,26 +142,32 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       ov[n++] = (struct agx3_field_kv)KV(43, 1);
    if (d->shift)
       ov[n++] = (struct agx3_field_kv)KV(agx3b ? 54 : 55, d->shift);
+   if (m5_sat)
+      ov[n++] = (struct agx3_field_kv)KV(54, 1);
    for (unsigned i = 0; i < slots; ++i) {
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV((agx3b ? 45 : 46) + i, 1);
    }
 
    return agx3_bind_compose(encoding,
-                            agx3b ? (d->subtract ? "isub" : "iadd") : "iadd32",
+                            agx3b ? (d->subtract ? "isub" : "iadd")
+                                  : (d->subtract ? "isub32" : "iadd32"),
                             0, baseline, nbaseline, ov, n, out, len);
 }
 
-bool
-agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
+static bool
+agx3_add_sub_immediate_encode(enum agx_isa_encoding encoding, bool subtract,
                             const struct agx3_isub_imm_desc *d,
                             uint8_t out[AGX3_IADD_MAX_LENGTH], uint8_t *len)
 {
-   if (!d || !out || !len || encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool gpu1 = encoding == AGX_ISA_ENCODING_AGX3C;
+   const unsigned slots = gpu1 ? 8 : 6;
+   if (!d || !out || !len ||
+       (encoding != AGX_ISA_ENCODING_AGX3B && !gpu1) || (!subtract && !gpu1) ||
        d->dest > 254 || (d->dest & 1) || d->src >= 256 ||
        (!d->src_16 && ((d->src & 1) || d->sign_extend)) ||
        d->immediate > 255 || (d->src_cache && d->src_kill) ||
-       (d->wait_mask & ~UINT16_C(0x3f)))
+       (d->wait_mask & ~((1u << slots) - 1)))
       return false;
 
    /* Native ushort/short/uint minus1/7/28/255, with paired live/dead
@@ -159,17 +177,37 @@ agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
     */
    const struct agx3_field_kv base[] = {
       KV(9,2), KV(10,2), KV(23,2), KV(24,d->src_16 ? 1 : 2),
-      KV(38,1), KV(39,1),
+      KV(38,1), KV(39,1), KV(44,3), KV(45,subtract ? 100 : 80),
    };
-   struct agx3_field_kv fields[13] = {
+   struct agx3_field_kv fields[15] = {
       KV(2,d->dest), KV(16,d->src), KV(30,d->immediate),
       KV(25,d->src_cache), KV(27,d->src_kill), KV(28,d->sign_extend),
+      KV(11,d->dest_cache),
    };
-   unsigned n=6;
-   for (unsigned slot=0;slot<6;slot++)
+   unsigned n=7;
+   /* HAL300 AGX3c isub32 retains the operand fields, with explicit GPR
+    * dispatch/opcode and eight dependencies in fields 46..53. */
+   for (unsigned slot=0;slot<slots;slot++)
       if(d->wait_mask & (1u<<slot))
-         fields[n++]=(struct agx3_field_kv)KV(45+slot,1);
-   return agx3_bind_compose(encoding,"isub",0,base,6,fields,n,out,len);
+         fields[n++]=(struct agx3_field_kv)KV((gpu1 ? 46 : 45)+slot,1);
+   return agx3_bind_compose(encoding,gpu1 ? (subtract ? "isub32" : "iadd32") : "isub",0,
+                            base,gpu1 ? 8 : 6,fields,n,out,len);
+}
+
+bool
+agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
+                           const struct agx3_isub_imm_desc *d,
+                           uint8_t out[AGX3_IADD_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_add_sub_immediate_encode(encoding, true, d, out, len);
+}
+
+bool
+agx3_iadd_immediate_encode(enum agx_isa_encoding encoding,
+                           const struct agx3_isub_imm_desc *d,
+                           uint8_t out[AGX3_IADD_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_add_sub_immediate_encode(encoding, false, d, out, len);
 }
 
 bool
@@ -180,8 +218,14 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d == NULL || out == NULL || len == NULL)
       return false;
 
-   /* Only the AGX3b form is witnessed. */
-   if (encoding != AGX_ISA_ENCODING_AGX3B)
+   const bool m5 = encoding == AGX_ISA_ENCODING_AGX3C;
+   if (encoding != AGX_ISA_ENCODING_AGX3B && !m5)
+      return false;
+
+   if (m5 && ((d->src_c_16 && d->dest_64) || (d->src_c_64 && !d->dest_64) ||
+              (d->dest_64 && d->no_addend) ||
+              (!d->dest_64 && d->src_a_sign_extend && !d->src_a_16) ||
+              d->src_c_sign_extend))
       return false;
 
    if (d->dest_16 && d->dest_64)
@@ -217,8 +261,8 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->dest_64) {
       /* A 32->64 product widens operands that are already 32-bit, so a narrow
        * operand carrying the bit is unwitnessed here. */
-      if ((d->src_a_sign_extend && d->src_a_16) ||
-          (d->multiplier_sign_extend && d->multiplier_16))
+      if (!m5 && ((d->src_a_sign_extend && d->src_a_16) ||
+                  (d->multiplier_sign_extend && d->multiplier_16)))
          return false;
    } else if (!d->dest_16) {
       /* A 32-bit product widens each 16-bit operand by exactly one step, by
@@ -247,7 +291,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
          return false;
       if ((d->src_a_16 || d->multiplier_16) && d->addend_is_immediate)
          return false;
-      if (d->multiplier_16 && !d->no_addend &&
+      if (!m5 && d->multiplier_16 && !d->no_addend &&
           (d->src_c_16 || d->src_c_64))
          return false;
    }
@@ -271,7 +315,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
         d->src_a_sign_extend || d->multiplier_sign_extend ||
         d->src_c_sign_extend))
       return false;
-   if (d->wait_mask >= (1u << 6))
+   if (d->wait_mask >= (1u << (m5 ? 8 : 6)))
       return false;
 
    if (d->multiplier_is_register &&
@@ -321,7 +365,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
          ? (sizeof(baseline_reg) / sizeof(baseline_reg[0]))
          : (sizeof(baseline_imm) / sizeof(baseline_imm[0]));
 
-   struct agx3_field_kv ov[24];
+   struct agx3_field_kv ov[28];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_cache);
@@ -353,17 +397,23 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    }
    if (d->src_c_sign_extend)
       ov[n++] = (struct agx3_field_kv)KV(58, 1);
-   for (unsigned i = 0; i < 6; ++i) {
+   if (m5) {
+      ov[n++] = (struct agx3_field_kv)KV(59, 3);
+      ov[n++] = (struct agx3_field_kv)KV(60, d->dest_64 ? 85 : 84);
+   }
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i) {
       if (d->wait_mask & (1u << i))
-         ov[n++] = (struct agx3_field_kv)KV(60 + i, 1);
+         ov[n++] = (struct agx3_field_kv)KV((m5 ? 61 : 60) + i, 1);
    }
 
    /* A negated addend is Apple's `imsub`: same fields, one opcode bit. A
     * pure multiply has no addend to negate, so refuse that rather than emit a
     * form nothing witnesses. */
-   if (d->negate_addend && d->no_addend)
+   if (d->negate_addend && (d->no_addend || m5))
       return false;
 
-   return agx3_bind_compose(encoding, d->negate_addend ? "imsub" : "imadd", 0,
+   return agx3_bind_compose(encoding,
+                            m5 ? (d->dest_64 ? "imadd64" : "imadd32")
+                               : (d->negate_addend ? "imsub" : "imadd"), 0,
                             baseline, nbaseline, ov, n, out, len);
 }

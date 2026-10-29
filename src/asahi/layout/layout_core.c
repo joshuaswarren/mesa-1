@@ -33,7 +33,7 @@ ail_m5_layer_stride_B(uint64_t unaligned_size_B, unsigned layers,
    if (layers <= 1)
       return unaligned_size_B;
 
-   if (unaligned_size_B > 0x4000)
+   if (unaligned_size_B >= 0x4000)
       return ALIGN_POT(unaligned_size_B, 0x4000);
 
    if (has_compression_metadata)

@@ -247,6 +247,8 @@ typedef enum {
     * you can always chase the chain.
     */
    nir_address_format_logical,
+   nir_address_format_64bit_global_32bit_offset_map,
+   nir_address_format_64bit_bounded_global_map,
 } nir_address_format;
 
 typedef union {

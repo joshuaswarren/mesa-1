@@ -244,7 +244,7 @@ libagx_image_texel_address_gen9(
    constant const struct agx_pbe_gen9_packed *ptr,
    constant const uint64_t *sw_ptr, uint4 coord, uint sample_idx,
    uint bytes_per_sample_B, bool is_1d, bool is_msaa, bool is_layered,
-   bool return_index)
+   bool return_index, bool gen10)
 {
    /* Decode only the native fields used for address arithmetic.  Calling the
     * generated unpacker here would also inline its diagnostic mask checks;
@@ -254,7 +254,8 @@ libagx_image_texel_address_gen9(
       (uint64_t)ptr->opaque[0] | ((uint64_t)ptr->opaque[1] << 32);
    const uint64_t native23 =
       (uint64_t)ptr->opaque[2] | ((uint64_t)ptr->opaque[3] << 32);
-   const uint width_px_lod0 = (uint)((native01 >> 24) & 0x3fffu) + 1;
+   const uint width_mask = gen10 ? 0x7fffu : 0x3fffu;
+   const uint width_px_lod0 = (uint)((native01 >> 24) & width_mask) + 1;
    /* A linear PBE shortens the address to 40 bits and stores its row pitch
     * minus 16 bytes at bit 40, see agx_pbe_agx3_2d_pack(). */
    const bool linear = ((native01 >> 4) & 0x3u) == AGX_LAYOUT_LINEAR;
@@ -433,6 +434,84 @@ libagx_texture_samples_gen9(constant struct agx_texture_gen9_packed *ptr)
 
    /* We may assume the input is multisampled, so just check the samples */
    return 2u << d.samples;
+}
+
+/* Gen10 widens the dimensions and moves the sample field. Decode the
+ * matching descriptor while retaining the shared view/LOD query semantics. */
+uint3
+libagx_txs_gen10(constant struct agx_texture_gen10_packed *ptr, uint16_t lod,
+           unsigned nr_comps, bool is_1d, bool is_2d,
+           bool is_cube, bool is_array)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+
+   /* From the Vulkan spec:
+    *
+    *    OpImageQuery*...  return 0 if the bound descriptor is a null descriptor
+    */
+   if (d.address == AGX_ZERO_PAGE_ADDRESS)
+      return 0;
+
+   /* Load standard dimensions */
+   uint3 size = (uint3)(d.width, d.height, d.depth);
+   lod += d.first_level;
+
+   /* Linear 2D arrays are special.
+    *
+    * TODO: Optimize this, since linear 2D arrays aren't needed for APIs and
+    * this just gets used internally for blits.
+    */
+   if (is_2d && is_array && d.layout == AGX_LAYOUT_LINEAR)
+      size.z = d.depth_linear;
+
+   /* 1D Arrays have their second component as the layer count */
+   if (is_1d && is_array)
+      size.y = size.z;
+
+   /* Adjust for LOD, do not adjust array size */
+   size.x = max(size.x >> lod, 1u);
+
+   if (nr_comps - (uint)is_array >= 2)
+      size.y = max(size.y >> lod, 1u);
+
+   if (nr_comps - (uint)is_array >= 3)
+      size.z = max(size.z >> lod, 1u);
+
+   /* Cube maps have equal width and height, we save some instructions by only
+    * reading one. Dead code elimination will remove the redundant instructions.
+    */
+   if (is_cube)
+      size.y = size.x;
+
+   return size;
+}
+
+uint
+libagx_texture_samples_gen10(constant struct agx_texture_gen10_packed *ptr)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+
+   /* As above */
+   if (d.address == AGX_ZERO_PAGE_ADDRESS)
+      return 0;
+
+   /* Single-sampled views use an ordinary 2D dimension; the sample field
+    * encodes 2/4/8 only for multisampled dimensions. */
+   const bool multisampled =
+      d.dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
+      d.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
+   return multisampled ? (2u << d.samples) : 1u;
+}
+
+uint
+libagx_texture_levels_gen10(constant struct agx_texture_gen10_packed *ptr)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+
+   if (d.address == AGX_ZERO_PAGE_ADDRESS)
+      return 0;
+   else
+      return (d.last_level - d.first_level) + 1;
 }
 
 /* robustImageAccess2 reads outside a view return (0, 0, 0, 1) for a format

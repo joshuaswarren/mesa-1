@@ -11,6 +11,7 @@
 #include "asahi/compiler/agx3_graphics_program.h"
 #include "asahi/lib/agx3_compute_program_core.h"
 #include "asahi/lib/agx_ioto_program_core.h"
+#include "util/format/u_format.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -21,6 +22,8 @@ extern "C" {
 #endif
 
 struct agx_tilebuffer_layout;
+
+bool hk_agx3_format_needs_shader_resolve(enum pipe_format format);
 
 /* Describe a nonempty compiler preamble uploaded with its whole binary.
  * Checks both CPU and executable extents. The caller keeps the immutable CPU

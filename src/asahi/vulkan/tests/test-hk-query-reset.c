@@ -36,9 +36,10 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
  * paths must not allocate, change dependencies, discard a stream or emit
  * unrelated work while draining query resets. */
 void
-hk_flush_deferred_clears(struct hk_cmd_buffer *cmd)
+hk_flush_deferred_clears_why(struct hk_cmd_buffer *cmd, const char *why)
 {
    (void)cmd;
+   (void)why;
    abort();
 }
 
@@ -86,6 +87,14 @@ hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
 void
 hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+bool
+hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    (void)cmd;
    (void)cs;

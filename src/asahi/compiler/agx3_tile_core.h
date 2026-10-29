@@ -12,6 +12,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "asahi/lib/agx_chip.h"
@@ -21,6 +22,26 @@ extern "C" {
 #endif
 
 #define AGX3_TILE_MAX_LENGTH 14u
+
+/* Genuine G17G builtin: base PBE pointer U0, tile offsets U4+4i,
+ * one retained eight-half coordinate wire per target, descriptor indexi. */
+#define AGX3_M5_MRT_EOT_MAX_LENGTH 400u
+uint16_t agx3_m5_mrt_eot_nr_gprs(unsigned targets);
+uint16_t agx3_m5_mrt_eot_staging_halfs(unsigned targets);
+bool agx3_m5_mrt_eot_generate_sample_mask(unsigned targets, const uint8_t *selectors,
+                                      unsigned multisample_mask, bool layered,
+                                      uint8_t *output, size_t capacity, size_t *written);
+bool agx3_m5_mrt_eot_generate_layered(unsigned targets, const uint8_t *selectors,
+                                      bool multisample, bool layered,
+                                      uint8_t *output, size_t capacity,
+                                      size_t *written);
+bool agx3_m5_mrt_eot_generate_typed_ms(unsigned targets, const uint8_t *selectors,
+                                       bool multisample, uint8_t *output,
+                                       size_t capacity, size_t *written);
+bool agx3_m5_mrt_eot_generate_typed(unsigned targets, const uint8_t *selectors,
+                                    uint8_t *output, size_t capacity, size_t *written);
+bool agx3_m5_mrt_eot_generate(unsigned targets, uint8_t *output,
+                              size_t capacity, size_t *written);
 
 enum agx3_tile_width {
    AGX3_TILE_W8 = 0,
@@ -90,7 +111,9 @@ bool agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
                      uint16_t wait_mask, uint8_t out[AGX3_TILE_MAX_LENGTH],
                      uint8_t *len);
 
-/* agx3_tile_store with AGX3b f13 chosen by the caller; AGX3c always sets it.
+/* agx3_tile_store with native f13 chosen by the caller. The ordinary C
+ * wrapper preserves f13=1; eight-sample fragment payloads may retain it at
+ * f13=0 until their last use, as Apple's sample_id8 shader does.
  * Apple's AGX3b fragments set f13 on the leading stores of colour
  * transactions wider than five targets, see agx3_g17p_mrt_protocol(). */
 bool agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,

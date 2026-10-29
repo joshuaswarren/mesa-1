@@ -52,7 +52,6 @@ struct agx3_g17p_graphics_program_desc {
    uint16_t nr_gprs;
    bool compiler_d_valid;
    uint32_t compiler_d;
-   uint32_t threadgroup_memory_size_B;
    bool fragment;
    bool writes_sample_mask;
    uint8_t colour_classes;
@@ -64,6 +63,9 @@ struct agx3_g17p_graphics_program_desc {
     * second-level dereference. Ordinary programs leave this false and
     * materialize every absolute range themselves. */
    bool preloaded_root;
+
+   /* Shared memory in bytes for a compute, mesh or object launch. */
+   uint32_t threadgroup_memory_size_B;
 
    /* Address-independent shape (agx3_ioto_uniform_program_desc::patchable):
     * every range materializes its own base with fixed-size LDIMMs, so the
@@ -84,6 +86,24 @@ struct agx3_g17p_graphics_program {
    uint16_t length;
 };
 
+bool agx3_g17g_graphics_program_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, size_t *size);
+bool agx3_g17g_graphics_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program);
+/* G17S-only native TA mesh/object program composition. Shader entry ABI and
+ * resources must already be supplied; this does not advertise mesh support. */
+bool agx3_g17g_mesh_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   bool object, struct agx3_g17p_graphics_program *program);
+bool agx3_g17g_compute_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program);
+bool agx3_g17g_tile_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   bool store, struct agx3_g17p_graphics_program *program);
+
 struct agx3_g17p_graphics_program_template {
    struct agx3_g17p_graphics_program program;
    struct agx_ioto_load_relocation
@@ -91,6 +111,22 @@ struct agx3_g17p_graphics_program_template {
    uint16_t relocation_count;
    uint16_t constant_suffix_offset;
 };
+
+
+
+bool agx3_g17g_graphics_program_template_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program_template *program);
+
+/* Capture the exact address materializations of the normal M5 compute
+ * program. Relocations refer to bytes of the final composed program. */
+bool agx3_g17g_compute_program_template_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program_template *program);
+
+bool agx3_g17g_tile_program_template_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   bool store, struct agx3_g17p_graphics_program_template *program);
 
 enum agx3_g17p_rt0_bg_op {
    AGX3_G17P_RT0_BG_CLEAR,

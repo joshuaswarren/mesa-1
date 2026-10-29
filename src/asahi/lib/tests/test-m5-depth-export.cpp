@@ -1,0 +1,406 @@
+/* Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * M5 fragment epilog depth/stencil export forms, against native
+ * Native G17G compiler fragments:
+ *  - depth or stencil alone, whole pixel: one DEPTHF in a loop over the
+ *    covered samples, with class 1 taken once ahead of it;
+ *  - depth and stencil together, whole pixel: one DEPTHF word;
+ *  - alpha-to-coverage: one DEPTHF per sample with the alpha coverage folded
+ *    into its word, and no separate MOVMSK;
+ *  - blended alpha-to-coverage without a depth write: one MOVMSK per pixel,
+ *    ahead of the per-sample blend;
+ *  - blended with a depth write: all of the depth words above, ahead of the
+ *    per-sample blend.
+ */
+#include <gtest/gtest.h>
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include "asahi/compiler/agx_compile.h"
+#include "compiler/nir/nir_builder.h"
+#include "agx_tilebuffer.h"
+#include "agx_linker.h"
+extern "C" {
+#include "asahi/compiler/agx_nir.h"
+#include "asahi/compiler/agx_debug.h"
+#include "asahi/isa/disasm.h"
+}
+
+namespace {
+
+class M5DepthExport : public ::testing::Test {
+ protected:
+   M5DepthExport() { glsl_type_singleton_init_or_ref(); }
+   ~M5DepthExport() { glsl_type_singleton_decref(); }
+};
+
+struct epilog_shape {
+   enum agx_chip chip;
+   unsigned samples;
+   bool z, s, a2c;
+   bool blend = false, sample_shading = false;
+};
+
+static nir_shader *
+build_epilog(const epilog_shape &shape)
+{
+   agx_fs_epilog_key fs = {};
+   fs.nr_samples = shape.samples;
+   fs.max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE;
+   fs.max_bytes_per_tile = 32768;
+   fs.max_samples_per_tile = 2048;
+   fs.link.loc_written = 1;
+   fs.link.size_32 = 1;
+   fs.link.colour_comps = BITFIELD_MASK(4);
+   fs.link.write_z = shape.z;
+   fs.link.write_s = shape.s;
+   fs.link.sample_shading = shape.sample_shading;
+   fs.blend.alpha_to_coverage = shape.a2c;
+   agx_fs_epilog_apply_device_policy(shape.chip, &fs);
+   fs.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   fs.remap[0] = 0;
+   for (unsigned rt = 1; rt < ARRAY_SIZE(fs.remap); ++rt)
+      fs.remap[rt] = -1;
+   fs.blend.rt[0].colormask = 0xf;
+   fs.blend.rt[0].mode =
+      shape.blend
+         ? agx_pack_blend_standard(PIPE_BLEND_ADD, PIPE_BLENDFACTOR_SRC_ALPHA,
+                                   PIPE_BLENDFACTOR_INV_SRC_ALPHA,
+                                   PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+                                   PIPE_BLENDFACTOR_INV_SRC_ALPHA)
+         : agx_pack_blend_standard(PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+                                   PIPE_BLENDFACTOR_ZERO, PIPE_BLEND_ADD,
+                                   PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "M5 depth export epilog");
+   /* As hk selects the builder for M5. */
+   if (shape.sample_shading)
+      agx_nir_fs_epilog_g17p(&b, &fs);
+   else
+      agx_nir_fs_epilog(&b, &fs);
+   return b.shader;
+}
+
+struct counts {
+   unsigned store_zs = 0, covered_sample = 0, transactions = 0, demotes = 0;
+   unsigned coverage_updates = 0;
+   unsigned stores_in_loop = 0;
+};
+
+static counts
+count_nir(nir_shader *s)
+{
+   counts c;
+   nir_foreach_block(block, nir_shader_get_entrypoint(s)) {
+      bool in_loop = false;
+      for (nir_cf_node *n = block->cf_node.parent; n; n = n->parent)
+         in_loop |= n->type == nir_cf_node_loop;
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_store_zs_agx) {
+            c.store_zs++;
+            c.covered_sample +=
+               !!(nir_intrinsic_base(intr) & AGX_ZS_COVERED_SAMPLE);
+            c.stores_in_loop += in_loop;
+         }
+         c.transactions += intr->intrinsic == nir_intrinsic_zs_transaction_agx;
+         c.demotes += intr->intrinsic == nir_intrinsic_demote_samples;
+         c.coverage_updates += intr->intrinsic == nir_intrinsic_sample_mask_agx;
+      }
+   }
+   return c;
+}
+
+/* Mnemonics of an AGX3c binary, in order. */
+static std::vector<std::string>
+mnemonics(const agx_shader_part &part)
+{
+   std::vector<std::string> out;
+   const uint8_t *code = (const uint8_t *)part.binary + part.info.main_offset;
+   size_t len = part.info.main_size, i = 0;
+   while (i < len) {
+      char *text = NULL;
+      size_t text_len = 0;
+      FILE *fp = open_memstream(&text, &text_len);
+      uint8_t buf[32] = {0};
+      memcpy(buf, code + i, MIN2(sizeof(buf), len - i));
+      signed ret = agx3c_disassemble_instr((BITSET_WORD *)buf, fp, i,
+                                           len - i, false);
+      fclose(fp);
+      std::string line = text ? text : "";
+      free(text);
+      unsigned length = abs(ret);
+      if (length == 0)
+         break;
+      /* Keep the mnemonic: the first word after the decoder's
+       * "# XXX: Unknown bit set N" notes. */
+      size_t at = 0;
+      while (at < line.size()) {
+         size_t start = line.find_first_not_of(" \t\n", at);
+         if (start == std::string::npos)
+            break;
+         size_t end = line.find_first_of(" \t\n", start);
+         std::string word = line.substr(start, end - start);
+         at = end;
+         if (word == "#" || word == "XXX:" || word == "Unknown" ||
+             word == "bit" || word == "set" ||
+             word.find_first_not_of("0123456789") == std::string::npos)
+            continue;
+         out.push_back(word);
+         break;
+      }
+      i += length;
+   }
+   return out;
+}
+
+static unsigned
+count_of(const std::vector<std::string> &m, const char *name)
+{
+   unsigned n = 0;
+   for (const auto &s : m)
+      n += s == name;
+   return n;
+}
+
+static int
+index_of(const std::vector<std::string> &m, const char *name)
+{
+   for (unsigned i = 0; i < m.size(); ++i) {
+      if (m[i] == name)
+         return i;
+   }
+   return -1;
+}
+
+static bool
+compile_m5(nir_shader *s, unsigned samples, agx_shader_part *part,
+           bool preprocessed = false)
+{
+   if (!preprocessed)
+      agx_preprocess_nir(s);
+   if (samples > 1)
+      agx_nir_lower_g17p_tile_samples(s, samples);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   key.no_preamble = true;
+   key.secondary = true;
+   key.fs.nr_samples = samples;
+   BITSET_SET(key.g17p_tile_partitions, 0);
+   return agx_compile_shader_nir(s, &key, part);
+}
+
+} /* namespace */
+
+/* Native zs_depth_{2,4,8}x, zs_cdepth_4x and zs_stencil_{2,4}x. */
+TEST_F(M5DepthExport, SingleAttachmentLoopsOverCoveredSamples)
+{
+   for (unsigned samples : {2u, 4u, 8u}) {
+      for (bool stencil : {false, true}) {
+         SCOPED_TRACE(::testing::Message() << samples << " samples, "
+                      << (stencil ? "stencil" : "depth"));
+         nir_shader *s = build_epilog({AGX_CHIP_G17S, samples, !stencil,
+                                       stencil, false});
+         counts c = count_nir(s);
+         EXPECT_EQ(c.store_zs, 1u);
+         EXPECT_EQ(c.covered_sample, 1u);
+         EXPECT_EQ(c.stores_in_loop, 1u);
+         EXPECT_EQ(c.transactions, 2u);
+
+         agx_shader_part part = {};
+         ASSERT_TRUE(compile_m5(s, samples, &part)) << agx_last_compile_refusal();
+         std::vector<std::string> m = mnemonics(part);
+         EXPECT_EQ(count_of(m, "depthf"), 1u);
+         EXPECT_EQ(count_of(m, "cndlt"), 1u);
+         /* One class-1 acquire, ahead of the loop and its DEPTHF. */
+         int depthf = index_of(m, "depthf"), loop = index_of(m, "cndlt");
+         int last_wait = -1;
+         unsigned waits_before_depthf = 0;
+         for (int i = 0; i < depthf; ++i) {
+            if (m[i] == "pixwait") {
+               last_wait = i;
+               waits_before_depthf++;
+            }
+         }
+         EXPECT_EQ(waits_before_depthf, 2u); /* entry gate, then class 1 */
+         EXPECT_LT(last_wait, depthf);
+         EXPECT_LT(depthf, loop);
+         bool cf_between = false;
+         for (int i = last_wait + 1; i < depthf; ++i)
+            cf_between |= m[i] == "cndst";
+         EXPECT_TRUE(cf_between) << "class-1 wait must precede the loop";
+         free(part.binary);
+         ralloc_free(s);
+      }
+   }
+}
+
+/* Native zs_depth_stencil_{2,4}x. */
+TEST_F(M5DepthExport, DepthAndStencilIsOneWord)
+{
+   for (unsigned samples : {2u, 4u}) {
+      SCOPED_TRACE(::testing::Message() << samples << " samples");
+      nir_shader *s = build_epilog({AGX_CHIP_G17S, samples, true, true, false});
+      counts c = count_nir(s);
+      EXPECT_EQ(c.store_zs, 1u);
+      EXPECT_EQ(c.covered_sample, 0u);
+      EXPECT_EQ(c.transactions, 0u);
+      agx_shader_part part = {};
+      ASSERT_TRUE(compile_m5(s, samples, &part)) << agx_last_compile_refusal();
+      std::vector<std::string> m = mnemonics(part);
+      EXPECT_EQ(count_of(m, "depthf"), 1u);
+      EXPECT_EQ(count_of(m, "cndlt"), 0u);
+      EXPECT_EQ(count_of(m, "movmsk"), 0u);
+      free(part.binary);
+      ralloc_free(s);
+   }
+}
+
+/* Native zs_depth_{2,4}x_a2c, zs_cdepth_4x_a2c, zs_stencil_4x_a2c and
+ * zs_depth_stencil_4x_a2c. */
+TEST_F(M5DepthExport, AlphaToCoverageFoldsIntoSampleWords)
+{
+   for (unsigned samples : {2u, 4u}) {
+      for (unsigned zs : {1u, 2u, 3u}) {
+         SCOPED_TRACE(::testing::Message() << samples << " samples, zs=" << zs);
+         nir_shader *s = build_epilog({AGX_CHIP_G17S, samples, !!(zs & 1),
+                                       !!(zs & 2), true});
+         counts c = count_nir(s);
+         EXPECT_EQ(c.demotes, 0u);
+         EXPECT_EQ(c.coverage_updates, 0u);
+         EXPECT_EQ(c.covered_sample, 0u);
+         EXPECT_FALSE(s->info.fs.uses_discard);
+         agx_shader_part part = {};
+         ASSERT_TRUE(compile_m5(s, samples, &part)) << agx_last_compile_refusal();
+         std::vector<std::string> m = mnemonics(part);
+         EXPECT_EQ(count_of(m, "depthf"), samples);
+         EXPECT_EQ(count_of(m, "movmsk"), 0u);
+         EXPECT_EQ(count_of(m, "cndlt"), 0u);
+         free(part.binary);
+         ralloc_free(s);
+      }
+   }
+}
+
+/* Without a depth or stencil write, alpha-to-coverage keeps its kill, and a
+ * single sample keeps its one word. */
+TEST_F(M5DepthExport, OtherShapesUnchanged)
+{
+   nir_shader *s = build_epilog({AGX_CHIP_G17S, 4, false, false, true});
+   counts c = count_nir(s);
+   EXPECT_EQ(c.store_zs, 0u);
+   EXPECT_EQ(c.transactions, 0u);
+   EXPECT_TRUE(s->info.fs.uses_discard);
+   ralloc_free(s);
+
+   s = build_epilog({AGX_CHIP_G17S, 1, true, false, false});
+   c = count_nir(s);
+   EXPECT_EQ(c.store_zs, 1u);
+   EXPECT_EQ(c.covered_sample, 0u);
+   EXPECT_EQ(c.transactions, 0u);
+   ralloc_free(s);
+
+   /* Not M5: no covered-sample loop, and alpha coverage stays a separate
+    * coverage update. */
+   s = build_epilog({AGX_CHIP_G17P, 4, true, false, true});
+   c = count_nir(s);
+   EXPECT_EQ(c.covered_sample, 0u);
+   EXPECT_EQ(c.transactions, 0u);
+   EXPECT_GT(c.demotes + c.coverage_updates, 0u);
+   ralloc_free(s);
+}
+
+TEST_F(M5DepthExport, SampleRateCoverageTestsBeforeColour)
+{
+   for (bool sample_shading : {false, true}) {
+      for (unsigned samples : {2u, 4u}) {
+         SCOPED_TRACE(::testing::Message() << samples << " samples"
+                      << (sample_shading ? ", sample shaded" : ""));
+         epilog_shape shape = {AGX_CHIP_G17S, samples, false, false, true};
+         shape.sample_shading = sample_shading;
+         nir_shader *s = build_epilog(shape);
+         agx_preprocess_nir(s);
+         counts c = count_nir(s);
+         EXPECT_EQ(c.coverage_updates, 1u);
+
+         agx_shader_part part = {};
+         ASSERT_TRUE(compile_m5(s, samples, &part, true))
+            << agx_last_compile_refusal();
+         std::vector<std::string> m = mnemonics(part);
+         EXPECT_EQ(count_of(m, "movmsk"), 1u);
+         EXPECT_LT(index_of(m, "movmsk"), index_of(m, "lstcol"));
+         free(part.binary);
+         ralloc_free(s);
+      }
+   }
+}
+
+TEST_F(M5DepthExport, BlendedAlphaCoverageTestsOncePerPixel)
+{
+   for (bool sample_shading : {false, true}) {
+      for (unsigned samples : {2u, 4u, 8u}) {
+         if (sample_shading && samples == 8)
+            continue;
+         SCOPED_TRACE(::testing::Message() << samples << " samples"
+                      << (sample_shading ? ", sample shaded" : ""));
+         epilog_shape shape = {AGX_CHIP_G17S, samples, false, false, true};
+         shape.blend = true;
+         shape.sample_shading = sample_shading;
+         nir_shader *s = build_epilog(shape);
+         agx_preprocess_nir(s);
+         counts c = count_nir(s);
+         EXPECT_EQ(c.coverage_updates, 1u);
+
+         agx_shader_part part = {};
+         ASSERT_TRUE(compile_m5(s, samples, &part, true))
+            << agx_last_compile_refusal();
+         std::vector<std::string> m = mnemonics(part);
+         EXPECT_EQ(count_of(m, "lldcol"), samples);
+         EXPECT_EQ(count_of(m, "movmsk"), 1u);
+         EXPECT_LT(index_of(m, "movmsk"), index_of(m, "lldcol"));
+         free(part.binary);
+         ralloc_free(s);
+      }
+   }
+}
+
+/* Native blend_depth_{2,4,8}x and a2cb_depth_{2,4,8}x: a blended fragment
+ * that writes depth finishes its depth words before blending any sample. */
+TEST_F(M5DepthExport, BlendedDepthWritesPrecedeTheBlend)
+{
+   for (bool a2c : {false, true}) {
+      for (unsigned samples : {2u, 4u, 8u}) {
+         SCOPED_TRACE(::testing::Message() << samples << " samples"
+                      << (a2c ? ", alpha to coverage" : ""));
+         epilog_shape shape = {AGX_CHIP_G17S, samples, true, false, a2c};
+         shape.blend = true;
+         nir_shader *s = build_epilog(shape);
+         agx_preprocess_nir(s);
+         counts c = count_nir(s);
+         EXPECT_EQ(c.store_zs, 1u);
+         EXPECT_EQ(c.covered_sample, a2c ? 0u : 1u);
+         EXPECT_EQ(c.coverage_updates, 0u);
+
+         agx_shader_part part = {};
+         ASSERT_TRUE(compile_m5(s, samples, &part, true))
+            << agx_last_compile_refusal();
+         std::vector<std::string> m = mnemonics(part);
+         EXPECT_EQ(count_of(m, "lldcol"), samples);
+         EXPECT_EQ(count_of(m, "depthf"), a2c ? samples : 1u);
+         EXPECT_EQ(count_of(m, "movmsk"), 0u);
+         int last_depthf = -1;
+         for (unsigned i = 0; i < m.size(); ++i) {
+            if (m[i] == "depthf")
+               last_depthf = i;
+         }
+         EXPECT_LT(last_depthf, index_of(m, "lldcol"));
+         free(part.binary);
+         ralloc_free(s);
+      }
+   }
+}

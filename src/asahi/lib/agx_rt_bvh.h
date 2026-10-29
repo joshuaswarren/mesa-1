@@ -995,6 +995,8 @@ agx_rt_bvh_gen1_header_set_child_layout(
    unsigned leaf_boxes, uint32_t child_space_slot, unsigned leaf_type,
    unsigned leaf_slot_capacity, bool indexed_leaf_counts)
 {
+   /* Indexed counts do not need a fixed slot capacity. Native M5 instance
+    * roots use this form with capacity zero and two-slot instance records. */
    if (!header || inner_count > 8 || leaf_boxes > 8 ||
        inner_count + leaf_boxes == 0 || inner_count + leaf_boxes > 8 ||
        leaf_type > 31 || leaf_slot_capacity > 15 ||

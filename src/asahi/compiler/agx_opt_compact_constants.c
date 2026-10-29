@@ -24,10 +24,20 @@ agx_opt_compact_constants(agx_context *ctx)
    BITSET_WORD *src_other = calloc(ctx->alloc, sizeof(BITSET_WORD));
    BITSET_WORD *replaced = calloc(ctx->alloc, sizeof(BITSET_WORD));
 
+   /* M5's f32 add takes at most one half register, so a constant added to a
+    * half in an f32 add must stay 32-bit. */
+   const bool agx3c = ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
+
    /* Analyze the types that we read constants as */
    agx_foreach_instr_global(ctx, I) {
       agx_foreach_ssa_src(I, s) {
-         if (agx_is_float_src(I, s))
+         const bool half_pair =
+            agx3c && I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 &&
+            I->dest[0].size == AGX_SIZE_32 && s < 2 &&
+            I->src[1 - s].type == AGX_INDEX_NORMAL &&
+            I->src[1 - s].size == AGX_SIZE_16;
+
+         if (agx_is_float_src(I, s) && !half_pair)
             BITSET_SET(src_float, I->src[s].value);
          else
             BITSET_SET(src_other, I->src[s].value);

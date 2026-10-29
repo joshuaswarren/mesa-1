@@ -153,6 +153,7 @@ agx3_cdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
       record->length = AGX3_CDM_BARRIER_SIZE;
       record->chip = chip;
       record->data.barrier.flags = barrier.flags;
+      record->data.barrier.flush_memory = barrier.flush_memory;
       return true;
 
    case AGX_CDM_BLOCK_TYPE_UNKNOWN_5: {

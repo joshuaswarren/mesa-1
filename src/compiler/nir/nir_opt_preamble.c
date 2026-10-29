@@ -267,6 +267,9 @@ can_move_intrinsic(nir_intrinsic_instr *instr, opt_preamble_ctx *ctx)
    case nir_intrinsic_image_samples_identical:
    case nir_intrinsic_bindless_image_load:
    case nir_intrinsic_image_heap_load:
+      if (ctx->options->no_textures)
+         return false;
+      FALLTHROUGH;
    case nir_intrinsic_load_global_bounded:
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_load_ssbo_intel:
@@ -293,6 +296,8 @@ can_move_instr(nir_instr *instr, opt_preamble_ctx *ctx)
 
    switch (instr->type) {
    case nir_instr_type_tex: {
+      if (ctx->options->no_textures)
+         return false;
       nir_tex_instr *tex = nir_instr_as_tex(instr);
       /* See note below about derivatives. We have special code to convert tex
        * to txd, though, because it's a common case.

@@ -662,9 +662,16 @@ agx_nir_fs_epilog_native(nir_builder *b, const void *key_)
    b->shader->info.stage = MESA_SHADER_FRAGMENT;
    b->shader->info.name = "FS epilog";
 
-   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_with_limits(
-      key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true,
-      key->max_sample_size_B, key->max_bytes_per_tile, key->max_samples_per_tile);
+   struct agx_tilebuffer_layout tib =
+      key->native_imageblock
+         ? agx_build_tilebuffer_layout_resident(
+              key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples,
+              true, key->max_sample_size_B, key->max_bytes_per_tile,
+              key->max_samples_per_tile, key->resident_mask)
+         : agx_build_tilebuffer_layout_with_limits(
+              key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples,
+              true, key->max_sample_size_B, key->max_bytes_per_tile,
+              key->max_samples_per_tile);
 
    unsigned rt_order[AGX_MAX_RENDER_TARGETS];
    for (unsigned rt = 0; rt < ARRAY_SIZE(rt_order); ++rt)
@@ -845,6 +852,7 @@ agx_nir_fs_epilog_native(nir_builder *b, const void *key_)
    }
 
    /* Alpha-to-coverage must be lowered before alpha-to-one */
+   const bool discards_before_a2c = b->shader->info.fs.uses_discard;
    if (key->blend.alpha_to_coverage)
       NIR_PASS(_, b->shader, nir_lower_alpha_to_coverage, false,
                NULL);
@@ -870,6 +878,34 @@ agx_nir_fs_epilog_native(nir_builder *b, const void *key_)
    const bool zs_carries_write_samples =
       (key->link.write_z || key->link.write_s) && key->nr_samples > 1 &&
       !key->defer_monolithic_msaa;
+
+   /* M5 carries alpha coverage the same way. Native G17G multisample
+    * fragments that write depth (native G17G compiler zs_depth_4x_a2c,
+    * zs_cdepth_4x_a2c and zs_depth_2x_a2c) evaluate it into each sample's
+    * DEPTHF coverage word and issue no MOVMSK; the colour store follows
+    * unmasked. A separate kill ahead of the words would be a second coverage
+    * update. Sample-rate epilogs keep the kill: they are lowered per sample
+    * below. */
+   nir_def *zs_alpha_coverage = NULL;
+   if (key->m5_coverage && zs_carries_write_samples &&
+       key->blend.alpha_to_coverage && !key->link.sample_shading) {
+      nir_foreach_block(block, b->impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_demote_samples)
+               continue;
+            nir_builder mask_b = nir_builder_at(nir_before_instr(instr));
+            nir_def *covered =
+               nir_u2u16(&mask_b, nir_inot(&mask_b, intr->src[0].ssa));
+            zs_alpha_coverage = zs_alpha_coverage
+               ? nir_iand(&mask_b, zs_alpha_coverage, covered) : covered;
+            nir_instr_remove(instr);
+         }
+      }
+      b->shader->info.fs.uses_discard = discards_before_a2c;
+   }
 
    /* already_ran_zs says the main shader has already triggered the
     * depth/stencil tests, so the epilog must not trigger them again.  It does
@@ -942,6 +978,8 @@ agx_nir_fs_epilog_native(nir_builder *b, const void *key_)
          write_samples ? nir_iand(b, write_samples,
                                   nir_load_active_samples_agx(b))
                        : nir_imm_intN_t(b, 0xFF, 16);
+      if (zs_alpha_coverage)
+         zs_samples = nir_iand(b, zs_samples, zs_alpha_coverage);
       nir_def *depth =
          nir_load_exported_agx(b, 1, 32, .base = AGX_ABI_FOUT_Z);
 
@@ -997,7 +1035,10 @@ agx_nir_fs_epilog_native(nir_builder *b, const void *key_)
        * to avoid duplicating tests.
        */
       if (b->shader->info.fs.uses_discard) {
-         NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
+         if (key->m5_coverage)
+            NIR_PASS(_, b->shader, agx_nir_lower_sample_mask_m5);
+         else
+            NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
       }
 
       NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
@@ -1010,15 +1051,30 @@ agx_nir_fs_epilog_native(nir_builder *b, const void *key_)
       b->cursor = nir_after_impl(b->impl);
       nir_export_agx(b, sample_id, .base = AGX_ABI_FIN_SAMPLE_MASK);
    } else if (!key->defer_monolithic_msaa) {
-      NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
+      if (key->m5_coverage)
+         NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa_m5, key->nr_samples);
+      else
+         NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
    } else if (b->shader->info.fs.uses_discard) {
       /* G17P can keep a pixel-shaded multisample blend as one tile
        * load/store pair carrying the live coverage register. Lower the
        * alpha discard while the epilog's test intrinsics are still available;
        * doing it after this function leaves a newly introduced test query
        * past divergence analysis. */
-      NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
+      if (key->m5_coverage)
+         NIR_PASS(_, b->shader, agx_nir_lower_sample_mask_m5);
+      else
+         NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
    }
+
+   /* M5 writes whole-pixel depth or stencil alone in one covered-sample
+    * DEPTHF loop, as native G17G does. A sample-rate epilog writes its own
+    * sample instead. A blended epilog's write qualifies once the MSAA
+    * lowering has kept it ahead of the sample loop; one left inside that
+    * loop does not run once and stays as it is. */
+   if (key->m5_coverage && !key->link.sample_shading &&
+       !key->defer_monolithic_msaa)
+      NIR_PASS(_, b->shader, agx_nir_lower_m5_zs_sample_loop, key->nr_samples);
 
    if (native_spills) {
       /* The generated loop has exactly two or four iterations. G17P's MRT
@@ -1249,6 +1305,8 @@ struct lower_epilog_ctx {
    struct agx_fs_epilog_link_info *info;
    nir_variable *masked_samples;
    bool preserve_early_demote;
+   bool preserve_memory_demote;
+   bool preserve_alpha_one;
 };
 
 static bool
@@ -1276,11 +1334,11 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    if (intr->intrinsic == nir_intrinsic_demote_samples &&
        (b->shader->info.fs.early_fragment_tests ||
+        (ctx->preserve_memory_demote && b->shader->info.writes_memory) ||
         (ctx->preserve_early_demote &&
-         (b->shader->info.writes_memory ||
-          (!b->shader->info.fs.uses_sample_shading &&
-           (b->shader->info.outputs_written &
-            BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))))))) {
+         !b->shader->info.fs.uses_sample_shading &&
+         (b->shader->info.outputs_written &
+          BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))))) {
 
       /* G17P carries the discard mask across the split for both early and
        * late tests. LSTCOL consumes it directly, and late DEPTHF must use it
@@ -1366,7 +1424,7 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       /* G17P's mixed-width MRT epilog cannot materialize the elided alpha
        * through AGX2's 16-bit immediate move. Keep it in the ordinary export
        * ABI, which is also what native multi-target shaders use. */
-      if (!ctx->preserve_early_demote && loc == 0 && c == 3 &&
+      if (!ctx->preserve_alpha_one && loc == 0 && c == 3 &&
           nir_scalar_is_const(s) &&
           nir_scalar_as_uint(s) == one_f) {
 
@@ -1384,11 +1442,14 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
 static bool
 lower_fs_output_to_epilog(nir_shader *s, struct agx_fs_epilog_link_info *out,
-                          bool preserve_early_demote)
+                          bool preserve_early_demote, bool preserve_memory_demote,
+                          bool preserve_alpha_one)
 {
    struct lower_epilog_ctx ctx = {
       .info = out,
       .preserve_early_demote = preserve_early_demote,
+      .preserve_memory_demote = preserve_memory_demote,
+      .preserve_alpha_one = preserve_alpha_one,
    };
 
    nir_shader_intrinsics_pass(s, lower_output_to_epilog,
@@ -1418,14 +1479,16 @@ bool
 agx_nir_lower_fs_output_to_epilog(nir_shader *s,
                                   struct agx_fs_epilog_link_info *out)
 {
-   return lower_fs_output_to_epilog(s, out, false);
+   return lower_fs_output_to_epilog(s, out, false, false, false);
 }
 
 bool
 agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out)
 {
-   return lower_fs_output_to_epilog(s, out, agx_chip_native_agx3(chip));
+   return lower_fs_output_to_epilog(
+      s, out, agx_chip_native_agx3(chip) || agx_chip_g17_m5(chip),
+      agx_chip_native_agx3(chip), agx_chip_native_agx3(chip));
 }
 
 static bool
@@ -1650,7 +1713,7 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 bool
 agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
 {
-   if (nr_samples != 1 && nr_samples != 2 && nr_samples != 4)
+   if (nr_samples != 1 && nr_samples != 2 && nr_samples != 4 && nr_samples != 8)
       return false;
 
    struct g17p_tile_sample_state state = {.samples = nr_samples};
@@ -1795,6 +1858,11 @@ agx_nir_fs_epilog_g17p(nir_builder *b, const void *key_)
          opt_progress = false;
          NIR_PASS(opt_progress, b->shader, nir_opt_constant_folding);
          NIR_PASS(opt_progress, b->shader, nir_opt_algebraic);
+         /* M5 folds dead branches so its sample-rate coverage updates
+          * coalesce ahead of the colour stores. Other parts keep their
+          * qualified epilog shape. */
+         if (key->m5_coverage)
+            NIR_PASS(opt_progress, b->shader, nir_opt_dead_cf);
       } while (opt_progress);
       NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
    } else {
@@ -1816,26 +1884,37 @@ agx_nir_fs_epilog_g17p(nir_builder *b, const void *key_)
  * and its epilog. Keep layout selection and the register-file limit together.
  */
 bool
-agx_nir_lower_g17p_sample_shading(nir_shader *nir,
-                                  struct agx_fs_epilog_link_info *link,
-                                  unsigned samples)
+agx_nir_lower_g17p_sample_shading_file(nir_shader *nir,
+                                       struct agx_fs_epilog_link_info *link,
+                                       unsigned samples, unsigned registers,
+                                       bool eight_samples)
 {
-   if (samples != 2 && samples != 4)
+   if (samples != 2 && samples != 4 && !(eight_samples && samples == 8))
       return false;
 
    struct agx_g17p_colour_layout layout;
    agx_g17p_colour_layout_init(&layout, link->loc_written, link->size_32,
                                link->colour_comps, false);
-   if (agx_g17p_sample_exports_end(&layout, samples) > AGX3B_NUM_REGS) {
+   if (agx_g17p_sample_exports_end(&layout, samples) > registers) {
       NIR_PASS(_, nir, agx_nir_pack_g17p_colour_exports, link);
       agx_g17p_colour_layout_init(&layout, link->loc_written, link->size_32,
                                   link->colour_comps, true);
    }
-   if (agx_g17p_sample_exports_end(&layout, samples) > AGX3B_NUM_REGS)
+   if (agx_g17p_sample_exports_end(&layout, samples) > registers)
       return false;
 
    NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
    NIR_PASS(_, nir, agx_nir_unroll_g17p_samples_layout, samples, &layout);
    nir->info.fs.uses_sample_shading = false;
    return true;
+}
+
+/* G17P: two or four samples within its 192-half register file. */
+bool
+agx_nir_lower_g17p_sample_shading(nir_shader *nir,
+                                  struct agx_fs_epilog_link_info *link,
+                                  unsigned samples)
+{
+   return agx_nir_lower_g17p_sample_shading_file(nir, link, samples,
+                                                 AGX3B_NUM_REGS, false);
 }

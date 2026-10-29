@@ -224,3 +224,141 @@ TEST(FminmaxConstantDenorm, FlushOnlyInFlushToZeroShaders)
       }
    }
 }
+
+static nir_def *
+unknown_word(nir_builder *b)
+{
+   return nir_load_push_constant(b, 1, 32, nir_imm_int(b, 0), .range = 4);
+}
+
+static void
+check_shared(uint32_t bits, bool arithmetic, bool mixed, bool narrow,
+             unsigned alignment, bool preserve, bool expect_removed)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "shared-minmax");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+   b.shader->info.shared_size = 16;
+   if (preserve)
+      b.shader->info.float_controls_execution_mode |=
+         FLOAT_CONTROLS_DENORM_PRESERVE_FP32;
+   nir_def *stored = arithmetic
+                        ? nir_fmul(&b, unknown_word(&b), nir_imm_float(&b, 2))
+                        : nir_imm_int(&b, bits);
+   nir_store_shared(&b, stored, nir_imm_int(&b, 0), .align_mul = 4);
+   if (mixed)
+      nir_store_shared(&b, nir_imm_int(&b, 1), nir_imm_int(&b, 4),
+                       .align_mul = 4);
+   if (narrow)
+      nir_store_shared(&b, nir_imm_intN_t(&b, 1, 16), nir_imm_int(&b, 8),
+                       .align_mul = 2);
+   nir_def *load =
+      nir_load_shared(&b, 1, 32, nir_imm_int(&b, 0), .align_mul = alignment);
+   nir_def *out = nir_fmin(&b, load, nir_imm_float(&b, 1));
+   nir_store_ssbo(&b, out, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                  .write_mask = 1, .align_mul = 4);
+   ASSERT_TRUE(agx_nir_lower_fminmax(b.shader, false));
+   unsigned before = fadds(b.shader);
+   ASSERT_EQ(before, 1u);
+   EXPECT_EQ(agx_nir_opt_canonical_minmax(b.shader), expect_removed);
+   EXPECT_EQ(fadds(b.shader), before - unsigned(expect_removed));
+   nir_validate_shader(b.shader, "shared-minmax result");
+   ralloc_free(b.shader);
+}
+
+TEST(FminmaxProvenance, SharedArithmetic)
+{
+   check_shared(0, true, false, false, 4, false, true);
+}
+TEST(FminmaxProvenance, SharedNormalConstant)
+{
+   check_shared(0x3f800000, false, false, false, 4, false, true);
+}
+TEST(FminmaxProvenance, SharedSubnormalConstant)
+{
+   check_shared(1, false, false, false, 4, false, false);
+}
+TEST(FminmaxProvenance, MixedUnknownWord)
+{
+   check_shared(0, true, true, false, 4, false, false);
+}
+TEST(FminmaxProvenance, NarrowWrite)
+{
+   check_shared(0, true, false, true, 4, false, false);
+}
+TEST(FminmaxProvenance, UnalignedRead)
+{
+   check_shared(0, true, false, false, 2, false, false);
+}
+TEST(FminmaxProvenance, DenormPreserve)
+{
+   check_shared(0, true, false, false, 4, true, false);
+}
+TEST(FminmaxProvenance, SharedSignallingNan)
+{
+   check_shared(0x7f800001, false, false, false, 4, false, false);
+}
+
+static void
+check_select(bool unknown)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "select-minmax");
+   nir_def *x = unknown_word(&b);
+   nir_def *a = nir_fmul(&b, x, nir_imm_float(&b, 2));
+   nir_def *value = nir_bcsel(&b, nir_ine_imm(&b, x, 0), a,
+                              unknown ? x : nir_imm_float(&b, 0));
+   nir_def *out = nir_fmax(&b, value, nir_imm_float(&b, -1));
+   nir_store_ssbo(&b, out, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                  .write_mask = 1, .align_mul = 4);
+   ASSERT_TRUE(agx_nir_lower_fminmax(b.shader, false));
+   /* The lowering may already prove a canonical select; either pass must
+    * leave exactly the unknown input's flush. */
+   const unsigned before = fadds(b.shader);
+   ASSERT_LE(before, 1u);
+   EXPECT_EQ(agx_nir_opt_canonical_minmax(b.shader), before > unsigned(unknown));
+   EXPECT_EQ(fadds(b.shader), unsigned(unknown));
+   nir_validate_shader(b.shader, "select-minmax result");
+   ralloc_free(b.shader);
+}
+TEST(FminmaxProvenance, CanonicalSelect)
+{
+   check_select(false);
+}
+TEST(FminmaxProvenance, UnknownSelect)
+{
+   check_select(true);
+}
+
+static void
+check_phi(bool unknown)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "phi-minmax");
+   nir_def *x = unknown_word(&b);
+   nir_push_if(&b, nir_ine_imm(&b, x, 0));
+   nir_def *a = nir_fmul(&b, x, nir_imm_float(&b, 2));
+   nir_push_else(&b, nullptr);
+   nir_def *other = unknown ? x : nir_imm_float(&b, 0);
+   nir_pop_if(&b, nullptr);
+   nir_def *value = nir_if_phi(&b, a, other);
+   nir_def *out = nir_fmax(&b, value, nir_imm_float(&b, -1));
+   nir_store_ssbo(&b, out, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                  .write_mask = 1, .align_mul = 4);
+   ASSERT_TRUE(agx_nir_lower_fminmax(b.shader, false));
+   const unsigned before = fadds(b.shader);
+   ASSERT_LE(before, 1u);
+   EXPECT_EQ(agx_nir_opt_canonical_minmax(b.shader), before > unsigned(unknown));
+   EXPECT_EQ(fadds(b.shader), unsigned(unknown));
+   nir_validate_shader(b.shader, "phi-minmax result");
+   ralloc_free(b.shader);
+}
+TEST(FminmaxProvenance, CanonicalPhi)
+{
+   check_phi(false);
+}
+TEST(FminmaxProvenance, UnknownPhi)
+{
+   check_phi(true);
+}

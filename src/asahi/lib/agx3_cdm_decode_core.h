@@ -64,6 +64,7 @@ struct agx3_cdm_decoded_record {
       } link_padding;
       struct {
          uint8_t flags;
+         bool flush_memory;
       } barrier;
       struct {
          uint8_t flags;

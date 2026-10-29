@@ -9,6 +9,7 @@
 #include "util/u_math.h"
 #include "vulkan/vulkan_core.h"
 #include "hk_cmd_buffer.h"
+#include "hk_frame_anatomy.h"
 #include "layout.h"
 
 #include "hk_device.h"
@@ -43,6 +44,16 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
       struct ail_layout *layout = &image->planes[plane].layout;
       perf_debug(cmd, "Image clear (%scompressed)",
                  layout->compressed ? "" : "un");
+      if (unlikely(hk_cmd_buffer_device(cmd)->frame_anatomy)) {
+         hk_frame_anatomy_note(
+            hk_cmd_buffer_device(cmd),
+            "image clear %ux%ux%u %s samples=%u levels=%u plane=%u "
+            "compressed=%u usage=0x%x empty_pass=%u",
+            image->vk.extent.width, image->vk.extent.height,
+            image->vk.array_layers, util_format_short_name(layout->format),
+            layout->sample_count_sa, level_count, plane, layout->compressed,
+            (unsigned)image->vk.usage, cmd->sync.kind_override != 0);
+      }
 
       for (uint32_t l = 0; l < level_count; l++) {
          const uint32_t level = range->baseMipLevel + l;
@@ -143,7 +154,9 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
             libagx_fast_clear(cmd, grid, AGX_BARRIER_ALL, meta_addr, address,
                               grid.count[0], grid.count[1], tilesize.width_el,
                               tilesize.height_el, meta_layer_stride_tl,
-                              layer_stride_uint4, util_logbase2(blocksize_B),
+                              layer_stride_uint4,
+                              util_logbase2(ail_metadata_tile(layout).height_el),
+                              util_logbase2(blocksize_B),
                               util_logbase2(layout->sample_count_sa), c[0],
                               c[1], c[2], c[3], word);
          } else {
@@ -200,6 +213,16 @@ hk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    if (hk_defer_clear(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, &value,
                       rangeCount, pRanges))
       return;
+
+   if (unlikely(hk_cmd_buffer_device(cmd)->frame_anatomy)) {
+      hk_frame_anatomy_note(
+         hk_cmd_buffer_device(cmd),
+         "clear not deferred: %ux%u %s ranges=%u levels=%u layers=%u usage=0x%x compressed=%u",
+         image->vk.extent.width, image->vk.extent.height,
+         util_format_short_name(hk_format_to_pipe_format(image->vk.format)),
+         rangeCount, image->vk.mip_levels, image->vk.array_layers,
+         (unsigned)image->vk.usage, image->planes[0].layout.compressed);
+   }
 
    /* Transfer stage: the streams recorded here belong to the transfer
     * class for every recorded dependency. */

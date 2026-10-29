@@ -34,6 +34,9 @@ struct hk_cmd_bo {
    /* Full VA of the G17P VDM alias in the architectural user window. */
    uint64_t g17p_vdm_alias;
 
+   /* This recording allocated the BO only through uploader.streams. */
+   bool stream_only;
+
    /** Link in a matching command-pool or command-buffer BO list. */
    struct list_head link;
 };

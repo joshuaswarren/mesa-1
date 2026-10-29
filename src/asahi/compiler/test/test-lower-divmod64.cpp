@@ -131,26 +131,30 @@ TEST(LowerDivmod64, MatchesReference)
    const nir_shader_compiler_options options = unroll_options();
    const nir_op ops[] = {nir_op_udiv, nir_op_umod, nir_op_idiv, nir_op_irem,
                          nir_op_imod};
-   for (nir_op op : ops) {
-      const bool is_signed = op == nir_op_idiv || op == nir_op_irem ||
-                             op == nir_op_imod;
-      for (uint64_t n : values) {
-         for (uint64_t d : values) {
-            if (d == 0)
-               continue;
-            /* INT64_MIN / -1 overflows and is undefined. */
-            if (is_signed && n == 0x8000000000000000ull &&
-                d == ~UINT64_C(0))
-               continue;
-            nir_shader *shader = make_program(&options, op, 1);
-            ASSERT_TRUE(agx_nir_lower_divmod64(shader));
-            nir_validate_shader(shader, "after divmod64 lowering");
-            uint64_t got = 0;
-            ASSERT_TRUE(evaluate(shader, &n, &d, 1, &got))
-               << nir_op_infos[op].name << " " << n << " " << d;
-            EXPECT_EQ(got, reference(op, n, d))
-               << nir_op_infos[op].name << " " << std::hex << n << " / " << d;
-            ralloc_free(shader);
+   /* Both forms of the loop's 64-bit add and subtract (G17P and M5). */
+   for (bool native_add64 : {false, true}) {
+      for (nir_op op : ops) {
+         const bool is_signed = op == nir_op_idiv || op == nir_op_irem ||
+                                op == nir_op_imod;
+         for (uint64_t n : values) {
+            for (uint64_t d : values) {
+               if (d == 0)
+                  continue;
+               /* INT64_MIN / -1 overflows and is undefined. */
+               if (is_signed && n == 0x8000000000000000ull &&
+                   d == ~UINT64_C(0))
+                  continue;
+               nir_shader *shader = make_program(&options, op, 1);
+               ASSERT_TRUE(agx_nir_lower_divmod64(shader, native_add64));
+               nir_validate_shader(shader, "after divmod64 lowering");
+               uint64_t got = 0;
+               ASSERT_TRUE(evaluate(shader, &n, &d, 1, &got))
+                  << nir_op_infos[op].name << " " << n << " " << d;
+               EXPECT_EQ(got, reference(op, n, d))
+                  << nir_op_infos[op].name << " " << std::hex << n << " / "
+                  << d;
+               ralloc_free(shader);
+            }
          }
       }
    }
@@ -162,7 +166,7 @@ TEST(LowerDivmod64, VectorComponentsAreIndependent)
    const uint64_t n[4] = {100, 0xffff859a3bf78592ull, 7, 0x123456789abcdefull};
    const uint64_t d[4] = {7, 3, 0x100000000ull, 0xffffffffull};
    nir_shader *shader = make_program(&options, nir_op_idiv, 4);
-   ASSERT_TRUE(agx_nir_lower_divmod64(shader));
+   ASSERT_TRUE(agx_nir_lower_divmod64(shader, false));
    uint64_t got[4] = {0};
    ASSERT_TRUE(evaluate(shader, n, d, 4, got));
    for (unsigned c = 0; c < 4; ++c)
@@ -178,6 +182,6 @@ TEST(LowerDivmod64, LeavesNarrowDivisionAlone)
    nir_def *d = agx_test_load_preamble(&b, 1, 32, 2);
    nir_store_global(&b, nir_udiv(&b, n, d), nir_imm_int64(&b, 0),
                     .align_mul = 4);
-   EXPECT_FALSE(agx_nir_lower_divmod64(b.shader));
+   EXPECT_FALSE(agx_nir_lower_divmod64(b.shader, false));
    ralloc_free(b.shader);
 }

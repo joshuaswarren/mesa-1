@@ -1629,6 +1629,53 @@ nir_opt_if_empty_then(nir_shader *shader)
    return progress;
 }
 
+/* Only the merge of adjacent if-statements with the same condition, for
+ * callers whose late code motion empties the block between two such ifs and
+ * which must not have the rest of nir_opt_if reshape their control flow. */
+static bool
+opt_if_merge_cf_list(struct exec_list *cf_list)
+{
+   bool progress = false;
+   foreach_list_typed(nir_cf_node, cf_node, node, cf_list) {
+      switch (cf_node->type) {
+      case nir_cf_node_block:
+         break;
+
+      case nir_cf_node_if: {
+         nir_if *nif = nir_cf_node_as_if(cf_node);
+         progress |= opt_if_merge_cf_list(&nif->then_list);
+         progress |= opt_if_merge_cf_list(&nif->else_list);
+         /* Absorb every following if with the same condition. */
+         while (opt_if_merge(nif))
+            progress = true;
+         break;
+      }
+
+      case nir_cf_node_loop: {
+         nir_loop *loop = nir_cf_node_as_loop(cf_node);
+         assert(!nir_loop_has_continue_construct(loop));
+         progress |= opt_if_merge_cf_list(&loop->body);
+         break;
+      }
+
+      case nir_cf_node_function:
+         UNREACHABLE("Invalid cf type");
+      }
+   }
+   return progress;
+}
+
+bool
+nir_opt_if_merge(nir_shader *shader)
+{
+   bool progress = false;
+   nir_foreach_function_impl(impl, shader) {
+      bool impl_progress = opt_if_merge_cf_list(&impl->body);
+      progress |= nir_progress(impl_progress, impl, nir_metadata_none);
+   }
+   return progress;
+}
+
 bool
 nir_opt_if(nir_shader *shader, nir_opt_if_options options)
 {

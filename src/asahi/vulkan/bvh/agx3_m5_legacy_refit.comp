@@ -1,0 +1,101 @@
+/* Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ * Refit a retained binary topology without sorting or repartitioning.
+ */
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float32 : require
+#extension GL_KHR_memory_scope_semantics : require
+#include "hk_build_interface.h"
+
+#ifndef HK_AGX3_GEN1
+#define HK_AGX3_GEN1 0
+#endif
+layout(local_size_x = 64) in;
+layout(push_constant) uniform CONSTS { hk_m5_refit_args args; };
+struct refit_node { uint parent; uint arrivals; uint reserved[2]; };
+TYPE(refit_node, 4);
+uint source_index(uint child)
+{
+   uint offset = ir_id_to_offset(child);
+   return ir_id_to_type(child) == vk_ir_node_internal
+      ? args.leaf_bound + (offset - args.root_offset) / SIZEOF(vk_ir_box_node)
+      : offset / (args.root_offset / args.leaf_bound);
+}
+void main()
+{
+   uint id = gl_GlobalInvocationID.x;
+   uint header_words = SIZEOF(vk_ir_header) / 4;
+   uint internal_bound = args.node_bound - args.leaf_bound;
+   if (args.phase <= 1) {
+      uint64_t retained_base = args.retained;
+      if (HK_AGX3_GEN1 != 0 && args.phase == 1 && args.metadata != 0ul) {
+         libagx_gen1_as_metadata live =
+            DEREF(REF(libagx_gen1_as_metadata)(args.metadata));
+         retained_base = live.native_base + live.retained_offset;
+      }
+      /* Preserve the actual binary topology, not unused internal capacity.
+       * Restore counts come from the retained GPU header after copy/rebase. */
+      uint internal_count = HK_AGX3_GEN1 == 0 ? internal_bound : args.phase == 0 ? DEREF(args.header).ir_internal_node_count
+         : DEREF(REF(vk_ir_header)(retained_base)).ir_internal_node_count;
+      uint words = header_words + internal_count * (SIZEOF(vk_ir_box_node) / 4);
+      if (id < words) {
+         uint64_t addr = id < header_words ? uint64_t(args.header) + uint64_t(id)*4ul
+            : args.intermediate_bvh + uint64_t(args.root_offset) + uint64_t(id-header_words)*4ul;
+         REF(uint32_t) retained = REF(uint32_t)(retained_base + uint64_t(id)*4ul);
+         if (args.phase == 0) DEREF(retained) = DEREF(REF(uint32_t)(addr));
+         else {
+            uint value = DEREF(retained);
+            if (id < 3) value = 0x7fffffffu;
+            else if (id < 6) value = 0x80000000u;
+            else if (id == 6) value = 0;
+            DEREF(REF(uint32_t)(addr)) = value;
+         }
+      }
+      if (args.phase == 1 && id < args.node_bound) {
+         DEREF(INDEX(refit_node, args.parents, id)).parent = 0xffffffffu;
+         DEREF(INDEX(refit_node, args.parents, id)).arrivals = 0;
+      }
+      return;
+   }
+   if (args.phase == 2) {
+      if (id >= DEREF(args.header).ir_internal_node_count) return;
+      REF(vk_ir_box_node) node = REF(vk_ir_box_node)(args.intermediate_bvh +
+         uint64_t(args.root_offset) + uint64_t(id)*uint64_t(SIZEOF(vk_ir_box_node)));
+      for (uint c = 0; c < 2; ++c) {
+         uint child = DEREF(node).children[c];
+         if (child != VK_BVH_INVALID_NODE)
+            DEREF(INDEX(refit_node, args.parents, source_index(child))).parent = args.leaf_bound + id;
+      }
+      return;
+   }
+   if (id >= args.leaf_bound) return;
+   uint parent = DEREF(INDEX(refit_node, args.parents, id)).parent;
+   for (uint steps = 0; parent != 0xffffffffu && steps < args.node_bound; ++steps) {
+      REF(vk_ir_box_node) node = REF(vk_ir_box_node)(args.intermediate_bvh +
+         uint64_t(args.root_offset) + uint64_t(parent-args.leaf_bound)*uint64_t(SIZEOF(vk_ir_box_node)));
+      uint expected = uint(DEREF(node).children[0] != VK_BVH_INVALID_NODE) +
+                      uint(DEREF(node).children[1] != VK_BVH_INVALID_NODE);
+      uint arrived = atomicAdd(DEREF(INDEX(refit_node, args.parents, parent)).arrivals,
+         1, gl_ScopeDevice, gl_StorageSemanticsBuffer,
+         gl_SemanticsAcquireRelease | gl_SemanticsMakeAvailable | gl_SemanticsMakeVisible);
+      if (arrived + 1 != expected) break;
+      vk_aabb bounds; bounds.min = vec3(INFINITY); bounds.max = vec3(-INFINITY);
+      for (uint c = 0; c < 2; ++c) {
+         uint child = DEREF(node).children[c];
+         if (child == VK_BVH_INVALID_NODE) continue;
+         REF(vk_ir_node) src = REF(vk_ir_node)(args.intermediate_bvh + uint64_t(ir_id_to_offset(child)));
+         bounds.min = min(bounds.min, DEREF(src).aabb.min);
+         bounds.max = max(bounds.max, DEREF(src).aabb.max);
+      }
+      DEREF(node).base.aabb = bounds;
+      parent = DEREF(INDEX(refit_node, args.parents, parent)).parent;
+   }
+}

@@ -168,6 +168,10 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
    case AGX_OPCODE_SCS_LOAD_REGISTER_BASE_AGX3:
       return size * util_last_bit(I->mask ? I->mask : 1);
 
+   case AGX_OPCODE_MATMAD16_AGX3:
+      return 16;
+   case AGX_OPCODE_MATMAD8_AGX3:
+      return 4;
    case AGX_OPCODE_MOV:
    case AGX_OPCODE_PHI:
       /* Tautological */
@@ -189,7 +193,7 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
 
    case AGX_OPCODE_LOAD_CPROG_AGX3:
       assert(ctx->is_preamble && ctx->agx3_cprog_inputs_lowered &&
-             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+             agx_isa_is_agx3(ctx->key->dev.encoding));
       assert(I->nr_dests == 1 && I->nr_srcs == 0 && !I->saturate);
       assert(I->dest[d].size == AGX_SIZE_16 || I->dest[d].size == AGX_SIZE_32);
       assert(agx_channels(I->dest[d]) == 1 && I->imm < 512 && size <= 512 - I->imm);
@@ -200,12 +204,12 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
    case AGX_OPCODE_STACK_LOAD:
    case AGX_OPCODE_LD_TILE:
       if (I->op == AGX_OPCODE_LOCAL_LOAD && I->memory_is_packed) {
-         assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+         assert(agx_isa_is_agx3(ctx->key->dev.encoding));
          assert(I->format == AGX_FORMAT_I8 && I->dest[d].size == AGX_SIZE_16);
          return DIV_ROUND_UP(util_bitcount(I->mask), 2);
       }
       if (I->op == AGX_OPCODE_DEVICE_LOAD && I->memory_is_packed) {
-         assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+         assert(agx_isa_is_agx3(ctx->key->dev.encoding));
          assert(I->dest[d].size == AGX_SIZE_32);
          const unsigned bytes = I->format == AGX_FORMAT_I8 ? 1 :
                                 I->format == AGX_FORMAT_I16 ? 2 : 4;
@@ -220,7 +224,7 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
           I->dest[d].size == AGX_SIZE_16 &&
           (I->format == AGX_FORMAT_U8NORM || I->format == AGX_FORMAT_S8NORM ||
            (I->format == AGX_FORMAT_I8 &&
-            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)))
+            agx_isa_is_agx3(ctx->key->dev.encoding))))
          return DIV_ROUND_UP(util_bitcount(I->mask), 2);
 
       /* Can write 16-bit or 32-bit. Anything logically 64-bit is already
@@ -305,6 +309,17 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
       return 2;
    }
 
+   if (I->agx3_split_coords && (s == 0 || s == 6 || s == 7)) {
+      assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+             I->nr_srcs == 8 &&
+             ((I->op == AGX_OPCODE_TEXTURE_LOAD &&
+               (I->dim == AGX_DIM_2D || I->dim == AGX_DIM_2D_MS ||
+                I->dim == AGX_DIM_2D_ARRAY)) ||
+              (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+               I->dim == AGX_DIM_2D)));
+      return 2;
+   }
+
    /* This is a sampler-private value, not a dimensional GPR coordinate. */
    if (agx_texture_resource(I) && s == 0)
       return agx_index_size_16(I->src[s]);
@@ -319,6 +334,10 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
    case AGX_OPCODE_STORE_UVB_M5:
       return 2 * size;
 
+   case AGX_OPCODE_MATMAD16_AGX3:
+      return s == 2 ? 16 : 8;
+   case AGX_OPCODE_MATMAD8_AGX3:
+      return s == 2 || (I->matrix_type & 15) == 2 ? 4 : 2;
    case AGX_OPCODE_MOV:
    case AGX_OPCODE_EXPORT:
       /* Tautological */
@@ -343,7 +362,7 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
    case AGX_OPCODE_UNIFORM_FMUL_AGX3:
    case AGX_OPCODE_UNIFORM_FFMA_AGX3:
       assert(ctx->is_preamble &&
-             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+             agx_isa_is_agx3(ctx->key->dev.encoding));
       assert(I->nr_dests == 0 && I->imm < 128 && !(I->imm & 1));
       assert(I->nr_srcs == (I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3 ? 3 : 2));
       assert(!I->saturate && !I->src[s].memory &&
@@ -365,7 +384,7 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
       if (s == 0) {
          if ((I->op == AGX_OPCODE_DEVICE_STORE ||
               I->op == AGX_OPCODE_LOCAL_STORE) && I->memory_is_packed) {
-            assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+            assert(agx_isa_is_agx3(ctx->key->dev.encoding));
             assert(I->format == AGX_FORMAT_I8);
             return DIV_ROUND_UP(util_bitcount(I->mask), 2);
          }
@@ -402,7 +421,8 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
       }
 
    case AGX_OPCODE_ZS_EMIT_AGX3:
-      assert(s == 0 && I->zs >= 1 && I->zs <= 3);
+      /* Bit 2 marks one word of an M5 covered-sample loop. */
+      assert(s == 0 && (I->zs & 3) && I->zs <= 7);
       return (I->zs & 1) ? 4 : 2;
 
    case AGX_OPCODE_IMAGE_WRITE:
@@ -420,6 +440,12 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          return agx_coordinate_registers(I, I->src[0].size);
       } else if (s == 1) {
          /* LOD */
+         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->memory_is_packed &&
+             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) {
+            assert(I->src[s].size == AGX_SIZE_32 &&
+                   agx_channels(I->src[s]) == 1);
+            return 2;
+         }
          if ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
               I->op == AGX_OPCODE_IMAGE_LOAD) &&
              ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&

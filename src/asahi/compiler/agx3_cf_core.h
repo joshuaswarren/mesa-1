@@ -65,6 +65,11 @@ struct agx3_cf_source_hints {
    bool discard;
 };
 
+bool agx3_cf_icmp_width_m5(enum agx3_cf_icond cond, unsigned slot,
+                            const uint16_t src[2], const bool half[2],
+                            const struct agx3_cf_source_hints hints[2],
+                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
 bool agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                         unsigned slot, const uint16_t src[2],
                         const struct agx3_cf_source_hints hints[2], uint16_t wait_mask,
@@ -75,14 +80,14 @@ bool agx3_cf_icmp_reg(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                       unsigned slot, uint16_t src0, uint16_t src1,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 /* flag[slot] = (32-bit register src0 cond 32-bit uniform), the form Apple's
- * G17P loop test uses. `uniform` is an even half index below 256. */
+ * G17P and G17G loop tests use. `uniform` is an even half index below 256. */
 bool agx3_cf_icmp_reg_uniform32(enum agx_isa_encoding enc,
                                 enum agx3_cf_icond cond, unsigned slot,
                                 uint16_t src0, uint16_t uniform,
                                 struct agx3_cf_source_hints hint,
                                 uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 /* flag[slot] = (32-bit uniform cond imm); `uniform` is an even half index
- * below 256. Apple's G17P loop-guard form; AGX3B only. */
+ * below 256. Apple's G17P/G17G loop-guard form. */
 bool agx3_cf_icmp_uniform_imm(enum agx_isa_encoding enc,
                               enum agx3_cf_icond cond, unsigned slot,
                               uint16_t uniform, uint8_t imm,
@@ -132,6 +137,13 @@ bool agx3_cf_fcmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                         const struct agx3_cf_source_hints hints[2],
                         uint16_t wait_mask, uint8_t out[AGX3_CF_MAX_LENGTH],
                         uint8_t *len);
+
+bool agx3_cf_fcmp_width_m5(enum agx3_cf_fcond cond, bool or_nan, unsigned slot,
+                          const uint16_t src[2], const bool half[2],
+                          const bool absolute[2],
+                          const struct agx3_cf_source_hints hints[2],
+                          uint16_t wait_mask,
+                          uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
 /* G17P register comparison with exactly one negated f32 source. */
 bool agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc,

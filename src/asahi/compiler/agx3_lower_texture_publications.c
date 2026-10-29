@@ -6,6 +6,11 @@
 #include "agx3_resource_ir.h"
 #include "agx3_staging.h"
 #include <string.h>
+#include "util/u_debug.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(m5_scalar_3d_coords, "ASAHI_M5_SCALAR_3D_COORDS", true)
+DEBUG_GET_ONCE_BOOL_OPTION(m5_wide_scalar_sources,
+                           "ASAHI_M5_WIDE_SCALAR_SOURCES", true)
 
 struct publication {
    agx_index coordinates, reference;
@@ -269,6 +274,126 @@ agx3_lower_scalar_cube_coordinates(agx_context *ctx)
    return progress;
 }
 
+/* An M5 texel fetch stages its coordinates with one COPY per component, and a
+ * multisampled or array read publishes its sample index or layer with
+ * PACK_SMPIR, so the read never needs its coordinates as a contiguous vector.
+ * A filtered 2D sample stages x and y with one COPY each as well; its level,
+ * bias, gradient, offset and comparison operands stage on their own. A
+ * collected vector per read costs a GPR move for every component that already
+ * lives elsewhere: a depth pyramid that reads four samples at each of four
+ * texels moves three words before each of its sixteen reads, and a filtered
+ * shadow lookup moves both coordinates of every tap. Hand the read the
+ * components themselves. */
+static bool
+split_coords_candidate(const agx_instr *I)
+{
+   if (I->nr_srcs != 6 || I->nr_dests != 1 || I->agx3_tex_coords_staged ||
+       I->agx3_split_coords || I->agx3_cube_scalar_coords || I->query_lod ||
+       I->sparse || I->src[0].type != AGX_INDEX_NORMAL || I->src[0].memory ||
+       I->src[0].abs || I->src[0].neg || I->src[0].size != AGX_SIZE_32)
+      return false;
+
+   if (I->op == AGX_OPCODE_TEXTURE_SAMPLE)
+      return I->dim == AGX_DIM_2D && agx_channels(I->src[0]) == 2;
+
+   return I->op == AGX_OPCODE_TEXTURE_LOAD && !I->offset && !I->shadow &&
+          I->gather == AGX_GATHER_NONE &&
+          (I->dim == AGX_DIM_2D || I->dim == AGX_DIM_2D_MS ||
+           I->dim == AGX_DIM_2D_ARRAY) &&
+          agx_channels(I->src[0]) == (I->dim == AGX_DIM_2D ? 2 : 3) &&
+          agx_is_null(I->src[5]);
+}
+
+bool
+agx3_split_texture_coordinates(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C || ctx->is_preamble)
+      return false;
+
+   /* Every M5 stage stages its fetch and sample coordinates
+    * (agx3_pack_binary.c). */
+   switch (ctx->stage) {
+   case MESA_SHADER_VERTEX:
+   case MESA_SHADER_FRAGMENT:
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_TESS_CTRL:
+   case MESA_SHADER_GEOMETRY:
+   case MESA_SHADER_MESH:
+   case MESA_SHADER_TASK:
+      break;
+   default:
+      return false;
+   }
+
+   agx_instr **defs = rzalloc_array(ctx, agx_instr *, ctx->alloc);
+   if (!defs)
+      return false;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         defs[I->dest[d].value] = I;
+   }
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (!split_coords_candidate(I))
+         continue;
+      const unsigned n = agx_channels(I->src[0]);
+      agx_instr *collect = defs[I->src[0].value];
+      if (!collect || collect->op != AGX_OPCODE_COLLECT ||
+          collect->nr_srcs != n)
+         continue;
+      bool eligible = true;
+      for (unsigned c = 0; c < n; ++c) {
+         eligible &= collect->src[c].type == AGX_INDEX_NORMAL &&
+                     scalar_publication_source(collect->src[c]);
+         /* A component that is also another operand (a level, a reference
+          * or an offset word) would name that operand's register: its own
+          * staging may then discard the register before or after the
+          * coordinate COPY reads it. Keep the vector. */
+         for (unsigned s = 1; s < 6; ++s) {
+            eligible &= I->src[s].type != AGX_INDEX_NORMAL ||
+                        I->src[s].value != collect->src[c].value;
+         }
+      }
+      if (!eligible)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_instr *split = agx_alloc_instr(&b, I->op, 1, 8);
+      memcpy(&split->op, &I->op, sizeof(*I) - offsetof(agx_instr, op));
+      split->nr_srcs = 8;
+      split->dest[0] = I->dest[0];
+      memcpy(split->src, I->src, 6 * sizeof(agx_index));
+      for (unsigned c = 0; c < 3; ++c) {
+         agx_index component = c < n ? collect->src[c] : agx_null();
+         /* Liveness is recomputed by RA; drop the collect's annotations. */
+         component.kill = component.cache = component.discard = false;
+         split->src[c ? c + 5 : 0] = component;
+      }
+      split->agx3_split_coords = true;
+
+      /* A fetch keeps the vector's placement as an RA affinity hint: where
+       * the components can sit together, allocation matches the vector's. A
+       * sample does not: filter taps pair each coordinate with several
+       * others (a PCF footprint reads x0 with y0 and y1, x1 with both), so a
+       * pair hint per tap only constrains where the coordinates may live. */
+      if (I->op == AGX_OPCODE_TEXTURE_LOAD) {
+         if (!ctx->collect_split_hints.data)
+            util_dynarray_init(&ctx->collect_split_hints, ctx);
+         agx_instr *hint = agx_alloc_instr(&b, AGX_OPCODE_COLLECT, 1, n);
+         hint->dest[0] = collect->dest[0];
+         for (unsigned c = 0; c < n; ++c)
+            hint->src[c] = collect->src[c];
+         util_dynarray_append(&ctx->collect_split_hints, hint);
+      }
+
+      agx_builder_insert(&b.cursor, split);
+      agx_remove_instruction(I);
+      progress = true;
+   }
+   return progress;
+}
+
 static bool
 ssa_preserves_publications(const agx_instr *I)
 {
@@ -304,7 +429,9 @@ ssa_preserves_publications(const agx_instr *I)
 bool
 agx3_lower_scalar_texture_publications(agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool m5 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+      debug_get_option_m5_scalar_3d_coords();
+   if ((!m5 && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble)
       return false;
 
@@ -330,24 +457,30 @@ agx3_lower_scalar_texture_publications(agx_context *ctx)
       agx_foreach_instr_in_block_safe(block, I) {
          bool eligible =
             I->op == AGX_OPCODE_TEXTURE_SAMPLE && !agx_texture_resource(I) &&
-            !I->agx3_tex_coords_staged && I->dim == AGX_DIM_2D && !I->query_lod &&
+            !I->agx3_tex_coords_staged && I->dim == (m5 ? AGX_DIM_3D : AGX_DIM_2D) && !I->query_lod &&
             (!I->offset || I->offset_xyz) && I->nr_srcs == 6 &&
             I->src[0].type == AGX_INDEX_NORMAL && !I->src[0].memory &&
             !I->src[0].abs && !I->src[0].neg && I->src[0].size == AGX_SIZE_32 &&
-            agx_channels(I->src[0]) == 2 &&
+            agx_channels(I->src[0]) == (m5 ? 3 : 2) &&
+            (!m5 || (I->nr_dests == 1 && I->dest[0].size == AGX_SIZE_32 &&
+                     !I->shadow && !I->offset && !I->sparse &&
+                     I->gather == AGX_GATHER_NONE &&
+                     I->lod_mode == AGX_LOD_MODE_AUTO_LOD)) &&
             (I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
              ((I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS ||
                I->lod_mode == AGX_LOD_MODE_LOD_MIN) &&
               I->src[1].type == AGX_INDEX_IMMEDIATE));
          agx_instr *collect = eligible ? defs[I->src[0].value] : NULL;
          eligible &= collect && collect->op == AGX_OPCODE_COLLECT &&
-                     collect->nr_srcs == 2 &&
+                     collect->nr_srcs == (m5 ? 3 : 2) &&
+                     (!m5 || scalar_publication_source(collect->src[2])) &&
                      scalar_publication_source(collect->src[0]) &&
                      scalar_publication_source(collect->src[1]) &&
                      (!I->shadow || scalar_publication_source(I->src[5]));
          if (eligible) {
             agx_index x = collect->src[0], y = collect->src[1];
-            agx_index reference = I->shadow ? I->src[5] : agx_null();
+            agx_index reference = m5 ? collect->src[2] :
+                                  I->shadow ? I->src[5] : agx_null();
             unsigned match = count;
             for (unsigned j = 0; j < count; ++j) {
                if (same_register_value(available[j].x, x) &&
@@ -365,20 +498,31 @@ agx3_lower_scalar_texture_publications(agx_context *ctx)
                        (count - match - 1) * sizeof(*available));
                available[count - 1] = hit;
             } else {
-               const unsigned cost = I->shadow ? 8 : 4;
+               const unsigned cost = (m5 || I->shadow) ? 8 : 4;
                while (reserved + cost > AGX3_STAGING_HALFS) {
                   reserved -= available[0].cost;
                   memmove(available, available + 1, --count * sizeof(*available));
                }
                agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-               agx_publish_texture_scalar_agx3(&b, x, y, reference, ++next);
+               agx_index px = x, py = y, pz = reference;
+               /* The M5 publication stages x, y and z with the wide scalar
+                * COPY, which reads the whole register file, so it reads
+                * them where they live. Only the seven-bit form needs its
+                * operands in the low source bank; copies keep long-lived
+                * values out of that constraint. */
+               if (m5 && !debug_get_option_m5_wide_scalar_sources()) {
+                  px = agx_mov(&b, x);
+                  py = agx_mov(&b, y);
+                  pz = agx_mov(&b, reference);
+               }
+               agx_publish_texture_scalar_agx3(&b, px, py, pz, ++next);
                value = next;
                available[count++] = (struct scalar_publication){
                   x, y, reference, value, cost,
                };
                reserved += cost;
             }
-            I->src[0] = agx_get_vec_index(value, AGX_SIZE_32, I->shadow ? 3 : 2);
+            I->src[0] = agx_get_vec_index(value, AGX_SIZE_32, (m5 || I->shadow) ? 3 : 2);
             I->src[0].type = AGX_INDEX_RESOURCE;
             if (I->shadow)
                I->src[5] = agx_null();

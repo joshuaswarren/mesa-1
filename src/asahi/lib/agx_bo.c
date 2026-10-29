@@ -53,6 +53,11 @@ static void
 agx_bo_cache_remove_locked(struct agx_device *dev, struct agx_bo *bo)
 {
    simple_mtx_assert_locked(&dev->bo_cache.lock);
+   if (dev->bo_cache.next_unadvised == bo->handle) {
+      struct list_head *next = bo->lru_link.next;
+      dev->bo_cache.next_unadvised = next == &dev->bo_cache.lru ? 0 :
+         list_entry(next, struct agx_bo, lru_link)->handle;
+   }
    list_del(&bo->bucket_link);
    list_del(&bo->lru_link);
    dev->bo_cache.size -= bo->size;
@@ -100,11 +105,33 @@ agx_bo_cache_advise_aged(struct agx_device *dev, int64_t now_ns)
    if (dev->bo_cache.madvise < 0 || !dev->ops.bo_madvise)
       return;
 
-   list_for_each_entry(struct agx_bo, entry, &dev->bo_cache.lru, lru_link) {
+   const uint32_t handle = dev->bo_cache.next_unadvised;
+   if (!handle)
+      return;
+
+   struct agx_bo *entry = util_sparse_array_get(&dev->bo_map, handle);
+   assert(entry->handle == handle);
+   bool advance = true;
+   for (struct list_head *link = &entry->lru_link;
+        link != &dev->bo_cache.lru; link = link->next) {
+      entry = list_entry(link, struct agx_bo, lru_link);
       if (now_ns - entry->cached_ns < AGX_BO_CACHE_ADVISE_NS)
          break;
       if (!entry->purgeable)
          agx_bo_cache_advise_dontneed(dev, entry);
+
+      /* Keep failed advice eligible for retry, but do not rescan a prefix
+       * whose objects are already purgeable or never accept advice. */
+      const bool complete = entry->purgeable ||
+         (entry->flags & (AGX_BO_SHARED | AGX_BO_SHAREABLE)) ||
+         dev->bo_cache.madvise < 0;
+      if (advance && complete) {
+         struct list_head *next = link->next;
+         dev->bo_cache.next_unadvised = next == &dev->bo_cache.lru ? 0 :
+            list_entry(next, struct agx_bo, lru_link)->handle;
+      } else {
+         advance = false;
+      }
    }
 }
 
@@ -286,6 +313,10 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
    struct list_head *bucket = agx_bucket(dev, bo->size, bo->flags);
    /* Add us to the bucket */
    list_addtail(&bo->bucket_link, bucket);
+
+   /* An empty LRU initializes the cursor, including on its first insertion. */
+   if (list_is_empty(&dev->bo_cache.lru) || !dev->bo_cache.next_unadvised)
+      dev->bo_cache.next_unadvised = bo->handle;
 
    /* Add us to the LRU list and update the last_used field. */
    list_addtail(&bo->lru_link, &dev->bo_cache.lru);

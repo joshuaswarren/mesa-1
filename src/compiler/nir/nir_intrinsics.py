@@ -253,6 +253,7 @@ index("nir_resource_type", "resource_type")
 
 # The nir_alu_type of input data to a store or conversion
 index("nir_alu_type", "src_type")
+index("nir_alu_type", "src_type2")
 
 # The nir_alu_type of the data output from a load or conversion
 index("nir_alu_type", "dest_type")
@@ -1570,6 +1571,8 @@ intrinsic("cmat_insert", src_comp=[-1, 1, -1, 1])
 intrinsic("cmat_copy", src_comp=[-1, -1])
 intrinsic("cmat_transpose", src_comp=[-1, -1], indices=[SATURATE, CMAT_SIGNED_MASK, FP_MATH_CTRL])
 intrinsic("cmat_get_coordinate", src_comp=[1], dest_comp=2, indices=[CMAT_DESC], bit_sizes=[32])
+intrinsic("cmat_muladd_agx", src_comp=[0, 0, 0], dest_comp=0, bit_sizes=[32], indices=[SRC_TYPE, SRC_TYPE2],
+          flags=[CAN_ELIMINATE, SUBGROUP])
 
 # src[] = { deref }.
 load("buffer_ptr_deref", [-1], [ACCESS, RESOURCE_TYPE],
@@ -2606,6 +2609,10 @@ store("local_pixel_agx", [1, -1], [BASE, WRITE_MASK, FORMAT, EXPLICIT_COORD, TAR
 # src[] = { sample mask, depth, stencil }
 intrinsic("store_zs_agx", [1, 1, 1], indices=[BASE], flags=[])
 
+# M5: open (FLAGS = 0) or close (FLAGS = 1) the depth/coverage pixel
+# transaction around a loop of store_zs_agx carrying AGX_ZS_COVERED_SAMPLE.
+intrinsic("zs_transaction_agx", indices=[FLAGS])
+
 # Store a block from local memory into a bound image. Used to write out render
 # targets within the end-of-tile shader, although it is valid in general compute
 # kernels.
@@ -2697,6 +2704,9 @@ system_value("active_samples_agx", 1, bit_sizes=[16])
 # Loads the sample position array as fixed point packed into a 32-bit word
 system_value("sample_positions_agx", 1, bit_sizes=[32])
 
+# Upper four fixed-point sample positions on an eight-sample framebuffer.
+system_value("sample_positions_hi_agx", 1, bit_sizes=[32])
+
 # In a non-monolithic fragment shader part, returns whether this shader part is
 # responsible for Z/S testing after its final discard. ~0/0 boolean.
 system_value("shader_part_tests_zs_agx", 1, bit_sizes=[16])
@@ -2749,6 +2759,16 @@ intrinsic("store_scs_uniform_agx", [0, 1, 1], indices=[BASE, FORMAT, COMPONENT])
 intrinsic("load_scs_base_agx", [1], dest_comp=0, bit_sizes=[16, 32],
           indices=[BASE, FORMAT, COMPONENT, FLAGS])
 intrinsic("store_scs_base_agx", [0, 1], indices=[BASE, FORMAT, COMPONENT])
+intrinsic("load_scs_register_agx", [1, 1], dest_comp=0, bit_sizes=[16, 32],
+          indices=[BASE, FORMAT, COMPONENT, FLAGS])
+
+# Two 64-bit native operands followed by the three 32-bit launch words
+# published to staging halves 0/2/4. Completion is observed through SCS.
+intrinsic("intersect_ray_agx", [1, 1, 1, 1, 1])
+intrinsic("continue_ray_agx", [1])
+# Native query stack entry. The hardware writes a 32-bit query pointer to the
+# f2 register; BASE is the native allocation index (f24, witnessed 4/5).
+intrinsic("enter_query_agx", [], dest_comp=1, bit_sizes=[32], indices=[BASE])
 
 
 # Helper shader intrinsics
@@ -3402,19 +3422,31 @@ system_value("is_viewport_z_transform_emulated_kk", 1, bit_sizes=[1])
 # Loads the viewport Z range for a given viewport index.
 load("viewport_z_range_kk", [1], [], [CAN_ELIMINATE, CAN_REORDER])
 
-# Native G17P/G17X SR59 identifies the resident SCS thread.
 system_value("scs_thread_index_agx", 1, bit_sizes=[32])
 
+# Deferred guarded global read. Source0 is the64-bit base, source1 the32-bit
+# byte offset, and source2 the exact frontend bounds predicate. False returns
+# zero without a memory access. AGX lowers this after all speculation passes.
+load("global_predicated_agx", [1, 1, 1],
+     indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET], flags=[CAN_ELIMINATE])
+# Native mesh allocation consumes two scalar 16-bit operands. UVST reads
+# a contiguous vec2-u32 descriptor; FLAGS selects the witnessed primitive leaf.
 intrinsic("allocate_mesh_uvb_agx", [1, 1])
 intrinsic("store_mesh_uvb_agx", [2], indices=[FLAGS])
+# Object invocation0/1/2 publishes one child-grid dimension through UVSW.
 intrinsic("store_object_childcount_agx", [1])
 
+# Native object/mesh payload pointer from witnessed SR62 low32/SR63 high16.
 intrinsic("load_mesh_payload_address_agx", dest_comp=2, bit_sizes=[32],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# Native per-workgroup mesh per-primitive record base: SR64 low32 / SR65 high16
+# (primitive_color and primitive_id witnesses, main and write_uvb helper).
 intrinsic("load_mesh_primitive_storage_agx", dest_comp=2, bit_sizes=[32],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# Exact captured native mesh payload entry barrier; anonymous selector fields.
 intrinsic("mesh_payload_entry_barrier_agx")
 
+# Native object.write_childcount payload publication barrier.
 intrinsic("object_payload_exit_barrier_agx")

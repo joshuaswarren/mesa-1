@@ -66,6 +66,7 @@ L = (1 << 15)
 _ = None
 
 FORMAT = immediate("format", "enum agx_format")
+MATRIX_TYPE = immediate("matrix_type")
 IMM = immediate("imm", "uint64_t")
 WRITEOUT = immediate("writeout")
 INDEX = immediate("index")
@@ -111,6 +112,7 @@ COHERENT = immediate("coherent", "bool")
 SCS_ZERO_EXTEND = immediate("scs_zero_extend", "bool")
 SCS_C_STATUS_LOAD = immediate("scs_c_status_load", "bool")
 SCS_C_LOAD_MARKER = immediate("scs_c_load_marker", "bool")
+SCS_RT_COMPLETION = immediate("scs_rt_completion", "bool")
 SCS_ADDRESS_SELECTOR = immediate("scs_address_selector", "uint8_t")
 SCOREBOARD = immediate("scoreboard")
 ICOND = immediate("icond", "enum agx_icond")
@@ -159,7 +161,15 @@ SR = enum("sr", {
    147: 'helper_arg_h',
    # G17P builtin background reload: native half-register layer input.
    195: 'background_layer_id',
+   # Native M5 ray shader reads normalized SR59 (hardware byte0xea).
    234: 'scs_thread_index',
+   # Native object_amplify and mesh_amplified payload pointer witness.
+   235: 'mesh_payload_lo',
+   236: 'mesh_payload_hi',
+   # Native primitive_color/primitive_id mesh witnesses read the per-workgroup
+   # per-primitive record base from normalized SR64 (W32) and SR65 (W16).
+   237: 'mesh_primitive_storage_lo',
+   238: 'mesh_primitive_storage_hi',
    # AGX3 hardware-vertex inputs. Apple emits these as explicit 32-bit rld
    # instructions instead of the AGX2 preloaded-input ABI.
    216: 'instance_id',
@@ -247,6 +257,8 @@ op("fmul", encoding = (0x1A, 4, 6), srcs = 2, is_float = True)
 op("hadd", encoding = (0x26, 4, 6), srcs = 2, is_float = True)
 op("hfma", encoding = (0x36, 6, 8), srcs = 3, is_float = True)
 op("hmul", encoding = (0x16, 4, 6), srcs = 2, is_float = True)
+op("matmad8_agx3", None, srcs = 3, imms = [MATRIX_TYPE], can_reorder = False)
+op("matmad16_agx3", None, srcs = 3, imms = [MATRIX_TYPE], can_reorder = False)
 # Apple's AGX3 backend calls the same semantic operation `ldimm`.  This is the
 # first source-grounded AGX2 IR -> AGX3 mnemonic mapping: the native immediate
 # field reproduces all 14 probe constants exactly on G15, G16 and G17, while
@@ -467,6 +479,8 @@ op("persp_rcp_agx3", None, srcs = 1, imms = [IMM], is_float = True)
 op("iterproj", (0x21, 8, _), srcs = 3, imms = [CHANNELS, INTERPOLATION])
 
 op("ldcf", (0xA1, 8, _), srcs = 1, imms = [CHANNELS])
+# Native mesh output allocation and two-word UVB descriptor publication.
+# Keep their source dependencies explicit through scheduling and allocation.
 op("allocate_uvb_m5", _, dests=0, srcs=2, can_eliminate=False,
    can_reorder=False, schedule_class="store", agx3_mnemonic="allocate_uvb")
 op("store_uvb_m5", _, dests=0, srcs=1, imms=[IMM], can_eliminate=False,
@@ -520,7 +534,7 @@ op("scoped_barrier_agx3", _, dests = 0, srcs = 0, imms = [IMM],
    can_eliminate = False, schedule_class = "barrier",
    agx3_mnemonic = "barrier")
 
-# Direct-absolute scalar coverage-stack access. These internal pseudos are the
+# Direct-absolute coverage-stack access (word vectors or narrow scalars). These internal pseudos are the
 # bounded landing point for future ray-query lowering; no generic address-space
 # operation is silently reinterpreted as SCS.
 op("scs_load_agx3", _, dests = 1, srcs = 0, imms = [IMM, FORMAT, MASK],
@@ -528,6 +542,11 @@ op("scs_load_agx3", _, dests = 1, srcs = 0, imms = [IMM, FORMAT, MASK],
 op("scs_store_agx3", _, dests = 0, srcs = 1, imms = [IMM, FORMAT, MASK],
    can_eliminate = False, can_reorder = False, schedule_class = "store", agx3_mnemonic = "stscs")
 
+# Uniform-base plus scalar-GPR-index SCS access.  The source order keeps the
+# address provenance explicit instead of recovering it from generic pointer
+# arithmetic after the fact: load(base, index), store(value, base, index).
+# The native address selector is explicit and independent of FORMAT; the
+# backend refuses other address forms.
 op("scs_load_uniform_indexed_agx3", _, dests = 1, srcs = 2,
    imms = [IMM, FORMAT, MASK, SCS_ADDRESS_SELECTOR, SCS_ZERO_EXTEND, SCS_C_LOAD_MARKER],
    can_reorder = False, schedule_class = "load", agx3_mnemonic = "ldscs")
@@ -535,13 +554,18 @@ op("scs_store_uniform_indexed_agx3", _, dests = 0, srcs = 3,
    imms = [IMM, FORMAT, MASK, SCS_ADDRESS_SELECTOR], can_eliminate = False, can_reorder = False, schedule_class = "store",
    agx3_mnemonic = "stscs")
 
+# Explicit two-GPR M5 SCS addressing, including the instanced traversal form.
+# Source order matches the uniform-indexed pseudos: (base, index) and
+# (value, base, index). The native address selector is preserved explicitly.
 op("scs_load_register_indexed_agx3", _, dests = 1, srcs = 2,
-   imms = [IMM, FORMAT, MASK, SCS_ADDRESS_SELECTOR, SCS_C_LOAD_MARKER],
+   imms = [IMM, FORMAT, MASK, SCS_ADDRESS_SELECTOR, SCS_C_LOAD_MARKER, SCS_RT_COMPLETION],
    can_reorder = False, schedule_class = "load", agx3_mnemonic = "ldscs")
 op("scs_store_register_indexed_agx3", _, dests = 0, srcs = 3,
    imms = [IMM, FORMAT, MASK, SCS_ADDRESS_SELECTOR],
    can_eliminate = False, can_reorder = False, schedule_class = "store", agx3_mnemonic = "stscs")
 
+# Register-base form has no index operand. Its special status load cannot be
+# represented as a normal byte load: both native control fields are explicit.
 op("scs_load_register_base_agx3", _, dests = 1, srcs = 1,
    imms = [IMM, FORMAT, MASK, SCS_ADDRESS_SELECTOR, SCS_C_LOAD_MARKER,
            SCS_C_STATUS_LOAD],
@@ -558,6 +582,19 @@ op("intersect_ray_gen1", _, dests=0, srcs=4, imms=[IMM],
 op("continue_ray_gen1", _, dests=0, srcs=1, imms=[IMM],
    can_eliminate=False, can_reorder=False, schedule_class="barrier",
    agx3_mnemonic="continue_ray")
+# M5 native traversal entry. Two native operands are 64-bit; the BVH operand
+# may remain uniform. Three explicit 32-bit launch words are published to
+# staging halves 0/2/4 immediately before the instruction. Completion is
+# observed by the SCS polling protocol, not a fabricated GPR result.
+op("intersect_ray_m5", _, dests = 0, srcs = 5,
+   can_eliminate = False, can_reorder = False, schedule_class = "barrier",
+   agx3_mnemonic = "intersect_ray")
+op("enter_query_m5", _, dests = 1, srcs = 0, imms = [IMM],
+   can_eliminate = False, can_reorder = False, schedule_class = "barrier",
+   agx3_mnemonic = "incStk")
+op("continue_ray_m5", _, dests = 0, srcs = 1,
+   can_eliminate = False, can_reorder = False, schedule_class = "barrier",
+   agx3_mnemonic = "continue_ray")
 
 def memory_barrier(name, a, b, c):
     op(name, (0xF5 | (a << 10) | (b << 8) | (c << 12), 2, _), dests = 0, srcs = 0,
@@ -642,6 +679,9 @@ for (name, is_float) in [("break_if_icmp", False), ("break_if_fcmp", True)]:
 # Native normalized RGB10A2 conversion, four floats to/from one packed word.
 op("pack_rgb10a2_agx3", _, dests=1, srcs=4, is_float=True, agx3_mnemonic="pack")
 op("unpack_rgb10a2_agx3", _, dests=1, srcs=1, agx3_mnemonic="unpack")
+# G17G packs reusable half-float LOD/bias values into normal register words.
+# Pure SSA producers can be CSE'd before each sample publishes its own COPY.
+op("pack_sampler_lod_agx3", _, dests=1, srcs=1, agx3_mnemonic="pack_smpir")
 # G17P's native coverage word is prepared before RA, from SR2 at one sample.
 # Keep the general sample-mask target explicit while selecting its native zero
 # no-op.

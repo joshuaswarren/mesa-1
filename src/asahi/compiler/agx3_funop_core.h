@@ -56,6 +56,11 @@ bool agx3_funop_encode_source_lifetime(
    bool src_abs, bool src_neg, bool saturate, uint16_t wait_mask, bool src_live,
    uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len);
 
+/* Whether the witnessed form of `op` has scoreboard wait fields. A caller
+ * with an outstanding dependency on a form without them must retire it
+ * first (as for the gradients). */
+bool agx3_funop_carries_wait(enum agx_isa_encoding enc, enum agx3_funop op);
+
 #ifdef __cplusplus
 }
 #endif

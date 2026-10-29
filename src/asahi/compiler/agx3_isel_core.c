@@ -302,6 +302,78 @@ encode_explicit(const struct agx3_isel_desc *d,
                            base, sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
+static bool
+encode_agx3c(const struct agx3_isel_desc *d,
+             uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
+{
+   const bool cmp1_16 = d->cmp_16 != d->cmp_mixed_width;
+   if (!(d->cmp_16 ? reg16_ok(d->cmp0) : reg32_ok(d->cmp0)) ||
+       (d->cmp1_uniform ? ((d->cmp1 & 1) || d->cmp1 >= 512) :
+        d->cmp1_immediate ? d->cmp1 > 255 :
+        !(cmp1_16 ? reg16_ok(d->cmp1) : reg32_ok(d->cmp1))))
+      return false;
+   if (d->wait_mask >= (1u << 8))
+      return false;
+   for (unsigned i = 0; i < 4; ++i) {
+      if (d->cache[i] && d->discard[i])
+         return false;
+   }
+
+   const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
+   const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
+   if ((d->cmp1_immediate && (d->cache[1] || d->discard[1])) ||
+       (ti && (d->cache[2] || d->discard[2])) ||
+       (fi && (d->cache[3] || d->discard[3])))
+      return false;
+
+   const unsigned width = d->dest_16 ? 1 : 2;
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, width), KV(11, d->dest_cache),
+      KV(23, 2), KV(24, d->cmp_16 ? 1 : 2),
+      KV(38, d->cmp1_uniform ? 3 : d->cmp1_immediate ? 1 : 2),
+      KV(39, (d->cmp1_immediate || cmp1_16) ? 1 : 2),
+      KV(53, d->true_kind == AGX3_ISEL_UNIFORM ? 3 : ti ? 1 : 2), KV(54, width),
+      KV(67, d->false_kind == AGX3_ISEL_UNIFORM ? 3 : fi ? 1 : 2), KV(68, width),
+      KV(72, 3), KV(73, d->dest_16 ? 96 : 97),
+   };
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
+   ov[n++] = (struct agx3_field_kv)KV(16, d->cmp0);
+   ov[n++] = (struct agx3_field_kv)KV(d->cmp1_uniform ? 32 : d->cmp1_immediate ? 30 : 31, d->cmp1);
+   ov[n++] = (struct agx3_field_kv)KV(82, d->cond);
+   ov[n++] = (struct agx3_field_kv)KV(d->true_kind == AGX3_ISEL_UNIFORM ? 47 : ti ? 45 : 46, d->sel_true);
+   ov[n++] = (struct agx3_field_kv)KV(d->false_kind == AGX3_ISEL_UNIFORM ? 61 : fi ? 59 : 60, d->sel_false);
+   ov[n++] = (struct agx3_field_kv)KV(25, d->cache[0]);
+   ov[n++] = (struct agx3_field_kv)KV(27, d->discard[0]);
+   if (d->cmp_16 && d->cond >= AGX3_ISEL_ICOND_EQ)
+      ov[n++] = (struct agx3_field_kv)KV(28, 1);
+   if (!d->cmp1_immediate && !d->cmp1_uniform) {
+      ov[n++] = (struct agx3_field_kv)KV(40, d->cache[1]);
+      ov[n++] = (struct agx3_field_kv)KV(42, d->discard[1]);
+      if (cmp1_16 && d->cond >= AGX3_ISEL_ICOND_EQ)
+         ov[n++] = (struct agx3_field_kv)KV(43, 1);
+   }
+   if (!ti && d->true_kind != AGX3_ISEL_UNIFORM) {
+      ov[n++] = (struct agx3_field_kv)KV(55, d->cache[2]);
+      ov[n++] = (struct agx3_field_kv)KV(57, d->discard[2]);
+   }
+   if (!fi && d->false_kind != AGX3_ISEL_UNIFORM) {
+      ov[n++] = (struct agx3_field_kv)KV(69, d->cache[3]);
+      ov[n++] = (struct agx3_field_kv)KV(71, d->discard[3]);
+   }
+   for (unsigned i = 0; i < 8; ++i)
+      ov[n++] = (struct agx3_field_kv)KV(74 + i, (d->wait_mask >> i) & 1);
+
+   const char *mnemonic = d->dest_16 ? "iseli16" : "iseli32";
+   for (unsigned ep = 0; ep < 16; ++ep) {
+      if (agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, mnemonic, ep, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len))
+         return true;
+   }
+   return false;
+}
+
 bool
 agx3_isel_encode(enum agx_isa_encoding encoding,
                  const struct agx3_isel_desc *d,
@@ -310,9 +382,28 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
    if (d == NULL || out == NULL || len == NULL)
       return false;
 
-   /* The probes are AGX3b. AGX3c spells this `iseli32`/`iseli16` with its own
-    * forms, which no probe here covers. */
-   if (encoding != AGX_ISA_ENCODING_AGX3B)
+   if (encoding == AGX_ISA_ENCODING_AGX3C) {
+      const bool tu = d->true_kind == AGX3_ISEL_UNIFORM;
+      const bool fu = d->false_kind == AGX3_ISEL_UNIFORM;
+      const bool any_uniform = d->cmp1_uniform || tu || fu;
+      /* Native M5 ray/SVGF shaders use an aligned full32 uniform as the
+       * right comparand and/or either selected value. A left uniform and
+       * narrow/mixed-width uniform forms are not part of this admission. */
+      if (!cond_ok(d->cond) || d->cmp0_uniform ||
+          (any_uniform && (d->dest_16 || d->cmp_16 || d->cmp_mixed_width)) ||
+          (d->cmp1_uniform && (d->cmp1_immediate || (d->cmp1 & 1) ||
+                              d->cmp1 >= 512 || d->cache[1] || d->discard[1])) ||
+          !(d->dest_16 ? reg16_ok(d->dest) : reg32_ok(d->dest)) ||
+          (tu ? ((d->sel_true & 1) || d->sel_true >= 512 ||
+                 d->cache[2] || d->discard[2]) :
+                !operand_ok(d->true_kind, d->sel_true, d->dest_16)) ||
+          (fu ? ((d->sel_false & 1) || d->sel_false >= 512 ||
+                 d->cache[3] || d->discard[3]) :
+                !operand_ok(d->false_kind, d->sel_false, d->dest_16)))
+         return false;
+      return encode_agx3c(d, out, len);
+   }
+   if (encoding != AGX_ISA_ENCODING_AGX3B || d->cmp_mixed_width)
       return false;
 
    /* The register comparands share a width; immediates carry no register. */

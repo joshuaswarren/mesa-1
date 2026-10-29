@@ -6,6 +6,7 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "agx_nir.h"
+#include <string.h>
 
 /*
  * AGX generally flushes FP32 denorms. However, the min/max instructions do not
@@ -131,4 +132,181 @@ bool
 agx_nir_lower_fminmax(nir_shader *s, bool ftz_only)
 {
    return nir_shader_alu_pass(s, lower, nir_metadata_control_flow, &ftz_only);
+}
+
+/* A shared-memory load cannot introduce a denormal if every writer stores
+ * canonical FP32 values. Uninitialized shared reads have undefined values;
+ * this analysis never relies on a particular value for them. Integer/partial
+ * writes and atomics conservatively disable the shared-memory proof. */
+struct canonical_state {
+   bool shared_canonical;
+   unsigned removed;
+};
+
+static bool
+canonical_value(nir_scalar value, bool shared_canonical, nir_scalar *path,
+                unsigned depth, unsigned *budget)
+{
+   if (!*budget)
+      return false;
+   (*budget)--;
+   value = nir_scalar_chase_movs(value);
+   if (value.def->bit_size != 32 || depth >= 64)
+      return false;
+   for (unsigned i = 0; i < depth; ++i)
+      if (path[i].def == value.def && path[i].comp == value.comp)
+         return false;
+   path[depth++] = value;
+
+   if (nir_scalar_is_const(value)) {
+      uint32_t bits = nir_scalar_as_uint(value);
+      if ((bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0)
+         return false; /* Do not remove a possible signalling-NaN quieting. */
+      return (bits & 0x7f800000u) != 0 || (bits & 0x007fffffu) == 0;
+   }
+
+   if (nir_def_instr(value.def)->type == nir_instr_type_phi) {
+      nir_phi_instr *phi = nir_def_as_phi(value.def);
+      nir_foreach_phi_src(src, phi) {
+         if (!canonical_value(nir_get_scalar(src->src.ssa, value.comp),
+                              shared_canonical, path, depth, budget))
+            return false;
+      }
+      return true;
+   }
+
+   if (nir_scalar_is_intrinsic(value)) {
+      if (!shared_canonical ||
+          nir_scalar_intrinsic_op(value) != nir_intrinsic_load_shared)
+         return false;
+      nir_intrinsic_instr *load = nir_def_as_intrinsic(value.def);
+      return nir_intrinsic_align_mul(load) >= 4 &&
+             (nir_intrinsic_align_offset(load) & 3) == 0;
+   }
+
+   if (!nir_scalar_is_alu(value))
+      return false;
+
+   nir_op op = nir_scalar_alu_op(value);
+   switch (op) {
+   case nir_op_bcsel:
+   case nir_op_b32csel:
+      return canonical_value(nir_scalar_chase_alu_src(value, 1),
+                             shared_canonical, path, depth, budget) &&
+             canonical_value(nir_scalar_chase_alu_src(value, 2),
+                             shared_canonical, path, depth, budget);
+   case nir_op_fmin:
+   case nir_op_fmax:
+   case nir_op_fmin_agx:
+   case nir_op_fmax_agx:
+      return canonical_value(nir_scalar_chase_alu_src(value, 0),
+                             shared_canonical, path, depth, budget) &&
+             canonical_value(nir_scalar_chase_alu_src(value, 1),
+                             shared_canonical, path, depth, budget);
+   case nir_op_fneg:
+   case nir_op_fabs:
+      return canonical_value(nir_scalar_chase_alu_src(value, 0),
+                             shared_canonical, path, depth, budget);
+   case nir_op_f2f32:
+      return nir_scalar_chase_alu_src(value, 0).def->bit_size == 16;
+   case nir_op_fadd:
+   case nir_op_fmul:
+   case nir_op_ffma:
+   case nir_op_fdiv:
+   case nir_op_frcp:
+   case nir_op_frsq:
+   case nir_op_fsqrt:
+   case nir_op_fexp2:
+   case nir_op_flog2:
+   case nir_op_ffloor:
+   case nir_op_fceil:
+   case nir_op_ftrunc:
+   case nir_op_fround_even:
+   case nir_op_i2f32:
+   case nir_op_u2f32:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+canonical(nir_def *def, unsigned component, bool shared_canonical)
+{
+   nir_scalar path[64];
+   unsigned budget = 1024;
+   return canonical_value(nir_get_scalar(def, component), shared_canonical,
+                          path, 0, &budget);
+}
+
+static bool
+remove_canonical_minmax(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   struct canonical_state *state = data;
+   if (alu->op != nir_op_fadd || alu->def.bit_size != 32 ||
+       alu->def.num_components != 1)
+      return false;
+
+   nir_scalar self = nir_get_scalar(&alu->def, 0);
+   for (unsigned i = 0; i < 2; ++i) {
+      nir_scalar zero = nir_scalar_chase_alu_src(self, i);
+      nir_scalar value = nir_scalar_chase_alu_src(self, 1 - i);
+      if (!nir_scalar_is_const(zero) ||
+          nir_scalar_as_uint(zero) != 0x80000000u || !nir_scalar_is_alu(value))
+         continue;
+      nir_op op = nir_scalar_alu_op(value);
+      if (op != nir_op_fmin_agx && op != nir_op_fmax_agx)
+         continue;
+      if (!canonical(value.def, value.comp, state->shared_canonical))
+         continue;
+      b->cursor = nir_before_instr(&alu->instr);
+      nir_def *replacement = nir_channel(b, value.def, value.comp);
+      nir_def_rewrite_uses(&alu->def, replacement);
+      nir_instr_remove(&alu->instr);
+      state->removed++;
+      return true;
+   }
+   return false;
+}
+
+bool
+agx_nir_opt_canonical_minmax(nir_shader *s)
+{
+   if (nir_is_denorm_preserve(s->info.float_controls_execution_mode, 32))
+      return false;
+
+   bool seen_store = false, shared_canonical = true;
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_store_shared) {
+               seen_store = true;
+               nir_def *value = intr->src[0].ssa;
+               if (value->bit_size != 32 || nir_intrinsic_align_mul(intr) < 4 ||
+                   (nir_intrinsic_align_offset(intr) & 3) != 0) {
+                  shared_canonical = false;
+                  continue;
+               }
+               for (unsigned c = 0; c < value->num_components; ++c)
+                  if ((nir_intrinsic_write_mask(intr) & (1u << c)) &&
+                      !canonical(value, c, false))
+                     shared_canonical = false;
+            } else {
+               const char *name = nir_intrinsic_infos[intr->intrinsic].name;
+               if ((strstr(name, "shared") &&
+                    (strstr(name, "atomic") || strstr(name, "store"))) ||
+                   (strstr(name, "deref") &&
+                    (strstr(name, "atomic") || strstr(name, "store") ||
+                     strstr(name, "copy"))))
+                  shared_canonical = false;
+            }
+         }
+      }
+   }
+   struct canonical_state state = {seen_store && shared_canonical, 0};
+   return nir_shader_alu_pass(s, remove_canonical_minmax,
+                              nir_metadata_control_flow, &state);
 }

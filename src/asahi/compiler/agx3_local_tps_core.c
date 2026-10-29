@@ -158,6 +158,8 @@ tps_ok(enum agx_isa_encoding enc, const struct agx3_tps_desc *d, bool is_load)
    const unsigned slots = slot_count(enc);
    return d != NULL && slots != 0 && d->data < 256 && width_ok(d->width) &&
           d->mask >= 1 && d->mask <= 15 && d->shift <= 3 && d->index < 256 &&
+          (!d->index_immediate || (enc == AGX_ISA_ENCODING_AGX3C &&
+           d->index == 0 && !d->index_kill && !d->index_signed)) &&
           d->frame_region >= 1 && d->frame_region <= 6 &&
           d->wait_mask < (1u << slots) &&
           (!is_load || (d->slot >= 1 && d->slot <= slots)) &&
@@ -173,8 +175,8 @@ tps_overrides(const struct agx3_tps_desc *d, bool is_load,
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
    ov[n++] = (struct agx3_field_kv)KV(11, d->narrow_extend);
    ov[n++] = (struct agx3_field_kv)KV(16, d->index);
-   ov[n++] = (struct agx3_field_kv)KV(23, 2);
-   ov[n++] = (struct agx3_field_kv)KV(24, 2);
+   ov[n++] = (struct agx3_field_kv)KV(23, d->index_immediate ? 1 : 2);
+   ov[n++] = (struct agx3_field_kv)KV(24, d->index_immediate ? 1 : 2);
    ov[n++] = (struct agx3_field_kv)KV(27, d->index_kill);
    ov[n++] = (struct agx3_field_kv)KV(28, d->index_signed);
    ov[n++] = (struct agx3_field_kv)KV(41, d->frame_region);

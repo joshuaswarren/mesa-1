@@ -234,6 +234,11 @@ test_gen1_encoding(void)
 
    struct agx_rt_bvh_gen1_header header = {0};
    require(agx_rt_bvh_gen1_header_set_child_layout(
+              &header, 0, 2, 3, 26, 0, true) &&
+              header.words[0] == 1 && header.words[6] == 3 &&
+              header.words[7] == 0x1a10,
+           "native M5 instance root uses indexed counts with zero capacity");
+   require(agx_rt_bvh_gen1_header_set_child_layout(
               &header, 2, 3, 0x12345678, 17, 3, true),
            "mixed child topology encodes");
    require(header.words[0] == 7 && header.words[5] == 0x1234 &&

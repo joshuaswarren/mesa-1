@@ -59,6 +59,127 @@ static const struct drm_asahi_params_global params_g13g = {
    .gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY,
 };
 
+/* Compile-only M1 Pro, M2 and M4 Pro profiles. Timing and submission
+ * ceilings deliberately use the existing fixtures, not hardware measurements.
+ * The product identity selects the real driver/compiler contract; T6040's
+ * two ten-core clusters exercise its larger helper tables (Mesa PR #55).
+ * No RT capabilities are invented for the M4 firmware runtime.
+ */
+static const struct drm_asahi_params_global params_g13x = {
+   .features = 0,
+   .gpu_generation = 13,
+   .gpu_variant = 'S',
+   .gpu_revision = 0,
+   .chip_id = 0x6000,
+   .num_dies = 1,
+   .num_clusters_total = 2,
+   .num_cores_per_cluster = 8,
+   .core_masks = {0xff, 0xff},
+   .vm_start = 0x4000,
+   .vm_end = 0x7fffff8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 1,
+   .max_attachments = 16,
+   .max_frequency_khz = 1278000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 2,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY,
+};
+
+static const struct drm_asahi_params_global params_g14g = {
+   .features = 0,
+   .gpu_generation = 14,
+   .gpu_variant = 'G',
+   .gpu_revision = 0,
+   .chip_id = 0x8112,
+   .num_dies = 1,
+   .num_clusters_total = 1,
+   .num_cores_per_cluster = 10,
+   .core_masks = {0x3ff},
+   .vm_start = 0x4000,
+   .vm_end = 0x7fffff8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 1,
+   .max_attachments = 16,
+   .max_frequency_khz = 1278000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 2,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY,
+};
+
+static const struct drm_asahi_params_global params_g16s = {
+   .features = DRM_ASAHI_FEATURE_SOFT_FAULTS,
+   .gpu_generation = 16,
+   .gpu_variant = 'S',
+   .gpu_revision = 0x11,
+   .chip_id = 0x6040,
+   .num_dies = 1,
+   .num_clusters_total = 2,
+   .num_cores_per_cluster = 10,
+   .core_masks = {0x3ff, 0x3ff},
+   .vm_start = 0x4000,
+   .vm_end = (1ull << 42) - 0x8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 64,
+   .max_attachments = 16,
+   .max_frequency_khz = 1500000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 3,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_200,
+};
+
+/* An explicit capability-bearing fixture tests RT exposure and eight queues.
+ * The plain g16s fixture remains a negative control for the kernel RT gate.
+ * Neither fixture is a claim that those commands executed on hardware. */
+static const struct drm_asahi_params_global params_g16s_rt = {
+   .features = DRM_ASAHI_FEATURE_SOFT_FAULTS |
+               DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS |
+               DRM_ASAHI_FEATURE_RENDER_RAY_QUERY |
+               DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES,
+   .gpu_generation = 16,
+   .gpu_variant = 'S',
+   .gpu_revision = 0x11,
+   .chip_id = 0x6040,
+   .num_dies = 1,
+   .num_clusters_total = 2,
+   .num_cores_per_cluster = 10,
+   .core_masks = {0x3ff, 0x3ff},
+   .vm_start = 0x4000,
+   .vm_end = (1ull << 42) - 0x8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 64,
+   .max_attachments = 16,
+   .max_frequency_khz = 1500000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 3,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_200,
+};
+
+/* The AS-only contract deliberately lacks the traversal capability. */
+static const struct drm_asahi_params_global params_g16s_as = {
+   .features = DRM_ASAHI_FEATURE_SOFT_FAULTS |
+               DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS |
+               DRM_ASAHI_FEATURE_BOUNDED_AS_BUILD |
+               DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES,
+   .gpu_generation = 16,
+   .gpu_variant = 'S',
+   .gpu_revision = 0x11,
+   .chip_id = 0x6040,
+   .num_dies = 1,
+   .num_clusters_total = 2,
+   .num_cores_per_cluster = 10,
+   .core_masks = {0x3ff, 0x3ff},
+   .vm_start = 0x4000,
+   .vm_end = (1ull << 42) - 0x8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 64,
+   .max_attachments = 16,
+   .max_frequency_khz = 1500000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 3,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_200,
+};
+
 /*
  * T8140 / A18 Pro, exactly as our G17P kernel adapter reports it
  * (drivers/gpu/drm/asahi/g17_drm.rs:24-27,118-140 and file.rs:295-324): a
@@ -219,12 +340,55 @@ static const struct drm_asahi_queue_limits queue_limits_g15s = {
  * and refuses user binds there. */
 #define SHIM_G15S_KERNEL_VA_START UINT64_C(0x7000000000)
 #define SHIM_G15S_KERNEL_VA_END   UINT64_C(0x7100000000)
+/* Explicit offline M5 Pro identity for command-generation tests. */
+static const struct drm_asahi_params_global params_g17s = {
+   .features = DRM_ASAHI_FEATURE_SOFT_FAULTS | DRM_ASAHI_FEATURE_RENDER_RESOURCES |
+               DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2,
+   .gpu_generation = 17, .gpu_variant = 'S', .gpu_revision = 0,
+   .chip_id = 0x6050, .num_dies = 1, .num_clusters_total = 2,
+   .num_cores_per_cluster = 10, .core_masks = {0x3ff, 0x3ff},
+   .vm_start = 0x4000, .vm_end = (1ull << 42) - 0x8000ull,
+   .vm_kernel_min_size = 0x20000000, .max_commands_per_submission = 64,
+   .max_attachments = 16, .max_frequency_khz = 1500000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 3, .gpu_hal_generation = DRM_ASAHI_GPU_HAL_300,
+};
+
+/* M5 Pro with the task (object->mesh) mesh rendering buffer bound
+ * (m5_mesh_storage_chunks != 0): DRM_ASAHI_FEATURE_TASK_MESH_STORAGE. */
+static const struct drm_asahi_params_global params_g17s_task = {
+   .features = DRM_ASAHI_FEATURE_SOFT_FAULTS | DRM_ASAHI_FEATURE_RENDER_RESOURCES |
+               DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2 |
+               DRM_ASAHI_FEATURE_COMPUTE_RESOURCES |
+               DRM_ASAHI_FEATURE_TASK_MESH_STORAGE,
+   .gpu_generation = 17, .gpu_variant = 'S', .gpu_revision = 0,
+   .chip_id = 0x6050, .num_dies = 1, .num_clusters_total = 2,
+   .num_cores_per_cluster = 10, .core_masks = {0x3ff, 0x3ff},
+   .vm_start = 0x4000, .vm_end = (1ull << 42) - 0x8000ull,
+   .vm_kernel_min_size = 0x20000000, .max_commands_per_submission = 64,
+   .max_attachments = 16, .max_frequency_khz = 1500000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 3, .gpu_hal_generation = DRM_ASAHI_GPU_HAL_300,
+};
 
 static const struct drm_asahi_params_global *
 shim_params(void)
 {
    const char *chip = getenv("ASAHI_SHIM_CHIP");
 
+   if (chip && !strcmp(chip, "g17s-task"))
+      return &params_g17s_task;
+
+   if (chip && !strcmp(chip, "g13x"))
+      return &params_g13x;
+   if (chip && !strcmp(chip, "g14g"))
+      return &params_g14g;
+   if (chip && !strcmp(chip, "g16s-as"))
+      return &params_g16s_as;
+   if (chip && !strcmp(chip, "g16s-rt"))
+      return &params_g16s_rt;
+   if (chip && !strcmp(chip, "g16s"))
+      return &params_g16s;
    if (chip && !strcmp(chip, "g17p"))
       return &params_g17p;
    if (chip && !strcmp(chip, "g15s"))
@@ -235,6 +399,8 @@ shim_params(void)
       return &params_g15c;
    if (chip && !strcmp(chip, "g16g"))
       return &params_g16g;
+   if (chip && !strcmp(chip, "g17s"))
+      return &params_g17s;
 
    return &params_g13g;
 }
@@ -911,14 +1077,16 @@ dump_submit(int fd, const struct drm_asahi_submit *submit, unsigned index)
          }
          h = dump_hash_bytes(h, chunk, len);
       }
-      fprintf(f, "MAP %#llx size=%#llx single=%u hash=%016llx\n",
+      fprintf(f, "MAP %#llx size=%#llx single=%u hash=%016llx backing=%#llx offset=%#llx\n",
               (unsigned long long)m->address, (unsigned long long)m->size,
-              m->single_page, (unsigned long long)h);
+              m->single_page, (unsigned long long)h,
+              (unsigned long long)m->bo->mem_addr,
+              (unsigned long long)m->object_offset);
 
       /* ASAHI_SHIM_DUMP_BYTES=<hex address>: also write that mapping's raw
        * bytes, one file per submit, next to the dump. */
       const char *want = getenv("ASAHI_SHIM_DUMP_BYTES");
-      if (want && strtoull(want, NULL, 16) == m->address) {
+      if (want && (!strcmp(want, "all") || strtoull(want, NULL, 16) == m->address)) {
          char path[4096];
          snprintf(path, sizeof(path), "%s/bytes-%llx-%u.bin",
                   getenv("ASAHI_SHIM_DUMP_SUBMIT"),
@@ -1182,6 +1350,19 @@ asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
       return asahi_ioctl_vm_status_mirror(fd, gp);
 
    case DRM_ASAHI_PARAM_GROUP_QUEUE_LIMITS:
+      if (shim_params() == &params_g16s_rt ||
+          shim_params() == &params_g16s_as) {
+         const struct drm_asahi_queue_limits limits = {
+            .max_queues = 8, .max_in_flight_per_queue = 2,
+         };
+         if (gp->size < sizeof(limits)) {
+            errno = EINVAL;
+            return -1;
+         }
+         memcpy((void *)(uintptr_t)gp->pointer, &limits, sizeof(limits));
+         gp->size = sizeof(limits);
+         return 0;
+      }
       if (!shim_g15s() || gp->size < sizeof(queue_limits_g15s)) {
          errno = EINVAL;
          return -1;
@@ -1801,12 +1982,29 @@ drm_shim_driver_init(void)
                           render_node_minor);
 
    const char *chip = getenv("ASAHI_SHIM_CHIP");
+   const bool g13x = chip && !strcmp(chip, "g13x");
+   const bool g14g = chip && !strcmp(chip, "g14g");
+   const bool g16s = chip &&
+      (!strcmp(chip, "g16s") || !strcmp(chip, "g16s-rt") ||
+       !strcmp(chip, "g16s-as"));
    const bool g17p = chip && !strcmp(chip, "g17p");
    const bool g15s = chip && !strcmp(chip, "g15s");
    const bool g15c = chip && !strcmp(chip, "g15c");
    const bool g16g = chip && !strcmp(chip, "g16g");
 
-   drm_shim_override_file(g17p   ? "DRIVER=asahi\n"
+   drm_shim_override_file(g13x   ? "DRIVER=asahi\n"
+                                   "OF_FULLNAME=/soc/agx\n"
+                                   "OF_COMPATIBLE_0=apple,agx-g13s\n"
+                                   "OF_COMPATIBLE_N=1\n"
+                          : g14g ? "DRIVER=asahi\n"
+                                   "OF_FULLNAME=/soc/agx\n"
+                                   "OF_COMPATIBLE_0=apple,agx-g14g\n"
+                                   "OF_COMPATIBLE_N=1\n"
+                          : g16s ? "DRIVER=asahi\n"
+                                   "OF_FULLNAME=/soc/agx\n"
+                                   "OF_COMPATIBLE_0=apple,gpu-g16s\n"
+                                   "OF_COMPATIBLE_N=1\n"
+                          : g17p ? "DRIVER=asahi\n"
                                    "OF_FULLNAME=/soc/agx\n"
                                    "OF_COMPATIBLE_0=apple,gpu-g17p\n"
                                    "OF_COMPATIBLE_N=1\n"

@@ -105,7 +105,8 @@ struct hk_shader_info {
          /* G17P: the shader may leave pixels unwritten: it discards, demotes
           * or writes the sample mask. */
          bool may_kill;
-         uint8_t _pad[3];
+         bool m5_inline_sample_shading;
+         uint8_t _pad[2];
       } fs;
 
       struct {
@@ -159,6 +160,8 @@ struct hk_shader_info {
    bool agx3_combined_sampler_valid;
    bool agx3_uses_root;
    bool agx3_gen1_fragment_rq;
+   /* HK_ROOT_READS_* classes of root bytes the shader may read. */
+   uint8_t agx3_root_reads;
    /* Actual uniform address selected after stage and resource lowering. */
    unsigned agx3_root_uniform;
    bool agx3_txf_texture_valid;
@@ -306,13 +309,13 @@ static const char *hk_gs_variant_name[] = {
 /* clang-format on */
 
 enum hk_mesh_variant {
-   
+   /* Main compute kernel writing vertex/primitive/index records */
    HK_MESH_VARIANT_MAIN,
 
-   
+   /* Hardware vertex shader rasterizing those records */
    HK_MESH_VARIANT_RAST,
 
-   
+   /* Native object predicate/count kernel; selected only when required. */
    HK_MESH_VARIANT_PREDICATED_OBJECT,
 
    HK_MESH_VARIANTS,
@@ -399,8 +402,8 @@ struct hk_api_shader {
    /* Is this an internal passthrough geometry shader? */
    bool is_passthrough;
 
-   /* Dynamic G17P sample-rate/coverage shaders have native 1x/2x/4x binaries. */
-   bool g17p_sample_variants;
+   /* Native sample-count variants: three slots on G17P, four on M5. */
+   uint8_t g17p_sample_variants;
 
    /* The one-sample binary compiles with the shader; the multisample ones
     * compile from this source on first use (hk_fs_build_sample_variant). */
@@ -436,13 +439,14 @@ bool hk_shader_ensure_link_ht_locked(struct hk_shader *shader);
 static inline unsigned
 hk_api_num_variants(const struct hk_api_shader *obj)
 {
-   return obj->g17p_sample_variants ? 3 : hk_num_variants(obj->vk.stage);
+   return obj->g17p_sample_variants ? obj->g17p_sample_variants
+                                    : hk_num_variants(obj->vk.stage);
 }
 
 static inline size_t
-hk_api_shader_size(mesa_shader_stage stage, bool samples)
+hk_api_shader_size(mesa_shader_stage stage, unsigned samples)
 {
-   unsigned count = samples ? 3 : hk_num_variants(stage);
+   unsigned count = samples ? samples : hk_num_variants(stage);
    return sizeof(struct hk_api_shader) + count * sizeof(struct hk_shader);
 }
 
@@ -458,7 +462,7 @@ hk_variant_name(struct hk_api_shader *obj, struct hk_shader *variant)
    assert(i < hk_api_num_variants(obj));
 
    if (obj->g17p_sample_variants) {
-      static const char *names[] = {"1 sample", "2 samples", "4 samples"};
+      static const char *names[] = {"1 sample", "2 samples", "4 samples", "8 samples"};
       return names[i];
    } else if (hk_api_num_variants(obj) == 1) {
       return NULL;
@@ -508,7 +512,8 @@ hk_fs_variant(struct hk_api_shader *obj, unsigned samples)
 
    assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
    if (obj->g17p_sample_variants)
-      assert(samples == 0 || samples == 1 || samples == 2 || samples == 4);
+      assert(samples == 0 || samples == 1 || samples == 2 || samples == 4 ||
+             (samples == 8 && obj->g17p_sample_variants == 4));
    if (!obj->g17p_sample_variants)
       return hk_only_variant(obj);
 
@@ -560,6 +565,9 @@ struct hk_linked_shader {
     * parallel and are released with this linked executable. */
    void *g17p_compute_templates;
 
+   /* M5 compute loaders retain their exact native load schedule. */
+   void *m5_compute_templates;
+
    /* G17P stage programs of this executable, one per uniform-range layout,
     * patched with each draw's range addresses (struct hk_g17p_gfx_loader). */
    void *g17p_gfx_loaders;
@@ -585,6 +593,13 @@ struct hk_linked_shader {
     * the descriptor root even when the application fragment shader does not. */
    bool g17p_prolog_uses_root;
 
+   /* An inline-blend fragment program that forms its own constant program
+    * (hk_g17p_inline_epilog_part()) has its own uniform layout: this shader
+    * describes it, and the draw takes the program's launch (uniform ranges,
+    * constant program, scratch) from it instead of the API shader. Owned by
+    * this linked shader; NULL when the API shader's layout applies. */
+   struct hk_shader *g17p_layout;
+
    /* Distinct from hk_shader::counts due to addition of cf_binding_count, which
     * is delayed since it depends on cull distance.
     */
@@ -606,6 +621,13 @@ struct hk_linked_shader *hk_fast_link_part(struct hk_device *dev, bool fragment,
                                            struct agx_shader_part *prolog,
                                            struct agx_shader_part *epilog,
                                            unsigned nr_samples_shaded);
+/* A copy of `api` whose code, uniform layout and constant program are
+ * `part`'s (an inline-blend program with its own constant program); takes
+ * ownership of part->binary. */
+struct hk_shader *hk_g17p_layout_shader_create(struct hk_device *dev,
+                                               const struct hk_shader *api,
+                                               struct agx_shader_part *part);
+
 struct hk_linked_shader *hk_fast_link(struct hk_device *dev, bool fragment,
                                       struct hk_shader *main,
                                       struct agx_shader_part *prolog,
@@ -647,21 +669,24 @@ hk_ubo_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)
 
 static inline nir_address_format
 hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness,
-                      bool null_descriptor)
+                      bool null_descriptor, bool map_metadata)
 {
    /* A null buffer descriptor has a zero range.  Preserve that range through
     * explicit-I/O lowering even when ordinary robustness is disabled so null
     * loads return zero and null stores are discarded before touching the
     * read-only zero page. */
    if (null_descriptor)
-      return nir_address_format_64bit_bounded_global;
+      return map_metadata ? nir_address_format_64bit_bounded_global_map
+                          : nir_address_format_64bit_bounded_global;
 
    switch (robustness) {
    case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT:
-      return nir_address_format_64bit_global_32bit_offset;
+      return map_metadata ? nir_address_format_64bit_global_32bit_offset_map
+                          : nir_address_format_64bit_global_32bit_offset;
    case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT:
    case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT:
-      return nir_address_format_64bit_bounded_global;
+      return map_metadata ? nir_address_format_64bit_bounded_global_map
+                          : nir_address_format_64bit_bounded_global;
    default:
       UNREACHABLE("Invalid robust buffer access behavior");
    }
@@ -699,7 +724,7 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
 
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      hk_internal_builder_t builder, void *data,
-                                     size_t data_size);
+                                     size_t data_size, VkResult *result);
 struct spirv_to_nir_options
 hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      UNUSED mesa_shader_stage stage,

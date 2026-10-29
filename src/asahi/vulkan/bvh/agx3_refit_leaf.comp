@@ -1,0 +1,72 @@
+/* Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * An update's leaf pass for triangles, in place of generating IR leaves: a
+ * thread per primitive of one geometry reads its triangle as leaf
+ * generation does and leaves it at its leaf's slot (see
+ * hk_agx3_retained_state), so that refit encoding reads each leaf job's
+ * children together rather than gathering IR leaves. Reads follow the
+ * application's index order; only the stores scatter.
+ */
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float32 : require
+#include "hk_build_interface.h"
+#include "agx3_node.h"
+
+/* Inactive triangles have NaN vertices, as for leaf generation. */
+#define SpvCapabilitySignedZeroInfNanPreserve 4466
+#define SpvExecutionModeSignedZeroInfNanPreserve 4461
+spirv_execution_mode(extensions = ["SPV_KHR_float_controls"],
+                     capabilities = [SpvCapabilitySignedZeroInfNanPreserve],
+                     SpvExecutionModeSignedZeroInfNanPreserve, 32);
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform CONSTS { hk_agx3_refit_leaf_args args; };
+
+void
+main()
+{
+   uint id = gl_GlobalInvocationID.x;
+   if (id >= args.primitive_count)
+      return;
+   hk_agx3_refit_state refit = DEREF(REF(hk_agx3_refit_state)(args.refit));
+   uint64_t slots = refit.retained +
+                    uint64_t(HK_AGX3_RETAINED_SLOTS(refit.job_count, args.leaf_bound));
+   uint slot = DEREF(INDEX(uint32_t, slots, args.geometry.first_id + id));
+   if (slot == ~0u)
+      return;
+
+   vk_bvh_geometry_data geom = args.geometry;
+   triangle_vertices vertices =
+      load_vertices(geom.data, load_indices(geom.indices, geom.index_format, id),
+                    geom.vertex_format, geom.stride);
+   if (geom.transform != 0ul) {
+      mat4 transform = mat4(1.0);
+      for (uint col = 0; col < 4; col++)
+         for (uint row = 0; row < 3; row++)
+            transform[col][row] = DEREF(INDEX(float, geom.transform, col + row * 4));
+      for (uint i = 0; i < 3; i++)
+         vertices.vertex[i] = transform * vertices.vertex[i];
+   }
+   /* An updatable structure keeps an inactive triangle as zero vertices
+    * (VK_BUILD_FLAG_ALWAYS_ACTIVE). */
+   bool inactive = false;
+   for (uint i = 0; i < 3; i++)
+      inactive = inactive || any(isnan(vertices.vertex[i]));
+   uvec3 v[3];
+   for (uint i = 0; i < 3; i++)
+      v[i] = inactive ? uvec3(0u) : floatBitsToUint(vertices.vertex[i].xyz);
+
+   uint64_t triangle = uint64_t(INDEX(hk_agx3_refit_triangle, args.triangles, slot));
+   store128(triangle, uvec4(v[0], v[1].x));
+   store128(triangle + 16ul, uvec4(v[1].yz, v[2].xy));
+   store128(triangle + 32ul, uvec4(v[2].z, geom.geometry_id, id, 0u));
+}

@@ -138,6 +138,12 @@ struct vk_meta_device {
     * destination Z when addressing the source buffer. */
    bool use_view_relative_3d_layer;
 
+   /* Specialize graphics buffer uploads whose attachment view has exactly
+    * one layer. Requires non-layered rendering: fragment Layer is then zero
+    * even when the attachment selects an array layer or a 3D slice.
+    */
+   bool specialize_single_layer_buffer_upload;
+
    bool use_rect_list_pipeline;
 
    struct {

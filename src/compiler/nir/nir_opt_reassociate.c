@@ -154,25 +154,135 @@ lookup_pair_freq(struct hash_table *ht, struct pair_key key)
    return (uintptr_t)(_mesa_hash_table_search(ht, &key)->data);
 }
 
+/* Bound on the expression depth walked to prove a source loop-invariant. */
+#define MAX_INVARIANT_DEPTH 32
+
+struct reassociate_state {
+   nir_reassociate_options opts;
+
+   /* Loop invariance memo: nir_def -> (loop << 1) | invariant. */
+   struct hash_table *invariant;
+};
+
+static nir_loop *
+innermost_loop(nir_block *block)
+{
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         return nir_cf_node_as_loop(node);
+   }
+
+   return NULL;
+}
+
+static bool
+loop_contains(nir_loop *loop, nir_block *block)
+{
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node == &loop->cf_node)
+         return true;
+   }
+
+   return false;
+}
+
+struct invariant_walk {
+   struct reassociate_state *state;
+   nir_loop *loop;
+   unsigned depth;
+
+   /* The depth bound cut the walk short somewhere below the current def. */
+   bool limited;
+};
+
+static bool def_loop_invariant(struct invariant_walk *w, nir_def *def);
+
+static bool
+src_loop_invariant(nir_src *src, void *data)
+{
+   return def_loop_invariant(data, src->ssa);
+}
+
+/*
+ * Whether def has the same value in every iteration of the loop: defined
+ * outside it, or computed inside it without side effects from such values.
+ * This only steers the order of a chain, so being conservative only costs
+ * optimization.
+ */
+static bool
+def_loop_invariant(struct invariant_walk *w, nir_def *def)
+{
+   nir_instr *instr = nir_def_instr(def);
+   if (!loop_contains(w->loop, instr->block))
+      return true;
+
+   struct hash_entry *ent = _mesa_hash_table_search(w->state->invariant, def);
+   if (ent && ((uintptr_t)ent->data & ~(uintptr_t)1) == (uintptr_t)w->loop)
+      return (uintptr_t)ent->data & 1;
+
+   const bool outer_limited = w->limited;
+   w->limited = w->depth >= MAX_INVARIANT_DEPTH;
+
+   bool invariant = false;
+   if (!w->limited) {
+      switch (instr->type) {
+      case nir_instr_type_load_const:
+      case nir_instr_type_undef:
+         invariant = true;
+         break;
+      case nir_instr_type_intrinsic:
+         if (!nir_intrinsic_can_reorder(nir_instr_as_intrinsic(instr)))
+            break;
+         FALLTHROUGH;
+      case nir_instr_type_alu:
+      case nir_instr_type_tex:
+         w->depth++;
+         invariant = nir_foreach_src(instr, src_loop_invariant, w);
+         w->depth--;
+         break;
+      default:
+         break;
+      }
+   }
+
+   /* A result cut short by the depth bound is not final. */
+   if (invariant || !w->limited) {
+      _mesa_hash_table_insert(w->state->invariant, def,
+                              (void *)((uintptr_t)w->loop | invariant));
+   }
+
+   w->limited |= outer_limited;
+   return invariant;
+}
+
 static int
-rank(nir_scalar s)
+rank(struct reassociate_state *state, nir_loop *loop, nir_scalar s)
 {
    /* Constants are rank 0. This promotes constant folding. */
    if (nir_scalar_is_const(s))
       return 0;
 
-   /* Convergent expressions are rank 1, promoting preambles and scalar ALU */
-   if (!s.def->divergent)
-      return 1;
+   /* Convergent expressions rank below divergent ones, promoting preambles
+    * and scalar ALU.
+    */
+   int r = s.def->divergent ? 2 : 1;
 
-   /* Everything else is rank 2. TODO: Promote loop-invariant code motion. */
-   return 2;
+   /* Optionally split each class by loop invariance, so the invariant part
+    * of a chain inside a loop is computed first and can leave the loop.
+    */
+   if (state->opts & nir_reassociate_loop_invariant) {
+      struct invariant_walk w = { .state = state, .loop = loop };
+      r = 2 * r - (!loop || def_loop_invariant(&w, s.def) ? 1 : 0);
+   }
+
+   return r;
 }
 
 struct chain {
    nir_alu_instr *root;
    unsigned length;
    nir_scalar srcs[MAX_CHAIN_LENGTH];
+   int ranks[MAX_CHAIN_LENGTH];
    bool do_global_cse;
    unsigned fp_math_ctrl;
 };
@@ -284,8 +394,8 @@ record_pairs(struct chain *c, struct hash_table *pair_freq)
  * ensures we do not duplicate chains and keeps `find_chains` O(instructions).
  */
 static void
-find_chains(nir_function_impl *impl, struct hash_table *pair_freq,
-            struct util_dynarray *chains)
+find_chains(nir_function_impl *impl, struct reassociate_state *state,
+            struct hash_table *pair_freq, struct util_dynarray *chains)
 {
    nir_foreach_block_reverse(block, impl) {
       nir_foreach_instr_reverse(instr, block) {
@@ -311,20 +421,24 @@ find_chains(nir_function_impl *impl, struct hash_table *pair_freq,
          if (c.length < 3)
             continue;
 
+         nir_loop *loop = innermost_loop(block);
+         for (unsigned i = 0; i < c.length; ++i)
+            c.ranks[i] = rank(state, loop, c.srcs[i]);
+
          /* Analyze the chain to feed our heuristic */
          unsigned lowest_rank = UINT32_MAX, nr_lowest = 0;
          unsigned highest_rank = 0, nr_highest = 0;
          bool local = true;
 
          for (unsigned i = 0; i < c.length; ++i) {
-            lowest_rank = MIN2(rank(c.srcs[i]), lowest_rank);
-            highest_rank = MAX2(rank(c.srcs[i]), highest_rank);
+            lowest_rank = MIN2(c.ranks[i], lowest_rank);
+            highest_rank = MAX2(c.ranks[i], highest_rank);
             local &= nir_def_block(c.srcs[i].def) == block;
          }
 
          for (unsigned i = 0; i < c.length; ++i) {
-            nr_lowest += (rank(c.srcs[i]) == lowest_rank);
-            nr_highest += (rank(c.srcs[i]) == highest_rank);
+            nr_lowest += (c.ranks[i] == lowest_rank);
+            nr_highest += (c.ranks[i] == highest_rank);
          }
 
          /* If we don't have the pair_freq table, the caller doesn't want to use
@@ -419,7 +533,7 @@ find_best_pair_in_chain(struct chain *c, void *pair_freq)
    foreach_pair(c, i, j) {
       struct pair_key key = get_pair_key(c->root->op, c->srcs[i], c->srcs[j]);
       unsigned freq = lookup_pair_freq(pair_freq, key);
-      unsigned max_rank = MAX2(rank(c->srcs[i]), rank(c->srcs[j]));
+      unsigned max_rank = MAX2(c->ranks[i], c->ranks[j]);
 
       if (freq > best_freq || (freq == best_freq && max_rank < best_max_rank)) {
          best = (struct pair){i, j};
@@ -431,17 +545,46 @@ find_best_pair_in_chain(struct chain *c, void *pair_freq)
    return best_freq > 1 ? best : (struct pair){0};
 }
 
+struct ranked_src {
+   nir_scalar src;
+   int rank;
+};
+
 /* Compare ranks. Tie break to ensure the sort-by-rank sort is stable */
 static int
 cmp_rank(const void *a_, const void *b_)
 {
-   const nir_scalar *a = a_, *b = b_;
-   int ra = rank(*a), rb = rank(*b);
+   const struct ranked_src *a = a_, *b = b_;
 
-   if (ra != rb)
-      return ra - rb;
+   if (a->rank != b->rank)
+      return a->rank - b->rank;
    else
-      return a->def->index - b->def->index;
+      return a->src.def->index - b->src.def->index;
+}
+
+static void
+swap_srcs(struct chain *c, unsigned a, unsigned b)
+{
+   SWAP(c->srcs[a], c->srcs[b]);
+   SWAP(c->ranks[a], c->ranks[b]);
+}
+
+/* Sort the sources from `first` by rank. */
+static void
+sort_by_rank(struct chain *c, unsigned first)
+{
+   struct ranked_src srcs[MAX_CHAIN_LENGTH];
+   const unsigned n = c->length - first;
+
+   for (unsigned i = 0; i < n; ++i)
+      srcs[i] = (struct ranked_src){c->srcs[first + i], c->ranks[first + i]};
+
+   qsort(srcs, n, sizeof(srcs[0]), cmp_rank);
+
+   for (unsigned i = 0; i < n; ++i) {
+      c->srcs[first + i] = srcs[i].src;
+      c->ranks[first + i] = srcs[i].rank;
+   }
 }
 
 static bool
@@ -458,13 +601,13 @@ reassociate_chain(struct chain *c, void *pair_freq)
 
       if (best_pair.i != best_pair.j) {
          /* Pin the best pair at the front. The rest is sorted by rank. */
-         SWAP(c->srcs[0], c->srcs[best_pair.i]);
-         SWAP(c->srcs[1], c->srcs[best_pair.j]);
+         swap_srcs(c, 0, best_pair.i);
+         swap_srcs(c, 1, best_pair.j);
          pinned = 2;
       }
    }
 
-   qsort(c->srcs + pinned, c->length - pinned, sizeof(c->srcs[0]), cmp_rank);
+   sort_by_rank(c, pinned);
 
    /* Reassociate according to the new order */
    nir_def *new_root = nir_mov_scalar(&b, c->srcs[0]);
@@ -509,6 +652,10 @@ nir_opt_reassociate(nir_shader *nir, nir_reassociate_options opts)
    bool cse_heuristic = opts & nir_reassociate_cse_heuristic;
    struct hash_table *pair_freq =
       cse_heuristic ? pair_key_table_create(NULL) : NULL;
+   struct reassociate_state state = {
+      .opts = opts,
+      .invariant = _mesa_pointer_hash_table_create(NULL),
+   };
    struct util_dynarray chains;
    bool progress = false;
 
@@ -529,10 +676,11 @@ nir_opt_reassociate(nir_shader *nir, nir_reassociate_options opts)
 
       bool impl_progress = false;
       _mesa_hash_table_clear(pair_freq, NULL);
+      _mesa_hash_table_clear(state.invariant, NULL);
       util_dynarray_clear(&chains);
 
       /* Step 1: find all chains in the function */
-      find_chains(impl, pair_freq, &chains);
+      find_chains(impl, &state, pair_freq, &chains);
 
       /* Step 2: reassociate all chains */
       util_dynarray_foreach(&chains, struct chain, chain) {
@@ -544,6 +692,7 @@ nir_opt_reassociate(nir_shader *nir, nir_reassociate_options opts)
    }
 
    ralloc_free(pair_freq);
+   ralloc_free(state.invariant);
    util_dynarray_fini(&chains);
    return progress;
 }
@@ -564,8 +713,10 @@ nir_opt_reassociate_loop(nir_shader *nir, nir_reassociate_options in_opts)
    for (unsigned i = 0; i < 2; ++i) {
       nir_reassociate_options opts = in_opts;
       if (i >= 1) {
-         if (in_opts == (nir_reassociate_cse_heuristic | nir_reassociate_scalar_math))
-            opts = nir_reassociate_scalar_math;
+         const nir_reassociate_options both =
+            nir_reassociate_cse_heuristic | nir_reassociate_scalar_math;
+         if ((in_opts & both) == both)
+            opts = in_opts & ~nir_reassociate_cse_heuristic;
          else
             break;
       }

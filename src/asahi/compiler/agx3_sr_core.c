@@ -64,22 +64,21 @@ agx3_sr_witnessed(enum agx_isa_encoding enc, uint8_t sr, enum agx3_sr_width widt
       switch (sr) {
       case 6: case 7: case 9: case 10: case 11: case 13:
       case 17: case 18: case 19: case 20: case 21: case 22:
-      case 34: case 36:
-      /* fragment-only, see the comment above */
-      case 2: case 39: case 41:
-      /* G17P builtin BG array reloads read their layer with 34c31046. */
-      case 12:
-      /* G17P instance main +0x61a and M5 ray entry read SR59. */
-      case 59:
+      case 34: case 36: case 59:
+      case 2: case 39: case 41: case 12:
          return true;
+      case 63:
+         return enc == AGX_ISA_ENCODING_AGX3C;
       case 65:
-         return enc == AGX_ISA_ENCODING_AGX3B;
+         return enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C;
       default:
          return false;
       }
    }
    if (width == AGX3_SR_W32 && sr == 64)
-      return enc == AGX_ISA_ENCODING_AGX3B;
+      return enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C;
+   if (width == AGX3_SR_W32 && sr == 62)
+      return enc == AGX_ISA_ENCODING_AGX3C;
    if (width == AGX3_SR_W32)
       return (sr >= 23 && sr <= 28) || (sr >= 46 && sr <= 49) || sr == 51;
    return false;
@@ -101,16 +100,17 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    if (d->slot < 1 || d->slot > nslots || (d->wait_mask >> nslots) != 0)
       return false;
 
-   /* The entry marker is witnessed only on G17P's W16 SR39 coverage read:
+   /* The entry marker is witnessed on G17P/G17G's W16 SR39 coverage read:
     * `[[sample_mask]]` and centroid inputs, and a multisample fragment with no
     * other input, each open with `rld ep1 ... f48=1`. */
    /* Apple's throughput fragment (metal-nt applegpu_g17p, fragment.fields
     * offset 64) also opens with a marked 32-bit SR24 read,
     * 1ca1110601000000, so the pixel-coordinate pair qualifies too. */
-   if (d->first &&
-       (enc != AGX_ISA_ENCODING_AGX3B ||
-        !((d->sr == 39 && d->width == AGX3_SR_W16) ||
-          ((d->sr == 23 || d->sr == 24) && d->width == AGX3_SR_W32))))
+   const bool coverage_entry = d->sr == 39 && d->width == AGX3_SR_W16 &&
+      (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C);
+   const bool pixel_entry = enc == AGX_ISA_ENCODING_AGX3B &&
+      (d->sr == 23 || d->sr == 24) && d->width == AGX3_SR_W32;
+   if (d->first && !coverage_entry && !pixel_entry)
       return false;
 
    struct agx3_field_kv base[5];

@@ -71,6 +71,9 @@ struct ail_layout {
     */
    bool mipmapped_z;
 
+   /** Sparse residency maps address whole pages within each layer. */
+   bool sparse_residency;
+
    /** Tiling mode used */
    enum ail_tiling tiling;
 
@@ -340,17 +343,22 @@ ail_get_tiled_element_B(const struct ail_layout *layout, unsigned level,
              ail_get_blocksize_B(layout);
 }
 
+/* The samples one compression metadata entry covers. */
+static inline struct ail_tile
+ail_metadata_tile(const struct ail_layout *layout)
+{
+   return layout->policy == AIL_LAYOUT_POLICY_M5 && !layout->mipmapped_z
+             ? ail_m5_compression_tile_size(
+                  util_format_get_blocksize(layout->format))
+             : (struct ail_tile){16, 16};
+}
+
 static inline unsigned
 ail_metadata_width_tl(struct ail_layout *layout, unsigned level)
 {
    unsigned px = u_minify(layout->width_px, level);
    uint32_t sa = ail_effective_width_sa(px, layout->sample_count_sa);
-   const struct ail_tile tile =
-      layout->policy == AIL_LAYOUT_POLICY_M5 && !layout->mipmapped_z
-         ? ail_m5_compression_tile_size(
-              util_format_get_blocksize(layout->format))
-         : (struct ail_tile){16, 16};
-   return DIV_ROUND_UP(sa, tile.width_el);
+   return DIV_ROUND_UP(sa, ail_metadata_tile(layout).width_el);
 }
 
 static inline unsigned
@@ -358,12 +366,7 @@ ail_metadata_height_tl(struct ail_layout *layout, unsigned level)
 {
    unsigned px = u_minify(layout->height_px, level);
    uint32_t sa = ail_effective_height_sa(px, layout->sample_count_sa);
-   const struct ail_tile tile =
-      layout->policy == AIL_LAYOUT_POLICY_M5 && !layout->mipmapped_z
-         ? ail_m5_compression_tile_size(
-              util_format_get_blocksize(layout->format))
-         : (struct ail_tile){16, 16};
-   return DIV_ROUND_UP(sa, tile.height_el);
+   return DIV_ROUND_UP(sa, ail_metadata_tile(layout).height_el);
 }
 
 /*
@@ -582,7 +585,7 @@ ail_formats_compatible(enum pipe_format a, enum pipe_format b)
 }
 
 static inline bool
-ail_is_view_compatible(struct ail_layout *layout, enum pipe_format view)
+ail_is_view_compatible(const struct ail_layout *layout, enum pipe_format view)
 {
    return !layout->compressed || ail_formats_compatible(layout->format, view);
 }

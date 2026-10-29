@@ -75,9 +75,9 @@ agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
       return;
 
    if (unbind) {
-      /* Sparse/capture-replay VAs are always installed as a lower read-write
-       * mapping plus the corresponding upper read-only shadow.  Remove both
-       * in one VM_BIND transaction so neither half can survive VA reuse. */
+      /* Sparse/capture-replay VAs may contain a lower read-write mapping and
+       * its upper read-only shadow. Clear both, including unbound holes, in
+       * one VM_BIND transaction so neither half can survive VA reuse. */
       assert(!(va->flags & AGX_VA_USC));
       assert(va->size_B >= dev->guard_size);
       const uint64_t bound_size_B = va->size_B - dev->guard_size;

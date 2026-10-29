@@ -70,7 +70,7 @@
 extern "C" {
 #endif
 
-#define AGX3_ISEL_MAX_LENGTH 10u
+#define AGX3_ISEL_MAX_LENGTH 14u
 
 /* == enum agx_icond. Only the five Apple emits are encodable. */
 enum agx3_isel_icond {
@@ -107,6 +107,7 @@ struct agx3_isel_desc {
    bool cmp0_uniform;
    bool cmp1_uniform;
    bool cmp_16;
+   bool cmp_mixed_width; /* M5: the second register has the opposite width. */
    bool explicit_hints;
    bool dest_cache; /* f12: result is consumed through the register cache */
    bool cache[4];

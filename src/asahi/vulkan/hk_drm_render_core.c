@@ -46,6 +46,19 @@ hk_drm_g17p_zls_pixels(uint32_t width, uint32_t height,
 }
 
 uint32_t
+hk_drm_m5_zls_pixels(uint32_t width, uint32_t height,
+                     uint64_t depth_base, uint64_t depth_meta,
+                     uint64_t stencil_base, uint64_t stencil_meta)
+{
+   if (!hk_drm_g17p_has_zls_storage(depth_base, depth_meta, stencil_base,
+                                    stencil_meta))
+      return 0;
+   assert(width >= 1 && width <= 0x10000);
+   assert(height >= 1 && height <= 0x10000);
+   return (width - 1) | ((height - 1) << 16);
+}
+
+uint32_t
 hk_drm_g17p_depth_clear(uint32_t depth_clear,
                         uint64_t depth_base, uint64_t depth_meta,
                         uint64_t stencil_base, uint64_t stencil_meta)
@@ -197,6 +210,21 @@ hk_drm_next_command_span(const void *cmdbuf, size_t cmdbuf_size,
          if (header->vdm_barrier != DRM_ASAHI_BARRIER_NONE ||
              header->cdm_barrier != DRM_ASAHI_BARRIER_NONE ||
              header->size % sizeof(struct drm_asahi_attachment) != 0)
+            return false;
+      } else if (header->cmd_type == DRM_ASAHI_SET_RENDER_RESOURCES) {
+         if (header->vdm_barrier != DRM_ASAHI_BARRIER_NONE ||
+             header->cdm_barrier != DRM_ASAHI_BARRIER_NONE ||
+             header->size % sizeof(struct drm_asahi_render_program) != 0)
+            return false;
+      } else if (header->cmd_type == DRM_ASAHI_SET_RENDER_RESOURCES_V2) {
+         if (header->vdm_barrier != DRM_ASAHI_BARRIER_NONE ||
+             header->cdm_barrier != DRM_ASAHI_BARRIER_NONE ||
+             header->size % sizeof(struct drm_asahi_render_program_v2) != 0)
+            return false;
+      } else if (header->cmd_type == DRM_ASAHI_SET_COMPUTE_RESOURCES) {
+         if (header->vdm_barrier != DRM_ASAHI_BARRIER_NONE ||
+             header->cdm_barrier != DRM_ASAHI_BARRIER_NONE ||
+             header->size % sizeof(struct drm_asahi_compute_program) != 0)
             return false;
       } else {
          return false;

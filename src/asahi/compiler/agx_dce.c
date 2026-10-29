@@ -29,6 +29,13 @@ agx_dce(agx_context *ctx, bool partial)
          if (block->loop_header && I->op == AGX_OPCODE_PHI)
             break;
 
+         /* RT-completion loads wait for a traversal producer even when their
+          * byte result is unread. Ordinary dead SCS metadata loads remain
+          * removable. Keep a real destination, as the native load writes it. */
+         const bool rt_completion =
+            (I->op == AGX_OPCODE_SCS_LOAD_REGISTER_INDEXED_AGX3 ||
+             I->op == AGX_OPCODE_SCS_LOAD_REGISTER_BASE_AGX3) &&
+            I->scs_rt_completion;
          bool needed = false;
 
          agx_foreach_ssa_dest(I, d) {
@@ -39,13 +46,17 @@ agx_dce(agx_context *ctx, bool partial)
              */
             if (BITSET_TEST(seen, I->dest[d].value)) {
                needed = true;
-            } else if (partial) {
+            } else if (partial && I->op != AGX_OPCODE_ENTER_QUERY_M5 &&
+                       !rt_completion) {
+               /* The M5 query entry always writes its result register, so
+                * it must keep a real destination even when it is unread.
+                */
                I->dest[d] = agx_null();
             }
          }
 
          if (!needed && agx_opcodes_info[I->op].can_eliminate &&
-             !I->agx3_tex_coord_stage) {
+             !I->agx3_tex_coord_stage && !rt_completion) {
             agx_remove_instruction(I);
          } else {
             agx_foreach_ssa_src(I, s) {

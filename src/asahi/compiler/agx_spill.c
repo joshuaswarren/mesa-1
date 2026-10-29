@@ -823,6 +823,13 @@ min_algorithm(struct spill_ctx *ctx)
          insert_W(ctx, I->dest[d].value);
       }
 
+      /* The M5 query entry's result may be unread; it then dies immediately
+       * and must not occupy W or be spilled.
+       */
+      if (I->op == AGX_OPCODE_ENTER_QUERY_M5 && I->nr_dests == 1 &&
+          ctx->next_uses[I->dest[0].value] == DIST_INFINITY)
+         remove_W_if_present(ctx, I->dest[0].value);
+
       /* Update next-use distances for this instruction. Unlike the paper, we
        * prune dead values from W as we go. This doesn't affect correctness, but
        * it speeds up limit() on average.
@@ -982,10 +989,10 @@ loop_room_for_live_through(struct spill_ctx *ctx, BITSET_WORD *used)
 
 /*
  * Hack's thesis sorts the live-in set (+ destinations of phis) by next-use
- * distance and takes as much as fits. On G17P, values read in the loop are
- * taken first that way, and values live through the loop then fill only the
- * room the loop leaves them (section 4.2 of the paper). A remat-only pass must
- * not spill, so it keeps the thesis heuristic.
+ * distance and takes as much as fits. On G17P and M5, values read in the loop
+ * are taken first that way, and values live through the loop then fill only
+ * the room the loop leaves them (section 4.2 of the paper). A remat-only pass
+ * must not spill, so it keeps the thesis heuristic.
  */
 static ATTRIBUTE_NOINLINE void
 compute_w_entry_loop_header(struct spill_ctx *ctx)
@@ -1009,7 +1016,9 @@ compute_w_entry_loop_header(struct spill_ctx *ctx)
 
    BITSET_WORD *used = NULL;
    unsigned room = 0;
-   if (ctx->shader->key->dev.chip == AGX_CHIP_G17P && !ctx->remat_only) {
+   if ((ctx->shader->key->dev.chip == AGX_CHIP_G17P ||
+        agx_chip_g17_m5(ctx->shader->key->dev.chip)) &&
+       !ctx->remat_only) {
       used = BITSET_CALLOC(ctx->n);
       room = loop_room_for_live_through(ctx, used);
    }
@@ -1326,6 +1335,182 @@ validate_next_use_info(UNUSED agx_context *ctx,
 #endif
 }
 
+/* SSA repair after rematerialization may merge different register copies of
+ * one literal. Prove the entire scalar PHI/MOV web, including loop backedges,
+ * before replacing a PHI. No partially-known input is assumed constant. */
+struct constant_phi_edge {
+   unsigned parent;
+   int next;
+};
+
+static bool
+constant_phi_scalar(agx_index x)
+{
+   return x.type == AGX_INDEX_NORMAL && !x.memory && !x.has_reg &&
+          !x.abs && !x.neg && agx_channels(x) == 1 &&
+          (x.size == AGX_SIZE_16 || x.size == AGX_SIZE_32);
+}
+
+static bool
+constant_phi_transparent(const agx_instr *I)
+{
+   if (!I || I->nr_dests != 1 || !constant_phi_scalar(I->dest[0]) ||
+       I->saturate || I->invert_cond)
+      return false;
+
+   if (I->op == AGX_OPCODE_MOV_IMM)
+      return I->nr_srcs == 0;
+
+   if ((I->op != AGX_OPCODE_MOV || I->nr_srcs != 1) &&
+       (I->op != AGX_OPCODE_PHI || I->nr_srcs == 0))
+      return false;
+
+   agx_foreach_src(I, s) {
+      if (!constant_phi_scalar(I->src[s]) ||
+          I->src[s].size != I->dest[0].size)
+         return false;
+   }
+
+   return true;
+}
+
+static bool
+constant_phi_prove(agx_instr **defs, const int *parents,
+                   const struct constant_phi_edge *edges, unsigned n,
+                   unsigned start, BITSET_WORD *visited, BITSET_WORD *grounded,
+                   unsigned *nodes, unsigned *work, uint64_t *literal)
+{
+   memset(visited, 0, BITSET_BYTES(n));
+   memset(grounded, 0, BITSET_BYTES(n));
+   unsigned count = 1, read = 0, roots = 0;
+   bool have_literal = false;
+   enum agx_size size = defs[start]->dest[0].size;
+   nodes[0] = start;
+   BITSET_SET(visited, start);
+
+   while (read < count) {
+      unsigned v = nodes[read++];
+      const agx_instr *I = defs[v];
+      if (!constant_phi_transparent(I) || I->dest[0].size != size)
+         return false;
+
+      if (I->op == AGX_OPCODE_MOV_IMM) {
+         uint64_t value = I->imm &
+            (size == AGX_SIZE_16 ? UINT64_C(0xffff) : UINT64_C(0xffffffff));
+         if (have_literal && value != *literal)
+            return false;
+         have_literal = true;
+         *literal = value;
+         BITSET_SET(grounded, v);
+         work[roots++] = v;
+         continue;
+      }
+
+      agx_foreach_src(I, s) {
+         unsigned src = I->src[s].value;
+         if (src >= n || !defs[src])
+            return false;
+         if (!BITSET_TEST(visited, src)) {
+            BITSET_SET(visited, src);
+            nodes[count++] = src;
+         }
+      }
+   }
+
+   if (!have_literal)
+      return false;
+
+   /* Every node must have a path to a literal. Otherwise a root-free cycle
+    * could have contributed an unknown input beside a known literal. Traverse
+    * reverse edges from the actual literal definitions, rather than guessing
+    * that an unresolved PHI input agrees with an already-known one. */
+   unsigned proven = roots;
+   read = 0;
+   while (read < proven) {
+      unsigned v = work[read++];
+      for (int e = parents[v]; e >= 0; e = edges[e].next) {
+         unsigned parent = edges[e].parent;
+         if (BITSET_TEST(visited, parent) &&
+             !BITSET_TEST(grounded, parent)) {
+            BITSET_SET(grounded, parent);
+            work[proven++] = parent;
+         }
+      }
+   }
+
+   return proven == count;
+}
+
+bool
+agx_fold_m5_spill_constant_phis(agx_context *ctx)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->is_preamble || !ctx->alloc)
+      return false;
+
+   void *memctx = ralloc_context(NULL);
+   unsigned n = ctx->alloc;
+   agx_instr **defs = rzalloc_array(memctx, agx_instr *, n);
+   int *parents = ralloc_array(memctx, int, n);
+   memset(parents, 0xff, n * sizeof(*parents));
+   struct util_dynarray edges;
+   util_dynarray_init(&edges, memctx);
+
+   agx_foreach_instr_global(ctx, I) {
+      if (I->nr_dests == 1 && I->dest[0].type == AGX_INDEX_NORMAL &&
+          !I->dest[0].memory && !I->dest[0].has_reg)
+         defs[I->dest[0].value] = I;
+
+      if (!constant_phi_transparent(I) || I->op == AGX_OPCODE_MOV_IMM)
+         continue;
+
+      agx_foreach_src(I, s) {
+         unsigned src = I->src[s].value;
+         if (src >= n)
+            continue;
+         struct constant_phi_edge edge = {
+            .parent = I->dest[0].value, .next = parents[src],
+         };
+         parents[src] = util_dynarray_num_elements(&edges, struct constant_phi_edge);
+         util_dynarray_append(&edges, edge);
+      }
+   }
+
+   BITSET_WORD *visited = rzalloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
+   BITSET_WORD *grounded = rzalloc_array(memctx, BITSET_WORD, BITSET_WORDS(n));
+   unsigned *nodes = ralloc_array(memctx, unsigned, n);
+   unsigned *work = ralloc_array(memctx, unsigned, n);
+   bool progress = false;
+
+   agx_foreach_block(ctx, block) {
+      /* Preserve the ELSE/PHI prefix: literals execute after all surviving
+       * parallel PHIs, never between them. */
+      agx_cursor cursor = agx_after_block(block);
+      agx_foreach_instr_in_block(block, I) {
+         if (I->op != AGX_OPCODE_PHI && I->op != AGX_OPCODE_ELSE_ICMP &&
+             I->op != AGX_OPCODE_ELSE_FCMP) {
+            cursor = agx_before_instr(I);
+            break;
+         }
+      }
+      agx_builder b = agx_init_builder(ctx, cursor);
+      agx_foreach_phi_in_block_safe(block, phi) {
+         uint64_t literal = 0;
+         if (constant_phi_transparent(phi) &&
+             constant_phi_prove(defs, parents, util_dynarray_begin(&edges), n,
+                                phi->dest[0].value, visited, grounded,
+                                nodes, work, &literal)) {
+            agx_mov_imm_to(&b, phi->dest[0], literal);
+            agx_remove_instruction(phi);
+            progress = true;
+         }
+      }
+   }
+
+   ralloc_free(memctx);
+   return progress;
+}
+
 void
 agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 {
@@ -1336,7 +1521,8 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
     * inserts none, but must still leave room for the registers RA reserves at
     * the bottom of the file, which is four for an AGX3 divergent shuffle.
     */
-   k -= remat_only ? MAX2(agx_reserved_registers(ctx), 2) : 8;
+   k -= remat_only ? MAX2(agx_reserved_registers(ctx), 2)
+                   : MAX2(agx_reserved_registers(ctx), 8);
 
    uint8_t *channels = rzalloc_array(memctx, uint8_t, ctx->alloc);
    dist_t *next_uses = rzalloc_array(memctx, dist_t, ctx->alloc);
@@ -1425,6 +1611,7 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 
    /* Spilling breaks SSA, so we need to repair before validating */
    agx_repair_ssa(ctx);
+   agx_fold_m5_spill_constant_phis(ctx);
    agx_validate(ctx, "Spilling");
 
    /* Remat can introduce dead code */

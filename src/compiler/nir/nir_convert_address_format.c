@@ -30,6 +30,12 @@ nir_build_convert_address_format(nir_builder *b, nir_def *addr,
    switch (from) {
    case nir_address_format_64bit_global:
       switch (to) {
+      case nir_address_format_64bit_global_32bit_offset_map: {
+         nir_def *parts[] = {nir_unpack_64_2x32_split_x(b, addr),
+            nir_unpack_64_2x32_split_y(b, addr), nir_imm_int(b, 0),
+            nir_imm_int(b, 0), nir_imm_int(b, 0)};
+         return nir_vec(b, parts, 5);
+      }
       case nir_address_format_64bit_global_32bit_offset:
          return nir_vec4(b, nir_unpack_64_2x32_split_x(b, addr),
                          nir_unpack_64_2x32_split_y(b, addr), nir_imm_int(b, 0),
@@ -40,6 +46,7 @@ nir_build_convert_address_format(nir_builder *b, nir_def *addr,
       }
 
    case nir_address_format_64bit_global_32bit_offset:
+   case nir_address_format_64bit_global_32bit_offset_map:
       switch (to) {
       case nir_address_format_64bit_global:
          return nir_iadd(b, nir_pack_64_2x32(b, nir_trim_vector(b, addr, 2)),

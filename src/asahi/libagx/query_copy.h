@@ -17,8 +17,23 @@
 #include "vulkan/vulkan_core.h"
 #endif
 
+/* Availability of one query: a 32-bit word, or with availability_shift 1 a
+ * 64-bit slot that the kernel may fill with the retirement timestamp of the
+ * render that ended the query. Any nonzero bit of the slot means available.
+ */
+static inline bool
+libagx_query_available(GLOBAL volatile uint32_t *availability,
+                       uint32_t availability_shift, uint32_t query)
+{
+   uint32_t word = query << availability_shift;
+   uint32_t value = availability[word];
+   if (availability_shift)
+      value |= availability[word + 1];
+   return value != 0;
+}
+
 /* Shared with the host tests. One invocation owns a complete query tuple,
- * including its single availability word. Keep loads volatile: WAIT must
+ * including its single availability slot. Keep loads volatile: WAIT must
  * reload availability, and results must be read after observing availability.
  * The caller must order the producer before launching a waiting consumer.
  */
@@ -28,7 +43,7 @@ libagx_copy_query_g17p_result(GLOBAL volatile uint32_t *availability,
                               GLOBAL uint16_t *oq_index, uint64_t dst_addr,
                               uint64_t dst_stride, uint32_t first_query,
                               uint32_t flags, uint16_t reports_per_query,
-                              uint32_t invocation)
+                              uint32_t availability_shift, uint32_t invocation)
 {
    uint32_t query = first_query + invocation;
    uint32_t index = oq_index ? oq_index[query] : query;
@@ -38,8 +53,10 @@ libagx_copy_query_g17p_result(GLOBAL volatile uint32_t *availability,
 
    bool available;
    do {
-      available =
-         availability ? availability[query] != 0 : report[0] != UINT64_MAX;
+      available = availability
+                     ? libagx_query_available(availability,
+                                              availability_shift, query)
+                     : report[0] != UINT64_MAX;
    } while (!available && (flags & VK_QUERY_RESULT_WAIT_BIT));
 
    if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) {

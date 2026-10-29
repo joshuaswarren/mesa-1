@@ -18,6 +18,111 @@ class G17PMSAAEpilog : public ::testing::Test {
    ~G17PMSAAEpilog() { glsl_type_singleton_decref(); }
 };
 
+TEST_F(G17PMSAAEpilog, M5SampleAlphaCoveragePrecedesAllColourStores)
+{
+   for (unsigned samples : {2u, 4u, 8u}) {
+      SCOPED_TRACE(samples);
+      agx_fs_epilog_key fs = {};
+      fs.nr_samples = samples;
+      fs.max_sample_size_B = 248;
+      fs.max_bytes_per_tile = 65536;
+      fs.max_samples_per_tile = 2048;
+      fs.link.loc_written = 1;
+      fs.link.size_32 = 1;
+      fs.link.colour_comps = 15;
+      fs.link.sample_shading = true;
+      fs.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+      fs.remap[0] = 0;
+      fs.blend.rt[0].colormask = 15;
+      fs.blend.rt[0].mode = agx_pack_blend_standard(
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+      fs.blend.alpha_to_coverage = true;
+      agx_fs_epilog_apply_device_policy(AGX_CHIP_G17S, &fs);
+
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "M5 sample alpha coverage");
+      agx_nir_fs_epilog_g17p(&b, &fs);
+      agx_preprocess_nir(b.shader);
+      nir_validate_shader(b.shader, "M5 sample alpha coverage ordering");
+
+      unsigned updates = 0, stores = 0;
+      nir_foreach_block(block, b.impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+            if (in->intrinsic == nir_intrinsic_sample_mask_agx) {
+               EXPECT_EQ(stores, 0u);
+               EXPECT_EQ(block->cf_node.parent, &b.impl->cf_node);
+               updates++;
+            }
+            if (in->intrinsic == nir_intrinsic_store_local_pixel_agx)
+               stores++;
+         }
+      }
+      EXPECT_EQ(updates, 1u);
+      EXPECT_EQ(stores, samples);
+      ralloc_free(b.shader);
+   }
+}
+
+TEST_F(G17PMSAAEpilog, ForceEarlyAppliesApiMaskBeforeSampleCounting)
+{
+   for (enum agx_chip chip : {AGX_CHIP_G13G, AGX_CHIP_G17P, AGX_CHIP_G17S}) {
+      for (unsigned samples : {2u, 4u, 8u}) {
+         for (bool early : {false, true}) {
+            for (bool sample_shading : {false, true}) {
+               for (unsigned mask : {0u, 0xaau, 0xffu}) {
+                  SCOPED_TRACE(::testing::Message() << chip << ", " << samples
+                     << " samples, early=" << early << ", shading="
+                     << sample_shading << ", mask=" << mask);
+                  nir_builder b = nir_builder_init_simple_shader(
+                     MESA_SHADER_FRAGMENT, &agx_nir_options, "forced early API mask");
+                  b.shader->info.fs.early_fragment_tests = early;
+                  b.shader->info.fs.uses_sample_shading = sample_shading;
+                  b.shader->info.fs.uses_discard = true;
+                  nir_intrinsic_instr *first = nir_sample_mask_agx(
+                     &b, nir_imm_intN_t(&b, 0xff, 16),
+                     nir_imm_intN_t(&b, 0xff, 16));
+                  nir_intrinsic_instr *last = nir_sample_mask_agx(
+                     &b, nir_imm_intN_t(&b, 0xff, 16),
+                     nir_imm_intN_t(&b, 0, 16));
+                  const bool changed = early &&
+                     (chip == AGX_CHIP_G17P ||
+                      (chip == AGX_CHIP_G17S && !sample_shading));
+                  EXPECT_EQ(agx_nir_apply_api_mask_to_force_early(b.shader, chip),
+                            changed);
+                  unsigned api_loads = 0;
+                  nir_foreach_block(block, b.impl) {
+                     nir_foreach_instr_safe(instr, block) {
+                        if (instr->type != nir_instr_type_intrinsic)
+                           continue;
+                        nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+                        if (in->intrinsic != nir_intrinsic_load_api_sample_mask_agx)
+                           continue;
+                        api_loads++;
+                        b.cursor = nir_before_instr(instr);
+                        nir_def_replace(&in->def, nir_imm_intN_t(
+                           &b, mask & BITFIELD_MASK(samples), in->def.bit_size));
+                     }
+                  }
+                  EXPECT_EQ(api_loads, changed ? 1u : 0u);
+                  nir_opt_constant_folding(b.shader);
+                  EXPECT_EQ(nir_src_as_uint(first->src[0]), 0xffu);
+                  EXPECT_EQ(nir_src_as_uint(first->src[1]),
+                            changed ? (mask & BITFIELD_MASK(samples)) : 0xffu);
+                  EXPECT_EQ(nir_src_as_uint(last->src[0]), 0xffu);
+                  EXPECT_EQ(nir_src_as_uint(last->src[1]), 0u);
+                  nir_validate_shader(b.shader, "forced early API mask");
+                  ralloc_free(b.shader);
+               }
+            }
+         }
+      }
+   }
+}
+
 TEST_F(G17PMSAAEpilog, PerSampleColourImportsCompile)
 {
    for (unsigned samples : {2u, 4u}) {
@@ -277,6 +382,45 @@ TEST_F(G17PMSAAEpilog, BroadcastNoopPreservesBoundTargets)
          EXPECT_EQ(stores, targets);
          EXPECT_TRUE(b.shader->info.fs.uses_fbfetch_output);
          ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(G17pMsaaEpilog, NativeLateSampleMaskCrossesEpilogBoundary)
+{
+   for (enum agx_chip chip : {AGX_CHIP_G13G, AGX_CHIP_G17P, AGX_CHIP_G17S}) {
+      for (bool sample_mask : {false, true}) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "late coverage boundary");
+      b.shader->info.io_lowered = true;
+      b.shader->info.fs.uses_discard = true;
+      b.shader->info.writes_memory = !sample_mask;
+      b.shader->info.outputs_written =
+         BITFIELD64_BIT(FRAG_RESULT_DATA0) |
+         (sample_mask ? BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK) : 0);
+      nir_demote_samples(&b, nir_imm_intN_t(&b, 0x5555, 16));
+      nir_store_output(&b, nir_imm_vec4(&b, 1, 1, 0, 1),
+         nir_imm_int(&b, 0), .write_mask = 15, .src_type = nir_type_float32,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1});
+      struct agx_fs_epilog_link_info info = {};
+      ASSERT_TRUE(agx_nir_lower_fs_output_to_epilog_for_device(b.shader, chip, &info));
+      unsigned demotes = 0, masks = 0;
+      nir_foreach_block(block, b.impl) nir_foreach_instr(in, block) {
+         if (in->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(in);
+         demotes += intr->intrinsic == nir_intrinsic_demote_samples;
+         masks += intr->intrinsic == nir_intrinsic_export_agx &&
+            nir_intrinsic_base(intr) == AGX_ABI_FOUT_WRITE_SAMPLES;
+      }
+      const bool native = chip == AGX_CHIP_G17P ||
+         (chip == AGX_CHIP_G17S && sample_mask);
+      EXPECT_EQ(info.sample_mask_after_force_early, native);
+      EXPECT_EQ(info.loc0_w_1, chip != AGX_CHIP_G17P);
+      EXPECT_EQ(demotes, native ? 0u : 1u);
+      EXPECT_EQ(masks, native ? 1u : 0u);
+      nir_validate_shader(b.shader, "late coverage transport");
+      ralloc_free(b.shader);
       }
    }
 }
