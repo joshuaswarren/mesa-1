@@ -77,8 +77,8 @@ typedef struct {
                               enum agx_bo_flags flags);
    int (*bo_bind)(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
                   uint32_t count);
-   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
-                   size_t size);
+   void *(*bo_mmap)(struct agx_device *dev, struct agx_bo *bo,
+                    void *fixed_addr, size_t size);
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -210,6 +210,8 @@ agx_bo_map_len(const struct agx_bo *bo)
    return bo->_map_size ? bo->_map_size : bo->size;
 }
 
+/* Drop the application mapping. The internal mapping (_imap) is owned by the
+ * driver and is never touched by application map/unmap paths. */
 static inline void
 agx_bo_unmap(struct agx_bo *bo)
 {
@@ -220,9 +222,11 @@ agx_bo_unmap(struct agx_bo *bo)
    }
 }
 
-/* Map the first `size` bytes of the BO, at fixed_addr when it is not NULL. A
- * mapping left by an earlier owner of a cached BO is dropped first, as it
- * cannot be at the requested address.
+/* Map the first `size` bytes of the BO as the application mapping, at
+ * fixed_addr when it is not NULL. A mapping left by an earlier owner of a
+ * cached BO is dropped first, as it cannot be at the requested address. The
+ * internal mapping (_imap) is independent: dropping or replacing the
+ * application mapping never invalidates it.
  */
 static inline void *
 agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t size)
@@ -230,16 +234,29 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t size)
    if (fixed_addr)
       agx_bo_unmap(bo);
 
-   if (!bo->_map)
-      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr, size);
+   if (!bo->_map) {
+      bo->_map = bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr, size);
+      if (bo->_map)
+         bo->_map_size = size;
+   }
 
    return bo->_map;
 }
 
+/* Internal mapping, whole BO. Used by driver-owned retainers (image binds,
+ * pools, scratch, printf). Independent of the application mapping, so it
+ * stays valid across placed maps, vkUnmapMemory and reserve unmaps. Lives
+ * until the BO is freed. */
 static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
-   return agx_bo_map_placed(bo, NULL, bo->size);
+   if (!bo->_imap) {
+      bo->_imap = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
+      if (bo->_imap)
+         bo->_imap_size = bo->size;
+   }
+
+   return bo->_imap;
 }
 
 static inline bool

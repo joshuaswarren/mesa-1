@@ -187,6 +187,8 @@ account_bo(struct label_stat *stat, struct agx_bo *bo)
 
    if (bo->_map != NULL)
       stat->mapped_B += bo->size;
+   if (bo->_imap != NULL)
+      stat->mapped_B += bo->size;
 }
 
 static void

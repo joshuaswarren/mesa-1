@@ -114,32 +114,23 @@ mock_track(struct mock_state *m, void *addr, size_t len)
 
 /* The single mock: the kernel side of a GEM mmap. One tmpfile is the BO
  * storage; every mapping is MAP_SHARED over it, at fixed_addr with MAP_FIXED
- * when requested. Body mirrors agx_bo_mmap (agx_device.c) minus the ioctls.
- * On mmap failure this clears _map/_map_size, which the production code
- * already treats as the map-failure result. */
-static void
+ * when requested. Body mirrors agx_bo_mmap (agx_device.c) minus the ioctls;
+ * like the production primitive it only hands back a pointer (or NULL) and
+ * leaves the slot bookkeeping to the production inlines. */
+static void *
 mock_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
              size_t size)
 {
    struct mock_state *m = (struct mock_state *)dev;
 
-   if (bo->_map != NULL) {
-      fprintf(stderr, "mock: bo double mapped\n");
-      exit(99);
-   }
-
    void *p = mmap(fixed_addr, size, PROT_READ | PROT_WRITE,
                   MAP_SHARED | (fixed_addr ? MAP_FIXED : 0), fileno(m->file),
                   0);
-   if (p == MAP_FAILED) {
-      bo->_map = NULL;
-      bo->_map_size = 0;
-      return;
-   }
+   if (p == MAP_FAILED)
+      return NULL;
 
-   bo->_map = p;
-   bo->_map_size = size;
    mock_track(m, p, size);
+   return p;
 }
 
 static bool

@@ -91,6 +91,14 @@ struct agx_bo {
     */
    size_t _map_size;
 
+   /* Internal mapping for driver-owned retainers (image binds, pools,
+    * scratch, printf). Independent of the application mapping in _map: a
+    * placed map, unmap or reserve unmap never drops it. Lives until the BO
+    * is freed.
+    */
+   void *_imap;
+   size_t _imap_size;
+
    /* Process-local index */
    uint32_t handle;
 
