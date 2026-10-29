@@ -165,6 +165,30 @@ TEST_F(LowerMathTest, LateFdivDoesNotRefineExistingFrcp)
    EXPECT_EQ(count_alu(nir_op_frcp), 1u + (first.count(nir_op_frcp) ? first[nir_op_frcp] : 0));
 }
 
+TEST_F(LowerMathTest, GraphicsFdivLowersBothWidthsInEarlyAndLatePasses)
+{
+   b.shader->info.stage = MESA_SHADER_FRAGMENT;
+   for (unsigned bits : {16u, 32u}) {
+      nir_fdiv(&b, nir_undef(&b, 1, bits), nir_undef(&b, 1, bits));
+   }
+
+   EXPECT_TRUE(agx_nir_lower_fdiv(b.shader));
+   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
+   EXPECT_EQ(count_alu(nir_op_fmul), 2u);
+   EXPECT_EQ(count_alu(nir_op_frcp), 2u);
+   EXPECT_EQ(count_alu(nir_op_ffma), 0u);
+
+   for (unsigned bits : {16u, 32u}) {
+      nir_fdiv(&b, nir_undef(&b, 1, bits), nir_undef(&b, 1, bits));
+   }
+
+   EXPECT_TRUE(agx_nir_lower_fdiv_late(b.shader));
+   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
+   EXPECT_EQ(count_alu(nir_op_fmul), 4u);
+   EXPECT_EQ(count_alu(nir_op_frcp), 4u);
+   EXPECT_EQ(count_alu(nir_op_ffma), 0u);
+}
+
 TEST_F(LowerMathTest, SinDefaultKeepsSelect)
 {
    set_mode(0);
