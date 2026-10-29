@@ -268,3 +268,49 @@ TEST_F(LowerMathTest, SinZeroPathNumericalArtifact)
    const bool zero_compare_normal = false;
    EXPECT_EQ(zero_compare_normal ? 0x80000000u : normal, normal);
 }
+
+/*
+ * Graphics integer division keeps the correctly rounded reciprocal that
+ * nir_lower_idiv relies on. The production pattern is the real lowering's:
+ * nir_lower_idiv marks everything it emits exact (b->fp_math_ctrl |=
+ * nir_fp_exact) and opens emit_udiv with frcp(u2f32(denominator)), so the
+ * early pass must keep refining that exact 32-bit reciprocal in graphics
+ * stages. An ordinary fast-math frcp stays untouched: refinement is keyed
+ * on the exact marking, not on every reciprocal.
+ */
+TEST_F(LowerMathTest, GraphicsIdivReciprocalRefinedPlainFrcpUntouched)
+{
+   b.shader->info.stage = MESA_SHADER_FRAGMENT;
+   nir_def *x = nir_undef(&b, 1, 32);
+   nir_def *y = nir_undef(&b, 1, 32);
+   nir_udiv(&b, x, y);
+
+   /* Exactly the lowering the driver runs, with the driver's options. */
+   nir_lower_idiv_options idiv_options;
+   idiv_options.allow_fp16 = true;
+   EXPECT_TRUE(nir_lower_idiv(b.shader, &idiv_options));
+
+   /* The exact integer-conversion reciprocal gets its refinement steps. */
+   EXPECT_TRUE(agx_nir_lower_fdiv(b.shader));
+   EXPECT_GT(count_alu(nir_op_ffma), 0u);
+
+   /* An unmarked graphics reciprocal is left alone. */
+   nir_builder s = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+                                                  &options, "plain frcp");
+   nir_frcp(&s, nir_undef(&s, 1, 32));
+
+   EXPECT_FALSE(agx_nir_lower_fdiv(s.shader));
+   unsigned plain_ffma = 0;
+   nir_foreach_function_impl(impl, s.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_alu &&
+                nir_instr_as_alu(instr)->op == nir_op_ffma)
+               plain_ffma++;
+         }
+      }
+   }
+   EXPECT_EQ(plain_ffma, 0u);
+
+   ralloc_free(s.shader);
+}
