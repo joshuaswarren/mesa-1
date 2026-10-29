@@ -31,6 +31,15 @@
  * admitted device gate (dEQP-VK host-copy coverage with a placed map after
  * image bind), not here.
  *
+ * Two further cases encode follow-up findings: the stable BO mapping that
+ * decode.c and wrap.c read and populate directly (_map) must survive the
+ * application map lifecycle, and two memory objects sharing one imported BO
+ * must map independently (an ordinary map must not reuse another importer's
+ * placed mapping, and one importer's unmap must not destroy the other's
+ * mapping). The application-map call sites of these two cases adapt to the
+ * per-memory mapping shape in the production fix commit; their assertions do
+ * not change.
+ *
  * Fails at head ddfb4cf114a6: the retained image mapping is destroyed and the
  * host-copy read faults or reads foreign memory. Passes once the internal
  * image mapping is independent of the application mapping.
@@ -308,10 +317,140 @@ out:
    return rc;
 }
 
+/* Follow-up finding: decode.c (agxdecode_grab_mapped :102, fetch :136,
+ * cmdstream :976) and wrap.c (:210, :230) read and populate bo->_map directly.
+ * The stable BO mapping must exist, match agx_bo_map, stay pointer-stable and
+ * coherent through the application map lifecycle. */
+static int
+stable_map_survives_application_maps(void)
+{
+   const char *name = "stable_map_survives_application_maps";
+   struct mock_state m;
+   int rc = 1;
+
+   if (!mock_bo_init(&m, BO_SIZE))
+      CASE_FAIL("tmpfile/ftruncate for the BO failed");
+
+   /* Decoder-style stable mapping. */
+   uint8_t *stable = agx_bo_map(&m.bo);
+   if (stable == NULL)
+      CASE_FAIL("internal map returned NULL");
+   if (m.bo._map == NULL)
+      CASE_FAIL("internal map did not populate the stable BO mapping _map "
+                "read by decode.c and wrap.c");
+   if (m.bo._map != (void *)stable)
+      CASE_FAIL("agx_bo_map result does not match the stable BO mapping");
+   memset(stable, 0x77, CANARY_LEN);
+
+   /* Application placed map over the same BO (hk_device_memory.c:362). */
+   void *placed = reserve_placed_address(&m, ALLOC_SIZE);
+   if (placed == NULL)
+      CASE_FAIL("could not reserve the placed target address");
+   uint8_t *mem_map = agx_bo_map_placed(&m.bo, placed, ALLOC_SIZE);
+   if (mem_map != placed) {
+      CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
+                placed);
+   }
+   if (memcmp(mem_map, stable, CANARY_LEN) != 0)
+      CASE_FAIL("placed mapping disagrees with the stable BO mapping");
+
+   /* Application unmap (hk_device_memory.c:405). */
+   agx_bo_unmap(&m.bo);
+
+   /* The stable mapping survives: same pointer, same bytes. */
+   if (m.bo._map != (void *)stable)
+      CASE_FAIL("application maps replaced the stable BO mapping pointer");
+   uint8_t readback[CANARY_LEN];
+   if (!guarded_copy(readback, stable, CANARY_LEN))
+      CASE_FAIL("stable BO mapping faults after application placed map + "
+                "unmap");
+   for (size_t i = 0; i < CANARY_LEN; i++) {
+      if (readback[i] != 0x77)
+         CASE_FAIL("stable BO mapping was destroyed or reused: canary "
+                   "mismatch at offset %zu",
+                   i);
+   }
+
+   printf("PASS %s\n", name);
+   rc = 0;
+
+out:
+   mock_bo_cleanup(&m);
+   return rc;
+}
+
+/* Follow-up finding: two VkDeviceMemory importers share one BO. An ordinary
+ * map of the second importer must not reuse the first importer's placed
+ * mapping, and the first importer's unmap must not destroy the second's
+ * mapping. Both mappings must show the same BO contents. */
+static int
+shared_bo_importers_map_independently(void)
+{
+   const char *name = "shared_bo_importers_map_independently";
+   struct mock_state m;
+   int rc = 1;
+
+   if (!mock_bo_init(&m, BO_SIZE))
+      CASE_FAIL("tmpfile/ftruncate for the BO failed");
+   m.bo.refcnt = 2; /* imported share: two memory objects, one BO */
+
+   /* Importer A: placed map (hk_device_memory.c:362, fixed address). */
+   void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
+   if (placed_a == NULL)
+      CASE_FAIL("could not reserve the placed target address");
+   uint8_t *map_a = agx_bo_map_placed(&m.bo, placed_a, ALLOC_SIZE);
+   if (map_a != placed_a) {
+      CASE_FAIL("importer A placed map returned %p, requested %p",
+                (void *)map_a, placed_a);
+   }
+
+   uint8_t pat_a[CANARY_LEN], pat_b[CANARY_LEN];
+   memset(pat_a, 0x5A, sizeof(pat_a));
+   memset(pat_b, 0xC3, sizeof(pat_b));
+   memcpy(map_a + BIND_OFF_A, pat_a, sizeof(pat_a));
+
+   /* Importer B: ordinary map (hk_device_memory.c:362, NULL fixed, whole
+    * BO). It must be its own mapping, not importer A's. */
+   uint8_t *map_b = agx_bo_map_placed(&m.bo, NULL, m.bo.size);
+   if (map_b == NULL)
+      CASE_FAIL("importer B map returned NULL");
+   if (map_b == map_a)
+      CASE_FAIL("importer B ordinary map reused importer A's placed mapping");
+
+   /* Coherence: both mappings show the same BO contents. */
+   if (memcmp(map_b + BIND_OFF_A, pat_a, CANARY_LEN) != 0)
+      CASE_FAIL("importer B mapping disagrees with importer A on BO "
+                "contents");
+   memcpy(map_b + BIND_OFF_B, pat_b, sizeof(pat_b));
+   if (memcmp(map_a + BIND_OFF_B, pat_b, CANARY_LEN) != 0)
+      CASE_FAIL("importer A mapping disagrees with importer B on BO "
+                "contents");
+
+   /* Importer A unmaps (hk_device_memory.c:405). Only A's mapping may die. */
+   agx_bo_unmap(&m.bo);
+
+   uint8_t readback[CANARY_LEN];
+   if (!guarded_copy(readback, map_b + BIND_OFF_A, CANARY_LEN))
+      CASE_FAIL("importer B mapping faults after importer A unmap");
+   if (memcmp(readback, pat_a, CANARY_LEN) != 0)
+      CASE_FAIL("importer B mapping was destroyed or reused by importer A's "
+                "unmap: canary mismatch");
+
+   printf("PASS %s\n", name);
+   rc = 0;
+
+out:
+   mock_bo_cleanup(&m);
+   return rc;
+}
+
 int
 main(void)
 {
    int failures = 0;
+
+   failures += stable_map_survives_application_maps();
+   failures += shared_bo_importers_map_independently();
 
    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
       failures += run_case(cases[i].name, cases[i].flags);
