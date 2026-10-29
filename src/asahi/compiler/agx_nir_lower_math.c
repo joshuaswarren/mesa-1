@@ -97,14 +97,39 @@ lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *data)
    if (alu->def.bit_size == 64)
       return false;
 
-   /* Graphics shaders keep the hardware reciprocal and the cheap quotient.
-    * The exact sequences below are for compute (MLX and kernels), where
-    * the rounding contract matters. A late fdiv (int64 lowering, perspective
-    * divide) still has to be lowered, because the backend has no fdiv.
+   /* Graphics shaders keep the hardware reciprocal and the cheap quotient,
+    * except that integer division's exact reciprocal stays correctly rounded
+    * here too: nir_lower_idiv relies on it. The exact sequences below are
+    * for compute (MLX and kernels), where the rounding contract matters. A
+    * late fdiv (int64 lowering, perspective divide) still has to be lowered,
+    * because the backend has no fdiv.
     */
    if (!mesa_shader_stage_is_compute(b->shader->info.stage)) {
-      if (alu->op != nir_op_fdiv || alu->def.bit_size != 32)
-         return false;
+      if (alu->op == nir_op_frcp) {
+         if (alu->def.bit_size != 32 || !nir_alu_instr_is_exact(alu))
+            return false;
+
+         /* The refinement only serves integer division: an application
+          * reciprocal keeps the hardware instruction. Driver-internal
+          * shaders keep it unconditionally. */
+         if (!b->shader->info.internal) {
+            nir_scalar src = nir_scalar_resolved(alu->src[0].src.ssa,
+                                                 alu->src[0].swizzle[0]);
+            if (!nir_scalar_is_alu(src) ||
+                (nir_scalar_alu_op(src) != nir_op_u2f32 &&
+                 nir_scalar_alu_op(src) != nir_op_i2f32))
+               return false;
+         }
+
+         /* Same refinement as compute, with the exact float controls scoped
+          * to these emissions instead of leaking to the rest of the shader. */
+         b->cursor = nir_before_instr(&alu->instr);
+         unsigned saved_fp = b->fp_math_ctrl;
+         b->fp_math_ctrl = nir_fp_no_fast_math;
+         nir_def_replace(&alu->def, rcp_rn(b, nir_ssa_for_alu_src(b, alu, 0)));
+         b->fp_math_ctrl = saved_fp;
+         return true;
+      }
 
       b->cursor = nir_before_instr(&alu->instr);
       nir_def *q = nir_fmul(b, nir_ssa_for_alu_src(b, alu, 0),
