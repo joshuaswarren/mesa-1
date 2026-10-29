@@ -571,8 +571,10 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    /* Native AGX3 occlusion availability lives in 64-bit slots of a bound
-    * timestamp buffer (hk_cmd_end_query_stamped()). */
-   const bool stamped = occlusion && agx_native_graphics(&dev->dev);
+    * timestamp buffer (hk_cmd_end_query_stamped()), on chips whose kernel
+    * writes them at render retirement (hk_oq_render_stamps_supported()). */
+   const bool stamped = occlusion && agx_native_graphics(&dev->dev) &&
+                        hk_oq_render_stamps_supported(dev->dev.chip);
    pool->avail_shift = stamped ? 1 : 0;
 
    /* We place the availability first and then data. Pipeline-statistics pools

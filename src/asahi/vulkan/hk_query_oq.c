@@ -262,6 +262,12 @@ hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
       hk_dispatch_imm_writes(cmd, movable);
 }
 
+bool
+hk_oq_render_stamps_supported(enum agx_chip chip)
+{
+   return chip == AGX_CHIP_G17P;
+}
+
 void
 hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
 {
