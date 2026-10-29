@@ -7663,7 +7663,7 @@ agx_lower_sincos(nir_shader *shader, unsigned native)
 {
    /* Compute on every target but G17P goes through agx_nir_lower_sincos, the
     * exact reduction. Graphics keeps the base sequence. */
-   if (!g17p && mesa_shader_stage_is_compute(shader->info.stage))
+   if (native != 1 && mesa_shader_stage_is_compute(shader->info.stage))
       return false;
 
    return nir_shader_lower_instructions(shader, agx_lower_sincos_filter,
@@ -10786,72 +10786,6 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Exactly one retry. Real full-budget spills retain the old refusal. */
    return agx_compile_function_nir_attempt(nir, impl, key, binary, out,
                                           offset_out, 0, true, NULL);
-}
-
-/*
- * The hardware frcp instruction is sometimes off by 1 ULP. For correctly
- * rounded frcp, a refinement step is required. This routine has been
- * exhaustively tested with a modified math_bruteforce.
- *
- * While Khronos APIs allow 2.5 ULP error for divides, nir_lower_idiv relies on
- * correctly rounded frcp. This is therefore load bearing for integer division
- * on all APIs.
- */
-static nir_def *
-libagx_frcp(nir_builder *b, nir_def *x)
-{
-   nir_def *u = nir_frcp(b, x);
-
-   /* Do 1 Newton-Raphson refinement step.
-    *
-    * Define f(u) = xu - 1. Then f(u) = 0 iff u = 1/x. Newton's method gives:
-    *
-    * u_2 = u - f(u) / f'(u) = u - (xu - 1) / x
-    *
-    * Our original guess is close, so we approximate (1 / x) by u:
-    *
-    * u_2 = u - u(xu - 1) = u + u(1 - xu)
-    *     = fma(fma(-x, u, 1), u, u)
-    */
-   nir_def *one = nir_imm_float(b, 1.0);
-   nir_def *u_2 = nir_ffma(b, nir_ffma(b, nir_fneg(b, x), u, one), u, u);
-
-   /* If the original value was infinite, frcp will generate the correct zero.
-    * However, the Newton-Raphson step would multiply 0 * Inf and get a NaN. So
-    * skip the refinement step for infinite inputs. We do this backwards,
-    * checking whether the refined result is NaN, since we can implement this
-    * check in a single fcmpsel instruction. The other case where the refinement
-    * is NaN is a NaN input, in which skipping refinement is acceptable.
-    */
-   return nir_bcsel(b, nir_fisnan(b, u_2), u, u_2);
-}
-
-static bool
-agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
-{
-   if (alu->op != nir_op_frcp || !nir_alu_instr_is_exact(alu) ||
-       alu->def.bit_size != 32)
-      return false;
-
-   /* The refinement makes frcp correctly rounded, which only integer
-    * division needs: nir_lower_idiv takes the reciprocal of an integer
-    * converted to float. An application float division keeps the 2.5 ULP
-    * that every Khronos API allows even when it is `precise`/NoContraction
-    * (which forbids contraction, not the hardware reciprocal), so do not
-    * spend two FMAs and a select on it; DXVK marks every operation precise.
-    * Driver-internal shaders keep the refinement unconditionally. */
-   if (!b->shader->info.internal) {
-      nir_scalar src = nir_scalar_resolved(alu->src[0].src.ssa,
-                                           alu->src[0].swizzle[0]);
-      if (!nir_scalar_is_alu(src) ||
-          (nir_scalar_alu_op(src) != nir_op_u2f32 &&
-           nir_scalar_alu_op(src) != nir_op_i2f32))
-         return false;
-   }
-
-   b->cursor = nir_before_instr(&alu->instr);
-   nir_def_replace(&alu->def, libagx_frcp(b, nir_ssa_for_alu_src(b, alu, 0)));
-   return true;
 }
 
 static bool
