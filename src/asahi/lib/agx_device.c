@@ -87,11 +87,6 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
    const uint64_t handle = bo->handle;
 
    agx_bo_unmap(bo);
-   if (bo->_imap) {
-      munmap(bo->_imap, bo->_imap_size ? bo->_imap_size : bo->size);
-      bo->_imap = NULL;
-      bo->_imap_size = 0;
-   }
 
    /* Free the VA. No need to unmap the BO or unbind the VA, as the kernel will
     * take care of that when we close it.

@@ -82,22 +82,18 @@ struct agx_bo {
    /* Mapping */
    struct agx_va *va;
 
-   /* Suffixed to force agx_bo_map access */
+   /* Suffixed to force agx_bo_map access. The stable driver-internal
+    * mapping: decode.c reads it directly and wrap.c populates it at BO
+    * creation. Application mappings do not live here; each VkDeviceMemory
+    * owns its own mapping, so an application placed map, unmap or reserve
+    * unmap never touches this one. Lives until the BO is freed.
+    */
    void *_map;
 
    /* Length of the live mapping in _map. Zero when the mapping was not made
-    * by bo_mmap (the trace wrapper), which covers the whole BO. A placed
-    * mapping can be shorter than the BO.
+    * by bo_mmap (the trace wrapper), which covers the whole BO.
     */
    size_t _map_size;
-
-   /* Internal mapping for driver-owned retainers (image binds, pools,
-    * scratch, printf). Independent of the application mapping in _map: a
-    * placed map, unmap or reserve unmap never drops it. Lives until the BO
-    * is freed.
-    */
-   void *_imap;
-   size_t _imap_size;
 
    /* Process-local index */
    uint32_t handle;

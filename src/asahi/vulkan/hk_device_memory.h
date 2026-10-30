@@ -23,9 +23,12 @@ struct hk_device_memory {
 
    void *map;
 
-   /* The live mapping was made with VK_MEMORY_MAP_PLACED_BIT_EXT. Such a
-    * mapping belongs to this object, so it is dropped on unmap and on free
-    * instead of staying on a BO that returns to the BO cache.
+   /* Length of the live mapping in map, valid when map is not NULL. */
+   size_t map_size;
+
+   /* The live mapping was made with VK_MEMORY_MAP_PLACED_BIT_EXT. The
+    * mapping belongs to this object: it is dropped on unmap and on free,
+    * independently of any other memory object sharing the BO.
     */
    bool placed_map;
 };

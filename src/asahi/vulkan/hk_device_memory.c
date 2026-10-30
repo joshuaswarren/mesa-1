@@ -277,11 +277,14 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);
 
-   /* Do not hand a placed mapping, which lies in application address space,
-    * to the BO cache with the BO.
+   /* The mapping belongs to this memory object: drop it on free instead of
+    * handing it to the BO cache.
     */
-   if (mem->map && mem->placed_map)
-      agx_bo_unmap(mem->bo);
+   if (mem->map) {
+      munmap(mem->map, mem->map_size);
+      mem->map = NULL;
+      mem->map_size = 0;
+   }
 
    agx_bo_unreference(&dev->dev, mem->bo);
 
@@ -345,34 +348,29 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
          return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                           "A placed map must cover the whole allocation.");
       }
-
-      /* An imported BO can be shared by two memory objects. Do not tear down
-       * a mapping the other one may hold.
-       */
-      if (mem->bo->_map && p_atomic_read(&mem->bo->refcnt) > 1) {
-         return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
-                          "Memory is shared and already mapped.");
-      }
    }
 
    /* A placed mapping covers exactly the allocation: the BO can be larger
-    * (BO cache, GPU page rounding) and the memory after the allocation belongs
-    * to the application. An ordinary mapping keeps the whole BO.
+    * (BO cache, GPU page rounding) and the memory after the allocation
+    * belongs to the application. An ordinary mapping keeps the whole BO. The
+    * mapping belongs to this memory object and is never stored on the BO, so
+    * memory objects sharing an imported BO map independently.
     */
-   mem->map = agx_bo_map_placed(mem->bo, fixed_addr,
-                                fixed_addr ? mem->vk.size : mem->bo->size);
+   size_t map_size = fixed_addr ? mem->vk.size : mem->bo->size;
+   mem->map = dev->dev.ops.bo_mmap(&dev->dev, mem->bo, fixed_addr, map_size);
    if (mem->map == NULL) {
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                        "Failed to map memory object.");
    }
 
    if (fixed_addr && mem->map != fixed_addr) {
-      agx_bo_unmap(mem->bo);
+      munmap(mem->map, map_size);
       mem->map = NULL;
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                        "Mapped address does not match the placed address.");
    }
 
+   mem->map_size = map_size;
    mem->placed_map = fixed_addr != NULL;
    *ppData = mem->map + offset;
 
@@ -391,21 +389,22 @@ hk_UnmapMemory2KHR(VkDevice device,
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       VK_FROM_HANDLE(hk_device, dev, device);
 
-      if (mem->bo->_map) {
-         void *err = mmap(mem->bo->_map, agx_bo_map_len(mem->bo), PROT_NONE,
+      if (mem->map) {
+         void *err = mmap(mem->map, mem->map_size, PROT_NONE,
                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
          if (err == MAP_FAILED) {
             return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                              "Failed to map over original mapping");
          }
-         mem->bo->_map = NULL;
-         mem->bo->_map_size = 0;
+         mem->map = NULL;
+         mem->map_size = 0;
       }
-   } else {
-      agx_bo_unmap(mem->bo);
+   } else if (mem->map) {
+      munmap(mem->map, mem->map_size);
+      mem->map = NULL;
+      mem->map_size = 0;
    }
 
-   mem->map = NULL;
    mem->placed_map = false;
 
    return VK_SUCCESS;

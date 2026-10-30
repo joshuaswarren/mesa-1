@@ -5,52 +5,49 @@
 
 /*
  * CPU-only regression for the omacom/mesa#8 review finding
- * (https://github.com/omacom/mesa/pull/8#discussion_r4418383484):
+ * (https://github.com/omacom/mesa/pull/8#discussion_r4418383484) and its
+ * follow-ups:
  *
  * A non-sparse image bind retains an internal host-copy mapping
  * (hk_image_plane_bind, hk_image.c:1334: plane->map = agx_bo_map(mem->bo) +
- * offset) without setting mem->map or taking a BO reference. A subsequent
- * application vkMapMemory2KHR with VK_MEMORY_MAP_PLACED_BIT_EXT reaches
- * agx_bo_map_placed (agx_device.h) with a fixed address, which unconditionally
- * drops the BO's current mapping. The retained plane->map then dangles, and
- * the host-copy paths (hk_image.c:1444, :1523, :1610) read and write through
- * it. The plain unmap path (hk_device_memory.c:405) and the
- * VK_MEMORY_UNMAP_RESERVE_BIT_EXT path (:394) invalidate the same retained
- * pointer.
+ * offset) without setting mem->map or taking a BO reference. While the
+ * application mapping lived on the BO, any vkMapMemory2KHR placed map,
+ * vkUnmapMemory2KHR (plain or VK_MEMORY_UNMAP_RESERVE_BIT_EXT) or
+ * vkFreeMemory of the same memory destroyed that retained pointer, and two
+ * memory objects sharing an imported BO shared one replaceable mapping. The
+ * fix gives the BO a single stable internal mapping (agx_bo_map ->
+ * bo->_map, read directly by decode.c and populated by wrap.c) and gives
+ * each VkDeviceMemory its own application mapping from the bo_mmap
+ * primitive, dropped only by that object's unmap, reserve unmap and free.
  *
- * This test drives the real production mapping code: agx_bo_map,
- * agx_bo_map_placed and agx_bo_unmap exactly as defined in agx_device.h, with
- * the exact call expressions used by hk_image_plane_bind, hk_MapMemory2KHR and
- * hk_UnmapMemory2KHR. The only mock is the kernel mmap: mock_bo_mmap backs the
- * BO with one tmpfile (ftruncate to the BO size) and hands out MAP_SHARED
- * mappings of it, so two live mappings of the same BO show the same bytes,
- * like two CPU mappings of one GEM object. The placed target is a PROT_NONE
- * reservation that stays mapped until the MAP_FIXED placed map replaces it.
- * Every resource failure FAILs the case; there are no SKIP paths. There is no
- * GPU, no device node and no Vulkan entrypoint; those are covered by the
- * admitted device gate (dEQP-VK host-copy coverage with a placed map after
- * image bind), not here.
+ * This test drives the real production mapping code: agx_bo_map exactly as
+ * defined in agx_device.h with the bind expression of hk_image_plane_bind,
+ * the per-memory primitive expressions of hk_MapMemory2KHR, the per-memory
+ * teardown of hk_UnmapMemory2KHR and hk_FreeMemory, and the real
+ * agx_bo_unreference. The only mock is the kernel mmap: mock_bo_mmap backs
+ * the BO with one tmpfile (ftruncate to the BO size) and hands out
+ * MAP_SHARED mappings of it, so two live mappings of the same BO show the
+ * same bytes, like two CPU mappings of one GEM object. The placed target is
+ * a PROT_NONE reservation that stays mapped until the MAP_FIXED placed map
+ * replaces it. Every resource failure FAILs the case; there are no SKIP
+ * paths. There is no GPU, no device node and no Vulkan entrypoint; those
+ * are covered by the admitted device gate (dEQP-VK host-copy coverage with
+ * a placed map after image bind), not here.
  *
- * Two further cases encode follow-up findings: the stable BO mapping that
- * decode.c and wrap.c read and populate directly (_map) must survive the
- * application map lifecycle, and two memory objects sharing one imported BO
- * must map independently (an ordinary map must not reuse another importer's
- * placed mapping, and one importer's unmap must not destroy the other's
- * mapping). The application-map call sites of these two cases adapt to the
- * per-memory mapping shape in the production fix commit; their assertions do
- * not change.
+ * The stable-map case pins the decoder contract: the internal mapping must
+ * exist, match agx_bo_map, stay pointer-stable and coherent through the
+ * application map lifecycle. The two-importer and free cases pin shared-BO
+ * lifetime: distinct mappings per memory object, mutual content coherence,
+ * and a survivor whose mapping outlives the other importer's unmap or
+ * free. The heap accounting, ext-BO tracking and vk_device_memory_destroy
+ * tail of hk_FreeMemory need a live vk_device and stay behind the admitted
+ * device gate.
  *
- * A further case exercises the free path for the shared-BO scenario: freeing
- * one of two memory objects sharing an imported BO runs the BO-relevant
- * hk_FreeMemory sequence (the placed-unmap condition of hk_device_memory.c:283
- * and the real agx_bo_unreference refcount drop) and must leave the
- * survivor's mapping valid. The heap accounting, ext-BO tracking and
- * vk_device_memory_destroy steps of hk_FreeMemory need a live hk_device and
- * stay behind the admitted device gate.
- *
- * Fails at head ddfb4cf114a6: the retained image mapping is destroyed and the
- * host-copy read faults or reads foreign memory. Passes once the internal
- * image mapping is independent of the application mapping.
+ * Red was parent-observed on the pre-fix lineage (fixture heads 8af285bd30c
+ * and e14884a59ca: stable _map absent, importer B reusing importer A's
+ * placed mapping; the free case stopped at the same pointer-independence
+ * assertion before reaching the survivor checks). Passes with per-memory
+ * ownership.
  */
 
 #include <setjmp.h>
@@ -237,11 +234,12 @@ run_case(const char *name, unsigned flags)
    if (!mock_bo_init(&m, BO_SIZE))
       CASE_FAIL("tmpfile/ftruncate for the BO failed");
 
-   /* Optional plain application map before bind, hk_device_memory.c:362 with
-    * a NULL fixed address. */
+   /* Optional plain application map before bind: a mapping owned by its own
+    * memory object (the hk_MapMemory2KHR ordinary expression: a fresh
+    * mapping from the bo_mmap primitive, never stored on the BO). */
    uint8_t *app_map = NULL;
    if (flags & CASE_MAP_FIRST) {
-      app_map = agx_bo_map_placed(&m.bo, NULL, m.bo.size);
+      app_map = m.dev.ops.bo_mmap(&m.dev, &m.bo, NULL, m.bo.size);
       if (app_map == NULL)
          CASE_FAIL("plain application map returned NULL");
    }
@@ -268,11 +266,13 @@ run_case(const char *name, unsigned flags)
        memcmp(app_map + BIND_OFF_A, pat_a, CANARY_LEN) != 0)
       CASE_FAIL("application and internal mappings disagree on BO contents");
 
-   /* Placed map at the reserved address (hk_device_memory.c:362). */
+   /* Placed map at the reserved address: a mapping owned by its own memory
+    * object (the hk_MapMemory2KHR placed expression: the primitive at the
+    * requested fixed address). */
    void *placed = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *mem_map = agx_bo_map_placed(&m.bo, placed, ALLOC_SIZE);
+   uint8_t *mem_map = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed, ALLOC_SIZE);
    if (mem_map != placed) {
       CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
                 placed);
@@ -288,16 +288,18 @@ run_case(const char *name, unsigned flags)
       CASE_FAIL("placed mapping does not show the BO contents at the alias "
                 "offset");
 
-   /* Application teardown. Reserve: production :394-396; else :405. */
+   /* Application teardown, owned by the mapped memory object
+    * (hk_UnmapMemory2KHR): reserve overlays exactly that mapping, a plain
+    * unmap releases it. The stable BO mapping is never touched. */
    if (flags & CASE_RESERVE) {
-      void *err = mmap(m.bo._map, agx_bo_map_len(&m.bo), PROT_NONE,
+      void *err = mmap(mem_map, ALLOC_SIZE, PROT_NONE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
       if (err == MAP_FAILED)
          CASE_FAIL("reserve overlay mmap failed");
-      m.bo._map = NULL;
-      m.bo._map_size = 0;
+      mem_map = NULL;
    } else {
-      agx_bo_unmap(&m.bo);
+      munmap(mem_map, ALLOC_SIZE);
+      mem_map = NULL;
    }
 
    /* Lifetime: host-copy read through the retained pointers (hk_image.c:1523).
@@ -350,11 +352,12 @@ stable_map_survives_application_maps(void)
       CASE_FAIL("agx_bo_map result does not match the stable BO mapping");
    memset(stable, 0x77, CANARY_LEN);
 
-   /* Application placed map over the same BO (hk_device_memory.c:362). */
+   /* Application placed map over the same BO: a mapping owned by its own
+    * memory object (the hk_MapMemory2KHR placed expression). */
    void *placed = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *mem_map = agx_bo_map_placed(&m.bo, placed, ALLOC_SIZE);
+   uint8_t *mem_map = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed, ALLOC_SIZE);
    if (mem_map != placed) {
       CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
                 placed);
@@ -362,8 +365,10 @@ stable_map_survives_application_maps(void)
    if (memcmp(mem_map, stable, CANARY_LEN) != 0)
       CASE_FAIL("placed mapping disagrees with the stable BO mapping");
 
-   /* Application unmap (hk_device_memory.c:405). */
-   agx_bo_unmap(&m.bo);
+   /* Application unmap of that memory object's mapping
+    * (hk_UnmapMemory2KHR). */
+   munmap(mem_map, ALLOC_SIZE);
+   mem_map = NULL;
 
    /* The stable mapping survives: same pointer, same bytes. */
    if (m.bo._map != (void *)stable)
@@ -402,11 +407,12 @@ shared_bo_importers_map_independently(void)
       CASE_FAIL("tmpfile/ftruncate for the BO failed");
    m.bo.refcnt = 2; /* imported share: two memory objects, one BO */
 
-   /* Importer A: placed map (hk_device_memory.c:362, fixed address). */
+   /* Importer A: placed map (hk_MapMemory2KHR placed expression, fixed
+    * address). */
    void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed_a == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *map_a = agx_bo_map_placed(&m.bo, placed_a, ALLOC_SIZE);
+   uint8_t *map_a = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed_a, ALLOC_SIZE);
    if (map_a != placed_a) {
       CASE_FAIL("importer A placed map returned %p, requested %p",
                 (void *)map_a, placed_a);
@@ -417,9 +423,9 @@ shared_bo_importers_map_independently(void)
    memset(pat_b, 0xC3, sizeof(pat_b));
    memcpy(map_a + BIND_OFF_A, pat_a, sizeof(pat_a));
 
-   /* Importer B: ordinary map (hk_device_memory.c:362, NULL fixed, whole
-    * BO). It must be its own mapping, not importer A's. */
-   uint8_t *map_b = agx_bo_map_placed(&m.bo, NULL, m.bo.size);
+   /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression, NULL
+    * fixed, whole BO). It must be its own mapping, not importer A's. */
+   uint8_t *map_b = m.dev.ops.bo_mmap(&m.dev, &m.bo, NULL, m.bo.size);
    if (map_b == NULL)
       CASE_FAIL("importer B map returned NULL");
    if (map_b == map_a)
@@ -434,8 +440,10 @@ shared_bo_importers_map_independently(void)
       CASE_FAIL("importer A mapping disagrees with importer B on BO "
                 "contents");
 
-   /* Importer A unmaps (hk_device_memory.c:405). Only A's mapping may die. */
-   agx_bo_unmap(&m.bo);
+   /* Importer A unmaps its own mapping (hk_UnmapMemory2KHR). Only A's
+    * mapping may die. */
+   munmap(map_a, ALLOC_SIZE);
+   map_a = NULL;
 
    uint8_t readback[CANARY_LEN];
    if (!guarded_copy(readback, map_b + BIND_OFF_A, CANARY_LEN))
@@ -469,18 +477,20 @@ free_one_importer_survivor_survives(void)
       CASE_FAIL("tmpfile/ftruncate for the BO failed");
    m.bo.refcnt = 2; /* imported share: two memory objects, one BO */
 
-   /* Importer A: placed map (hk_device_memory.c:362, fixed address). */
+   /* Importer A: placed map (hk_MapMemory2KHR placed expression, fixed
+    * address). */
    void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed_a == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *map_a = agx_bo_map_placed(&m.bo, placed_a, ALLOC_SIZE);
+   uint8_t *map_a = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed_a, ALLOC_SIZE);
    if (map_a != placed_a) {
       CASE_FAIL("importer A placed map returned %p, requested %p",
                 (void *)map_a, placed_a);
    }
 
-   /* Importer B: ordinary map (hk_device_memory.c:362, NULL fixed). */
-   uint8_t *map_b = agx_bo_map_placed(&m.bo, NULL, m.bo.size);
+   /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression, NULL
+    * fixed). */
+   uint8_t *map_b = m.dev.ops.bo_mmap(&m.dev, &m.bo, NULL, m.bo.size);
    if (map_b == NULL)
       CASE_FAIL("importer B map returned NULL");
    if (map_b == map_a)
@@ -492,12 +502,11 @@ free_one_importer_survivor_survives(void)
    memcpy(map_a + BIND_OFF_A, pat_a, sizeof(pat_a));
    memcpy(map_b + BIND_OFF_B, pat_b, sizeof(pat_b));
 
-   /* vkFreeMemory(A): the BO-relevant hk_FreeMemory sequence. A holds a
-    * placed mapping, so the :283 condition fires for A's mapping, and the
-    * real refcount drop returns the BO alive at refcount 1 for B. */
-   bool mem_a_mapped = true, mem_a_placed = true;
-   if (mem_a_mapped && mem_a_placed)
-      agx_bo_unmap(&m.bo);
+   /* vkFreeMemory(A): the mapping belongs to the freed memory object, so
+    * hk_FreeMemory drops exactly A's mapping, and the real refcount drop
+    * returns the BO alive at refcount 1 for B. */
+   munmap(map_a, ALLOC_SIZE);
+   map_a = NULL;
    agx_bo_unreference(&m.dev, &m.bo);
    if (p_atomic_read(&m.bo.refcnt) != 1)
       CASE_FAIL("freeing one importer did not leave the shared BO at "
