@@ -204,21 +204,14 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
    return addr + dev->sparse_ro_offset;
 }
 
-static inline size_t
-agx_bo_map_len(const struct agx_bo *bo)
-{
-   return bo->_map_size ? bo->_map_size : bo->size;
-}
-
 /* Drop the stable internal mapping. Application mappings are owned by their
  * VkDeviceMemory and never pass through here. */
 static inline void
 agx_bo_unmap(struct agx_bo *bo)
 {
    if (bo->_map) {
-      munmap(bo->_map, agx_bo_map_len(bo));
+      munmap(bo->_map, bo->size);
       bo->_map = NULL;
-      bo->_map_size = 0;
    }
 }
 
@@ -231,8 +224,6 @@ agx_bo_map(struct agx_bo *bo)
 {
    if (!bo->_map) {
       bo->_map = bo->dev->ops.bo_mmap(bo->dev, bo, NULL, bo->size);
-      if (bo->_map)
-         bo->_map_size = bo->size;
    }
 
    return bo->_map;

@@ -371,7 +371,6 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
    }
 
    mem->map_size = map_size;
-   mem->placed_map = fixed_addr != NULL;
    *ppData = mem->map + offset;
 
    return VK_SUCCESS;
@@ -404,8 +403,6 @@ hk_UnmapMemory2KHR(VkDevice device,
       mem->map = NULL;
       mem->map_size = 0;
    }
-
-   mem->placed_map = false;
 
    return VK_SUCCESS;
 }

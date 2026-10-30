@@ -90,11 +90,6 @@ struct agx_bo {
     */
    void *_map;
 
-   /* Length of the live mapping in _map. Zero when the mapping was not made
-    * by bo_mmap (the trace wrapper), which covers the whole BO.
-    */
-   size_t _map_size;
-
    /* Process-local index */
    uint32_t handle;
 
