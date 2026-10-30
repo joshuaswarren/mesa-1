@@ -40,6 +40,14 @@
  * per-memory mapping shape in the production fix commit; their assertions do
  * not change.
  *
+ * A further case exercises the free path for the shared-BO scenario: freeing
+ * one of two memory objects sharing an imported BO runs the BO-relevant
+ * hk_FreeMemory sequence (the placed-unmap condition of hk_device_memory.c:283
+ * and the real agx_bo_unreference refcount drop) and must leave the
+ * survivor's mapping valid. The heap accounting, ext-BO tracking and
+ * vk_device_memory_destroy steps of hk_FreeMemory need a live hk_device and
+ * stay behind the admitted device gate.
+ *
  * Fails at head ddfb4cf114a6: the retained image mapping is destroyed and the
  * host-copy read faults or reads foreign memory. Passes once the internal
  * image mapping is independent of the application mapping.
@@ -444,6 +452,81 @@ out:
    return rc;
 }
 
+/* The user-required free path: two memory objects share one imported BO;
+ * freeing one runs the BO-relevant hk_FreeMemory sequence (placed-unmap
+ * condition, hk_device_memory.c:283, plus the real agx_bo_unreference) and
+ * the survivor's mapping must stay valid and coherent. The heap accounting,
+ * ext-BO tracking and vk_device_memory_destroy tail of hk_FreeMemory need a
+ * live vk_device and stay behind the admitted device gate. */
+static int
+free_one_importer_survivor_survives(void)
+{
+   const char *name = "free_one_importer_survivor_survives";
+   struct mock_state m;
+   int rc = 1;
+
+   if (!mock_bo_init(&m, BO_SIZE))
+      CASE_FAIL("tmpfile/ftruncate for the BO failed");
+   m.bo.refcnt = 2; /* imported share: two memory objects, one BO */
+
+   /* Importer A: placed map (hk_device_memory.c:362, fixed address). */
+   void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
+   if (placed_a == NULL)
+      CASE_FAIL("could not reserve the placed target address");
+   uint8_t *map_a = agx_bo_map_placed(&m.bo, placed_a, ALLOC_SIZE);
+   if (map_a != placed_a) {
+      CASE_FAIL("importer A placed map returned %p, requested %p",
+                (void *)map_a, placed_a);
+   }
+
+   /* Importer B: ordinary map (hk_device_memory.c:362, NULL fixed). */
+   uint8_t *map_b = agx_bo_map_placed(&m.bo, NULL, m.bo.size);
+   if (map_b == NULL)
+      CASE_FAIL("importer B map returned NULL");
+   if (map_b == map_a)
+      CASE_FAIL("importer B ordinary map reused importer A's placed mapping");
+
+   uint8_t pat_a[CANARY_LEN], pat_b[CANARY_LEN];
+   memset(pat_a, 0x5A, sizeof(pat_a));
+   memset(pat_b, 0xC3, sizeof(pat_b));
+   memcpy(map_a + BIND_OFF_A, pat_a, sizeof(pat_a));
+   memcpy(map_b + BIND_OFF_B, pat_b, sizeof(pat_b));
+
+   /* vkFreeMemory(A): the BO-relevant hk_FreeMemory sequence. A holds a
+    * placed mapping, so the :283 condition fires for A's mapping, and the
+    * real refcount drop returns the BO alive at refcount 1 for B. */
+   bool mem_a_mapped = true, mem_a_placed = true;
+   if (mem_a_mapped && mem_a_placed)
+      agx_bo_unmap(&m.bo);
+   agx_bo_unreference(&m.dev, &m.bo);
+   if (p_atomic_read(&m.bo.refcnt) != 1)
+      CASE_FAIL("freeing one importer did not leave the shared BO at "
+                "refcount 1 (got %d)",
+                p_atomic_read(&m.bo.refcnt));
+
+   /* Survivor B: mapping still valid, both canaries coherent. */
+   uint8_t readback[CANARY_LEN];
+   if (!guarded_copy(readback, map_b + BIND_OFF_A, CANARY_LEN))
+      CASE_FAIL("survivor mapping faults after the other importer was "
+                "freed");
+   if (memcmp(readback, pat_a, CANARY_LEN) != 0)
+      CASE_FAIL("survivor mapping was destroyed or reused by the other "
+                "importer's free: canary mismatch");
+   if (!guarded_copy(readback, map_b + BIND_OFF_B, CANARY_LEN))
+      CASE_FAIL("survivor mapping faults on its own written range after "
+                "the other importer was freed");
+   if (memcmp(readback, pat_b, CANARY_LEN) != 0)
+      CASE_FAIL("survivor's own written range corrupted after the other "
+                "importer was freed");
+
+   printf("PASS %s\n", name);
+   rc = 0;
+
+out:
+   mock_bo_cleanup(&m);
+   return rc;
+}
+
 int
 main(void)
 {
@@ -451,6 +534,7 @@ main(void)
 
    failures += stable_map_survives_application_maps();
    failures += shared_bo_importers_map_independently();
+   failures += free_one_importer_survivor_survives();
 
    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
       failures += run_case(cases[i].name, cases[i].flags);
