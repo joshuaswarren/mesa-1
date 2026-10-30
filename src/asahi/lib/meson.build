@@ -78,6 +78,7 @@ if with_tests
                 '-I' + join_paths(meson.current_source_dir(), '..', 'libagx')],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_mesautil, idep_agx_pack],
+      link_with : [libasahi_lib],
       include_directories : [inc_src, inc_asahi, inc_virtio_vdrm],
     ),
     suite : ['asahi'],
