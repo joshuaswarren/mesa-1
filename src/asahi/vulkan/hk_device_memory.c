@@ -280,11 +280,7 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    /* The mapping belongs to this memory object: drop it on free instead of
     * handing it to the BO cache.
     */
-   if (mem->map) {
-      munmap(mem->map, mem->map_size);
-      mem->map = NULL;
-      mem->map_size = 0;
-   }
+   hk_memory_unmap(mem);
 
    agx_bo_unreference(&dev->dev, mem->bo);
 
@@ -352,25 +348,20 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
 
    /* A placed mapping covers exactly the allocation: the BO can be larger
     * (BO cache, GPU page rounding) and the memory after the allocation
-    * belongs to the application. An ordinary mapping keeps the whole BO. The
-    * mapping belongs to this memory object and is never stored on the BO, so
-    * memory objects sharing an imported BO map independently.
+    * belongs to the application. An ordinary mapping keeps the whole BO.
     */
    size_t map_size = fixed_addr ? mem->vk.size : mem->bo->size;
-   mem->map = dev->dev.ops.bo_mmap(&dev->dev, mem->bo, fixed_addr, map_size);
-   if (mem->map == NULL) {
+   if (hk_memory_map_from_bo(&dev->dev, mem, fixed_addr, map_size) == NULL) {
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                        "Failed to map memory object.");
    }
 
    if (fixed_addr && mem->map != fixed_addr) {
-      munmap(mem->map, map_size);
-      mem->map = NULL;
+      hk_memory_unmap(mem);
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                        "Mapped address does not match the placed address.");
    }
 
-   mem->map_size = map_size;
    *ppData = mem->map + offset;
 
    return VK_SUCCESS;
@@ -388,20 +379,12 @@ hk_UnmapMemory2KHR(VkDevice device,
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       VK_FROM_HANDLE(hk_device, dev, device);
 
-      if (mem->map) {
-         void *err = mmap(mem->map, mem->map_size, PROT_NONE,
-                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-         if (err == MAP_FAILED) {
-            return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
-                             "Failed to map over original mapping");
-         }
-         mem->map = NULL;
-         mem->map_size = 0;
+      if (!hk_memory_unmap_reserve(mem)) {
+         return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                          "Failed to map over original mapping");
       }
-   } else if (mem->map) {
-      munmap(mem->map, mem->map_size);
-      mem->map = NULL;
-      mem->map_size = 0;
+   } else {
+      hk_memory_unmap(mem);
    }
 
    return VK_SUCCESS;

@@ -150,3 +150,23 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+
+if with_tests
+  test(
+    'libasahi_placed_map_test',
+    executable(
+      'libasahi_placed_map_test',
+      'tests/test-placed-map.c',
+      c_args : [c_msvc_compat_args, no_override_init_args,
+                '-Wno-c2x-extensions'],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [
+        inc_gallium, inc_gallium_aux, inc_include, inc_src,
+        inc_asahi, inc_virtio_gpu, inc_virtio_vdrm,
+      ],
+      dependencies : [hk_deps, idep_mesautil],
+      link_with : [libasahi_lib],
+    ),
+    suite : ['asahi'],
+  )
+endif

@@ -70,20 +70,6 @@ libasahi_lib = static_library(
 
 if with_tests
   test(
-    'libasahi_placed_map_test',
-    executable(
-      'libasahi_placed_map_test',
-      'tests/test-placed-map.c',
-      c_args : [c_msvc_compat_args, no_override_init_args,
-                '-I' + join_paths(meson.current_source_dir(), '..', 'libagx')],
-      gnu_symbol_visibility : 'hidden',
-      dependencies : [idep_mesautil, idep_agx_pack],
-      link_with : [libasahi_lib],
-      include_directories : [inc_src, inc_asahi, inc_virtio_vdrm],
-    ),
-    suite : ['asahi'],
-  )
-  test(
     'libasahi_tests',
     executable(
       'libasahi_tests',

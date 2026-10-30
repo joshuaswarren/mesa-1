@@ -20,19 +20,21 @@
  * each VkDeviceMemory its own application mapping from the bo_mmap
  * primitive, dropped only by that object's unmap, reserve unmap and free.
  *
- * This test drives the real production mapping code: agx_bo_map exactly as
- * defined in agx_device.h with the bind expression of hk_image_plane_bind,
- * the per-memory primitive expressions of hk_MapMemory2KHR, the per-memory
- * teardown of hk_UnmapMemory2KHR and hk_FreeMemory, and the real
- * agx_bo_unreference. The only mock is the kernel mmap: mock_bo_mmap backs
- * the BO with one tmpfile (ftruncate to the BO size) and hands out
- * MAP_SHARED mappings of it, so two live mappings of the same BO show the
- * same bytes, like two CPU mappings of one GEM object. The placed target is
- * a PROT_NONE reservation that stays mapped until the MAP_FIXED placed map
- * replaces it. Every resource failure FAILs the case; there are no SKIP
- * paths. There is no GPU, no device node and no Vulkan entrypoint; those
- * are covered by the admitted device gate (dEQP-VK host-copy coverage with
- * a placed map after image bind), not here.
+ * This test drives the real production mapping code shared with the driver:
+ * hk_memory_map_from_bo, hk_memory_unmap and hk_memory_unmap_reserve from
+ * hk_device_memory.h operating on real struct hk_device_memory objects, plus
+ * agx_bo_map exactly as defined in agx_device.h with the bind expression of
+ * hk_image_plane_bind, and the real agx_bo_unreference. A mutation of the
+ * shared helpers back to BO-owned application mappings therefore fails these
+ * cases. The only mock is the kernel mmap: mock_bo_mmap backs the BO with
+ * one tmpfile (ftruncate to the BO size) and hands out MAP_SHARED mappings
+ * of it, so two live mappings of the same BO show the same bytes, like two
+ * CPU mappings of one GEM object. The placed target is a PROT_NONE
+ * reservation that stays mapped until the MAP_FIXED placed map replaces it.
+ * Every resource failure FAILs the case; there are no SKIP paths. There is
+ * no GPU, no device node and no Vulkan entrypoint; those are covered by the
+ * admitted device gate (dEQP-VK host-copy coverage with a placed map after
+ * image bind), not here.
  *
  * The stable-map case pins the decoder contract: the internal mapping must
  * exist, match agx_bo_map, stay pointer-stable and coherent through the
@@ -58,7 +60,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include "agx_device.h"
+#include "hk_device_memory.h"
 
 /* The BO cache can hand back a BO larger than the request (agx_bo_cache_fetch);
  * a placed map covers the allocation only. Same numbers as the PR: 0x100000
@@ -225,6 +227,28 @@ guarded_copy(void *dst, const void *src, size_t n)
       goto out;                     \
    } while (0)
 
+static void
+mock_mem_init(struct hk_device_memory *mem, struct agx_bo *bo)
+{
+   memset(mem, 0, sizeof(*mem));
+   mem->bo = bo;
+}
+
+/* The memory object must own exactly the mapping the shared helper made. */
+#define ASSERT_MAPPED(mem, want_ptr, want_size)                             \
+   do {                                                                     \
+      if ((mem)->map != (want_ptr) || (mem)->map_size != (want_size))       \
+         CASE_FAIL("memory object does not own its mapping: map=%p "        \
+                   "map_size=%zu", (mem)->map, (mem)->map_size);            \
+   } while (0)
+
+#define ASSERT_UNMAPPED(mem)                                                \
+   do {                                                                     \
+      if ((mem)->map != NULL || (mem)->map_size != 0)                       \
+         CASE_FAIL("memory object mapping state not cleared: map=%p "       \
+                   "map_size=%zu", (mem)->map, (mem)->map_size);            \
+   } while (0)
+
 static int
 run_case(const char *name, unsigned flags)
 {
@@ -234,14 +258,21 @@ run_case(const char *name, unsigned flags)
    if (!mock_bo_init(&m, BO_SIZE))
       CASE_FAIL("tmpfile/ftruncate for the BO failed");
 
+   /* Real per-memory objects: an earlier memory object mapping the BO
+    * plainly, and the one whose placed mapping this case tears down. */
+   struct hk_device_memory pre_mem, mem;
+   mock_mem_init(&pre_mem, &m.bo);
+   mock_mem_init(&mem, &m.bo);
+
    /* Optional plain application map before bind: a mapping owned by its own
-    * memory object (the hk_MapMemory2KHR ordinary expression: a fresh
-    * mapping from the bo_mmap primitive, never stored on the BO). */
+    * memory object (the hk_MapMemory2KHR ordinary expression via the shared
+    * helper). */
    uint8_t *app_map = NULL;
    if (flags & CASE_MAP_FIRST) {
-      app_map = m.dev.ops.bo_mmap(&m.dev, &m.bo, NULL, m.bo.size);
+      app_map = hk_memory_map_from_bo(&m.dev, &pre_mem, NULL, m.bo.size);
       if (app_map == NULL)
          CASE_FAIL("plain application map returned NULL");
+      ASSERT_MAPPED(&pre_mem, app_map, m.bo.size);
    }
 
    /* Bind (hk_image.c:1333-1335): internal mapping retained by the image. */
@@ -267,16 +298,16 @@ run_case(const char *name, unsigned flags)
       CASE_FAIL("application and internal mappings disagree on BO contents");
 
    /* Placed map at the reserved address: a mapping owned by its own memory
-    * object (the hk_MapMemory2KHR placed expression: the primitive at the
-    * requested fixed address). */
+    * object (the hk_MapMemory2KHR placed expression via the shared helper). */
    void *placed = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *mem_map = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed, ALLOC_SIZE);
+   uint8_t *mem_map = hk_memory_map_from_bo(&m.dev, &mem, placed, ALLOC_SIZE);
    if (mem_map != placed) {
       CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
                 placed);
    }
+   ASSERT_MAPPED(&mem, placed, ALLOC_SIZE);
 
    /* Placed/internal coherence: the placed mapping covers the allocation and
     * must show the same BO bytes at the bound offsets. */
@@ -292,15 +323,12 @@ run_case(const char *name, unsigned flags)
     * (hk_UnmapMemory2KHR): reserve overlays exactly that mapping, a plain
     * unmap releases it. The stable BO mapping is never touched. */
    if (flags & CASE_RESERVE) {
-      void *err = mmap(mem_map, ALLOC_SIZE, PROT_NONE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-      if (err == MAP_FAILED)
+      if (!hk_memory_unmap_reserve(&mem))
          CASE_FAIL("reserve overlay mmap failed");
-      mem_map = NULL;
    } else {
-      munmap(mem_map, ALLOC_SIZE);
-      mem_map = NULL;
+      hk_memory_unmap(&mem);
    }
+   ASSERT_UNMAPPED(&mem);
 
    /* Lifetime: host-copy read through the retained pointers (hk_image.c:1523).
     * The placed map and unmap must never touch the internal mapping. */
@@ -353,22 +381,27 @@ stable_map_survives_application_maps(void)
    memset(stable, 0x77, CANARY_LEN);
 
    /* Application placed map over the same BO: a mapping owned by its own
-    * memory object (the hk_MapMemory2KHR placed expression). */
+    * memory object (the hk_MapMemory2KHR placed expression via the shared
+    * helper). */
+   struct hk_device_memory mem;
+   mock_mem_init(&mem, &m.bo);
+
    void *placed = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *mem_map = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed, ALLOC_SIZE);
+   uint8_t *mem_map = hk_memory_map_from_bo(&m.dev, &mem, placed, ALLOC_SIZE);
    if (mem_map != placed) {
       CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
                 placed);
    }
+   ASSERT_MAPPED(&mem, placed, ALLOC_SIZE);
    if (memcmp(mem_map, stable, CANARY_LEN) != 0)
       CASE_FAIL("placed mapping disagrees with the stable BO mapping");
 
    /* Application unmap of that memory object's mapping
     * (hk_UnmapMemory2KHR). */
-   munmap(mem_map, ALLOC_SIZE);
-   mem_map = NULL;
+   hk_memory_unmap(&mem);
+   ASSERT_UNMAPPED(&mem);
 
    /* The stable mapping survives: same pointer, same bytes. */
    if (m.bo._map != (void *)stable)
@@ -407,29 +440,37 @@ shared_bo_importers_map_independently(void)
       CASE_FAIL("tmpfile/ftruncate for the BO failed");
    m.bo.refcnt = 2; /* imported share: two memory objects, one BO */
 
-   /* Importer A: placed map (hk_MapMemory2KHR placed expression, fixed
-    * address). */
+   struct hk_device_memory mem_a, mem_b;
+   mock_mem_init(&mem_a, &m.bo);
+   mock_mem_init(&mem_b, &m.bo);
+
+   /* Importer A: placed map (hk_MapMemory2KHR placed expression via the
+    * shared helper, fixed address). */
    void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed_a == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *map_a = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed_a, ALLOC_SIZE);
+   uint8_t *map_a = hk_memory_map_from_bo(&m.dev, &mem_a, placed_a,
+                                          ALLOC_SIZE);
    if (map_a != placed_a) {
       CASE_FAIL("importer A placed map returned %p, requested %p",
                 (void *)map_a, placed_a);
    }
+   ASSERT_MAPPED(&mem_a, placed_a, ALLOC_SIZE);
 
    uint8_t pat_a[CANARY_LEN], pat_b[CANARY_LEN];
    memset(pat_a, 0x5A, sizeof(pat_a));
    memset(pat_b, 0xC3, sizeof(pat_b));
    memcpy(map_a + BIND_OFF_A, pat_a, sizeof(pat_a));
 
-   /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression, NULL
-    * fixed, whole BO). It must be its own mapping, not importer A's. */
-   uint8_t *map_b = m.dev.ops.bo_mmap(&m.dev, &m.bo, NULL, m.bo.size);
+   /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression via the
+    * shared helper, NULL fixed, whole BO). It must be its own mapping, not
+    * importer A's. */
+   uint8_t *map_b = hk_memory_map_from_bo(&m.dev, &mem_b, NULL, m.bo.size);
    if (map_b == NULL)
       CASE_FAIL("importer B map returned NULL");
    if (map_b == map_a)
       CASE_FAIL("importer B ordinary map reused importer A's placed mapping");
+   ASSERT_MAPPED(&mem_b, map_b, m.bo.size);
 
    /* Coherence: both mappings show the same BO contents. */
    if (memcmp(map_b + BIND_OFF_A, pat_a, CANARY_LEN) != 0)
@@ -442,8 +483,8 @@ shared_bo_importers_map_independently(void)
 
    /* Importer A unmaps its own mapping (hk_UnmapMemory2KHR). Only A's
     * mapping may die. */
-   munmap(map_a, ALLOC_SIZE);
-   map_a = NULL;
+   hk_memory_unmap(&mem_a);
+   ASSERT_UNMAPPED(&mem_a);
 
    uint8_t readback[CANARY_LEN];
    if (!guarded_copy(readback, map_b + BIND_OFF_A, CANARY_LEN))
@@ -477,24 +518,31 @@ free_one_importer_survivor_survives(void)
       CASE_FAIL("tmpfile/ftruncate for the BO failed");
    m.bo.refcnt = 2; /* imported share: two memory objects, one BO */
 
-   /* Importer A: placed map (hk_MapMemory2KHR placed expression, fixed
-    * address). */
+   struct hk_device_memory mem_a, mem_b;
+   mock_mem_init(&mem_a, &m.bo);
+   mock_mem_init(&mem_b, &m.bo);
+
+   /* Importer A: placed map (hk_MapMemory2KHR placed expression via the
+    * shared helper, fixed address). */
    void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed_a == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *map_a = m.dev.ops.bo_mmap(&m.dev, &m.bo, placed_a, ALLOC_SIZE);
+   uint8_t *map_a = hk_memory_map_from_bo(&m.dev, &mem_a, placed_a,
+                                          ALLOC_SIZE);
    if (map_a != placed_a) {
       CASE_FAIL("importer A placed map returned %p, requested %p",
                 (void *)map_a, placed_a);
    }
+   ASSERT_MAPPED(&mem_a, placed_a, ALLOC_SIZE);
 
-   /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression, NULL
-    * fixed). */
-   uint8_t *map_b = m.dev.ops.bo_mmap(&m.dev, &m.bo, NULL, m.bo.size);
+   /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression via the
+    * shared helper, NULL fixed). */
+   uint8_t *map_b = hk_memory_map_from_bo(&m.dev, &mem_b, NULL, m.bo.size);
    if (map_b == NULL)
       CASE_FAIL("importer B map returned NULL");
    if (map_b == map_a)
       CASE_FAIL("importer B ordinary map reused importer A's placed mapping");
+   ASSERT_MAPPED(&mem_b, map_b, m.bo.size);
 
    uint8_t pat_a[CANARY_LEN], pat_b[CANARY_LEN];
    memset(pat_a, 0x5A, sizeof(pat_a));
@@ -503,15 +551,16 @@ free_one_importer_survivor_survives(void)
    memcpy(map_b + BIND_OFF_B, pat_b, sizeof(pat_b));
 
    /* vkFreeMemory(A): the mapping belongs to the freed memory object, so
-    * hk_FreeMemory drops exactly A's mapping, and the real refcount drop
-    * returns the BO alive at refcount 1 for B. */
-   munmap(map_a, ALLOC_SIZE);
-   map_a = NULL;
+    * hk_FreeMemory drops exactly A's mapping via the shared helper, and the
+    * real refcount drop returns the BO alive at refcount 1 for B. */
+   hk_memory_unmap(&mem_a);
+   ASSERT_UNMAPPED(&mem_a);
    agx_bo_unreference(&m.dev, &m.bo);
    if (p_atomic_read(&m.bo.refcnt) != 1)
       CASE_FAIL("freeing one importer did not leave the shared BO at "
                 "refcount 1 (got %d)",
                 p_atomic_read(&m.bo.refcnt));
+   ASSERT_MAPPED(&mem_b, map_b, m.bo.size);
 
    /* Survivor B: mapping still valid, both canaries coherent. */
    uint8_t readback[CANARY_LEN];
@@ -536,6 +585,49 @@ out:
    return rc;
 }
 
+/* Boundary case: the shared helpers must treat a never-mapped memory object
+ * as a no-op (hk_UnmapMemory2KHR on unmapped memory must not touch the BO's
+ * stable mapping), and a later real map on the same object must work. */
+static int
+unmap_without_map_is_noop(void)
+{
+   const char *name = "unmap_without_map_is_noop";
+   struct mock_state m;
+   int rc = 1;
+
+   if (!mock_bo_init(&m, BO_SIZE))
+      CASE_FAIL("tmpfile/ftruncate for the BO failed");
+
+   struct hk_device_memory mem;
+   mock_mem_init(&mem, &m.bo);
+   ASSERT_UNMAPPED(&mem);
+
+   hk_memory_unmap(&mem);
+   if (!hk_memory_unmap_reserve(&mem))
+      CASE_FAIL("reserve unmap of a never-mapped object failed");
+   ASSERT_UNMAPPED(&mem);
+
+   /* The BO's stable mapping is untouched and a real map works after. */
+   uint8_t *stable = agx_bo_map(&m.bo);
+   if (stable == NULL)
+      CASE_FAIL("internal map returned NULL");
+   ASSERT_UNMAPPED(&mem);
+
+   uint8_t *map = hk_memory_map_from_bo(&m.dev, &mem, NULL, m.bo.size);
+   if (map == NULL)
+      CASE_FAIL("map after no-op unmaps returned NULL");
+   ASSERT_MAPPED(&mem, map, m.bo.size);
+   hk_memory_unmap(&mem);
+   ASSERT_UNMAPPED(&mem);
+
+   printf("PASS %s\n", name);
+   rc = 0;
+
+out:
+   mock_bo_cleanup(&m);
+   return rc;
+}
+
 int
 main(void)
 {
@@ -544,6 +636,7 @@ main(void)
    failures += stable_map_survives_application_maps();
    failures += shared_bo_importers_map_independently();
    failures += free_one_importer_survivor_survives();
+   failures += unmap_without_map_is_noop();
 
    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
       failures += run_case(cases[i].name, cases[i].flags);
