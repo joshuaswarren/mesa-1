@@ -190,6 +190,7 @@ test_invalid_requests(struct agx_device *dev)
    CHECK(!agx_va_capture_valid(dev, UINT64_MAX - PAGE + 1, sz, PAGE));
    CHECK(!agx_va_capture_valid(dev, 0, sz, PAGE));
    CHECK(!agx_va_capture_valid(dev, start + 4096, sz, PAGE));
+   CHECK(!agx_va_capture_valid(dev, start, sz, 0));
    /* A size that would wrap, and one that leaves no room for the guard. */
    CHECK(!agx_va_capture_valid(dev, start, UINT64_MAX - 100, PAGE));
    CHECK(!agx_va_capture_valid(dev, start, dev->capture_size, PAGE));

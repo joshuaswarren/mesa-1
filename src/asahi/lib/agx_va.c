@@ -49,7 +49,7 @@ agx_va_capture_valid(const struct agx_device *dev, uint64_t addr,
    const uint64_t end = dev->capture_start + dev->capture_size;
 
    /* Written to never wrap: size_B comes from the application. */
-   if (size_B > end - dev->capture_start - dev->guard_size)
+   if (!align_B || size_B > end - dev->capture_start - dev->guard_size)
       return false;
    if (addr < dev->capture_start || addr >= end)
       return false;
