@@ -361,10 +361,19 @@ enum hk_perftest {
  *
  * The state is read when a barrier is recorded. A resource the command
  * buffer references exists by then, and it counts from creation, so later
- * sparse binds are covered; the flush writes back every dirty line, so it
- * also covers writes recorded in earlier command buffers. Not covered: a
- * resource created after recording and reached only through a device
- * address the command buffer reads indirectly. */
+ * sparse binds are covered. The flush goes into the open compute stream,
+ * and only when that stream already holds work
+ * (hk_cdm_visibility_flush_needed()). It writes back every dirty line, so
+ * the writes it covers include those of earlier streams and earlier
+ * command buffers. A barrier recorded before any work in a command buffer
+ * has no such stream and records no flush: a write in an earlier command
+ * buffer, read through another address by the first work after that
+ * barrier, has no memory-scope flush between them. Whether the hardware
+ * returns stale data in that case has not been tested. Not covered: a
+ * resource created after the command buffer was recorded and reached
+ * through a path recording did not see, that is a device address the
+ * command buffer reads indirectly, or a descriptor set bound at recording
+ * and updated after it (descriptorBinding*UpdateAfterBind). */
 static inline bool
 hk_cdm_alias_scope(const struct hk_device *dev)
 {
