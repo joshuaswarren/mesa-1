@@ -3017,7 +3017,7 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
 
 static void
 agx_optimize_nir(nir_shader *nir, bool soft_fault, bool fold_subformat_address,
-                 uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count)
+                 bool simdmat_fold, uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count)
 {
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
@@ -3209,6 +3209,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool fold_subformat_address,
    NIR_PASS(_, nir, nir_opt_cse);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+   if (simdmat_fold) {
+      NIR_PASS(_, nir, agx_nir_fold_simdmat_f2f32);
+      NIR_PASS(_, nir, nir_opt_dce);
+   }
 
    /* Cleanup optimizations */
    nir_move_options move_all = nir_move_const_undef | nir_move_load_ubo |
@@ -3903,7 +3907,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    info->push_count = key->reserved_preamble;
    agx_optimize_nir(
       nir, key->dev.soft_fault, key->dev.fold_subformat_address,
-      key->secondary ? NULL : &info->push_count,
+      key->dev.simdmat_fold, key->secondary ? NULL : &info->push_count,
       (key->secondary || !key->promote_textures) ? NULL
                                                  : &info->texture_state_count,
       (key->secondary || !key->promote_textures) ? NULL
