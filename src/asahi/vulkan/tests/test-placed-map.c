@@ -120,6 +120,7 @@ struct mock_state {
    size_t vdrm_map_size;
    void *vdrm_map_placed;
    bool vdrm_fail_next;
+   void *vdrm_failure;
 };
 
 static void
@@ -659,8 +660,8 @@ out:
  * contract binds by length: vdrm_bo_map must receive exactly the requested
  * placed length (the application reserved only that much address space) and
  * record it, while a length of 0 keeps the whole cached BO. Drives the real
- * agx_virtio_bo_mmap with a stubbed vdrm host side; MAP_FAILED propagation
- * keeps the cleanup path covered. */
+ * agx_virtio_bo_mmap with a stubbed vdrm host side; NULL and MAP_FAILED
+ * propagation keep the cleanup path covered. */
 static void *
 mock_vdrm_bo_map(struct vdrm_device *vdev, uint32_t handle, size_t size,
                  void *placed_addr)
@@ -670,7 +671,7 @@ mock_vdrm_bo_map(struct vdrm_device *vdev, uint32_t handle, size_t size,
                                                          vdrm));
 
    if (m->vdrm_fail_next)
-      return MAP_FAILED;
+      return m->vdrm_failure;
 
    m->vdrm_map_size = size;
    m->vdrm_map_placed = placed_addr;
@@ -737,9 +738,17 @@ virtio_mmap_honors_length(void)
 
    /* MAP_FAILED from the host must leave the BO slot cleared. */
    m.vdrm_fail_next = true;
+   m.vdrm_failure = MAP_FAILED;
    agx_virtio_bo_mmap(&m.dev, &m.bo, NULL, 0);
    if (m.bo._map != NULL || m.bo._map_size != 0)
       CASE_FAIL("virtio MAP_FAILED left map=%p size=%zu on the BO",
+                m.bo._map, m.bo._map_size);
+
+   /* The real virtgpu backend returns NULL when its host map fails. */
+   m.vdrm_failure = NULL;
+   agx_virtio_bo_mmap(&m.dev, &m.bo, NULL, 0);
+   if (m.bo._map != NULL || m.bo._map_size != 0)
+      CASE_FAIL("virtio NULL left map=%p size=%zu on the BO",
                 m.bo._map, m.bo._map_size);
 
    printf("PASS %s\n", name);

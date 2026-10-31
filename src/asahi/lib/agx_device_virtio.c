@@ -199,7 +199,7 @@ agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
    size_t map_size = length ?: bo->size;
    bo->_map_size = map_size;
    bo->_map = vdrm_bo_map(dev->vdrm, bo->handle, map_size, fixed_addr);
-   if (bo->_map == MAP_FAILED) {
+   if (bo->_map == NULL || bo->_map == MAP_FAILED) {
       bo->_map = NULL;
       bo->_map_size = 0;
       fprintf(stderr, "mmap failed: result=%p size=0x%llx fd=%i\n", bo->_map,
