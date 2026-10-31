@@ -407,7 +407,10 @@ stable_map_survives_application_maps(void)
                 placed);
    }
    ASSERT_MAPPED(&mem, placed, ALLOC_SIZE);
-   if (memcmp(mem_map, stable, CANARY_LEN) != 0)
+   uint8_t readback[CANARY_LEN];
+   if (!guarded_copy(readback, stable, CANARY_LEN))
+      CASE_FAIL("stable BO mapping faults while checking map coherence");
+   if (memcmp(mem_map, readback, CANARY_LEN) != 0)
       CASE_FAIL("placed mapping disagrees with the stable BO mapping");
 
    /* Application unmap of that memory object's mapping
@@ -418,7 +421,6 @@ stable_map_survives_application_maps(void)
    /* The stable mapping survives: same pointer, same bytes. */
    if (m.bo._map != (void *)stable)
       CASE_FAIL("application maps replaced the stable BO mapping pointer");
-   uint8_t readback[CANARY_LEN];
    if (!guarded_copy(readback, stable, CANARY_LEN))
       CASE_FAIL("stable BO mapping faults after application placed map + "
                 "unmap");

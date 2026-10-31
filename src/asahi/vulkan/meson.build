@@ -127,20 +127,6 @@ hk_drirc = custom_target(
 )
 
 if with_tests
-  test('hk_placed_map_lifetime',
-    executable('hk-placed-map-lifetime',
-      files('tests/test-placed-map.c'),
-      c_args : [c_msvc_compat_args, no_override_init_args,
-                '-Wno-c2x-extensions'],
-      gnu_symbol_visibility : 'hidden',
-      include_directories : [
-        inc_gallium, inc_gallium_aux, inc_include, inc_src,
-        inc_asahi, inc_virtio_gpu, inc_virtio_vdrm,
-      ],
-      dependencies : [hk_deps, idep_mesautil],
-      link_with : [libasahi_lib]),
-    suite : ['asahi'])
-
   test('hk_execution_allowance',
     executable('hk_execution_allowance_test',
       files('tests/test-hk-execution-allowance.c'),
@@ -468,6 +454,21 @@ hk_deps = [
   idep_libagx,
   idep_libagx_shaders_h,
 ]
+if with_tests
+  test('hk_placed_map_lifetime',
+    executable('hk-placed-map-lifetime',
+      files('tests/test-placed-map.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args,
+                '-Wno-c2x-extensions'],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [
+        inc_gallium, inc_gallium_aux, inc_include, inc_src,
+        inc_asahi, inc_virtio_gpu, inc_virtio_vdrm,
+      ],
+      dependencies : [hk_deps, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_layout, libasahi_compiler]),
+    suite : ['asahi'])
+endif
 
 libhk = static_library(
   'hk',
