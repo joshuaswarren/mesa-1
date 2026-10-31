@@ -65,10 +65,9 @@
 #include <unistd.h>
 
 #include "hk_device_memory.h"
+#include "asahi/lib/agx_device_virtio.h"
 #include "virtio/vdrm/vdrm.h"
 
-extern void agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo,
-                               void *fixed_addr, size_t length);
 
 /* The BO cache can hand back a BO larger than the request (agx_bo_cache_fetch);
  * a placed map covers the allocation only. Same numbers as the PR: 0x100000
