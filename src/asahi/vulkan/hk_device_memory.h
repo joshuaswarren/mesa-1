@@ -40,10 +40,9 @@ struct hk_device_memory {
 
 /* Application mappings belong to one VkDeviceMemory, never the shared BO. */
 static inline void *
-hk_memory_map_from_bo(struct agx_device *dev, struct hk_device_memory *mem,
-                      void *fixed_addr, size_t length)
+hk_memory_map_from_bo(struct hk_device_memory *mem, void *fixed_addr,
+                      size_t length)
 {
-   (void)dev;
    mem->map = agx_bo_map_owned(mem->bo, fixed_addr, length, &mem->map_size);
    return mem->map;
 }

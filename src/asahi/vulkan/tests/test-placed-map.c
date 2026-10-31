@@ -277,7 +277,7 @@ run_case(const char *name, unsigned flags)
     * helper). */
    uint8_t *app_map = NULL;
    if (flags & CASE_MAP_FIRST) {
-      app_map = hk_memory_map_from_bo(&m.dev, &pre_mem, NULL, m.bo.size);
+      app_map = hk_memory_map_from_bo(&pre_mem, NULL, m.bo.size);
       if (app_map == NULL)
          CASE_FAIL("plain application map returned NULL");
       ASSERT_MAPPED(&pre_mem, app_map, m.bo.size);
@@ -314,7 +314,7 @@ run_case(const char *name, unsigned flags)
    void *placed = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *mem_map = hk_memory_map_from_bo(&m.dev, &mem, placed, ALLOC_SIZE);
+   uint8_t *mem_map = hk_memory_map_from_bo(&mem, placed, ALLOC_SIZE);
    if (mem_map != placed) {
       CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
                 placed);
@@ -401,7 +401,7 @@ stable_map_survives_application_maps(void)
    void *placed = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *mem_map = hk_memory_map_from_bo(&m.dev, &mem, placed, ALLOC_SIZE);
+   uint8_t *mem_map = hk_memory_map_from_bo(&mem, placed, ALLOC_SIZE);
    if (mem_map != placed) {
       CASE_FAIL("placed map returned %p, requested %p", (void *)mem_map,
                 placed);
@@ -461,7 +461,7 @@ shared_bo_importers_map_independently(void)
    void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed_a == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *map_a = hk_memory_map_from_bo(&m.dev, &mem_a, placed_a,
+   uint8_t *map_a = hk_memory_map_from_bo(&mem_a, placed_a,
                                           ALLOC_SIZE);
    if (map_a != placed_a) {
       CASE_FAIL("importer A placed map returned %p, requested %p",
@@ -477,7 +477,7 @@ shared_bo_importers_map_independently(void)
    /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression via the
     * shared helper, NULL fixed, whole BO). It must be its own mapping, not
     * importer A's. */
-   uint8_t *map_b = hk_memory_map_from_bo(&m.dev, &mem_b, NULL, m.bo.size);
+   uint8_t *map_b = hk_memory_map_from_bo(&mem_b, NULL, m.bo.size);
    if (map_b == NULL)
       CASE_FAIL("importer B map returned NULL");
    if (map_b == map_a)
@@ -539,7 +539,7 @@ free_one_importer_survivor_survives(void)
    void *placed_a = reserve_placed_address(&m, ALLOC_SIZE);
    if (placed_a == NULL)
       CASE_FAIL("could not reserve the placed target address");
-   uint8_t *map_a = hk_memory_map_from_bo(&m.dev, &mem_a, placed_a,
+   uint8_t *map_a = hk_memory_map_from_bo(&mem_a, placed_a,
                                           ALLOC_SIZE);
    if (map_a != placed_a) {
       CASE_FAIL("importer A placed map returned %p, requested %p",
@@ -549,7 +549,7 @@ free_one_importer_survivor_survives(void)
 
    /* Importer B: ordinary map (hk_MapMemory2KHR ordinary expression via the
     * shared helper, NULL fixed). */
-   uint8_t *map_b = hk_memory_map_from_bo(&m.dev, &mem_b, NULL, m.bo.size);
+   uint8_t *map_b = hk_memory_map_from_bo(&mem_b, NULL, m.bo.size);
    if (map_b == NULL)
       CASE_FAIL("importer B map returned NULL");
    if (map_b == map_a)
@@ -625,7 +625,7 @@ unmap_without_map_is_noop(void)
       CASE_FAIL("internal map returned NULL");
    ASSERT_UNMAPPED(&mem);
 
-   uint8_t *map = hk_memory_map_from_bo(&m.dev, &mem, NULL, m.bo.size);
+   uint8_t *map = hk_memory_map_from_bo(&mem, NULL, m.bo.size);
    if (map == NULL)
       CASE_FAIL("map after no-op unmaps returned NULL");
    ASSERT_MAPPED(&mem, map, m.bo.size);
