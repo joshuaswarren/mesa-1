@@ -947,6 +947,8 @@ agx_gather_device_key(struct agx_device *dev)
       .needs_g13x_coherency = u_tristate_make(g13x_coh),
       .soft_fault = agx_has_soft_fault(dev),
       .g13 = dev->params.gpu_generation == 13,
+      .simdmat_fold = dev->chip == AGX_CHIP_G13G &&
+                      agx_simdmat_fold_enabled(),
       .fold_subformat_address = dev->params.gpu_generation == 13 &&
                                 dev->params.num_clusters_total == 1 &&
                                 dev->params.num_dies == 1,
