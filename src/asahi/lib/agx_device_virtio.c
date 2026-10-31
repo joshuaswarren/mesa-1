@@ -190,17 +190,20 @@ agx_virtio_bo_unbind_object(struct agx_device *dev, uint32_t object_handle)
    return 0;
 }
 
-static void
+/* Real mapping primitive, non-static so the placed-map regression can drive
+ * it: the per-length contract it implements belongs to the ops signature. */
+void
 agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
-                   UNUSED size_t length)
+                   size_t length)
 {
-   bo->_map_size = bo->size;
-   bo->_map = vdrm_bo_map(dev->vdrm, bo->handle, bo->size, fixed_addr);
+   size_t map_size = length ?: bo->size;
+   bo->_map_size = map_size;
+   bo->_map = vdrm_bo_map(dev->vdrm, bo->handle, map_size, fixed_addr);
    if (bo->_map == MAP_FAILED) {
       bo->_map = NULL;
       bo->_map_size = 0;
       fprintf(stderr, "mmap failed: result=%p size=0x%llx fd=%i\n", bo->_map,
-              (long long)bo->size, dev->fd);
+              (long long)map_size, dev->fd);
    }
 }
 

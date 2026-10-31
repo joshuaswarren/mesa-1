@@ -24,17 +24,20 @@
  * hk_memory_map_from_bo, hk_memory_unmap and hk_memory_unmap_reserve from
  * hk_device_memory.h operating on real struct hk_device_memory objects, plus
  * agx_bo_map exactly as defined in agx_device.h with the bind expression of
- * hk_image_plane_bind, and the real agx_bo_unreference. A mutation of the
- * shared helpers back to BO-owned application mappings therefore fails these
- * cases. The only mock is the kernel mmap: mock_bo_mmap backs the BO with
- * one tmpfile (ftruncate to the BO size) and hands out MAP_SHARED mappings
- * of it, so two live mappings of the same BO show the same bytes, like two
- * CPU mappings of one GEM object. The placed target is a PROT_NONE
- * reservation that stays mapped until the MAP_FIXED placed map replaces it.
- * Every resource failure FAILs the case; there are no SKIP paths. There is
- * no GPU, no device node and no Vulkan entrypoint; those are covered by the
- * admitted device gate (dEQP-VK host-copy coverage with a placed map after
- * image bind), not here.
+ * hk_image_plane_bind, the real agx_bo_unreference, and the real
+ * agx_virtio_bo_mmap. A mutation of the shared helpers back to BO-owned
+ * application mappings, or of the virtio primitive away from the per-length
+ * ops contract, fails these cases. The mocks stand in for the kernel: the
+ * bo_mmap shim backs the BO with one tmpfile (ftruncate to the BO size) and
+ * hands out MAP_SHARED mappings of it, so two live mappings of the same BO
+ * show the same bytes, like two CPU mappings of one GEM object, and the
+ * vdrm host-side shim records what the virtio primitive asks the host to
+ * map. The placed target is a PROT_NONE reservation that stays mapped until
+ * the MAP_FIXED placed map replaces it. Every resource failure FAILs the
+ * case; there are no SKIP paths. There is no GPU, no device node and no
+ * Vulkan entrypoint; those are covered by the admitted device gate
+ * (dEQP-VK host-copy coverage with a placed map after image bind), not
+ * here.
  *
  * The stable-map case pins the decoder contract: the internal mapping must
  * exist, match agx_bo_map, stay pointer-stable and coherent through the
@@ -54,6 +57,7 @@
 
 #include <setjmp.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +65,10 @@
 #include <unistd.h>
 
 #include "hk_device_memory.h"
+#include "virtio/vdrm/vdrm.h"
+
+extern void agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo,
+                               void *fixed_addr, size_t length);
 
 /* The BO cache can hand back a BO larger than the request (agx_bo_cache_fetch);
  * a placed map covers the allocation only. Same numbers as the PR: 0x100000
@@ -107,6 +115,12 @@ struct mock_state {
    FILE *file;
    struct mock_map maps[MOCK_MAX_MAPS];
    unsigned map_count;
+
+   /* Host side of the virtio backend under test. */
+   struct vdrm_device vdrm;
+   size_t vdrm_map_size;
+   void *vdrm_map_placed;
+   bool vdrm_fail_next;
 };
 
 static void
@@ -642,6 +656,101 @@ out:
    return rc;
 }
 
+/* The virtio mapping primitive is the one bo_mmap implementer the ops
+ * contract binds by length: vdrm_bo_map must receive exactly the requested
+ * placed length (the application reserved only that much address space) and
+ * record it, while a length of 0 keeps the whole cached BO. Drives the real
+ * agx_virtio_bo_mmap with a stubbed vdrm host side; MAP_FAILED propagation
+ * keeps the cleanup path covered. */
+static void *
+mock_vdrm_bo_map(struct vdrm_device *vdev, uint32_t handle, size_t size,
+                 void *placed_addr)
+{
+   struct mock_state *m = (struct mock_state *)((char *)vdev -
+                                                offsetof(struct mock_state,
+                                                         vdrm));
+
+   if (m->vdrm_fail_next)
+      return MAP_FAILED;
+
+   m->vdrm_map_size = size;
+   m->vdrm_map_placed = placed_addr;
+
+   void *p = mmap(placed_addr, size, PROT_READ | PROT_WRITE,
+                  MAP_SHARED | (placed_addr ? MAP_FIXED : 0), fileno(m->file),
+                  0);
+   if (p == MAP_FAILED)
+      return MAP_FAILED;
+
+   mock_track(m, p, size);
+   return p;
+}
+
+static int
+virtio_mmap_honors_length(void)
+{
+   const char *name = "virtio_mmap_honors_length";
+   struct mock_state m;
+   int rc = 1;
+
+   if (!mock_bo_init(&m, BO_SIZE))
+      CASE_FAIL("tmpfile/ftruncate for the BO failed");
+
+   /* The production primitive only reads dev->vdrm and dev->fd. */
+   memset(&m.vdrm, 0, sizeof(m.vdrm));
+   static const struct vdrm_device_funcs funcs = {
+      .bo_map = mock_vdrm_bo_map,
+   };
+   m.vdrm.funcs = &funcs;
+   m.dev.vdrm = &m.vdrm;
+   m.dev.fd = fileno(m.file);
+   m.bo.handle = 1;
+
+   /* Placed: the BO cache may hold a mapping up to twice the allocation, so
+    * the primitive must ask the host for exactly the requested length. The
+    * reservation extends past the placed target, so the pre-fix oversized
+    * MAP_FIXED lands in reserved address space instead of corrupting live
+    * memory and the assertions report the defect. */
+   void *placed = reserve_placed_address(&m, BO_SIZE + ALLOC_SIZE);
+   if (placed == NULL)
+      CASE_FAIL("could not reserve the placed target address");
+   agx_virtio_bo_mmap(&m.dev, &m.bo, placed, ALLOC_SIZE);
+   if (m.bo._map != placed || m.bo._map_size != ALLOC_SIZE)
+      CASE_FAIL("virtio placed map returned map=%p size=%zu, wanted %p+%zu",
+                m.bo._map, m.bo._map_size, placed, (size_t)ALLOC_SIZE);
+   if (m.vdrm_map_size != ALLOC_SIZE || m.vdrm_map_placed != placed)
+      CASE_FAIL("virtio host map requested size=%zu placed=%p, wanted "
+                "%u+%p",
+                m.vdrm_map_size, m.vdrm_map_placed,
+                (unsigned)ALLOC_SIZE, placed);
+
+   /* Ordinary: a length of 0 maps and records the whole cached BO. */
+   agx_virtio_bo_mmap(&m.dev, &m.bo, NULL, 0);
+   if (m.bo._map == NULL || m.bo._map == placed ||
+       m.bo._map_size != m.bo.size)
+      CASE_FAIL("virtio ordinary map returned map=%p size=%zu, wanted the "
+                "whole BO",
+                m.bo._map, m.bo._map_size);
+   if (m.vdrm_map_size != m.bo.size)
+      CASE_FAIL("virtio host ordinary map asked for %zu, wanted %zu",
+                m.vdrm_map_size, m.bo.size);
+   munmap(m.bo._map, m.bo._map_size);
+
+   /* MAP_FAILED from the host must leave the BO slot cleared. */
+   m.vdrm_fail_next = true;
+   agx_virtio_bo_mmap(&m.dev, &m.bo, NULL, 0);
+   if (m.bo._map != NULL || m.bo._map_size != 0)
+      CASE_FAIL("virtio MAP_FAILED left map=%p size=%zu on the BO",
+                m.bo._map, m.bo._map_size);
+
+   printf("PASS %s\n", name);
+   rc = 0;
+
+out:
+   mock_bo_cleanup(&m);
+   return rc;
+}
+
 int
 main(void)
 {
@@ -651,6 +760,7 @@ main(void)
    failures += shared_bo_importers_map_independently();
    failures += free_one_importer_survivor_survives();
    failures += unmap_without_map_is_noop();
+   failures += virtio_mmap_honors_length();
 
    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
       failures += run_case(cases[i].name, cases[i].flags);
