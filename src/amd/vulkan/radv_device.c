@@ -1613,9 +1613,14 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    }
    device->private_sdma_queue = VK_NULL_HANDLE;
 
-   device->shader_use_invisible_vram = (instance->perftest_flags & RADV_PERFTEST_DMA_SHADERS) &&
-                                       /* SDMA buffer copy is only implemented for GFX7+. */
-                                       pdev->info.gfx_level >= GFX7;
+   /* Shader uploads through CPU-mapped VRAM need a CPU-visible VRAM BAR.
+    * Hosts with none (non-posted BARs, e.g. USB4 eGPUs on Apple Silicon)
+    * must use the SDMA upload queue without requiring the perftest flag.
+    */
+   device->shader_use_invisible_vram =
+      ((instance->perftest_flags & RADV_PERFTEST_DMA_SHADERS) || !pdev->info.vram_vis_size_kb) &&
+      /* SDMA buffer copy is only implemented for GFX7+. */
+      pdev->info.gfx_level >= GFX7;
    result = radv_init_shader_upload_queue(device);
    if (result != VK_SUCCESS)
       goto fail;

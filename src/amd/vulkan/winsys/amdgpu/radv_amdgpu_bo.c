@@ -580,7 +580,12 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
        * e.g. Horizon Zero Dawn allocates more memory than we have
        * VRAM.
        */
-      if (!(ws->perftest & RADV_PERFTEST_NO_GTT_SPILL))
+      /* Spillable VRAM buffers migrate between heaps; on hosts with no
+       * CPU-visible VRAM (non-posted BARs, e.g. USB4 eGPUs on Apple
+       * Silicon) that migration traffic crosses the slow tunnel, so
+       * keep VRAM allocations VRAM-only there by default.
+       */
+      if (!(ws->perftest & RADV_PERFTEST_NO_GTT_SPILL) && ws->info.vram_vis_size_kb)
          request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
    }
 
