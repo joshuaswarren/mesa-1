@@ -372,6 +372,7 @@
 - [@zounanhai](https://github.com/zounanhai)
 - [@zzoon](https://github.com/zzoon)
 - [@zzyiwei](https://github.com/zzyiwei)
+
 _Linked GitHub accounts only. Anonymous (unlinked) commit authors are
 enumerable through the API (anon=true) but are identified there only by
 name/email, which this registry does not publish; credit them by hand in
