@@ -4,55 +4,47 @@
  */
 
 /*
- * CPU-only regression for the omacom/mesa#8 review finding
- * (https://github.com/omacom/mesa/pull/8#discussion_r4418383484) and its
- * follow-ups:
+ * CPU-only regression test for per-memory application mappings.
  *
- * A non-sparse image bind retains an internal host-copy mapping
- * (hk_image_plane_bind, hk_image.c:1334: plane->map = agx_bo_map(mem->bo) +
- * offset) without setting mem->map or taking a BO reference. While the
- * application mapping lived on the BO, any vkMapMemory2KHR placed map,
- * vkUnmapMemory2KHR (plain or VK_MEMORY_UNMAP_RESERVE_BIT_EXT) or
- * vkFreeMemory of the same memory destroyed that retained pointer, and two
- * memory objects sharing an imported BO shared one replaceable mapping. The
- * fix gives the BO a single stable internal mapping (agx_bo_map ->
- * bo->_map, read directly by decode.c and populated by wrap.c) and gives
- * each VkDeviceMemory its own application mapping from the bo_mmap
+ * A non-sparse image bind keeps an internal host-copy mapping
+ * (plane->map = agx_bo_map(mem->bo) + offset in hk_image_plane_bind) without
+ * setting mem->map or taking a BO reference. If the application mapping lived
+ * on the BO, a placed vkMapMemory2KHR, a plain or VK_MEMORY_UNMAP_RESERVE_BIT_EXT
+ * vkUnmapMemory2KHR, or vkFreeMemory of the same memory would destroy that
+ * retained pointer, and two memory objects sharing an imported BO would share
+ * one replaceable mapping. The fix gives the BO one stable internal mapping
+ * (agx_bo_map -> bo->_map, read directly by decode.c and populated by wrap.c)
+ * and gives each VkDeviceMemory its own application mapping from the bo_mmap
  * primitive, dropped only by that object's unmap, reserve unmap and free.
  *
- * This test drives the real production mapping code shared with the driver:
+ * The test drives the production mapping code shared with the driver:
  * hk_memory_map_from_bo, hk_memory_unmap and hk_memory_unmap_reserve from
- * hk_device_memory.h operating on real struct hk_device_memory objects, plus
- * agx_bo_map exactly as defined in agx_device.h with the bind expression of
- * hk_image_plane_bind, the real agx_bo_unreference, and the real
- * agx_virtio_bo_mmap. A mutation of the shared helpers back to BO-owned
- * application mappings, or of the virtio primitive away from the per-length
- * ops contract, fails these cases. The mocks stand in for the kernel: the
- * bo_mmap shim backs the BO with one tmpfile (ftruncate to the BO size) and
- * hands out MAP_SHARED mappings of it, so two live mappings of the same BO
- * show the same bytes, like two CPU mappings of one GEM object, and the
- * vdrm host-side shim records what the virtio primitive asks the host to
+ * hk_device_memory.h on real struct hk_device_memory objects, agx_bo_map as
+ * defined in agx_device.h with the bind expression above, the real
+ * agx_bo_unreference, and the real agx_virtio_bo_mmap. Mutating the shared
+ * helpers back to BO-owned application mappings, or the virtio primitive away
+ * from the per-length ops contract, fails these cases. The mocks stand in for
+ * the kernel: the bo_mmap shim backs the BO with one tmpfile (ftruncate to the
+ * BO size) and hands out MAP_SHARED mappings of it, so two live mappings of
+ * the same BO show the same bytes, like two CPU mappings of one GEM object.
+ * The vdrm host-side shim records what the virtio primitive asks the host to
  * map. The placed target is a PROT_NONE reservation that stays mapped until
- * the MAP_FIXED placed map replaces it. Every resource failure FAILs the
- * case; there are no SKIP paths. There is no GPU, no device node and no
- * Vulkan entrypoint; those are covered by the admitted device gate
- * (dEQP-VK host-copy coverage with a placed map after image bind), not
- * here.
+ * the MAP_FIXED placed map replaces it. Every resource failure fails the case;
+ * there are no skip paths. There is no GPU, no device node and no Vulkan
+ * entrypoint here.
  *
- * The stable-map case pins the decoder contract: the internal mapping must
- * exist, match agx_bo_map, stay pointer-stable and coherent through the
- * application map lifecycle. The two-importer and free cases pin shared-BO
- * lifetime: distinct mappings per memory object, mutual content coherence,
- * and a survivor whose mapping outlives the other importer's unmap or
- * free. The heap accounting, ext-BO tracking and vk_device_memory_destroy
- * tail of hk_FreeMemory need a live vk_device and stay behind the admitted
- * device gate.
+ * Cases:
+ * - stable map: the internal mapping exists, matches agx_bo_map, stays
+ *   pointer-stable and coherent through the application map lifecycle.
+ * - two importers and free: distinct mappings per memory object, mutual
+ *   content coherence, and a survivor whose mapping outlives the other
+ *   importer's unmap or free.
+ * - map before bind: the application-first order leaves the internal BO map
+ *   independent.
  *
- * Red was parent-observed on the pre-fix lineage (fixture heads 8af285bd30c
- * and e14884a59ca: stable _map absent, importer B reusing importer A's
- * placed mapping; the free case stopped at the same pointer-independence
- * assertion before reaching the survivor checks). Passes with per-memory
- * ownership.
+ * The heap accounting, ext-BO tracking and vk_device_memory_destroy tail of
+ * hk_FreeMemory need a live vk_device and are covered by the device gate
+ * (host-copy coverage with a placed map after image bind), not here.
  */
 
 #include <setjmp.h>
@@ -70,8 +62,7 @@
 
 
 /* The BO cache can hand back a BO larger than the request (agx_bo_cache_fetch);
- * a placed map covers the allocation only. Same numbers as the PR: 0x100000
- * allocation in a 0x104000 BO. */
+ * a placed map covers the allocation only: a 0x100000 allocation in a 0x104000 BO. */
 #define ALLOC_SIZE 0x100000
 #define BO_SIZE    0x104000
 
@@ -83,8 +74,8 @@
 
 #define CANARY_LEN 0x1000
 
-/* Case selection bits. Plain unmap (hk_device_memory.c:405) is the default
- * application teardown; CASE_RESERVE uses the :394 overlay instead. */
+/* Case selection bits. Plain unmap is the default application teardown;
+ * CASE_RESERVE uses the reserve-unmap overlay instead. */
 #define CASE_RESERVE   (1u << 0)
 #define CASE_ALIAS     (1u << 1)
 #define CASE_MAP_FIRST (1u << 2)
@@ -225,7 +216,7 @@ fault_handler(int sig)
 }
 
 /* Reads through a possibly-dangling retained pointer the way the host-copy
- * paths do (hk_image.c:1523). Returns false when the access faults. */
+ * paths do. Returns false when the access faults. */
 static bool
 guarded_copy(void *dst, const void *src, size_t n)
 {
@@ -299,7 +290,7 @@ run_case(const char *name, unsigned flags)
          CASE_FAIL("application map populated stable BO mapping before bind");
    }
 
-   /* Bind (hk_image.c:1333-1335): internal mapping retained by the image. */
+   /* Bind: internal mapping retained by the image. */
    void *internal = agx_bo_map(&m.bo);
    if (internal == NULL)
       CASE_FAIL("internal map returned NULL");
@@ -356,12 +347,12 @@ run_case(const char *name, unsigned flags)
    }
    ASSERT_UNMAPPED(&mem);
 
-   /* Lifetime: host-copy read through the retained pointers (hk_image.c:1523).
+   /* Lifetime: host-copy read through the retained pointers.
     * The placed map and unmap must never touch the internal mapping. */
    uint8_t readback[CANARY_LEN];
    if (!guarded_copy(readback, image_a, CANARY_LEN))
       CASE_FAIL("host copy through the retained image mapping faults after "
-                "placed map + unmap (omacom/mesa#8 r4418383484)");
+                "placed map + unmap");
    if (memcmp(readback, pat_a, CANARY_LEN) != 0)
       CASE_FAIL("retained image mapping was destroyed or reused: canary "
                 "mismatch");
@@ -531,7 +522,7 @@ out:
 
 /* The user-required free path: two memory objects share one imported BO;
  * freeing one runs the BO-relevant hk_FreeMemory sequence (placed-unmap
- * condition, hk_device_memory.c:283, plus the real agx_bo_unreference) and
+ * condition, plus the real agx_bo_unreference) and
  * the survivor's mapping must stay valid and coherent. The heap accounting,
  * ext-BO tracking and vk_device_memory_destroy tail of hk_FreeMemory need a
  * live vk_device and stay behind the admitted device gate. */
