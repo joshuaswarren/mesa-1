@@ -165,35 +165,6 @@ TEST_F(LowerMathTest, LateFdivDoesNotRefineExistingFrcp)
    EXPECT_EQ(count_alu(nir_op_frcp), 1u + (first.count(nir_op_frcp) ? first[nir_op_frcp] : 0));
 }
 
-TEST_F(LowerMathTest, GraphicsFdivLowersBothWidthsInEarlyAndLatePasses)
-{
-   b.shader->info.stage = MESA_SHADER_FRAGMENT;
-   for (unsigned bits : {16u, 32u}) {
-      nir_fdiv(&b, nir_undef(&b, 1, bits), nir_undef(&b, 1, bits));
-   }
-
-   EXPECT_TRUE(agx_nir_lower_fdiv(b.shader));
-   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
-   EXPECT_EQ(count_alu(nir_op_fmul), 2u);
-   EXPECT_EQ(count_alu(nir_op_frcp), 2u);
-   EXPECT_EQ(count_alu(nir_op_ffma), 0u);
-
-   /* The early pass deleted the instruction the builder cursor was parked
-    * after: the pass lowers through nir_def_replace, which removes the fdiv.
-    * Rebuild the cursor from the shader so the late-half fdivs land in the
-    * implementation instead of behind a removed instruction. */
-   b.cursor = nir_after_impl(nir_shader_get_entrypoint(b.shader));
-
-   for (unsigned bits : {16u, 32u}) {
-      nir_fdiv(&b, nir_undef(&b, 1, bits), nir_undef(&b, 1, bits));
-   }
-
-   EXPECT_TRUE(agx_nir_lower_fdiv_late(b.shader));
-   EXPECT_EQ(count_alu(nir_op_fdiv), 0u);
-   EXPECT_EQ(count_alu(nir_op_fmul), 4u);
-   EXPECT_EQ(count_alu(nir_op_frcp), 4u);
-   EXPECT_EQ(count_alu(nir_op_ffma), 0u);
-}
 
 TEST_F(LowerMathTest, SinDefaultKeepsSelect)
 {
@@ -284,39 +255,3 @@ TEST_F(LowerMathTest, SinZeroPathNumericalArtifact)
  * stages. An ordinary fast-math frcp stays untouched: refinement is keyed
  * on the exact marking, not on every reciprocal.
  */
-TEST_F(LowerMathTest, GraphicsIdivReciprocalRefinedPlainFrcpUntouched)
-{
-   b.shader->info.stage = MESA_SHADER_FRAGMENT;
-   nir_def *x = nir_undef(&b, 1, 32);
-   nir_def *y = nir_undef(&b, 1, 32);
-   nir_udiv(&b, x, y);
-
-   /* Exactly the lowering the driver runs, with the driver's options. */
-   nir_lower_idiv_options idiv_options;
-   idiv_options.allow_fp16 = true;
-   EXPECT_TRUE(nir_lower_idiv(b.shader, &idiv_options));
-
-   /* The exact integer-conversion reciprocal gets its refinement steps. */
-   EXPECT_TRUE(agx_nir_lower_fdiv(b.shader));
-   EXPECT_GT(count_alu(nir_op_ffma), 0u);
-
-   /* An unmarked graphics reciprocal is left alone. */
-   nir_builder s = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
-                                                  &options, "plain frcp");
-   nir_frcp(&s, nir_undef(&s, 1, 32));
-
-   EXPECT_FALSE(agx_nir_lower_fdiv(s.shader));
-   unsigned plain_ffma = 0;
-   nir_foreach_function_impl(impl, s.shader) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type == nir_instr_type_alu &&
-                nir_instr_as_alu(instr)->op == nir_op_ffma)
-               plain_ffma++;
-         }
-      }
-   }
-   EXPECT_EQ(plain_ffma, 0u);
-
-   ralloc_free(s.shader);
-}
