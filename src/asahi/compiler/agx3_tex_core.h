@@ -679,7 +679,8 @@ bool agx3_tex_encode_image_write_rgba8_2d(
  * f5 names X, not G17G's bank. The write waits on its staging slot and
  * signals that same slot, as native run112 kick 19 does. Native459 also
  * grounds an explicit uniform heap base and immediate/GPR/uniform indices.
- * Zero image_kind retains the original immediate-index interface. AGX3C only. */
+ * Zero image_kind retains the original immediate-index interface. Encodes
+ * agx3c only: G18G compiles to it before its agx3d re-encode. */
 #define AGX3_IMAGE_WRITE_G18G_MAX_SLOT  4u
 #define AGX3_IMAGE_WRITE_G18G_MAX_INDEX 15u
 

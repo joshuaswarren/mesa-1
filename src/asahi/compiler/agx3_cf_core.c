@@ -50,7 +50,7 @@ agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                    const struct agx3_cf_source_hints hints[2], uint16_t wait_mask,
                    uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   /* AGX3c is the same compare with its class constants f32/f33 = 3/82,
+   /* agx3c (G17G and G18G) is the same compare with its class constants f32/f33 = 3/82,
     * waiting at f33 + slot (AGX3b's slot-6 f39 is the same rule): metal-nt
     * applegpu_g17g breaks a loop on ushort a == b with icmp f41 after
     * slot-8 loads, applegpu_g18g tests x < y with f34 after slot-1 loads

@@ -154,8 +154,10 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
       return false;
    if (d->two_lanes != (d->src[1].kind != AGX3_FLTNORM_SRC_NONE))
       return false;
-   /* G18 normalized16 output witnesses carry modes 2/3 in the same operand
-    * map. Its compiler emits AGX3c before the final AGX3d translation. */
+   /* G18G normalized16 output witnesses carry modes 2/3 in the same operand
+    * map; G18G compiles to agx3c before its agx3d re-encode. The M5 never asks
+    * for this form: agx_compile.c admits normalized16 output only on G17P and
+    * G18G. */
    if (d->is_16bit && enc != AGX_ISA_ENCODING_AGX3B &&
        enc != AGX_ISA_ENCODING_AGX3C && enc != AGX_ISA_ENCODING_AGX3D)
       return false;

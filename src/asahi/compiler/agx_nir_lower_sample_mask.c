@@ -927,7 +927,8 @@ struct g17p_tile_sample_state {
    nir_def *coverage;
    nir_block *block;
    /* msaa163: G18G reads the coverage as the 16-bit active-sample word (W16
-    * SR39); its backend has no AGX3C encoding of load_sample_mask. */
+    * SR39); the agx3c encoder G18G compiles through has no load_sample_mask
+    * form. */
    bool g18;
 };
 

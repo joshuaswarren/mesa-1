@@ -466,6 +466,19 @@ struct agx_device_key {
    bool emit_agx3d;
 };
 
+/*
+ * Is this a compile for the M6 GPU (G18G)? G18G compiles with the G17G key
+ * (encoding AGX_ISA_ENCODING_AGX3C, the M5's) and re-encodes as agx3d, so a
+ * gate on the encoding alone also fires on the M5. Gate M6-only workarounds
+ * and facts grounded only by G18G witnesses on this; keep the encoding gate
+ * for G17G instruction-set behaviour that G17G and G18G share.
+ */
+static inline bool
+agx_is_g18g(const struct agx_device_key *dev)
+{
+   return dev->encoding == AGX_ISA_ENCODING_AGX3C && dev->emit_agx3d;
+}
+
 struct agx_shader_key {
    /* Device info */
    struct agx_device_key dev;

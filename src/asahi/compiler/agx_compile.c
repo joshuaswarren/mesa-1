@@ -943,12 +943,12 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
 
    /* Fresh Apple G17P R16Unorm/R16Snorm pipelines use the same conversion
     * opcode with format modes 2/3. G18 R/RG/RGBA16 constant, uniform and
-    * reload witnesses use the same scalar/pair conversion through AGX3c IR.
-    * Keep other AGX3c devices closed until their native path is qualified. */
+    * reload witnesses use the same scalar/pair conversion through the G17G
+    * (agx3c) IR G18G compiles to. Keep the M5 (G17G) closed until its native
+    * path is qualified. */
    if (!norm8 &&
        !(norm16 && (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                    (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-                     b->shader->key->dev.emit_agx3d))))
+                    agx_is_g18g(&b->shader->key->dev))))
       return 0;
 
    if (nr_channels < 1 || nr_channels > 4)
@@ -1166,8 +1166,7 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
      * F16 stores consume contiguous half registers, including packed UNORM
      * targets whose physical tile representation is F16. */
     if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-         (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-          b->shader->key->dev.emit_agx3d)) &&
+         agx_is_g18g(&b->shader->key->dev)) &&
        format == AGX_FORMAT_F16 && nr_packed == 0) {
       nr_packed = compact_count;
       for (unsigned i = 0; i < compact_count; ++i) {
@@ -1209,8 +1208,7 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
     * it covered (run165); 1x relies on the implicit release at end. */
    if (b->shader->stage == MESA_SHADER_FRAGMENT &&
        !b->shader->key->fs.ignore_tib_dependencies &&
-       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-       b->shader->key->dev.emit_agx3d &&
+       agx_is_g18g(&b->shader->key->dev) &&
        (b->shader->key->fs.nr_samples == 2 || b->shader->key->fs.nr_samples == 4) &&
        agx_g18_msaa4_enabled())
       agx_signal_pix(b, 0xC);
@@ -1988,7 +1986,7 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
     * only the scalar takes this path there. G18 returns vector bytes packed
     * into one word; unpack them for both halfword and 32-bit NIR lanes. */
    const enum agx_isa_encoding encoding = b->shader->key->dev.encoding;
-   const bool is_g18 = b->shader->key->dev.emit_agx3d;
+   const bool is_g18 = agx_is_g18g(&b->shader->key->dev);
    if ((encoding == AGX_ISA_ENCODING_AGX3B ||
         (encoding == AGX_ISA_ENCODING_AGX3C &&
          (instr->def.num_components == 1 || is_g18))) &&
@@ -3549,8 +3547,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
    case nir_intrinsic_load_sample_mask:
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-          (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-           b->shader->key->dev.emit_agx3d &&
+          (agx_is_g18g(&b->shader->key->dev) &&
            (b->shader->key->fs.nr_samples == 2 ||
             b->shader->key->fs.nr_samples == 4) && agx_g18_msaa4_enabled())) {
          /* G17P/G18G covered samples are bits 0..3 of native W16 SR39, the word
@@ -3580,8 +3577,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        * the same W16 SR39 into a half and passes it unmodified to lstcol
        * (rld 210a42000000: f21=39, f10/f24=1). */
       assert((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-              (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-               b->shader->key->dev.emit_agx3d &&
+              (agx_is_g18g(&b->shader->key->dev) &&
                (b->shader->key->fs.nr_samples == 2 ||
                 b->shader->key->fs.nr_samples == 4) &&
                agx_g18_msaa4_enabled())) &&
@@ -3978,9 +3974,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       }
 
       agx_index data = agx_src_index(&instr->src[0]);
-      /* G18's admitted shuffle carries 32-bit values. Preserve the low-half
-       * bits through that path, just as for a dynamic quad broadcast. */
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+      /* G18G's admitted shuffle carries 32-bit values. Preserve the low-half
+       * bits through that path, just as for a dynamic quad broadcast. M6 only:
+       * the M5 keeps its half shuffle. */
+      if (agx_is_g18g(&b->shader->key->dev) &&
           data.size == AGX_SIZE_16 && agx_channels(data) == 1) {
          agx_index shuffled = agx_temp(b->shader, AGX_SIZE_32);
          agx_shuffle_to(b, shuffled, agx_pad_to_32(b, data), lane);
@@ -4413,12 +4410,12 @@ void
 agx_lower_agx3_mixed_width_unary(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B &&
-       !ctx->key->dev.emit_agx3d)
+       !agx_is_g18g(&ctx->key->dev))
       return;
 
    agx_foreach_instr_global_safe(ctx, I) {
-      /* G18 compiles with the AGX3C key. Admit only its unsupported scalar
-       * half floor; the other unary rewrites below remain AGX3B-only. */
+      /* G18G (M6) compiles with the G17G key. Admit only its unsupported
+       * scalar half floor; the other unary rewrites below remain AGX3B-only. */
       if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B &&
           !(I->op == AGX_OPCODE_FLOOR && I->nr_dests == 1 &&
             I->dest[0].size == AGX_SIZE_16))
@@ -5045,9 +5042,10 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
-      /* G18's mixed half-compare/full-result ISEL admits one selected
-       * immediate. Keep the compare intact and materialize the other value. */
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+      /* G18G's mixed half-compare/full-result ISEL admits one selected
+       * immediate. Keep the compare intact and materialize the other value.
+       * M6 only: the form is grounded by G18G witnesses alone. */
+      if (agx_is_g18g(&ctx->key->dev) &&
           I->op == AGX_OPCODE_ICMPSEL && I->nr_dests == 1 &&
           I->nr_srcs == 4 && !I->saturate &&
           I->dest[0].size == AGX_SIZE_32 &&
@@ -5473,8 +5471,8 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          /* G18G's half FSEL is grounded only with all four sources in half
           * registers (agx3_alu_fcmp_select_half_gpu1). Compare slots hold
           * minifloats, so materialize their half value; select slots are
-          * bit patterns. */
-         if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          * bit patterns. M6 only. */
+         if (agx_is_g18g(&ctx->key->dev) &&
              I->op == AGX_OPCODE_FCMPSEL && I->dest[0].size == AGX_SIZE_16) {
             for (unsigned s = 0; s < 4; ++s) {
                agx_index v = I->src[s];
@@ -9552,15 +9550,13 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    if (ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble)
       return false;
 
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-       ctx->key->dev.emit_agx3d && ctx->stage == MESA_SHADER_FRAGMENT &&
+   if (agx_is_g18g(&ctx->key->dev) && ctx->stage == MESA_SHADER_FRAGMENT &&
        ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
        (ctx->key->fs.nr_samples == 2 || ctx->key->fs.nr_samples == 4))
       return agx3_order_g18_msaa_tile_ops(ctx);
    /* G18's native two-target fragment uses the same descending stores and
     * per-target class pairs. Keep its qualification to one-sample shaders. */
-   const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-                    ctx->key->dev.emit_agx3d && ctx->key->fs.nr_samples <= 1;
+   const bool g18 = agx_is_g18g(&ctx->key->dev) && ctx->key->fs.nr_samples <= 1;
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18)
       return false;
 
@@ -10747,11 +10743,11 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
          stack_size = align(ctx->scratch_size_B, 4);
 
-      /* G18 native pressure launches publish the static TPS extent in bytes,
+      /* G18G native pressure launches publish the static TPS extent in bytes,
        * rounded to 16. COPY/RLD offsets address halves; SPECTPR divides this
        * byte count by four. The legacy word count and dynamic-stack header
-       * do not describe this frame. */
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C)
+       * do not describe this frame. M6 only: no M5 launch grounds it. */
+      if (agx_is_g18g(&ctx->key->dev))
          stack_size = align(ctx->scratch_size_B, 16);
 
       if (ctx->is_preamble)
@@ -12932,12 +12928,12 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
     * G17P with a byte offset in the element-index field, a fourfold
     * over-stride for a 32-bit element.
     *
-    * G18's AGX3C compiler path has the same element-index convention before
-    * transcoding to AGX3D. Its address widening is supported by the native
-    * half COPY and CLR forms, so use real element indices instead of relying
-    * on an over-sized threadgroup allocation. Keep unqualified G17G shared
-    * memory behavior unchanged. */
-   if ((is_g17p || key->dev.emit_agx3d) &&
+    * G18G compiles to the G17G encoding (agx3c) before its agx3d re-encode and
+    * has the same element-index convention. Its address widening is supported
+    * by the native half COPY and CLR forms, so use real element indices
+    * instead of relying on an over-sized threadgroup allocation. Keep
+    * unqualified M5 (G17G) shared memory behavior unchanged. */
+   if ((is_g17p || agx_is_g18g(&key->dev)) &&
        !nir->info.shared_element_index_agx)
       NIR_PASS(_, nir, agx_nir_lower_shared_element_index);
 

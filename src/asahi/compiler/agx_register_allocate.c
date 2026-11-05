@@ -375,8 +375,7 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
     * G18G, which names a seven-bit destination like the half COPY. Other
     * instructions can still allocate the full register file. */
    if ((rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-        (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-         rctx->shader->key->dev.emit_agx3d)) &&
+        agx_is_g18g(&rctx->shader->key->dev)) &&
        I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_UNIFORM)
       limit = MIN2(limit, AGX3_COPY_REG16_DEST_HALVES);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&

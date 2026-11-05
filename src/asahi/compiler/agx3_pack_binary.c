@@ -3019,9 +3019,10 @@ agx3_emit_texture_sample_g17g(struct util_dynarray *emission,
    const bool g18g_colour_level = g18g_binding || (g18g &&
       enc == AGX_ISA_ENCODING_AGX3C && agx3_g18g_colour_sample(I) &&
       ((!vertex_stage && !compute_stage) || explicit_lod));
-   /* Experimental combination: unbiased query selector is proven by949;
-    * register-bias semantics still require independent hardware readback. */
-   const bool gpu1_query_lod = enc == AGX_ISA_ENCODING_AGX3C && query_lod &&
+   /* Experimental combination: unbiased query selector is proven by949 (on
+    * the M6); register-bias semantics still require independent hardware
+    * readback. G18G only: no M5 run grounds this form. */
+   const bool gpu1_query_lod = g18g && enc == AGX_ISA_ENCODING_AGX3C && query_lod &&
       I->nr_srcs == 6 && I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE && !array && !cube &&
       !vertex_stage && !compute_stage && !min_lod && !I->sparse &&
@@ -6210,7 +6211,7 @@ agx3_map_reduce_op(enum agx_simd_op in, enum agx3_subgroup_reduce_op *out)
 static bool
 agx3_emit_subgroup_reduce(struct util_dynarray *emission,
                           enum agx_isa_encoding enc, const agx_instr *I,
-                          uint16_t wait_mask)
+                          uint16_t wait_mask, bool g18g)
 {
    const bool quad = I->op == AGX_OPCODE_QUAD_REDUCE ||
                      I->op == AGX_OPCODE_QUAD_PREFIX;
@@ -6227,11 +6228,12 @@ agx3_emit_subgroup_reduce(struct util_dynarray *emission,
    enum agx3_subgroup_reduce_op op;
    if (!agx3_map_reduce_op(I->simd_op, &op))
       return false;
-   /* G18 only has a witnessed embedded wait for full-width SIMD iadd.
+   /* G18G only has a witnessed embedded wait for full-width SIMD iadd.
     * Retire the full wait on our destination, whose pending producers and
     * readers are covered by the scheduler. An identity preserves an in-place
-    * source; an unrelated r0 could still have an unretired producer. */
-   const bool retire_wait = enc == AGX_ISA_ENCODING_AGX3C && wait_mask &&
+    * source; an unrelated r0 could still have an unretired producer. M6
+    * only: the M5 keeps the embedded wait. */
+   const bool retire_wait = g18g && enc == AGX_ISA_ENCODING_AGX3C && wait_mask &&
       (quad || half || I->simd_op != AGX_SIMD_OP_IADD);
    const struct agx3_subgroup_reduce_desc d = {
       .quad = quad,
@@ -14033,8 +14035,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                subgroup_stage;
             /* msaa163: Apple's G18 4x fragment reads the covered-sample word
              * the same way, rld 210a42000000 = W16 SR39 into a half, and
-             * passes it straight to lstcol. Only a G18G four-sample fragment
-             * under AGX_G18_MSAA4 reads it on AGX3C. */
+             * passes it straight to lstcol. Of the agx3c-encoded compiles,
+             * only a G18G four-sample fragment under AGX_G18_MSAA4 reads it. */
             const bool g18_msaa4_coverage =
                enc == AGX_ISA_ENCODING_AGX3C && sample_coverage &&
                agx3_g18_msaa4_tile_shader(ctx);
@@ -14476,7 +14478,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->op == AGX_OPCODE_QUAD_REDUCE ||
              I->op == AGX_OPCODE_SIMD_PREFIX ||
              I->op == AGX_OPCODE_QUAD_PREFIX) {
-            if (!agx3_emit_subgroup_reduce(emission, enc, I, wait))
+            if (!agx3_emit_subgroup_reduce(emission, enc, I, wait,
+                                           agx_is_g18g(&ctx->key->dev)))
                AGX3_REFUSE(I);
             continue;
          }
@@ -18414,8 +18417,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                const enum agx3_alu_hint hints[2]={
                   agx3_post_ra_hint(I->src[0]),agx3_post_ra_hint(I->src[1])};
                uint8_t bytes[AGX3_ALU_MAX_LENGTH],len=0;
-               /* The compact form is grounded for G17P only. G18 also
-                * reaches this dispatch as AGX3C before transcoding. */
+               /* The compact form is grounded for G17P only. G18G also
+                * reaches this dispatch, with the agx3c (G17G) encoding,
+                * before its agx3d re-encode. */
                const bool native_forms =
                   enc == AGX_ISA_ENCODING_AGX3B;
                const bool encoded = native_forms
@@ -19697,9 +19701,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             AGX3_REFUSE(I);
 
          /* An immediate has no source dependency but can still overwrite a
-          * pending result. G18 immediate moves have no embedded wait form. */
+          * pending result. G18G immediate moves have no embedded wait form; the
+          * M5 keeps its embedded wait. */
          const bool retire_immediate_wait =
-            enc == AGX_ISA_ENCODING_AGX3C && I->op == AGX_OPCODE_MOV_IMM &&
+            enc == AGX_ISA_ENCODING_AGX3C && agx_is_g18g(&ctx->key->dev) &&
+            I->op == AGX_OPCODE_MOV_IMM &&
             I->nr_dests == 1 &&
             agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) && wait;
          const uint16_t alu_wait = retire_immediate_wait ? 0 : wait;
