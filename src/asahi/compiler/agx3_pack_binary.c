@@ -17177,10 +17177,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * when global IDs and pushed extents share a scoreboard slot. */
             const bool retired =
                wait == 0 || agx3_retire_result_wait(emission, enc, I, wait);
-            if (!retired ||
-                !agx3_copy_encode_uniform_to_reg32(enc, I->dest[0].value,
-                                                   I->src[0].value, bytes,
-                                                   &len) ||
+            const bool encoded =
+               agx_is_g18g(&ctx->key->dev)
+                  ? agx3_copy_encode_uniform_to_reg32_g18g(
+                       I->dest[0].value, I->src[0].value, bytes, &len)
+                  : agx3_copy_encode_uniform_to_reg32(
+                       enc, I->dest[0].value, I->src[0].value, bytes, &len);
+            if (!retired || !encoded ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             outstanding &= (uint16_t)~wait;

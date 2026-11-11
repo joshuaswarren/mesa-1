@@ -290,3 +290,36 @@ agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
                             overrides,
                             AGX3_COPY_ARRAY_SIZE(overrides), out, len);
 }
+
+bool
+agx3_copy_encode_uniform_to_reg32_g18g(uint16_t dest_half,
+                                       uint16_t uniform_half,
+                                       uint8_t out[AGX3_COPY_MAX_LENGTH],
+                                       uint8_t *len)
+{
+   if (dest_half < AGX3_COPY_REG16_DEST_HALVES)
+      return agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX3C,
+                                               dest_half, uniform_half, out,
+                                               len);
+   if (out == NULL || len == NULL || (dest_half & 1) || dest_half + 2 > 256 ||
+       (uniform_half & 1) || uniform_half + 2 > 512)
+      return false;
+
+   /* metal-nt -arch applegpu_g18g, 120 live values plus 48 loop-carried
+    * accumulators seeded from a constant struct: the seed copy that lands
+    * past half 128 is the compact form's vector with f42=1, which Apple
+    * order composes as the ten-byte form, not the compact one:
+    *
+    *   copy r68, u51   a3 08 66 0a 10 00 00 00 30 00   f2=136 f17=102
+    */
+   const struct agx3_field_kv overrides[] = {
+      KV(2, dest_half),
+      KV(17, uniform_half),
+      KV(42, 1),
+   };
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "copy", 1,
+                            agx3c_copy_baseline,
+                            AGX3_COPY_ARRAY_SIZE(agx3c_copy_baseline),
+                            overrides, AGX3_COPY_ARRAY_SIZE(overrides), out,
+                            len);
+}
