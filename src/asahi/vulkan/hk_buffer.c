@@ -138,11 +138,16 @@ hk_bind_scratch(struct hk_device *dev, struct agx_va *va, unsigned offset_B,
    if (ret)
       return errno == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN;
 
-   /* Map read-only scratch to the secondary (top half) VA range */
-   ret = agx_bo_bind(&dev->dev, dev->dev.zero_bo,
-                     addr + dev->dev.sparse_ro_offset, size_B, 0, flags);
-   if (ret)
-      return errno == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN;
+   /* Map read-only scratch to the secondary (top half) VA range. Skipped
+    * while sparse is unsupported: sparse_ro_offset == 0 means the whole
+    * window is the primary heap and there is no secondary range. */
+   if (dev->dev.sparse_ro_offset) {
+      ret = agx_bo_bind(&dev->dev, dev->dev.zero_bo,
+                        addr + dev->dev.sparse_ro_offset, size_B, 0, flags);
+      if (ret)
+         return errno == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY
+                                : VK_ERROR_UNKNOWN;
+   }
 
    return VK_SUCCESS;
 }
@@ -183,6 +188,13 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
 
    if (pCreateInfo->size > HK_MAX_BUFFER_SIZE)
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   if ((pCreateInfo->flags &
+        (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
+         VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
+         VK_BUFFER_CREATE_SPARSE_ALIASED_BIT)) &&
+       !hk_device_physical(dev)->vk.supported_features.sparseBinding)
+      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
 
    buffer =
       vk_buffer_create(&dev->vk, pCreateInfo, pAllocator, sizeof(*buffer));
@@ -455,13 +467,16 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
          if (ret)
             return VK_ERROR_UNKNOWN;
 
-         /* Upper mapping: read-only */
-         ret =
-            agx_bo_bind(&dev->dev, mem->bo,
-                        buffer->vk.device_address + dev->dev.sparse_ro_offset,
-                        size, pBindInfos[i].memoryOffset, DRM_ASAHI_BIND_READ);
-         if (ret)
-            return VK_ERROR_UNKNOWN;
+         /* Upper mapping: read-only, only while the sparse alias exists. */
+         if (dev->dev.sparse_ro_offset) {
+            ret = agx_bo_bind(&dev->dev, mem->bo,
+                              buffer->vk.device_address +
+                                 dev->dev.sparse_ro_offset,
+                              size, pBindInfos[i].memoryOffset,
+                              DRM_ASAHI_BIND_READ);
+            if (ret)
+               return VK_ERROR_UNKNOWN;
+         }
       } else {
          assert(buffer->vk.device_address == 0);
          buffer->vk.device_address =

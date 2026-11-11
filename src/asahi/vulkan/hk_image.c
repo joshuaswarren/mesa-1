@@ -1771,6 +1771,13 @@ hk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
       return wsi_common_create_swapchain_image(&pdev->wsi_device, pCreateInfo,
                                                pImage);
 
+   if ((pCreateInfo->flags &
+        (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+         VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+         VK_IMAGE_CREATE_SPARSE_ALIASED_BIT)) &&
+       !pdev->vk.supported_features.sparseBinding)
+      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+
    image = vk_zalloc2(&dev->vk.alloc, pAllocator, sizeof(*image), 8,
                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!image)

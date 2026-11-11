@@ -77,7 +77,9 @@ agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
    if (unbind) {
       /* Sparse/capture-replay VAs may contain a lower read-write mapping and
        * its upper read-only shadow. Clear both, including unbound holes, in
-       * one VM_BIND transaction so neither half can survive VA reuse. */
+       * one VM_BIND transaction so neither half can survive VA reuse. With
+       * sparse_ro_offset unset the shadow is the same range, so send one
+       * UNBIND rather than a duplicate. */
       assert(!(va->flags & AGX_VA_USC));
       assert(va->size_B >= dev->guard_size);
       const uint64_t bound_size_B = va->size_B - dev->guard_size;
@@ -95,7 +97,7 @@ agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
       };
 
       /* Do not recycle an address if either stale mapping could remain. */
-      if (dev->ops.bo_bind(dev, ops, ARRAY_SIZE(ops)))
+      if (dev->ops.bo_bind(dev, ops, dev->sparse_ro_offset ? 2 : 1))
          return;
    }
 

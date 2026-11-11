@@ -327,6 +327,11 @@ hk_get_device_features(
    const struct vk_device_extension_table *supported_extensions,
    struct vk_features *features)
 {
+   /* The read-only sparse alias exists only while sparse_ro_offset is set.
+    * Without it an unbound sparse page maps the shared writable scratch BO,
+    * so non-resident-strict reads cannot hold; do not advertise sparse. */
+   const bool sparse_usable = dev->sparse_ro_offset != 0;
+
    *features = (struct vk_features){
       /* Vulkan 1.0 */
       .robustBufferAccess = true,
@@ -384,9 +389,9 @@ hk_get_device_features(
       .shaderFloat64 = false,
       .shaderInt64 = true,
       .shaderInt16 = true,
-      .shaderResourceResidency = true,
+      .shaderResourceResidency = sparse_usable,
       .shaderResourceMinLod = true,
-      .sparseBinding = true,
+      .sparseBinding = sparse_usable,
 
       /* We probably could advertise multisampled sparse but we don't have a use
        * case yet and it isn't trivial.
@@ -394,9 +399,9 @@ hk_get_device_features(
       .sparseResidency2Samples = false,
       .sparseResidency4Samples = false,
       .sparseResidency8Samples = false,
-      .sparseResidencyAliased = true,
-      .sparseResidencyImage2D = true,
-      .sparseResidencyBuffer = true,
+      .sparseResidencyAliased = sparse_usable,
+      .sparseResidencyImage2D = sparse_usable,
+      .sparseResidencyBuffer = sparse_usable,
 
       /* This needs investigation. */
       .sparseResidencyImage3D = false,
@@ -933,7 +938,8 @@ hk_get_device_features(
        * window is split for the RO alias exactly as AGX2 is. Sparse texture
        * updates flush the SSTT with a HAL200 CDM record, so other native
        * chips do not advertise it. */
-      const bool sparse = dev->chip == AGX_CHIP_G17P;
+      const bool sparse = dev->chip == AGX_CHIP_G17P &&
+                          dev->sparse_ro_offset != 0;
       features->shaderResourceResidency = sparse;
       features->sparseBinding = sparse;
       features->sparseResidencyAliased = false;
@@ -1300,7 +1306,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .nonCoherentAtomSize = 64,
 
       /* Vulkan 1.0 sparse properties */
-      .sparseResidencyNonResidentStrict = true,
+      .sparseResidencyNonResidentStrict = dev->sparse_ro_offset != 0,
       .sparseResidencyAlignedMipSize = false,
       .sparseResidencyStandard2DBlockShape = true,
 
@@ -2097,8 +2103,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
 
    VkQueueFlags queue_flags =
-      VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT |
-      VK_QUEUE_SPARSE_BINDING_BIT;
+      VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+   if (pdev->vk.supported_features.sparseBinding)
+      queue_flags |= VK_QUEUE_SPARSE_BINDING_BIT;
    if (agx_native_graphics(&pdev->dev)) {
       /* Graphics, compute and transfers use the native HAL200 queue path.
        * Sparse binding rides the shared per-page VM_BIND path; advertise it
