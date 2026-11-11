@@ -701,15 +701,19 @@ hk_flush_bind(struct hk_bind_builder *b)
 
    util_dynarray_append(&b->binds, op);
 
-   /* Shadow a read-only mapping to the upper half */
-   op.flags &= ~DRM_ASAHI_BIND_WRITE;
-   op.addr = agx_rw_addr_to_ro(&b->dev->dev, op.addr);
+   /* Shadow a read-only mapping to the upper half. Skipped while sparse is
+    * unsupported: sparse_ro_offset == 0 makes the shadow address equal the
+    * primary mapping, so the duplicate bind buys nothing. */
+   if (b->dev->dev.sparse_ro_offset) {
+      op.flags &= ~DRM_ASAHI_BIND_WRITE;
+      op.addr = agx_rw_addr_to_ro(&b->dev->dev, op.addr);
 
-   if (!b->mem) {
-      op.handle = b->dev->dev.zero_bo->uapi_handle;
+      if (!b->mem) {
+         op.handle = b->dev->dev.zero_bo->uapi_handle;
+      }
+
+      util_dynarray_append(&b->binds, op);
    }
-
-   util_dynarray_append(&b->binds, op);
 
    return VK_SUCCESS;
 }

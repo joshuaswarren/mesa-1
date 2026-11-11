@@ -1213,7 +1213,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    const uint64_t user_limit = agx_chip_g17_m5(dev->chip)
       ? AGX_M5_DATA_END
       : agx_va_user_limit(dev->chip, heap_below_usc, vm_create.kernel_start);
-   uint64_t user_size = user_limit - user_start;
+   uint64_t user_size;
 
    int ret = dev->ops.simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
@@ -1235,57 +1235,28 @@ agx_open_device(void *memctx, struct agx_device *dev)
    for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
       list_inithead(&dev->bo_cache.buckets[i]);
 
-   /* Round the user VA window to a power-of-two window whose top half can be
-    * addressed by a single bit, so sparse buffers can be aliased read-only at
-    * +sparse_ro_offset.  This is a hard failure rather than an assert: the
-    * reduction depends on the kernel-reported window, so a geometry we cannot
-    * split must be reported, not tripped over in a debug build and silently
-    * miscomputed in a release one.
-    */
-   if (!agx_va_split_user_window(user_start, user_size, &user_start,
-                                 &user_size)) {
-      fprintf(stderr,
-              "Cannot split the kernel user VA window [%#llx, %#llx) for "
-              "sparse aliasing\n",
-              (unsigned long long)dev->params.vm_start,
-              (unsigned long long)dev->params.vm_end);
-      goto fail;
-   }
-
-   /* Every vkAllocateMemory() binds a read-only shadow of the allocation at
-    * +sparse_ro_offset, unconditionally, "in case this is used for a sparse
-    * resident buffer" (hk_device_memory.c).  So the ALIAS window
-    * [user_start + user_size, user_start + 2 * user_size) is live for every
-    * app allocation, not just sparse ones, and the kernel rejects a bind that
-    * leaves the user range or touches the kernel range (file.rs gem_bind:
-    * "not contained in user range" / "intrudes in kernel range", both EINVAL).
-    *
-    * agx_va_split_user_window() only sizes the window against its own start;
-    * it never sees kernel_start, so nothing has been checking that the alias
-    * half still fits underneath it.  At the default base it fits with three
-    * orders of magnitude to spare, which is why this has never fired.  Move
-    * the USC window to 2^40 and the split yields a 1TiB user heap at
-    * 0x20000000000 whose alias reaches 0x40000000000 -- past the top of the
-    * user range and straight through the kernel's 32GiB reservation -- and
-    * the FIRST app allocation fails with VK_ERROR_UNKNOWN before anything is
-    * ever submitted.
-    *
-    * Halve until the alias fits.  This is a no-op for the default layout
-    * (0x2000000000 + 2 * 0x1000000000 = 0x4000000000, far below a kernel
-    * range starting at 0x3f7fff_f8000), so it does not perturb the baseline. */
-   while (user_size > 0 && user_start + 2 * user_size > user_limit)
-      user_size /= 2;
-
+   /* Honeykrisp refuses sparse buffers, so no read-only alias is needed and
+   * the main heap spans the whole rounded kernel user window instead of
+   * half of it. sparse_ro_offset stays zero, which gates every alias
+   * consumer (the queue shadow bind, the read-only scratch half of
+   * hk_bind_scratch, the read-only upper mapping when binding memory to a
+   * sparse buffer, and the read-only address fixup, which returns the
+   * address unchanged at offset zero). Unbound pages of sparse-binding or
+   * BDA capture-replay buffers now read whatever is mapped instead of
+   * zeroes; sparse residency is not exposed, so no conforming app can rely
+   * on the old behaviour. Restore this rounding-split with the sparse
+   * support itself: agx_va_split_user_window() rounds the window and cuts
+   * it in half so a single address bit distinguishes the read-only alias.
+   */
+   user_start = util_next_power_of_two64(user_start);
+   user_size = user_start < user_limit ? user_limit - user_start : 0;
    if (user_size == 0) {
-      fprintf(stderr,
-              "User VA window at %#llx leaves no room for the sparse "
-              "read-only alias below %#llx\n",
-              (unsigned long long)user_start,
-              (unsigned long long)user_limit);
+      fprintf(stderr, "User VA window [%#llx, %#llx) leaves no heap\n",
+              (unsigned long long)user_start, (unsigned long long)user_limit);
       goto fail;
    }
 
-   dev->sparse_ro_offset = user_size;
+   dev->sparse_ro_offset = 0;
    dev->main_heap_base = user_start;
    dev->main_heap_size = user_size;
 

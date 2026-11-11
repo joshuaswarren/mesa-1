@@ -313,16 +313,21 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
             : mem->bo->va->addr;
    }
 
-   /* Shadow map in case this is used for a sparse resident buffer */
-   int ret = agx_bo_bind(&dev->dev, mem->bo,
-                         agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
-                         mem->bo->size, 0, DRM_ASAHI_BIND_READ);
-   if (ret) {
-      /* The bind fails once the VM carries a sticky error. */
-      agx_bo_unreference(&dev->dev, mem->bo);
-      mem->bo = NULL;
-      vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
-      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   /* Shadow map in case this is used for a sparse resident buffer. Skipped
+    * while sparse is unsupported: with sparse_ro_offset == 0 the shadow
+    * address equals the primary mapping, so binding it twice only doubles
+    * the per-allocation bind cost and halves the usable heap budget. */
+   if (dev->dev.sparse_ro_offset) {
+      int ret = agx_bo_bind(&dev->dev, mem->bo,
+                            agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
+                            mem->bo->size, 0, DRM_ASAHI_BIND_READ);
+      if (ret) {
+         /* The bind fails once the VM carries a sticky error. */
+         agx_bo_unreference(&dev->dev, mem->bo);
+         mem->bo = NULL;
+         vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
    }
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
