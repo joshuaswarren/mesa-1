@@ -43,6 +43,12 @@ extern "C" {
 #include "agx3_tile_core.h"
 #include "agx3_pixel_core.h"
 #include "agx3_select_core.h"
+extern "C" {
+#include "agx3_compose/agx3_decode.h"
+#include "agx3_transcode.h"
+#include "asahi/isa/disasm.h"
+#include "agx3_binder.h"
+}
 #include "agx3_vary_core.h"
 #include "agx3_zs_core.h"
 #include "probes/g17p-sparse-mrt.h"
@@ -12163,6 +12169,78 @@ TEST_F(AGX3PackBinary, G17PUniformWordMoveReachesHighDestinations)
    }
 }
 
+/*
+ * The same move on G18G, which packs AGX3C words and re-encodes them with
+ * agx3_transcode_agx3d(). llama.cpp's Vulkan prompt-processing shaders were
+ * refused on an M6 Mac mini with
+ *
+ *   agx3_pack_binary.c:17185: no grounded AGX3 encoding for bitop
+ *     [d32:reg130 s0=32:uni8 s1=16:imm#0 cond=0 nest=0 chan=1 mask=0x0 ...]
+ *
+ * Apple's applegpu_g18g compiler encodes such a destination in a ten-byte
+ * copy with f42=1 (native/g18g/uniform-copy-high-registers.md). Half 136
+ * from uniform 102 is that witness verbatim.
+ */
+TEST_F(AGX3PackBinary, G18GUniformWordMoveReachesHighDestinations)
+{
+   static const uint8_t apple[] = {0xa3, 0x08, 0x66, 0x0a, 0x10,
+                                   0x00, 0x00, 0x00, 0x30, 0x00};
+   for (unsigned dest : {2u, 126u, 128u, 130u, 136u, 254u}) {
+      for (unsigned uniform : {8u, 102u}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+         key.dev.emit_agx3d = true;
+         agx_bitop_to(b, agx_register(dest, AGX_SIZE_32),
+                      agx_uniform(uniform, AGX_SIZE_32), agx_zero(),
+                      AGX3_SEL_TT_MOV);
+         agx_stop(b);
+
+         struct util_dynarray bin;
+         util_dynarray_init(&bin, mem_ctx);
+         ASSERT_TRUE(agx3_pack_binary(b->shader, &bin))
+            << "dest half=" << dest << " uniform=" << uniform;
+         const char *why = NULL;
+         unsigned at = 0;
+         ASSERT_TRUE(agx3_transcode_agx3d(&bin, 0, &why, &at))
+            << "dest half=" << dest << ": " << (why ? why : "") << " at "
+            << at;
+
+         const uint8_t *code = (const uint8_t *)bin.data;
+         const int32_t ep0 = agx3_form_index(&agx3d_table, "copy", 0);
+         const int32_t ep1 = agx3_form_index(&agx3d_table, "copy", 1);
+         const int32_t ep2 = agx3_form_index(&agx3d_table, "copy", 2);
+         ASSERT_GE(ep0, 0);
+         ASSERT_GE(ep1, 0);
+         ASSERT_GE(ep2, 0);
+         bool found_copy = false;
+         for (unsigned off = 0; off < bin.size;) {
+            const signed n =
+               agx3d_instr_length(code + off, bin.size - off, NULL);
+            ASSERT_GT(n, 0) << "dest half=" << dest << " at " << off;
+            uint64_t fields[AGX3_MAX_FIELDS];
+            const int32_t form =
+               agx3_decode(&agx3d_table, code + off, n, "copy", fields);
+            if (form == ep0 || form == ep1 || form == ep2) {
+               found_copy = true;
+               EXPECT_EQ(fields[2], dest)
+                  << "dest half=" << dest << " uniform=" << uniform;
+               EXPECT_EQ(fields[17], uniform)
+                  << "dest half=" << dest << " uniform=" << uniform;
+               EXPECT_EQ(agx3d_table.forms[form].size,
+                         dest < AGX3_COPY_REG16_DEST_HALVES ? 4u : 10u)
+                  << "dest half=" << dest;
+               if (dest == 136 && uniform == 102)
+                  EXPECT_EQ(std::vector<uint8_t>(code + off, code + off + n),
+                            std::vector<uint8_t>(apple, apple + sizeof(apple)));
+               off = bin.size;
+               break;
+            }
+            off += n;
+         }
+         ASSERT_TRUE(found_copy) << "dest half=" << dest << " uniform=" << uniform;
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, UniformStoreWaitPreservesUnrelatedPendingR0)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -13930,6 +14008,41 @@ TEST_F(AGX3PackBinary, HalfExp2MatchesNativeNegateAndRefusesAbsolute)
    agx_exp2_to(b, agx_register(2, AGX_SIZE_16), src);
    agx_stop(b);
    EXPECT_TRUE(pack(b, false).empty());
+}
+
+/*
+ * llama.cpp soft_max_f32 on G18G computes exp2 in place on r67 (half 134)
+ * and the shader was refused. Apple's applegpu_g18g encoder fills the whole
+ * register file; the words below are from native/g18g/exp2-high-registers.md
+ * and equal the agx3c composition the G18G transcode passes through.
+ */
+TEST_F(AGX3PackBinary, G17GExp2EncodesHighRegisters)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   agx_index dst = agx_register(132, AGX_SIZE_32);
+   dst.cache = true;
+   agx_index src = agx_register(132, AGX_SIZE_32);
+   src.discard = true;
+   agx_exp2_to(b, dst, src);
+   agx_stop(b);
+   const auto in_place = pack(b);
+   const uint8_t apple_in_place[] = {
+      0x27,0x00,0x0c,0x1a,0x2a,0x20,0xa5,0x0a,0x32,0x00,
+   };
+   ASSERT_GE(in_place.size(), sizeof(apple_in_place));
+   EXPECT_EQ(memcmp(in_place.data(), apple_in_place, sizeof(apple_in_place)), 0);
+
+   b = builder(AGX_ISA_ENCODING_AGX3C);
+   src = agx_register(170, AGX_SIZE_32);
+   src.discard = true;
+   agx_exp2_to(b, agx_register(128, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto high_dest = pack(b);
+   const uint8_t apple_high_dest[] = {
+      0x27,0x02,0x0c,0x6a,0x22,0x20,0xa5,0x02,0x32,0x00,
+   };
+   ASSERT_GE(high_dest.size(), sizeof(apple_high_dest));
+   EXPECT_EQ(memcmp(high_dest.data(), apple_high_dest, sizeof(apple_high_dest)), 0);
 }
 
 TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndModifiers)

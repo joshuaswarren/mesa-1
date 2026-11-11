@@ -166,6 +166,35 @@ main(void)
    expect_refused("conflicting source lifetime", agx3_funop_encode_g17g(
       AGX3_FUNOP_LOG2, 0, 2, false, false, false, 0, &invalid_runtime, b, &len));
 
+   /* Apple applegpu_g18g f32exp2 words on halves 128 and up, from
+    * native/g18g/exp2-high-registers.md. The agx3c table composes the same
+    * fields to the same bytes, so the G18G transcode passes them through.
+    * llama.cpp soft_max reaches half 134 in place. */
+   static const struct {
+      uint16_t dest, src;
+      bool dest_cache;
+      const char *hex;
+   } high_vectors[] = {
+      {134,  90, true,  "37020caa2a20a50a3100"},
+      { 38, 248, false, "370004ea2220a52a3300"},
+      {128, 170, false, "27020c6a2220a5023200"},
+      {132, 132, true,  "27000c1a2a20a50a3200"},
+      {166, 166, true,  "37020c5a2a20a52a3200"},
+   };
+   for (unsigned i = 0; i < sizeof(high_vectors) / sizeof(high_vectors[0]); ++i) {
+      const struct agx3_funop_runtime runtime = {
+         .dest_cache = high_vectors[i].dest_cache,
+         .src_discard = true,
+      };
+      const bool ok = agx3_funop_encode_g17g(
+         AGX3_FUNOP_EXP2, high_vectors[i].dest, high_vectors[i].src, false,
+         false, false, 0, &runtime, b, &len);
+      expect("G18G high-register exp2", ok, b, len, high_vectors[i].hex);
+   }
+   const struct agx3_funop_runtime dead_src = {.src_discard = true};
+   expect_refused("exp2 past the register file", agx3_funop_encode_g17g(
+      AGX3_FUNOP_EXP2, 256, 0, false, false, false, 0, &dead_src, b, &len));
+
    /* AGX3b, corpus/g16g fu_* kernels and corpus_frag/g16g dfd_func1. */
    static const struct vec vb[] = {
       {"fu_floor", AGX3_FUNOP_FLOOR, 0, 0, false, false, false,

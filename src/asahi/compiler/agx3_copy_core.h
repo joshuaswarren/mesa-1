@@ -106,6 +106,18 @@ bool agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
                                        uint8_t *len);
 
 /*
+ * agx3_copy_encode_uniform_to_reg32() for G18G, which packs AGX3C words that
+ * agx3_transcode_agx3d() re-encodes. Past half 128 Apple's applegpu_g18g
+ * compiler emits the ten-byte copy with f42=1, not the compact form, so this
+ * emits the eight-byte AGX3C ep1 carrying that vector
+ * (native/g18g/uniform-copy-high-registers.md). G17 never runs the carrier.
+ */
+bool agx3_copy_encode_uniform_to_reg32_g18g(uint16_t dest_half,
+                                            uint16_t uniform_half,
+                                            uint8_t out[AGX3_COPY_MAX_LENGTH],
+                                            uint8_t *len);
+
+/*
  * Encode `copy dest16, uniform16` -- the same move at 16 bits.
  *
  * Mesa keeps booleans and half-precision values in 16-bit halves, and
