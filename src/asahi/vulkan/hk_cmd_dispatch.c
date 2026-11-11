@@ -422,13 +422,15 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
       if (cs->current == cs->strong_flush_end)
          return;
 
-      /* G18G grounds exactly one CDM barrier word, the flag-free 0x60000160
-       * (agx3_cdm_barrier_flags_grounded); every native 26A434 capture holds
-       * only that word (2 occurrences, both launch tails), and flags=5 is
-       * witnessed on G15-G17 only. Every native launch already ends in that
-       * record, so there is nothing to strengthen and no grounded strong record
-       * to append: leave the stream as is. This does not claim write
-       * visibility beyond what the weak tail gives; see the rel16 notes. */
+      /* Every native 26A434 G18G capture holds only the flag-free 0x60000160
+       * (2 occurrences, both launch tails).  The flags=5 strong flush is
+       * grounded for G18G as a chained-launch tail (rel24b+), but a
+       * standalone barrier with no launch between them is not a shape
+       * Apple's CDM emitter produces. Every native launch already ends in
+       * that record, so there is nothing to strengthen and no grounded
+       * standalone strong record to append: leave the stream as is. This
+       * does not claim write visibility beyond what the weak tail gives;
+       * see the rel16 notes. */
       if (dev->dev.chip == AGX_CHIP_G18G)
          return;
 

@@ -566,8 +566,9 @@ agx3_cdm_link_padding_unpack(
 
 /* Exact four-byte barrier emitters are pinned in G15G/G15X, G16G/G16X,
  * G17P, G17G and G17X.  G16P and G17A remain unwitnessed here.  G18G's
- * compute-add capture ends its dispatch with the flag-free 0x60000160, which
- * is the only G18G barrier admitted: see agx3_cdm_barrier_flags_grounded. */
+ * compute-add capture ends its dispatch with the flag-free 0x60000160,
+ * and rel24b+ hardware runs pin flags=5 as the strong-flush chaining word:
+ * see agx3_cdm_barrier_flags_grounded. */
 static inline bool
 agx3_cdm_barrier_target_grounded(enum agx_chip chip)
 {
@@ -602,10 +603,11 @@ agx3_cdm_barrier_flags_grounded(enum agx_chip chip, uint8_t flags)
    case AGX_CHIP_G17C:
       return true;
    case AGX_CHIP_G18G:
-      /* Only the flag-free word is captured on G18G (compute-add).  Other
-       * flags are not inferred from the G17G HAL300 layout; they fail closed
-       * until a G18G capture shows them. */
-      return flags == 0;
+      /* The flag-free word is captured on G18G (compute-add), and flags=5
+       * is grounded on hardware from rel24b+ chained launches: the weak
+       * flag-free tail does not give write visibility and flag-free chains
+       * hung the CDM (hk_cmd_dispatch.c). */
+      return flags == 0 || flags == 5;
    default:
       return flags == 0 || flags == 0x5;
    }

@@ -269,7 +269,7 @@ agx3_g17g_native_compute_dispatch_append(
       return false;
    uint8_t staged[AGX3_G17G_NATIVE_COMPUTE_DISPATCH_SIZE];
    const struct agx3_cdm_barrier_info barrier = {
-      .chip = AGX_CHIP_G17G, .flags = barrier_flags,
+      .chip = program->chip, .flags = barrier_flags,
    };
    if (!agx3_native_compute_launch_pack(program, grid, staged) ||
        !agx3_cdm_barrier_pack(&barrier, staged + AGX3_CDM_DIRECT_LAUNCH_SIZE))
@@ -335,7 +335,7 @@ agx3_g17g_native_indirect_append(const struct agx3_compute_program *program,
    }
 
    const struct agx3_cdm_barrier_info barrier = {
-      .chip = AGX_CHIP_G17G, .flags = barrier_flags,
+      .chip = program->chip, .flags = barrier_flags,
    };
    if (!agx3_cdm_barrier_pack(&barrier, staged + launch))
       return false;
