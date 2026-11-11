@@ -566,8 +566,9 @@ agx3_cdm_link_padding_unpack(
 
 /* Exact four-byte barrier emitters are pinned in G15G/G15X, G16G/G16X,
  * G17P, G17G and G17X.  G16P and G17A remain unwitnessed here.  G18G's
- * compute-add capture ends its dispatch with the flag-free 0x60000160, which
- * is the only G18G barrier admitted: see agx3_cdm_barrier_flags_grounded. */
+ * compute-add capture ends its dispatch with the flag-free 0x60000160,
+ * and rel24b+ hardware runs pin flags=5 as the strong-flush chaining word:
+ * see agx3_cdm_barrier_flags_grounded. */
 static inline bool
 agx3_cdm_barrier_target_grounded(enum agx_chip chip)
 {

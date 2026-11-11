@@ -580,9 +580,13 @@ test_compute(void)
    indirect_info.pipeline |= 1;
    CHECK(!agx3_cdm_indirect_launch_pack(&indirect_info, indirect_packed));
 
-   /* Only the flag-free barrier is captured: every other flag value is
-    * refused on G18G in both directions, although G17G admits all of them. */
+   /* The flag-free barrier and the flags=5 strong flush are captured:
+    * every other flag value is refused on G18G in both directions,
+    * although G17G admits all of them.  flags=5 is grounded from rel24b+
+    * chained launches (hk_cmd_dispatch.c). */
    for (unsigned flags = 1; flags <= 0xf; ++flags) {
+      if (flags == 5)
+         continue;
       CHECK(!agx3_cdm_barrier_flags_grounded(AGX_CHIP_G18G, flags));
       CHECK(agx3_cdm_barrier_flags_grounded(AGX_CHIP_G17G, flags));
 
@@ -601,6 +605,19 @@ test_compute(void)
                                     &barrier) &&
             barrier.flags == flags);
    }
+
+   /* The flags=5 strong flush is grounded on G18G hardware. */
+   CHECK(agx3_cdm_barrier_flags_grounded(AGX_CHIP_G18G, 5));
+   const struct agx3_cdm_barrier_info strong = {
+      .chip = AGX_CHIP_G18G,
+      .flags = 5,
+   };
+   CHECK(agx3_cdm_barrier_pack(&strong, barrier_packed));
+   static const uint32_t strong_words[] = {UINT32_C(0x60001560)};
+   CHECK(equal_words(barrier_packed, sizeof(barrier_packed), strong_words, 1));
+   CHECK(agx3_cdm_barrier_unpack(AGX_CHIP_G18G, barrier_packed,
+                                 sizeof(barrier_packed), &barrier) &&
+         barrier.flags == 5);
 
    /* No capture has a substream barrier, even a flag-free one. */
    const struct agx3_cdm_substream_barrier_info substream = {

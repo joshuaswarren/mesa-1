@@ -809,10 +809,9 @@ agx_ioto_chip(const struct agx_device *dev)
 }
 
 /* The CDM barrier that ends an M5-profile compute dispatch: G17G's captured
- * flags-5 word, but on G18G the flag-free word -- the only barrier its
- * compute-add capture shows, and the only one agx3_cdm_barrier_flags_grounded
- * admits for it. (agx3_g17g_native_compute_dispatch_append packs as G17G, so
- * it cannot apply that gate itself.) */
+ * flags-5 word, but on G18G the flag-free word, matching this Gallium path's
+ * own capture.  The flags-5 strong flush is grounded for G18G too
+ * (agx3_cdm_barrier_flags_grounded); Vulkan's dispatch append uses it. */
 static inline uint8_t
 agx_m5_dispatch_barrier_flags(const struct agx_device *dev)
 {
