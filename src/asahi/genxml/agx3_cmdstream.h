@@ -602,10 +602,11 @@ agx3_cdm_barrier_flags_grounded(enum agx_chip chip, uint8_t flags)
    case AGX_CHIP_G17C:
       return true;
    case AGX_CHIP_G18G:
-      /* Only the flag-free word is captured on G18G (compute-add).  Other
-       * flags are not inferred from the G17G HAL300 layout; they fail closed
-       * until a G18G capture shows them. */
-      return flags == 0;
+      /* The flag-free word is captured on G18G (compute-add), and flags=5
+       * is grounded on hardware from rel24b+ chained launches: the weak
+       * flag-free tail does not give write visibility and flag-free chains
+       * hung the CDM (hk_cmd_dispatch.c). */
+      return flags == 0 || flags == 5;
    default:
       return flags == 0 || flags == 0x5;
    }
