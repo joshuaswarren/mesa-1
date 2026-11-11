@@ -12207,8 +12207,11 @@ TEST_F(AGX3PackBinary, G18GUniformWordMoveReachesHighDestinations)
          const uint8_t *code = (const uint8_t *)bin.data;
          const int32_t ep0 = agx3_form_index(&agx3d_table, "copy", 0);
          const int32_t ep1 = agx3_form_index(&agx3d_table, "copy", 1);
+         const int32_t ep2 = agx3_form_index(&agx3d_table, "copy", 2);
          ASSERT_GE(ep0, 0);
          ASSERT_GE(ep1, 0);
+         ASSERT_GE(ep2, 0);
+         bool found_copy = false;
          for (unsigned off = 0; off < bin.size;) {
             const signed n =
                agx3d_instr_length(code + off, bin.size - off, NULL);
@@ -12216,7 +12219,8 @@ TEST_F(AGX3PackBinary, G18GUniformWordMoveReachesHighDestinations)
             uint64_t fields[AGX3_MAX_FIELDS];
             const int32_t form =
                agx3_decode(&agx3d_table, code + off, n, "copy", fields);
-            if (form == ep0 || form == ep1) {
+            if (form == ep0 || form == ep1 || form == ep2) {
+               found_copy = true;
                EXPECT_EQ(fields[2], dest)
                   << "dest half=" << dest << " uniform=" << uniform;
                EXPECT_EQ(fields[17], uniform)
@@ -12232,6 +12236,7 @@ TEST_F(AGX3PackBinary, G18GUniformWordMoveReachesHighDestinations)
             }
             off += n;
          }
+         ASSERT_TRUE(found_copy) << "dest half=" << dest << " uniform=" << uniform;
       }
    }
 }
