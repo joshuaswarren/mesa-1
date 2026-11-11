@@ -13932,6 +13932,41 @@ TEST_F(AGX3PackBinary, HalfExp2MatchesNativeNegateAndRefusesAbsolute)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+/*
+ * llama.cpp soft_max_f32 on G18G computes exp2 in place on r67 (half 134)
+ * and the shader was refused. Apple's applegpu_g18g encoder fills the whole
+ * register file; the words below are from native/g18g/exp2-high-registers.md
+ * and equal the agx3c composition the G18G transcode passes through.
+ */
+TEST_F(AGX3PackBinary, G17GExp2EncodesHighRegisters)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   agx_index dst = agx_register(132, AGX_SIZE_32);
+   dst.cache = true;
+   agx_index src = agx_register(132, AGX_SIZE_32);
+   src.discard = true;
+   agx_exp2_to(b, dst, src);
+   agx_stop(b);
+   const auto in_place = pack(b);
+   const uint8_t apple_in_place[] = {
+      0x27,0x00,0x0c,0x1a,0x2a,0x20,0xa5,0x0a,0x32,0x00,
+   };
+   ASSERT_GE(in_place.size(), sizeof(apple_in_place));
+   EXPECT_EQ(memcmp(in_place.data(), apple_in_place, sizeof(apple_in_place)), 0);
+
+   b = builder(AGX_ISA_ENCODING_AGX3C);
+   src = agx_register(170, AGX_SIZE_32);
+   src.discard = true;
+   agx_exp2_to(b, agx_register(128, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto high_dest = pack(b);
+   const uint8_t apple_high_dest[] = {
+      0x27,0x02,0x0c,0x6a,0x22,0x20,0xa5,0x02,0x32,0x00,
+   };
+   ASSERT_GE(high_dest.size(), sizeof(apple_high_dest));
+   EXPECT_EQ(memcmp(high_dest.data(), apple_high_dest, sizeof(apple_high_dest)), 0);
+}
+
 TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndModifiers)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

@@ -151,8 +151,12 @@ agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t d
         (op == AGX3_FUNOP_SQRT_STEP && (dest_16 || src_neg || saturate))))
       return false;
 
-   /* Native scalar half registers may be odd; float registers are pairs. */
-   if (dest >= 128 || src >= 128 || (!dest_16 && (dest & 1)) ||
+   /* Native scalar half registers may be odd; float registers are pairs.
+    * The G17G/G18G forms carry 9-bit register fields and Apple fills the
+    * whole 256-half file (native/g18g/exp2-high-registers.md); AGX3b keeps
+    * the 128 its corpus shows. */
+   const unsigned nregs = runtime ? 256 : 128;
+   if (dest >= nregs || src >= nregs || (!dest_16 && (dest & 1)) ||
        (!src_16 && (src & 1)))
       return false;
 
