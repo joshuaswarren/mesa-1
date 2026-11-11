@@ -205,6 +205,31 @@ TEST_F(Optimizer, G17PPreservesHalfWidenBeforeFltnorm)
 }
 
 /*
+ * The native projective f32mul (PERSP_MUL) has no 16-bit destination form. A
+ * mediump varying narrows its product with an f32 to f16 move; folding that
+ * move into the multiply made the shader unencodable on M5 (AGX3C), so the
+ * move stays a separate instruction.
+ */
+TEST_F(Optimizer, G17CKeepsPerspMulNarrowingMove)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17C;
+   for (agx_builder *b : {actual, expected}) {
+      b->shader->key = &key;
+      agx_index product = agx_temp(b->shader, AGX_SIZE_32);
+      agx_persp_mul_agx3_to(b, product, wx, wy, 1);
+      agx_index narrow = agx_temp(b->shader, AGX_SIZE_16);
+      agx_fmov_to(b, narrow, product);
+      agx_unit_test(b, narrow);
+   }
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+/*
  * AGX3 has no select form without a register compare operand, so a select of
  * two immediates -- here fused out of a compare of two constants -- has to
  * fold to the chosen operand.

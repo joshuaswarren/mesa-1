@@ -616,6 +616,15 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
        (I->src[0].abs || I->src[0].neg || I->src[1].abs || I->src[1].neg))
       return false;
 
+   /* M5 (AGX3C): the native perspective multiply only encodes a word
+    * destination (agx3_persp_mul_encode). Folding the f32-to-f16 move that
+    * narrows a mediump varying into it made the binary packer refuse the
+    * shader and the draw was skipped. Keep the explicit move. */
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       I->op == AGX_OPCODE_PERSP_MUL_AGX3 &&
+       I->dest[0].size == AGX_SIZE_32 && use->dest[0].size == AGX_SIZE_16)
+      return false;
+
    /* saturate(saturate(x)) = saturate(x) */
    I->saturate |= use->saturate;
    I->dest[0] = use->dest[0];
