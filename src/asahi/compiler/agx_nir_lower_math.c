@@ -80,7 +80,7 @@ rcp_rn(nir_builder *b, nir_def *x)
 }
 
 static bool
-is_one(const nir_alu_instr *alu, unsigned i)
+is_one(nir_alu_instr *alu, unsigned i)
 {
    nir_scalar s = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), i);
    return nir_scalar_is_const(s) && nir_scalar_as_uint(s) == 0x3f800000;
