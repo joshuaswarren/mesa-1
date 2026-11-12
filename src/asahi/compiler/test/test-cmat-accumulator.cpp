@@ -56,6 +56,7 @@ lowered_muladd_count(enum glsl_base_type accum)
    nir_cmat_muladd(&b, &d->def, &a->def, &bb->def, &c->def);
 
    agx_nir_lower_cmat(b.shader);
+   nir_divergence_analysis(b.shader);
 
    unsigned left = 0, agx = 0;
    nir_foreach_function_impl(impl, b.shader) {
@@ -65,9 +66,11 @@ lowered_muladd_count(enum glsl_base_type accum)
                continue;
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
             left += intr->intrinsic == nir_intrinsic_cmat_muladd;
-            /* The hardware accumulates in 32 bits whatever the matrix type. */
+            /* The hardware accumulates in 32 bits whatever the matrix type,
+             * and every lane holds its own part of the result.
+             */
             agx += intr->intrinsic == nir_intrinsic_cmat_muladd_agx &&
-                   intr->src[2].ssa->bit_size == 32;
+                   intr->src[2].ssa->bit_size == 32 && intr->def.divergent;
          }
       }
    }
