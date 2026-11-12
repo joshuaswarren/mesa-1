@@ -185,6 +185,7 @@ if with_tests
          'test/test-compact-constants.cpp',
          'test/test-minifloat.cpp',
          'test/test-optimizer.cpp',
+         'test/test-cmat-accumulator.cpp',
          'test/test-pressure-cse.cpp',
          'test/test-rte-fma.cpp',
          'test/test-border-index.cpp',
