@@ -237,12 +237,15 @@ lower_matrix_instr(nir_builder *b, nir_instr *instr, struct hash_table *types)
       enum glsl_base_type input_b = matrix_desc(intr->src[2]).element_type;
       enum glsl_base_type accum = matrix_desc(intr->src[3]).element_type;
       enum glsl_base_type result = matrix_desc(intr->src[0]).element_type;
+      /* Cooperative-matrix accumulators are always widened to f32 for
+       * the AGX path. */
       assert((input == GLSL_TYPE_FLOAT16 || input == GLSL_TYPE_BFLOAT16 ||
               (input == GLSL_TYPE_FLOAT && matrix_desc(intr->src[1]).rows == 8)) &&
              (input_b == input || (matrix_desc(intr->src[1]).rows == 16 &&
                 ((input == GLSL_TYPE_FLOAT16 && input_b == GLSL_TYPE_BFLOAT16) ||
                  (input == GLSL_TYPE_BFLOAT16 && input_b == GLSL_TYPE_FLOAT16)))) &&
-             (accum == GLSL_TYPE_FLOAT || accum == GLSL_TYPE_BFLOAT16) && result == accum);
+             (accum == GLSL_TYPE_FLOAT || accum == GLSL_TYPE_FLOAT16 ||
+              accum == GLSL_TYPE_BFLOAT16) && result == accum);
       nir_def *a = load_matrix(b, intr->src[1]);
       nir_def *bb = load_matrix(b, intr->src[2]);
       nir_def *c = convert_matrix_value(b, load_matrix(b, intr->src[3]),
