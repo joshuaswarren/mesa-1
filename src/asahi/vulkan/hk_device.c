@@ -337,6 +337,20 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->cdm_barrier_mask =
       debug_get_num_option("HK_CDM_BARRIER_MASK", 0) & 0x07ffffff;
 
+   /* G14X of generation 14 launches with the reduced CDM_BARRIER word 0x1FF
+    * unless HK_CDM_BARRIER_MASK is set in any form (=0 keeps the full word).
+    * M2 Max Qwen3-4B decode at 2048 tokens saves 0.54 ms per token with
+    * identical tokens and logprobs. hk_cdm_cache_flush applies it only after
+    * the perftest overrides and the sparse guard.
+    */
+   dev->cdm_barrier_default_mask =
+      pdev->dev.chip == AGX_CHIP_G14X &&
+            pdev->dev.params.gpu_generation == 14 &&
+            !HK_PERF(dev, ALWAYSCDMBARRIER) &&
+            !debug_get_option("HK_CDM_BARRIER_MASK", NULL)
+         ? 0x1FF
+         : 0;
+
    /* The dependency-tracked CDM barrier holds token-digest parity with the
     * reference driver on G13 (M1 family) and on G14X of generation 14 (M2
     * Pro/Max/Ultra class; verified on M2 Max: greedy token digests of three

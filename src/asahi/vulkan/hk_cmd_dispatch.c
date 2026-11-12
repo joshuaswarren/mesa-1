@@ -74,6 +74,10 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
       uint32_t *word = cs->current;
       *word = 0xfffff | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
       cs->current = word + 1;
+   } else if (dev->cdm_barrier_default_mask) {
+      uint32_t *word = cs->current;
+      *word = dev->cdm_barrier_default_mask | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
    } else {
       cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
    }

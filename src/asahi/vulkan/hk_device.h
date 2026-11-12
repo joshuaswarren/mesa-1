@@ -101,9 +101,12 @@ struct hk_device {
    uint32_t sparse_used;
 
    uint32_t perftest;
-   /* HK_CDM_BARRIER_MASK=<hex>: perftest-only override of the per-launch
-    * CDM_BARRIER flag word (bits 0..26). 0 = unset. */
+   /* HK_CDM_BARRIER_MASK=<0x-prefixed hex>: perftest-only override of the
+    * per-launch CDM_BARRIER flag word (bits 0..26). 0 = unset. */
    uint32_t cdm_barrier_mask;
+   /* Reduced CDM_BARRIER word used by default on G14X generation 14 (see
+    * hk_device.c). 0 = the full barrier. */
+   uint32_t cdm_barrier_default_mask;
    /* HK_CDM_DEFER_FLUSH (hk_device.c): emit the CDM barrier at the end of
     * each compute batch, not after vkCmdPipelineBarrier2. */
    bool cdm_defer_flush;
