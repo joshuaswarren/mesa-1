@@ -28,6 +28,7 @@
 #include "agx_nir_texture.h"
 #include "agx_debug.h"
 #include "agx_nir.h"
+#include "agx3_isel_core.h"
 #include "agx3_matrix_core.h"
 #include "agx_opcodes.h"
 #include "agx3_pack.h"
@@ -5204,6 +5205,288 @@ agx3_fold_constant_fmovs(agx_context *ctx)
    }
 
    free(defs);
+}
+
+/*
+ * G18G's iseli16 witnesses cover only a witnessed subset of compare-select
+ * shapes (encode_gpu1 in agx3_isel_core.c); every other compare-select shape
+ * refuses at pack time, and a refusal kills the whole shader. Ask the encoder
+ * itself which shapes pack -- mirroring its gates by hand produced false
+ * refusals that broke shaders that used to compile -- and rewrite a refusing
+ * shape into the plain word form: both comparands and both selected operands
+ * become word registers and the word result is truncated back. Runs after
+ * optimization so these moves survive copy propagation, which deliberately
+ * preserves 16-to-32 widening on AGX3.
+ */
+
+/* Before register allocation NORMAL values are SSA IDs, not physical
+ * half-register indices. Give those operands valid representative indices
+ * when asking the encoder whether their shape is supported. */
+static uint16_t
+g18g_probe_reg_value(agx_index s)
+{
+   return s.type == AGX_INDEX_NORMAL ? 0 : s.value;
+}
+
+/* Build the same encoder description the packer builds, with no waits and
+ * no lifetime hints, and report whether that shape encodes. */
+static bool
+g18g_icmpsel_encodes(const agx_instr *I)
+{
+#define G18G_IS_REG(s) (!(s).memory && ((s).type == AGX_INDEX_REGISTER || \
+                                        (s).type == AGX_INDEX_NORMAL))
+   struct agx3_isel_desc d;
+   memset(&d, 0, sizeof(d));
+
+   agx_index a = I->src[0], b = I->src[1];
+   const agx_index dest = I->dest[0];
+
+   const bool narrow_first =
+      G18G_IS_REG(a) && G18G_IS_REG(b) &&
+      a.size == AGX_SIZE_16 && b.size == AGX_SIZE_32;
+   const bool swap_compare =
+      a.type == AGX_INDEX_IMMEDIATE || narrow_first;
+   if (swap_compare) {
+      const agx_index tmp = a;
+      a = b;
+      b = tmp;
+   }
+
+   const bool narrow_second =
+      G18G_IS_REG(a) && G18G_IS_REG(b) &&
+      a.size == AGX_SIZE_32 && b.size == AGX_SIZE_16;
+
+   const bool dest_ok =
+      G18G_IS_REG(dest) && agx_channels(dest) == 1 &&
+      (dest.size == AGX_SIZE_32 || dest.size == AGX_SIZE_16);
+   /* One aligned 32-bit uniform comparand is native beside a 32-bit
+    * register (agx3_isel_core.c); agx_lower_uniform_sources keeps no other
+    * uniform compare shape. */
+   const bool a_uniform = a.type == AGX_INDEX_UNIFORM;
+   const bool b_uniform = b.type == AGX_INDEX_UNIFORM;
+   const bool a_reg32 = G18G_IS_REG(a) && a.size == AGX_SIZE_32 &&
+                        agx_channels(a) == 1;
+   const bool b_reg32 = G18G_IS_REG(b) && b.size == AGX_SIZE_32 &&
+                        agx_channels(b) == 1;
+   const bool cmp_ok =
+      !a.memory && !a.abs && !a.neg &&
+      !b.memory && !b.abs && !b.neg &&
+      ((a_uniform && a.size == AGX_SIZE_32 && b_reg32) ||
+       (b_uniform && b.size == AGX_SIZE_32 && a_reg32) ||
+       (G18G_IS_REG(a) && (a.size == AGX_SIZE_32 || a.size == AGX_SIZE_16) &&
+        agx_channels(a) == 1 &&
+        ((b.type == AGX_INDEX_IMMEDIATE && b.value <= 255) ||
+         (G18G_IS_REG(b) && (b.size == a.size || narrow_second) &&
+          agx_channels(b) == 1))));
+   if (!dest_ok || !cmp_ok)
+      return false;
+
+   unsigned cond;
+   switch (I->icond) {
+   case AGX_ICOND_UEQ:
+   case AGX_ICOND_SEQ:
+      cond = AGX3_ISEL_ICOND_EQ;
+      break;
+   case AGX_ICOND_ULT: cond = AGX3_ISEL_ICOND_ULT; break;
+   case AGX_ICOND_UGT: cond = AGX3_ISEL_ICOND_UGT; break;
+   case AGX_ICOND_SLT: cond = AGX3_ISEL_ICOND_SLT; break;
+   case AGX_ICOND_SGT: cond = AGX3_ISEL_ICOND_SGT; break;
+   default: return false;
+   }
+   if (swap_compare) {
+      switch (cond) {
+      case AGX3_ISEL_ICOND_ULT: cond = AGX3_ISEL_ICOND_UGT; break;
+      case AGX3_ISEL_ICOND_UGT: cond = AGX3_ISEL_ICOND_ULT; break;
+      case AGX3_ISEL_ICOND_SLT: cond = AGX3_ISEL_ICOND_SGT; break;
+      case AGX3_ISEL_ICOND_SGT: cond = AGX3_ISEL_ICOND_SLT; break;
+      default: break;
+      }
+   }
+
+   const agx_index sel[2] = {I->src[2], I->src[3]};
+   enum agx3_isel_operand kind[2];
+   uint16_t value[2];
+   for (unsigned n = 0; n < 2; ++n) {
+      const agx_index s = sel[n];
+      if (s.type == AGX_INDEX_IMMEDIATE && !s.memory && !s.abs && !s.neg) {
+         kind[n] = AGX3_ISEL_IMMEDIATE;
+         value[n] = s.value;
+      } else if (G18G_IS_REG(s) && !s.abs && !s.neg &&
+                 s.size == dest.size && agx_channels(s) == 1) {
+         kind[n] = AGX3_ISEL_REGISTER;
+         value[n] = g18g_probe_reg_value(s);
+      } else if (s.type == AGX_INDEX_UNIFORM && !s.memory && !s.abs &&
+                 !s.neg && s.size == AGX_SIZE_32 &&
+                 dest.size == AGX_SIZE_32) {
+         kind[n] = AGX3_ISEL_UNIFORM;
+         value[n] = s.value;
+      } else {
+         return false;
+      }
+   }
+
+   d.dest = g18g_probe_reg_value(dest);
+   d.dest_16 = dest.size == AGX_SIZE_16;
+   d.cmp0 = g18g_probe_reg_value(a);
+   d.cmp1 = g18g_probe_reg_value(b);
+   d.cmp1_immediate = b.type == AGX_INDEX_IMMEDIATE;
+   d.cmp0_uniform = a_uniform;
+   d.cmp1_uniform = b_uniform;
+   d.cmp_16 = a.size == AGX_SIZE_16;
+   d.cmp1_16 = narrow_second;
+   d.explicit_hints = true;
+   d.dest_cache = dest.cache;
+   const agx_index hinted[4] = {a, b, I->src[2], I->src[3]};
+   for (unsigned n = 0; n < 4; ++n) {
+      if (hinted[n].type == AGX_INDEX_REGISTER) {
+         d.cache[n] = hinted[n].cache;
+         d.discard[n] = hinted[n].discard;
+      }
+   }
+   d.cond = cond;
+   d.true_kind = kind[0];
+   d.false_kind = kind[1];
+   d.sel_true = value[0];
+   d.sel_false = value[1];
+
+   uint8_t bytes[AGX3_ISEL_MAX_LENGTH];
+   uint8_t len = 0;
+   if (!agx3_isel_encode_g18g(AGX_ISA_ENCODING_AGX3C, &d, bytes, &len))
+      return false;
+
+   /* RA may place a narrow second comparand in either half. Stock packing
+    * refuses the odd half (encode_gpu1: every witnessed narrow comparand is
+    * a low half), so keep only forms that encode at both parities. */
+   if (narrow_second && b.type == AGX_INDEX_NORMAL) {
+      d.cmp1 = 1;
+      if (!agx3_isel_encode_g18g(AGX_ISA_ENCODING_AGX3C, &d, bytes, &len))
+         return false;
+   }
+
+   return true;
+#undef G18G_IS_REG
+}
+
+static char
+g18g_opchar(const agx_index s)
+{
+   switch (s.type) {
+   case AGX_INDEX_REGISTER: return 'r';
+   case AGX_INDEX_NORMAL: return 'n';
+   case AGX_INDEX_UNIFORM: return 'u';
+   case AGX_INDEX_IMMEDIATE: return 'i';
+   default: return '?';
+   }
+}
+
+static void
+g18g_log_icmpsel(const agx_context *ctx, const agx_instr *I, bool rewritten)
+{
+   if (!(agx_compiler_debug & AGX_DBG_SHADERS))
+      return;
+   fprintf(stderr,
+           "[g18g-icmpsel] %s stage=%d icond=%d dest=r%u/%u "
+           "c0=%c%u/%u%s%s c1=%c%u/%u%s%s "
+           "t=%c%u/%u%s%s f=%c%u/%u%s%s\n",
+           rewritten ? "rewrite" : "still-refuses", (int)ctx->stage,
+           (int)I->icond, I->dest[0].value,
+           I->dest[0].size == AGX_SIZE_16 ? 16 : 32,
+           g18g_opchar(I->src[0]), I->src[0].value,
+           I->src[0].size == AGX_SIZE_16 ? 16 : 32,
+           I->src[0].abs ? " abs" : "", I->src[0].neg ? " neg" : "",
+           g18g_opchar(I->src[1]), I->src[1].value,
+           I->src[1].size == AGX_SIZE_16 ? 16 : 32,
+           I->src[1].abs ? " abs" : "", I->src[1].neg ? " neg" : "",
+           g18g_opchar(I->src[2]), I->src[2].value,
+           I->src[2].size == AGX_SIZE_16 ? 16 : 32,
+           I->src[2].abs ? " abs" : "", I->src[2].neg ? " neg" : "",
+           g18g_opchar(I->src[3]), I->src[3].value,
+           I->src[3].size == AGX_SIZE_16 ? 16 : 32,
+           I->src[3].abs ? " abs" : "", I->src[3].neg ? " neg" : "");
+}
+
+static bool
+agx_lower_agx3_g18g_half_icmpsel(agx_context *ctx)
+{
+   if (!agx_is_g18g(&ctx->key->dev))
+      return false;
+
+#define G18G_IS_REG(s) (!(s).memory && ((s).type == AGX_INDEX_REGISTER || \
+                                        (s).type == AGX_INDEX_NORMAL))
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_ICMPSEL || I->nr_dests != 1 ||
+          I->nr_srcs != 4 ||
+          (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_32) ||
+          agx_channels(I->dest[0]) != 1)
+         continue;
+
+      if (g18g_icmpsel_encodes(I))
+         continue;
+
+      g18g_log_icmpsel(ctx, I, true);
+
+      const bool cond_signed =
+         I->icond == AGX_ICOND_SLT || I->icond == AGX_ICOND_SGT;
+
+      agx_builder wb = agx_init_builder(ctx, agx_before_instr(I));
+      for (unsigned s = 0; s < 4; ++s) {
+         agx_index src = I->src[s];
+         const bool comparand = s < 2;
+
+         if (src.type == AGX_INDEX_IMMEDIATE) {
+            uint64_t v = src.value;
+            if (comparand && cond_signed) {
+               /* The comparison is a signed one at the immediate's width:
+                  extend the pattern the way the relation reads it. */
+               if (src.size == AGX_SIZE_16 && v >= 0x8000)
+                  v -= 0x10000ull;
+               else if (src.size == AGX_SIZE_32 && v >= 0x80000000ull)
+                  v -= 0x100000000ull;
+            }
+            I->src[s] = agx_mov_imm(&wb, 32, v);
+         } else if (src.type == AGX_INDEX_UNIFORM) {
+            agx_index w = agx_temp(ctx, AGX_SIZE_32);
+            agx_mov_to(&wb, w, src);
+            I->src[s] = w;
+         } else if (G18G_IS_REG(src) && src.size == AGX_SIZE_32) {
+            if (!src.abs && !src.neg)
+               continue;
+            agx_index w = agx_temp(ctx, AGX_SIZE_32);
+            agx_mov_to(&wb, w, src);
+            I->src[s] = w;
+         } else {
+            /* A half register: materialize any modifier at half width,
+               then extend by the relation (a select only cares about the
+               bits, so it always zero-extends). */
+            agx_index half = src;
+            half.abs = half.neg = false;
+            if (src.abs || src.neg) {
+               agx_index t16 = agx_temp(ctx, AGX_SIZE_16);
+               agx_mov_to(&wb, t16, src);
+               half = t16;
+            }
+            agx_index w = agx_temp(ctx, AGX_SIZE_32);
+            if (comparand && cond_signed)
+               agx_signext_to(&wb, w, half);
+            else
+               agx_mov_to(&wb, w, half);
+            I->src[s] = w;
+         }
+      }
+
+      if (I->dest[0].size == AGX_SIZE_16) {
+         agx_index half = I->dest[0];
+         I->dest[0] = agx_temp(ctx, AGX_SIZE_32);
+         wb.cursor = agx_after_instr(I);
+         agx_subdivide_to(&wb, half, I->dest[0], 0);
+      }
+      if (!g18g_icmpsel_encodes(I))
+         g18g_log_icmpsel(ctx, I, false);
+      progress = true;
+   }
+   return progress;
+#undef G18G_IS_REG
 }
 
 void
