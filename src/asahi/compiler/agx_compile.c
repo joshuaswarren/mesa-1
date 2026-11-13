@@ -13280,6 +13280,7 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
    agx_lower_agx3_half_converts(ctx);
    agx_lower_agx3_fma_sources(ctx);
    agx_lower_agx3_mixed_width_unary(ctx);
+   AGX_PASS(ctx, agx_lower_agx3_g18g_half_icmpsel);
    agx_lower_agx3_shifted_iadd_dest(ctx);
    agx_lower_m5_alu_operands(ctx);
 

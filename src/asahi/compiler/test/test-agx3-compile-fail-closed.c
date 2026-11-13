@@ -6,6 +6,7 @@
 #include "agx_compile.h"
 #include "agx3_cf_core.h"
 #include "agx_compiler.h"
+#include "agx_debug.h"
 #include "nir_builder.h"
 #include "util/half_float.h"
 
@@ -13,6 +14,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static bool
 check_empty_compute(enum agx_isa_encoding encoding)
@@ -2379,9 +2382,107 @@ check_uniform_alu_policy(void)
    return true;
 }
 
+/*
+ * G18G: a signed compare of two half registers that selects between two half
+ * values is a shape the G18G encoder refuses. The pipeline has to rewrite it
+ * to the word form before register allocation, so the first compile attempt
+ * packs. Without the rewrite the first attempt refuses and only the second
+ * attempt (float constants in registers) rescues the shader, which logs
+ * "retrying". Compile as G18G (AGX3C, agx3d output) with shader debug on and
+ * require a binary from the first attempt.
+ */
+static bool
+check_g18g_half_icmpsel_case(bool ge, unsigned arms)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G18G half compare-select");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *a = nir_load_global(&b, 1, 16, nir_imm_int64(&b, 0x1000),
+                                .align_mul = sizeof(uint16_t));
+   nir_def *c = nir_load_global(&b, 1, 16, nir_imm_int64(&b, 0x1002),
+                                .align_mul = sizeof(uint16_t));
+   nir_def *x = arms >= 1 ? nir_imm_intN_t(&b, 7, 16)
+                          : nir_load_global(&b, 1, 16,
+                                            nir_imm_int64(&b, 0x1004),
+                                            .align_mul = sizeof(uint16_t));
+   nir_def *y = arms >= 2 ? nir_imm_intN_t(&b, 9, 16)
+                          : nir_load_global(&b, 1, 16,
+                                            nir_imm_int64(&b, 0x1006),
+                                            .align_mul = sizeof(uint16_t));
+   nir_def *cmp = ge ? nir_ige(&b, a, c) : nir_ilt(&b, a, c);
+   nir_store_global(&b, nir_bcsel(&b, cmp, x, y), nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint16_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.emit_agx3d = true;
+   struct agx_shader_part part = {0};
+
+   /* The retry note goes to stderr; capture it for this one compile. */
+   fflush(stderr);
+   FILE *log = tmpfile();
+   const int saved_fd = dup(STDERR_FILENO);
+   dup2(fileno(log), STDERR_FILENO);
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   fflush(stderr);
+   dup2(saved_fd, STDERR_FILENO);
+   close(saved_fd);
+
+   char text[1 << 16] = {0};
+   rewind(log);
+   const size_t n = fread(text, 1, sizeof(text) - 1, log);
+   text[n] = 0;
+   fclose(log);
+
+   const bool retried = strstr(text, "retrying") != NULL;
+   const bool valid = compiled && part.binary && part.info.binary_size &&
+                      !retried;
+   fprintf(stderr,
+           "G18G half compare-select %s arms=%u: compiled=%u retried=%u "
+           "valid=%u\n", ge ? "ige" : "ilt", arms, compiled, retried, valid);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+/*
+ * The compiler reads AGX_MESA_DEBUG once per process, so run the cases in a
+ * child with shader debug set and leave the other checks quiet.
+ */
+static bool
+check_g18g_half_icmpsel(void)
+{
+   fflush(stderr);
+   const pid_t pid = fork();
+   if (pid < 0)
+      return false;
+   if (pid == 0) {
+      setenv("AGX_MESA_DEBUG", "shaders", 1);
+      bool ok = true;
+      for (unsigned ge = 0; ge < 2; ++ge)
+         for (unsigned arms = 0; arms < 3; ++arms)
+            ok &= check_g18g_half_icmpsel_case(ge, arms);
+      fflush(stderr);
+      _exit(ok ? 0 : 1);
+   }
+   int status = 0;
+   return waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0;
+}
+
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--g18g-half-icmpsel-only")) {
+      const bool valid = check_g18g_half_icmpsel();
+      fprintf(stderr, "G18G half compare-select: %s\n", valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
+
    if (argc == 2 && !strcmp(argv[1], "--subgroup-multiply-only")) {
       const bool valid = check_subgroup_multiply_compute();
       fprintf(stderr, "G17P subgroup multiply compute: %s\n",
@@ -2721,6 +2822,9 @@ main(int argc, char **argv)
 
       ralloc_free(b.shader);
    }
+
+   if (!check_g18g_half_icmpsel())
+      return 1;
 
    glsl_type_singleton_decref();
 
