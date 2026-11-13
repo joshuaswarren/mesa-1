@@ -94,6 +94,7 @@ bool agx_nir_opt_shared_byte_offsets(struct nir_shader *s);
 bool agx_nir_opt_licm(struct nir_shader *shader, unsigned budget);
 bool agx_nir_lower_fminmax(struct nir_shader *s, bool ftz_only);
 bool agx_nir_lower_fminmax_signed_zero(struct nir_shader *s, bool ftz_only);
+bool agx_nir_lower_g18_ftz(struct nir_shader *s);
 bool agx_nir_lower_word_bounds(struct nir_shader *s);
 bool agx_nir_share_bounds(struct nir_shader *s);
 bool agx_nir_lower_atomics(struct nir_shader *s, bool native_fadd);
