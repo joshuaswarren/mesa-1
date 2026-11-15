@@ -5468,12 +5468,18 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                   I->src[s] = agx_mov_imm(&b, 16, I->src[s].value);
             }
          }
-         /* G18G's half FSEL is grounded only with all four sources in half
-          * registers (agx3_alu_fcmp_select_half_gpu1). Compare slots hold
-          * minifloats, so materialize their half value; select slots are
-          * bit patterns. M6 only. */
+         /* G18G's half FSEL is grounded with all four sources in half
+          * registers (agx3_alu_fcmp_select_half_gpu1), or, comparing a float
+          * register with a half register, with a small literal in one select
+          * slot. Compare slots hold minifloats, so materialize their half
+          * value; select slots are bit patterns, left as literals only for
+          * the mixed comparison. M6 only. */
          if (agx_is_g18g(&ctx->key->dev) &&
              I->op == AGX_OPCODE_FCMPSEL && I->dest[0].size == AGX_SIZE_16) {
+            const bool mixed_compare =
+               I->src[0].type != AGX_INDEX_IMMEDIATE &&
+               I->src[1].type != AGX_INDEX_IMMEDIATE &&
+               (I->src[0].size == AGX_SIZE_32) != (I->src[1].size == AGX_SIZE_32);
             for (unsigned s = 0; s < 4; ++s) {
                agx_index v = I->src[s];
                if (v.type != AGX_INDEX_IMMEDIATE)
@@ -5489,7 +5495,8 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                      f = -f;
                   I->src[s] = wide ? agx_mov_imm(&b, 32, fui(f))
                                    : agx_mov_imm(&b, 16, _mesa_float_to_half(f));
-               } else {
+               } else if (!mixed_compare || v.value > UINT8_MAX || v.abs ||
+                          v.neg) {
                   I->src[s] = agx_mov_imm(&b, 16, v.value);
                }
             }

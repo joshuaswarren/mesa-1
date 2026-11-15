@@ -2078,6 +2078,50 @@ check_f32_abs_zero_compare_select_compute(void)
    return valid;
 }
 
+/* G17G/G18G compare a 32-bit float with a half and select two half
+ * registers: no native form takes that mix, so it must still compile. */
+static bool
+check_mixed_compare_half_select_compute(void)
+{
+   for (unsigned variant = 0; variant < 4; ++variant) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options,
+         "AGX3C mixed compare half select");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      nir_def *wide = nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1000),
+                                      .align_mul = sizeof(uint32_t));
+      nir_def *h[3];
+      for (unsigned i = 0; i < 3; ++i)
+         h[i] = nir_f2f16(&b, nir_load_global(
+            &b, 1, 32, nir_imm_int64(&b, 0x1100 + 8 * i),
+            .align_mul = sizeof(uint32_t)));
+      nir_def *other = variant & 1 ? nir_imm_float(&b, -INFINITY)
+                                   : nir_f2f32(&b, h[0]);
+      nir_def *cond = variant & 2 ? nir_flt(&b, wide, other)
+                                  : nir_feq(&b, wide, other);
+      nir_def *selected = nir_bcsel(&b, cond, h[1], nir_imm_float16(&b, 0.0f));
+      nir_store_global(&b, nir_f2f32(&b, selected), nir_imm_int64(&b, 0x2000),
+                       .align_mul = sizeof(uint32_t));
+      agx_preprocess_nir(b.shader);
+
+      struct agx_shader_key key = {0};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.emit_agx3d = true;
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!compiled) {
+         fprintf(stderr, "AGX3C mixed compare half select %u failed\n",
+                 variant);
+         return false;
+      }
+   }
+   return true;
+}
+
 static bool
 check_half_sqrt_compute(void)
 {
@@ -2454,6 +2498,13 @@ main(int argc, char **argv)
       return valid ? 0 : 1;
    }
 
+   if (argc == 2 && !strcmp(argv[1], "--mixed-compare-half-select-only")) {
+      const bool valid = check_mixed_compare_half_select_compute();
+      fprintf(stderr, "AGX3C mixed compare half select: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
+
    if (argc == 2 && !strcmp(argv[1], "--half-add-only")) {
       const bool valid = check_half_add_compute();
       fprintf(stderr, "G17P shaderFloat16 add: %s\n",
@@ -2572,6 +2623,8 @@ main(int argc, char **argv)
       return 1;
    }
 
+   if (!check_mixed_compare_half_select_compute())
+      return 1;
    if (!check_uniform_alu_policy())
       return 1;
    for (unsigned ifs = 0; ifs <= 6; ++ifs) {
