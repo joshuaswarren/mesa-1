@@ -84,6 +84,13 @@ static const struct debug_named_value hk_perf_options[] = {
    {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
    {"nobatch",   HK_PERF_NOBATCH,  "Disable submission batching"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
+   {"nocdmbarrier", HK_PERF_NOCDMBARRIER,
+    "Omit the per-launch CDM barrier entirely"},
+   {"usccdmbarrier", HK_PERF_USCCDMBARRIER,
+    "Reduce the per-launch CDM barrier to a USC cache invalidate"},
+   {"designedusccdmbarrier", HK_PERF_DESIGNEDUSCCDMBARRIER,
+    "G13X designed set {0,1,2,4,5,6,8} plus USC cache invalidate (0x17f)"},
+   {"alwayscdmbarrier", HK_PERF_ALWAYSCDMBARRIER, "Unconditional per-launch CDM barrier (disable dependency tracking)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -867,6 +874,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+   dev->cdm_barrier_mask =
+      debug_get_num_option("HK_CDM_BARRIER_MASK", 0) & 0x07ffffff;
 
    if (instance->drirc.misc.disable_border_emulation) {
       dev->perftest |= HK_PERF_NOBORDER;
