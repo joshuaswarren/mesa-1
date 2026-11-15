@@ -5862,12 +5862,14 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
       const uint16_t prewait = wait_mask & -wait_mask;
       uint8_t prelude[AGX3_ALU_MAX_LENGTH];
       uint8_t prelude_len = 0;
+      /* An ldimm carries only some slots on some encodings (AGX3C refuses
+       * slot 0x40); band(d, d, d) retires any slot and is harmless on a
+       * destination the instruction overwrites. */
       const bool ok =
-         exact_in_place
-            ? agx3_band_carrier(enc, S->dest, prewait, prelude,
-                                &prelude_len)
-            : agx3_alu_compose(enc, AGX3_ALU_LDIMM, S->dest, S->dest, S->dest,
-                               0, 0, prewait, prelude, &prelude_len);
+         (!exact_in_place &&
+          agx3_alu_compose(enc, AGX3_ALU_LDIMM, S->dest, S->dest, S->dest, 0,
+                           0, prewait, prelude, &prelude_len)) ||
+         agx3_band_carrier(enc, S->dest, prewait, prelude, &prelude_len);
       if (!ok || !agx3_append(emission, prelude, prelude_len))
          return false;
       wait_mask &= ~prewait;
