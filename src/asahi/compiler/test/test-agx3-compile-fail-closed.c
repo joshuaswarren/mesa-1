@@ -2078,6 +2078,35 @@ check_f32_abs_zero_compare_select_compute(void)
    return valid;
 }
 
+/* G17G/G18G have no negated-addend imad: x*y - z must still compile, split
+ * into a multiply and a subtract. */
+static bool
+check_imad_negated_addend_compute(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3C imad negated addend");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *v[3];
+   for (unsigned i = 0; i < 3; ++i)
+      v[i] = nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1000 + 8 * i),
+                             .align_mul = sizeof(uint32_t));
+   nir_store_global(&b, nir_isub(&b, nir_imul(&b, v[0], v[1]), v[2]),
+                    nir_imm_int64(&b, 0x2000), .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   free(part.binary);
+   ralloc_free(b.shader);
+   if (!compiled)
+      fprintf(stderr, "AGX3C imad with negated addend failed\n");
+   return compiled;
+}
+
 static bool
 check_half_sqrt_compute(void)
 {
@@ -2454,6 +2483,13 @@ main(int argc, char **argv)
       return valid ? 0 : 1;
    }
 
+   if (argc == 2 && !strcmp(argv[1], "--imad-negated-addend-only")) {
+      const bool valid = check_imad_negated_addend_compute();
+      fprintf(stderr, "AGX3C imad negated addend: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
+
    if (argc == 2 && !strcmp(argv[1], "--half-add-only")) {
       const bool valid = check_half_add_compute();
       fprintf(stderr, "G17P shaderFloat16 add: %s\n",
@@ -2572,6 +2608,8 @@ main(int argc, char **argv)
       return 1;
    }
 
+   if (!check_imad_negated_addend_compute())
+      return 1;
    if (!check_uniform_alu_policy())
       return 1;
    for (unsigned ifs = 0; ifs <= 6; ++ifs) {

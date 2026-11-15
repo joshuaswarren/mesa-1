@@ -5354,6 +5354,26 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          I->src[0] = wide;
       }
 
+      /* The G17G/G18G imad has no negated-addend form (the packer refuses
+       * imsub there; the B encoding has it). Split a*b - c into a multiply
+       * and a subtract, which pack as plain imad and isub. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs == 3 &&
+          I->shift == 0 && !I->saturate && I->dest[0].size == AGX_SIZE_32 &&
+          I->src[2].type != AGX_INDEX_IMMEDIATE && I->src[2].neg &&
+          !I->src[2].abs && !I->src[2].memory &&
+          I->src[2].size == AGX_SIZE_32 &&
+          (I->src[0].type == AGX_INDEX_IMMEDIATE ||
+           I->src[0].size == AGX_SIZE_32) &&
+          (I->src[1].type == AGX_INDEX_IMMEDIATE ||
+           I->src[1].size == AGX_SIZE_32)) {
+         agx_index product = agx_temp(ctx, AGX_SIZE_32);
+         agx_imad_to(&b, product, I->src[0], I->src[1], agx_immediate(0), 0);
+         agx_iadd_to(&b, I->dest[0], product, I->src[2], 0);
+         agx_remove_instruction(I);
+         continue;
+      }
+
       /* FCMP becomes a boolean FSEL after register allocation. Legalize
        * its half/half comparison while a temporary can still be allocated;
        * the native mixed comparator form keeps the integer0/1 result. */
