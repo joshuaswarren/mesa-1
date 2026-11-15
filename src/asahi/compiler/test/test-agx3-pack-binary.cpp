@@ -18620,3 +18620,27 @@ TEST_F(AGX3PackBinary, FusedVertexExportsRetireEachSixSlotBatch)
       EXPECT_EQ(b->shader->agx3_staging_halfs, 2 * count);
    }
 }
+
+/* A bit operation with an immediate source takes the wait-retire prelude, and
+ * an ldimm prelude cannot carry every scoreboard slot on AGX3C: a NOT of the
+ * eighth load's result (wait 0x40) was refused whole, which stopped the Kokoro
+ * vocoder from compiling on a G18G. Every slot must pack. */
+TEST_F(AGX3PackBinary, BitopImmediateRetiresEveryLoadSlot)
+{
+   for (const auto enc : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
+      for (unsigned k = 0; k < 8; ++k) {
+         agx_builder *b = builder(enc);
+         b->shader->stage = MESA_SHADER_COMPUTE;
+         for (unsigned j = 0; j <= k; ++j)
+            agx_device_load_to(b, agx_register(4 + 2 * j, AGX_SIZE_32),
+                               agx_uniform(16, AGX_SIZE_64), agx_immediate(0),
+                               AGX_FORMAT_I32, 1, 0, false);
+         agx_index src = agx_register(4 + 2 * k, AGX_SIZE_32);
+         src.cache = true;
+         agx_bitop_to(b, agx_register(30, AGX_SIZE_32), src, agx_immediate(0),
+                      0x5);
+         agx_stop(b);
+         EXPECT_FALSE(pack(b).empty()) << "enc " << enc << " load " << k;
+      }
+   }
+}
