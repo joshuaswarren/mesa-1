@@ -590,6 +590,9 @@ hk_cdm_flush(struct hk_device *dev, struct hk_cs *cs, bool memory)
       } else {
          cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
       }
+      /* Record the trailing flush so a back-to-back barrier request at a
+       * declared dependency can reuse it (G15+ already did this). */
+      cs->strong_flush_end = cs->current;
       break;
 
    case AGX_CS_GENERATION_G15:
