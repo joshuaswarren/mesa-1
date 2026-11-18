@@ -2293,6 +2293,8 @@ bool hk_g17p_smooth_varyings_supported(
 void *hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd,
                                        void *current);
 
+void hk_cdm_flush_all_dirty(struct hk_cmd_buffer *cmd);
+
 static void
 hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
                                    struct hk_cs **ptr)
