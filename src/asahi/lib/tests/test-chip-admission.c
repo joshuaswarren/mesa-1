@@ -39,21 +39,17 @@ overlaps(uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1)
    return a0 < b1 && b0 < a1;
 }
 
-/* The main heap and sparse alias agx_open_device derives for a native chip
- * below the USC window (the same split and halving). */
+/* Rounded main heap span agx_open_device derives for a native chip below
+ * the USC window (full window, no RO alias while sparse is unsupported). */
 static void
 native_user_window(enum agx_chip chip, uint64_t *start, uint64_t *end)
 {
    const uint64_t limit = agx_va_user_limit(chip, true, UINT64_C(0x2f7ffff8000));
    uint64_t base = MAX2(UINT64_C(0x100000000), AGX_G17P_USER_LIMIT / 2);
-   uint64_t size = limit - base;
-
-   assert(agx_va_split_user_window(base, size, &base, &size));
-   while (size > 0 && base + 2 * size > limit)
-      size /= 2;
-   assert(size > 0);
+   base = util_next_power_of_two64(base);
+   assert(base < limit);
    *start = base;
-   *end = base + 2 * size;
+   *end = limit;
 }
 
 static void
@@ -269,7 +265,7 @@ main(void)
     * reservation of the kernel's T8122 runtime. */
    uint64_t start, end;
    native_user_window(AGX_CHIP_G15G, &start, &end);
-   assert(start == UINT64_C(0x4000000000) && end == UINT64_C(0x6000000000));
+   assert(start == UINT64_C(0x4000000000) && end == UINT64_C(0x7000000000));
    assert(end <= UINT64_C(1) << 39);
    assert(!overlaps(start, end, AGX_T8122_RUNTIME_RESERVED_START,
                     AGX_T8122_RUNTIME_RESERVED_END));

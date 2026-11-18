@@ -316,7 +316,7 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
    /* Shadow map in case this is used for a sparse resident buffer. Skipped
     * while sparse is unsupported: with sparse_ro_offset == 0 the shadow
     * address equals the primary mapping, so binding it twice only doubles
-    * the per-allocation bind cost and halves the usable heap budget. */
+    * the per-allocation bind cost for no alias benefit. */
    if (dev->dev.sparse_ro_offset) {
       int ret = agx_bo_bind(&dev->dev, mem->bo,
                             agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
