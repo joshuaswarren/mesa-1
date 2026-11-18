@@ -3028,7 +3028,7 @@ for t in ['int', 'uint', 'float', 'bool']:
 # upcasts where the type differs from the other cast
 for N, M in itertools.product(type_sizes('uint'), type_sizes('uint')):
    if N < M:
-      # Down-casts are always in the u2uN form
+      # Down-casts are always in the u2uN form; nir_validate rejects narrowing i2iN.
       u2uN = 'u2u{0}'.format(N)
 
       if N == 1:
