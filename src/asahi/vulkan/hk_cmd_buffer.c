@@ -1115,7 +1115,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
              * stays open: merge_control_streams stitches it back together
              * at hk_EndCommandBuffer, without a stream link per barrier.
              */
-            hk_cdm_flush_dirty(cmd, cmd->current_cs.cs);
+            hk_cdm_flush_all_dirty(cmd);
 
             /* Preserve the same conservative ordering in the shared submit
              * graph, including kernels that advertise exact prior barriers
@@ -1125,6 +1125,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
          }
       }
 
+      hk_cdm_flush_all_dirty(cmd);
       hk_cmd_buffer_end_compute(cmd);
       hk_cmd_buffer_end_graphics(cmd);
       /* Preserve the same conservative ordering in the shared submit graph,

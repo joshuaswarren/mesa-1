@@ -2295,6 +2295,7 @@ void *hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd,
 
 static inline void hk_cdm_flush_dirty(struct hk_cmd_buffer *cmd,
                                       struct hk_cs *cs);
+static inline void hk_cdm_flush_all_dirty(struct hk_cmd_buffer *cmd);
 
 static void
 hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
@@ -2302,7 +2303,7 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
 {
    if (*ptr) {
       struct hk_cs *cs = *ptr;
-      hk_cdm_flush_dirty(cmd, cs);
+      hk_cdm_flush_all_dirty(cmd);
       if (unlikely(cs->query_reset_pending))
          hk_flush_query_resets(cmd, cs);
 
@@ -2571,11 +2572,28 @@ void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 static inline void
 hk_cdm_flush_dirty(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
-   if (cs && cmd->state.cs.cdm_dirty && cs->type == HK_CS_CDM) {
-      hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
-      hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
-      cmd->state.cs.cdm_dirty = false;
+   if (!cs || !cmd->state.cs.cdm_dirty || cs->type != HK_CS_CDM)
+      return;
+
+   hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
+   hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+}
+
+static inline void
+hk_cdm_flush_all_dirty(struct hk_cmd_buffer *cmd)
+{
+   if (!cmd->state.cs.cdm_dirty)
+      return;
+
+   if (cmd->current_cs.cs)
+      hk_cdm_flush_dirty(cmd, cmd->current_cs.cs);
+
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs != cmd->current_cs.cs)
+         hk_cdm_flush_dirty(cmd, cs);
    }
+
+   cmd->state.cs.cdm_dirty = false;
 }
 
 /* As hk_cdm_cache_flush(), for a flush an application dependency asks for.
