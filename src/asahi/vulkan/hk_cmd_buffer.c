@@ -1059,6 +1059,45 @@ hk_classify_pass_barrier(struct hk_cmd_buffer *cmd, const VkDependencyInfo *info
    return hk_barrier_classify(info, &state);
 }
 
+/* xfer/compute→* barriers need a CDM visibility record in the stream that
+ * holds the source. The G14 dependency-tracked fast path used to skip this
+ * and only flush through cdm_dirty. */
+static void
+hk_cdm_xfer_visibility_at_barrier(struct hk_cmd_buffer *cmd,
+                                  const VkDependencyInfo *dep)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   uint8_t src_kinds, dst_kinds;
+
+   hk_sync_dependency_kinds(dep, hk_sync_image_class(cmd), &src_kinds,
+                          &dst_kinds);
+   if (!(src_kinds & (HK_SYNC_COMPUTE | HK_SYNC_XFER)) || !dst_kinds)
+      return;
+
+   const bool alias_scope = hk_cdm_alias_scope(dev);
+   struct hk_cs *list[16];
+   unsigned n = 0;
+
+   if (cmd->current_cs.cs && n < ARRAY_SIZE(list))
+      list[n++] = cmd->current_cs.cs;
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs == cmd->current_cs.cs || n >= ARRAY_SIZE(list))
+         continue;
+      list[n++] = cs;
+   }
+
+   for (unsigned i = 0; i < n; i++) {
+      struct hk_cs *cs = list[i];
+
+      if (cs->type != HK_CS_CDM ||
+          !hk_cdm_visibility_flush_needed(dev, cs, alias_scope))
+         continue;
+
+      hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
+      hk_cdm_visibility_flush(dev, cs, alias_scope);
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -1116,6 +1155,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
              * at hk_EndCommandBuffer, without a stream link per barrier.
              */
             hk_cdm_flush_all_dirty(cmd);
+            hk_cdm_xfer_visibility_at_barrier(cmd, pDependencyInfo);
 
             /* Preserve the same conservative ordering in the shared submit
              * graph, including kernels that advertise exact prior barriers
@@ -1126,6 +1166,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       }
 
       hk_cdm_flush_all_dirty(cmd);
+      hk_cdm_xfer_visibility_at_barrier(cmd, pDependencyInfo);
       hk_cmd_buffer_end_compute(cmd);
       hk_cmd_buffer_end_graphics(cmd);
       /* Preserve the same conservative ordering in the shared submit graph,
