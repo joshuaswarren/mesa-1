@@ -28,6 +28,7 @@ static uint64_t pinned, cached, peak, sibling_snapshot;
 static unsigned bo_calls, kernel_oom_attempts, trims, budget_queries;
 static unsigned passing, host_live;
 static bool bind_fails, bo_fails, image_bind_fails, export_fails, limited = true;
+static unsigned bind_calls;
 static unsigned images_live, successes, exported_count;
 static int exported_fds[4];
 static struct agx_bo *live_bos[16];
@@ -111,6 +112,7 @@ int
 __wrap_agx_bo_bind(struct agx_device *dev, struct agx_bo *bo, uint64_t address,
                    uint64_t size, uint64_t offset, uint32_t flags)
 {
+   ++bind_calls;
    return bind_fails ? -1 : 0;
 }
 
@@ -413,6 +415,20 @@ main(void)
    swapchain_attempt(dev, 256 * MIB);
    assert(exported_count == 1);
    export_fails = false;
+
+   /* Production runs at sparse_ro_offset == 0 (agx_device.c): the shadow
+    * bind is skipped entirely, so even a failing agx_bo_bind leaves the
+    * allocation untouched. */
+   dev->dev.sparse_ro_offset = 0;
+   bind_fails = true;
+   before = bind_calls;
+   passing = 4;
+   VkDeviceMemory zero_offset = VK_NULL_HANDLE;
+   assert(alloc(dev, 1024 * MIB, &zero_offset) == VK_SUCCESS);
+   assert(bind_calls == before);
+   hk_FreeMemory(hk_device_to_handle(dev), zero_offset, &allocator);
+   bind_fails = false;
+   dev->dev.sparse_ro_offset = UINT64_C(1) << 40;
 
    /* Application allocations are admitted by the allocator/kernel, even when
     * a WSI budget snapshot would refuse them. No cgroup query or trim occurs. */

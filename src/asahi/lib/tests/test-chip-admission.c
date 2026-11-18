@@ -261,7 +261,7 @@ main(void)
    bad.usc_generation = 2;
    assert(!agx_params_driver_supported(&bad));
 
-   /* T8122 (G15G): the heap and its sparse alias stay below 2^39, the
+   /* T8122 (G15G): the heap stays below 2^39, the
     * absolute USC Texture/Sampler bound, and clear of every per-VM
     * reservation of the kernel's T8122 runtime. */
    uint64_t start, end;
