@@ -249,6 +249,12 @@ hk_flush_query_resets(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       abort();
 }
 
+void
+hk_cdm_flush_all_dirty(struct hk_cmd_buffer *cmd)
+{
+   (void)cmd;
+}
+
 /* Timestamp recording references payload/allocation entry points for other
  * branches. These tests attach end stamps to already-created closed streams;
  * reaching a payload emission branch would invalidate that fixture contract.

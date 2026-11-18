@@ -55,6 +55,12 @@ hk_flush_query_resets(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 }
 
 void
+hk_cdm_flush_all_dirty(struct hk_cmd_buffer *cmd)
+{
+   (void)cmd;
+}
+
+void
 hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
                        uint64_t address, uint64_t size, uint32_t value)
 {

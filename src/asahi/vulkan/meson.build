@@ -15,6 +15,7 @@ hk_files = files(
   'hk_buffer_view.h',
   'hk_bvh.h',
   'hk_cmd_buffer.c',
+  'hk_cdm_flush_dirty.c',
   'hk_cmd_upload.c',
   'hk_cmd_buffer.h',
   'hk_conditional_render_core.h',
@@ -186,7 +187,8 @@ if with_tests
       'hk_query_reset',
       executable(
         'hk_query_reset_test',
-        files('tests/test-hk-query-reset.c', 'hk_query_reset.c'),
+        files('tests/test-hk-query-reset.c', 'hk_query_reset.c',
+              'hk_cdm_flush_dirty.c'),
         include_directories : [
           include_directories('.'),
           inc_gallium, inc_gallium_aux, inc_include, inc_src, inc_asahi,
