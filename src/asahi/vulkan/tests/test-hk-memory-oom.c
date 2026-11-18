@@ -370,7 +370,10 @@ main(void)
    list_inithead(&dev->dev.bo_cache.lru);
    for (unsigned i = 0; i < ARRAY_SIZE(dev->dev.bo_cache.buckets); ++i)
       list_inithead(&dev->dev.bo_cache.buckets[i]);
-   util_vma_heap_init(&dev->dev.main_heap, UINT64_C(0x1000000000), UINT64_C(1) << 40);
+   util_vma_heap_init(&dev->dev.main_heap, UINT64_C(0x1000000000), UINT64_C(1) << 39);
+   /* Exercise the sparse RO shadow bind in hk_AllocateMemory(); keep RW
+    * addresses below sparse_ro_offset so agx_rw_addr_to_ro() stays valid. */
+   dev->dev.sparse_ro_offset = UINT64_C(1) << 40;
    dev->dev.ops.bo_alloc = mock_bo_alloc;
    dev->dev.ops.bo_free = mock_bo_free;
    init_wsi(dev);
