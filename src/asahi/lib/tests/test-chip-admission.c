@@ -13,6 +13,7 @@
 #include "agx_chip.h"
 #include "agx_va_runtime_hole.h"
 #include "util/macros.h"
+#include "util/u_math.h"
 
 static struct drm_asahi_params_global
 g15_params(char variant, uint32_t chip_id, uint32_t clusters)
