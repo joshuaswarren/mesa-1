@@ -160,11 +160,9 @@ agx2_compute_upload_reuse(struct fixture *f)
       calloc(1, hk_api_shader_size(MESA_SHADER_COMPUTE, false));
    struct hk_shader *s = &cs_api->variants[0];
    struct hk_linked_shader linked;
-   uint8_t usc_blob[64];
    CHECK(cs_api);
    memset(&linked, 0, sizeof(linked));
-   linked.b.usc.size = sizeof(usc_blob);
-   linked.b.usc.data = usc_blob;
+   linked.usc.size = 16;
    s->compiled = true;
    s->info.stage = MESA_SHADER_COMPUTE;
    s->b.info.stage = MESA_SHADER_COMPUTE;
