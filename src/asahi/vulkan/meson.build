@@ -501,6 +501,12 @@ libhk = static_library(
 hk_wrap_test_link_args = cc.get_supported_link_arguments('-fno-lto')
 
 if with_tests
+  test('hk_cpu_upload_bench', executable('hk_cpu_upload_bench_test',
+    files('tests/hk_cpu_upload_bench.c'),
+    include_directories : [inc_gallium, inc_gallium_aux, inc_include, inc_src,
+      inc_asahi, inc_virtio_gpu, inc_virtio_vdrm, include_directories('.')],
+    dependencies : [hk_deps], link_with : [libhk],
+    link_args : [ld_args_gc_sections]), suite : ['asahi'])
   test('hk_rt_inlining', executable('hk_rt_inlining_test',
     files('tests/test-hk-rt-inlining.c'),
     include_directories : [inc_gallium, inc_gallium_aux, inc_include, inc_src,
