@@ -55,10 +55,14 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    const size_t tail_B = hk_root_descriptor_offset(set_dynamic_buffer_start);
    /* CPU-decoded descriptor programs use a new root identity to invalidate
     * their native program caches, even when only set memory changed. */
-   if (agx_native_graphics(&dev->dev) && desc->uploaded_root.gpu &&
-       desc->uploaded_root_size == root_size &&
-       desc->generation == desc->uploaded_root_generation &&
-       desc->dynamic_buffer_end == desc->uploaded_dynamic_buffer_end) {
+   const bool root_cache_eligible =
+      desc->uploaded_root.gpu && desc->uploaded_root_size == root_size &&
+      desc->generation == desc->uploaded_root_generation &&
+      desc->dynamic_buffer_end == desc->uploaded_dynamic_buffer_end &&
+      (agx_native_graphics(&dev->dev) ||
+       bind_point == VK_PIPELINE_BIND_POINT_COMPUTE);
+
+   if (root_cache_eligible) {
       root->root_desc_addr = desc->uploaded_root.gpu;
       if (memcmp(desc->uploaded_root.cpu, root, head_B) == 0 &&
           (tail_B >= root_size ||
@@ -216,7 +220,8 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               " draw_params=%" PRIu64 "/%" PRIu64 "B draw_param_reuse=%" PRIu64
               " draw_id=%" PRIu64 "/%" PRIu64 "B draw_id_reuse=%" PRIu64
               " constants=%" PRIu64 "/%" PRIu64 "B constant_reuse=%" PRIu64
-              " pool=%" PRIu64 "/%" PRIu64 "B usc_build=%" PRIu64 "/%" PRIu64 "B"
+              " pool=%" PRIu64 "/%" PRIu64 "B pool_gc_reuse=%" PRIu64
+              " usc_build=%" PRIu64 "/%" PRIu64 "B usc_reuse=%" PRIu64
               " vk_barrier2=%" PRIu64
               " cdm_dispatches=%" PRIu64 " cdm_launches=%" PRIu64
               " cdm_flush_barriers=%" PRIu64,
@@ -225,7 +230,8 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               s->draw_param_uploads, s->draw_param_bytes, s->draw_param_reuses,
               s->draw_id_uploads, s->draw_id_bytes, s->draw_id_reuses,
               s->constant_uploads, s->constant_bytes, s->constant_reuses,
-              s->pool_uploads, s->pool_upload_bytes, s->usc_builds, s->usc_bytes,
+              s->pool_uploads, s->pool_upload_bytes, s->pool_group_count_reuses,
+              s->usc_builds, s->usc_bytes, s->usc_reuses,
               s->vk_pipeline_barrier2, s->cdm_api_dispatches,
               s->cdm_launches, s->cdm_flush_barriers);
 }

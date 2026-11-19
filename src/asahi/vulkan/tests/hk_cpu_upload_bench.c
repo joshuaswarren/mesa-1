@@ -150,6 +150,56 @@ correctness(struct fixture *f)
 }
 
 static void
+agx2_compute_upload_reuse(struct fixture *f)
+{
+   f->dev.dev.chip = AGX_CHIP_G13G;
+   reset(f);
+
+   struct hk_cmd_buffer *cmd = &f->cmd;
+   struct hk_api_shader *cs_api =
+      calloc(1, hk_api_shader_size(MESA_SHADER_COMPUTE, false));
+   struct hk_shader *s = &cs_api->variants[0];
+   struct hk_linked_shader linked;
+   uint8_t usc_blob[64];
+   CHECK(cs_api);
+   memset(&linked, 0, sizeof(linked));
+   linked.b.usc.size = sizeof(usc_blob);
+   linked.b.usc.data = usc_blob;
+   s->compiled = true;
+   s->info.stage = MESA_SHADER_COMPUTE;
+   s->b.info.stage = MESA_SHADER_COMPUTE;
+   s->b.info.workgroup_size[0] = 1;
+   s->b.info.workgroup_size[1] = 1;
+   s->b.info.workgroup_size[2] = 1;
+   s->b.info.rodata.size_16 = 0;
+   s->only_linked = &linked;
+   cmd->state.cs.shader = cs_api;
+
+   VkDispatchIndirectCommand gc = {.x = 1, .y = 1, .z = 1};
+   struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+   desc->root.cs.group_count_addr = hk_pool_upload_cs_group_count(cmd, &gc);
+   desc->root.cs.grid_helper_sparse_map_addr = 0;
+
+   const uint64_t usc1 = hk_upload_usc_words(cmd, s, &linked);
+   CHECK(usc1);
+   CHECK(cmd->state.upload_stats.usc_builds == 1);
+   CHECK(cmd->state.upload_stats.usc_reuses == 0);
+   CHECK(cmd->state.upload_stats.root_uploads == 1);
+   CHECK(cmd->state.upload_stats.pool_uploads == 1);
+
+   desc->root.cs.group_count_addr = hk_pool_upload_cs_group_count(cmd, &gc);
+   CHECK(cmd->state.upload_stats.pool_group_count_reuses >= 1);
+
+   const uint64_t usc2 = hk_upload_usc_words(cmd, s, &linked);
+   CHECK(usc2 == usc1);
+   CHECK(cmd->state.upload_stats.usc_builds == 1);
+   CHECK(cmd->state.upload_stats.usc_reuses >= 1);
+   CHECK(cmd->state.upload_stats.root_reuses >= 1);
+   free(cs_api);
+   f->dev.dev.chip = AGX_CHIP_G17P;
+}
+
+static void
 reuse_correctness(struct fixture *f)
 {
    struct hk_cmd_buffer *cmd = &f->cmd;
@@ -347,6 +397,7 @@ main(int argc, char **argv)
    CHECK(batches && batches <= 1000000);
    struct fixture *f = fixture();
    correctness(f);
+   agx2_compute_upload_reuse(f);
    reuse_correctness(f);
    run(f, "identical", 16, batches);
    run(f, "change_every_4", 4, batches);

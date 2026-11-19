@@ -279,8 +279,8 @@ struct hk_upload_stats {
    uint64_t draw_param_uploads, draw_param_bytes, draw_param_reuses;
    uint64_t draw_id_uploads, draw_id_bytes, draw_id_reuses;
    uint64_t constant_uploads, constant_bytes, constant_reuses;
-   uint64_t pool_uploads, pool_upload_bytes;
-   uint64_t usc_builds, usc_bytes;
+   uint64_t pool_uploads, pool_upload_bytes, pool_group_count_reuses;
+   uint64_t usc_builds, usc_bytes, usc_reuses;
    /* Honeykrisp compute path (G13): rolled up at EndCommandBuffer from CDM streams. */
    uint64_t vk_pipeline_barrier2;
    uint64_t cdm_api_dispatches, cdm_launches, cdm_flush_barriers;
@@ -1005,6 +1005,14 @@ hk_m5_fragment_root_select(struct hk_graphics_state *gfx, uint8_t root_reads,
 struct hk_compute_state {
    struct hk_descriptor_state descriptors;
    struct hk_api_shader *shader;
+   /* Stable pool slot for {groupCountX,Y,Z}; only the words change. */
+   struct agx_ptr group_count_pool;
+   struct {
+      uint64_t usc_gpu;
+      const struct hk_shader *shader;
+      const struct hk_linked_shader *linked;
+      uint32_t generation;
+   } usc_cache;
 };
 
 /*
@@ -1998,6 +2006,9 @@ uint64_t hk_g17p_vdm_alias(struct hk_cmd_buffer *cmd, uint64_t primary);
 
 uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
                         uint32_t size, uint32_t alignment);
+
+uint64_t hk_pool_upload_cs_group_count(struct hk_cmd_buffer *cmd,
+                                     const VkDispatchIndirectCommand *counts);
 
 /*
  * G17P does not honour the low five bits of the texture-table pointer that

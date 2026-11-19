@@ -630,6 +630,29 @@ hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
    return chunk;
 }
 
+uint64_t
+hk_pool_upload_cs_group_count(struct hk_cmd_buffer *cmd,
+                              const VkDispatchIndirectCommand *counts)
+{
+   struct hk_compute_state *cs = &cmd->state.cs;
+
+   if (cs->group_count_pool.cpu) {
+      memcpy(cs->group_count_pool.cpu, counts, sizeof(*counts));
+      hk_upload_stat(cmd, pool_group_count_reuses, 1);
+      return cs->group_count_pool.gpu;
+   }
+
+   struct agx_ptr t = hk_pool_alloc(cmd, sizeof(*counts), 8);
+   if (!t.cpu)
+      return 0;
+
+   memcpy(t.cpu, counts, sizeof(*counts));
+   hk_upload_stat(cmd, pool_uploads, 1);
+   hk_upload_stat(cmd, pool_upload_bytes, sizeof(*counts));
+   cs->group_count_pool = t;
+   return t.gpu;
+}
+
 __attribute__((hot)) uint64_t
 hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
                uint32_t alignment)
@@ -3564,6 +3587,17 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 
    mesa_shader_stage sw_stage = s->info.stage;
 
+   if (sw_stage == MESA_SHADER_COMPUTE) {
+      struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+      const struct hk_compute_state *cs = &cmd->state.cs;
+      if (cs->usc_cache.usc_gpu && cs->usc_cache.shader == s &&
+          cs->usc_cache.linked == linked &&
+          cs->usc_cache.generation == desc->generation && !desc->root_dirty) {
+         hk_upload_stat(cmd, usc_reuses, 1);
+         return cs->usc_cache.usc_gpu;
+      }
+   }
+
    unsigned constant_push_ranges = DIV_ROUND_UP(s->b.info.rodata.size_16, 64);
    unsigned push_ranges = 2;
    unsigned stage_ranges = 3;
@@ -3648,7 +3682,15 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    agx_usc_push_blob(&b, linked->usc.data, linked->usc.size);
    hk_upload_stat(cmd, usc_builds, 1);
    hk_upload_stat(cmd, usc_bytes, usc_size);
-   return agx_usc_addr(&dev->dev, t.gpu);
+   const uint64_t usc_gpu = agx_usc_addr(&dev->dev, t.gpu);
+   if (sw_stage == MESA_SHADER_COMPUTE) {
+      struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+      cmd->state.cs.usc_cache.usc_gpu = usc_gpu;
+      cmd->state.cs.usc_cache.shader = s;
+      cmd->state.cs.usc_cache.linked = linked;
+      cmd->state.cs.usc_cache.generation = desc->generation;
+   }
+   return usc_gpu;
 }
 
 uint64_t

@@ -521,6 +521,8 @@ void
 hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
                            struct hk_api_shader *shader)
 {
+   if (cmd->state.cs.shader != shader)
+      memset(&cmd->state.cs.usc_cache, 0, sizeof(cmd->state.cs.usc_cache));
    cmd->state.cs.shader = shader;
 }
 
@@ -2786,7 +2788,7 @@ hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer, uint32_t invocations_x,
       .z = DIV_ROUND_UP(invocations_z, s->b.info.workgroup_size[2]),
    };
    desc->root.cs.group_count_addr =
-      hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+      hk_pool_upload_cs_group_count(cmd, &group_count);
    desc->root.cs.grid_helper_sparse_map_addr = 0;
 
    dispatch_grid(cmd, agx_3d(invocations_x, invocations_y, invocations_z),
@@ -2818,7 +2820,7 @@ hk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
    };
 
    desc->root.cs.group_count_addr =
-      hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+      hk_pool_upload_cs_group_count(cmd, &group_count);
    desc->root.cs.grid_helper_sparse_map_addr = 0;
 
    dispatch(cmd, agx_3d(groupCountX, groupCountY, groupCountZ));
