@@ -10,6 +10,7 @@
 #include "util/macros.h"
 
 #include "util/list.h"
+#include "util/os_time.h"
 #include "agx_abi.h"
 #include "agx_helpers.h"
 #include "agx_linker.h"
@@ -284,6 +285,11 @@ struct hk_upload_stats {
    /* Honeykrisp compute path (G13): rolled up at EndCommandBuffer from CDM streams. */
    uint64_t vk_pipeline_barrier2;
    uint64_t cdm_api_dispatches, cdm_launches, cdm_flush_barriers;
+   /* Next-largest per-dispatch CPU costs: pipeline lookup, descriptor bind,
+    * command-buffer (main pool) allocation, ns under AGX_DBG_PERF only. */
+   uint64_t pipeline_binds, pipeline_bind_ns;
+   uint64_t descriptor_bind_ns;
+   uint64_t pool_allocs, pool_alloc_ns;
 };
 
 #define hk_upload_stat(cmd, field, value)                                      \
@@ -2054,8 +2060,17 @@ void hk_cmd_buffer_release_bos(struct hk_cmd_buffer *cmd,
 static inline struct agx_ptr
 hk_pool_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   return hk_pool_alloc_from(cmd, &cmd->uploader.main, size, alignment,
-                             HK_CMD_BO_MAIN);
+   const bool perf =
+      unlikely(hk_cmd_buffer_device(cmd)->dev.debug & AGX_DBG_PERF);
+   const uint64_t t0 = perf ? os_time_get_nano() : 0;
+   struct agx_ptr ptr =
+      hk_pool_alloc_from(cmd, &cmd->uploader.main, size, alignment,
+                         HK_CMD_BO_MAIN);
+   if (perf) {
+      hk_upload_stat(cmd, pool_allocs, 1);
+      hk_upload_stat(cmd, pool_alloc_ns, os_time_get_nano() - t0);
+   }
+   return ptr;
 }
 
 static inline struct agx_ptr

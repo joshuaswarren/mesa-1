@@ -1229,9 +1229,16 @@ hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
       struct hk_api_shader *shader = shaders[i]
          ? container_of(shaders[i], struct hk_api_shader, vk)
          : NULL;
-      if (stages[i] == MESA_SHADER_COMPUTE || stages[i] == MESA_SHADER_KERNEL)
+      if (stages[i] == MESA_SHADER_COMPUTE || stages[i] == MESA_SHADER_KERNEL) {
+         const bool perf =
+            unlikely(hk_cmd_buffer_device(cmd)->dev.debug & AGX_DBG_PERF);
+         const uint64_t t0 = perf ? os_time_get_nano() : 0;
          hk_cmd_bind_compute_shader(cmd, shader);
-      else
+         if (perf) {
+            hk_upload_stat(cmd, pipeline_binds, 1);
+            hk_upload_stat(cmd, pipeline_bind_ns, os_time_get_nano() - t0);
+         }
+      } else
          hk_cmd_bind_graphics_shader(cmd, stages[i], shader);
    }
 
@@ -1377,8 +1384,13 @@ hk_CmdBindDescriptorSets2KHR(
    }
 
    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+      const bool perf =
+         unlikely(hk_cmd_buffer_device(cmd)->dev.debug & AGX_DBG_PERF);
+      const uint64_t t0 = perf ? os_time_get_nano() : 0;
       hk_bind_descriptor_sets(cmd, &cmd->state.cs.descriptors,
                               pBindDescriptorSetsInfo);
+      if (perf)
+         hk_upload_stat(cmd, descriptor_bind_ns, os_time_get_nano() - t0);
    }
 
    if (pBindDescriptorSetsInfo->stageFlags & HK_RT_SHADER_STAGES) {

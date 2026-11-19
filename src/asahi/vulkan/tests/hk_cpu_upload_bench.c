@@ -189,6 +189,7 @@ agx2_compute_upload_reuse(struct fixture *f)
 
    desc->root.cs.group_count_addr = hk_pool_upload_cs_group_count(cmd, &gc);
    CHECK(cmd->state.upload_stats.pool_group_count_reuses >= 1);
+   CHECK(cmd->state.upload_stats.pool_allocs >= 1);
 
    const uint64_t usc2 = hk_upload_usc_words(cmd, s, &linked);
    CHECK(usc2 == usc1);

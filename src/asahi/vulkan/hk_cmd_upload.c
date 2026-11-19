@@ -224,7 +224,9 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               " usc_build=%" PRIu64 "/%" PRIu64 "B usc_reuse=%" PRIu64
               " vk_barrier2=%" PRIu64
               " cdm_dispatches=%" PRIu64 " cdm_launches=%" PRIu64
-              " cdm_flush_barriers=%" PRIu64,
+              " cdm_flush_barriers=%" PRIu64
+              " pipe_bind=%" PRIu64 "/%" PRIu64 "ns desc_bind_ns=%" PRIu64
+              " pool_alloc=%" PRIu64 "/%" PRIu64 "ns",
               s->draws, s->descriptor_binds, s->descriptor_noops,
               s->root_uploads, s->root_bytes, s->root_reuses,
               s->draw_param_uploads, s->draw_param_bytes, s->draw_param_reuses,
@@ -233,5 +235,7 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               s->pool_uploads, s->pool_upload_bytes, s->pool_group_count_reuses,
               s->usc_builds, s->usc_bytes, s->usc_reuses,
               s->vk_pipeline_barrier2, s->cdm_api_dispatches,
-              s->cdm_launches, s->cdm_flush_barriers);
+              s->cdm_launches, s->cdm_flush_barriers,
+              s->pipeline_binds, s->pipeline_bind_ns, s->descriptor_bind_ns,
+              s->pool_allocs, s->pool_alloc_ns);
 }

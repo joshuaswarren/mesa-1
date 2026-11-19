@@ -29,6 +29,8 @@ end of each command buffer:
 
 - `draws`: recorded draw calls, including internal meta and expanded multiview draws.
 - `descriptor_binds` / `descriptor_noops`: calls per bind point and unchanged
+- `pipe_bind` / `desc_bind_ns` / `pool_alloc`: compute-path cost counters (ns,
+  AGX_DBG_PERF only) for pipeline bind, compute descriptor bind, main-pool alloc
   binds on the admitted native graphics path. Combined sampler, sample-variant,
   geometry/tessellation and compute descriptor paths stay conservative.
 - `root`, `draw_params`, `draw_id`, `constants`: successful upload count and
