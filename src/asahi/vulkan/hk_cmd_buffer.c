@@ -1070,6 +1070,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    if (HK_PERF(dev, NOBARRIER))
       return;
 
+   hk_upload_stat(cmd, vk_pipeline_barrier2, 1);
    perf_debug(cmd, "Pipeline barrier");
 
    if (unlikely(dev->frame_anatomy)) {

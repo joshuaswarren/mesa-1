@@ -194,8 +194,21 @@ hk_cmd_upload_draw_id(struct hk_cmd_buffer *cmd, uint32_t draw_id)
 }
 
 void
+hk_cmd_buffer_collect_cdm_stats(struct hk_cmd_buffer *cmd)
+{
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs->type != HK_CS_CDM)
+         continue;
+      cmd->state.upload_stats.cdm_api_dispatches += cs->stats.calls;
+      cmd->state.upload_stats.cdm_launches += cs->stats.cmds;
+      cmd->state.upload_stats.cdm_flush_barriers += cs->stats.flushes;
+   }
+}
+
+void
 hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
 {
+   hk_cmd_buffer_collect_cdm_stats(cmd);
    const struct hk_upload_stats *s = &cmd->state.upload_stats;
    perf_debug(cmd, "CPU uploads: draws=%" PRIu64
               " descriptor_binds=%" PRIu64 " descriptor_noops=%" PRIu64
@@ -203,11 +216,16 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               " draw_params=%" PRIu64 "/%" PRIu64 "B draw_param_reuse=%" PRIu64
               " draw_id=%" PRIu64 "/%" PRIu64 "B draw_id_reuse=%" PRIu64
               " constants=%" PRIu64 "/%" PRIu64 "B constant_reuse=%" PRIu64
-              " pool=%" PRIu64 "/%" PRIu64 "B usc_build=%" PRIu64 "/%" PRIu64 "B",
+              " pool=%" PRIu64 "/%" PRIu64 "B usc_build=%" PRIu64 "/%" PRIu64 "B"
+              " vk_barrier2=%" PRIu64
+              " cdm_dispatches=%" PRIu64 " cdm_launches=%" PRIu64
+              " cdm_flush_barriers=%" PRIu64,
               s->draws, s->descriptor_binds, s->descriptor_noops,
               s->root_uploads, s->root_bytes, s->root_reuses,
               s->draw_param_uploads, s->draw_param_bytes, s->draw_param_reuses,
               s->draw_id_uploads, s->draw_id_bytes, s->draw_id_reuses,
               s->constant_uploads, s->constant_bytes, s->constant_reuses,
-              s->pool_uploads, s->pool_upload_bytes, s->usc_builds, s->usc_bytes);
+              s->pool_uploads, s->pool_upload_bytes, s->usc_builds, s->usc_bytes,
+              s->vk_pipeline_barrier2, s->cdm_api_dispatches,
+              s->cdm_launches, s->cdm_flush_barriers);
 }

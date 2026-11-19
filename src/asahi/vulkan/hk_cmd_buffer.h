@@ -281,6 +281,9 @@ struct hk_upload_stats {
    uint64_t constant_uploads, constant_bytes, constant_reuses;
    uint64_t pool_uploads, pool_upload_bytes;
    uint64_t usc_builds, usc_bytes;
+   /* Honeykrisp compute path (G13): rolled up at EndCommandBuffer from CDM streams. */
+   uint64_t vk_pipeline_barrier2;
+   uint64_t cdm_api_dispatches, cdm_launches, cdm_flush_barriers;
 };
 
 #define hk_upload_stat(cmd, field, value)                                      \
@@ -2484,6 +2487,7 @@ void hk_cmd_upload_draw_id(struct hk_cmd_buffer *cmd, uint32_t draw_id);
 uint64_t hk_cmd_upload_constants(struct hk_cmd_buffer *cmd,
                                  const struct hk_shader *shader,
                                  mesa_shader_stage stage);
+void hk_cmd_buffer_collect_cdm_stats(struct hk_cmd_buffer *cmd);
 void hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd);
 
 uint64_t hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
