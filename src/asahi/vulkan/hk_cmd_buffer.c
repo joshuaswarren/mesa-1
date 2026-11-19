@@ -639,6 +639,8 @@ hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
       return 0;
 
    memcpy(T.cpu, data, size);
+   hk_upload_stat(cmd, pool_uploads, 1);
+   hk_upload_stat(cmd, pool_upload_bytes, size);
    return T.gpu;
 }
 
@@ -3643,6 +3645,8 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    agx_usc_uniform(&b, root_unif, 4 * (1 + s->info.set_count), root_ptr);
 
    agx_usc_push_blob(&b, linked->usc.data, linked->usc.size);
+   hk_upload_stat(cmd, usc_builds, 1);
+   hk_upload_stat(cmd, usc_bytes, usc_size);
    return agx_usc_addr(&dev->dev, t.gpu);
 }
 

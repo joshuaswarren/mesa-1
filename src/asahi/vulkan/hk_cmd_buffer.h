@@ -279,6 +279,8 @@ struct hk_upload_stats {
    uint64_t draw_param_uploads, draw_param_bytes, draw_param_reuses;
    uint64_t draw_id_uploads, draw_id_bytes, draw_id_reuses;
    uint64_t constant_uploads, constant_bytes, constant_reuses;
+   uint64_t pool_uploads, pool_upload_bytes;
+   uint64_t usc_builds, usc_bytes;
 };
 
 #define hk_upload_stat(cmd, field, value)                                      \

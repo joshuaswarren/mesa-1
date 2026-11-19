@@ -202,10 +202,12 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               " root=%" PRIu64 "/%" PRIu64 "B root_reuse=%" PRIu64
               " draw_params=%" PRIu64 "/%" PRIu64 "B draw_param_reuse=%" PRIu64
               " draw_id=%" PRIu64 "/%" PRIu64 "B draw_id_reuse=%" PRIu64
-              " constants=%" PRIu64 "/%" PRIu64 "B constant_reuse=%" PRIu64,
+              " constants=%" PRIu64 "/%" PRIu64 "B constant_reuse=%" PRIu64
+              " pool=%" PRIu64 "/%" PRIu64 "B usc_build=%" PRIu64 "/%" PRIu64 "B",
               s->draws, s->descriptor_binds, s->descriptor_noops,
               s->root_uploads, s->root_bytes, s->root_reuses,
               s->draw_param_uploads, s->draw_param_bytes, s->draw_param_reuses,
               s->draw_id_uploads, s->draw_id_bytes, s->draw_id_reuses,
-              s->constant_uploads, s->constant_bytes, s->constant_reuses);
+              s->constant_uploads, s->constant_bytes, s->constant_reuses,
+              s->pool_uploads, s->pool_upload_bytes, s->usc_builds, s->usc_bytes);
 }
