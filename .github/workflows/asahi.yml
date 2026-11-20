@@ -25,7 +25,7 @@ jobs:
         run: |
           dnf -y install dnf-plugins-core git
           dnf -y builddep mesa
-          dnf -y install ccache clang
+          dnf -y install ccache clang libglvnd-egl
 
       - name: Check out
         uses: actions/checkout@v4
