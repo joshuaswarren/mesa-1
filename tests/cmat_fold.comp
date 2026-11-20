@@ -1,0 +1,93 @@
+#version 450
+/* SPDX-License-Identifier: MIT
+ *
+ * Mixed-precision cooperative-matrix MAC: D = A * B + C at fp32, with A, B or
+ * both written as fp16 elements widened by float(). This is the source form
+ * that agx_nir_fold_simdmat_f2f32 rewrites.
+ *
+ * FORM 0: fp32 A, fp16 B.  FORM 1: fp16 A, fp32 B.  FORM 2: fp16 A and B.
+ * Each element is read from a SHARED copy when SHARED is 1.
+ *
+ * One workgroup is one subgroup and owns STEPS tiles of 256 fp32 words in the
+ * input: A32[64] B32[64] A16[64] B16[64] (fp16, 32 words each) C32[64]. Lane L
+ * holds elements 2L and 2L + 1. Output: D32[64] per workgroup. WRAP reuses
+ * the first WRAP workgroups of data, for long timing dispatches.
+ */
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) readonly buffer In32 { float v[]; };
+layout(std430, binding = 0) readonly buffer In16 { float16_t h[]; };
+layout(std430, binding = 1) writeonly buffer Out { float o[]; };
+
+#ifndef FORM
+#define FORM 0
+#endif
+#ifndef STEPS
+#define STEPS 1
+#endif
+#ifndef WRAP
+#define WRAP 0x7fffffffu
+#endif
+#ifndef SHARED
+#define SHARED 0
+#endif
+
+#if SHARED
+shared float16_t sa[64 * STEPS];
+shared float16_t sb[64 * STEPS];
+#define A16(s, e) sa[(s) * 64u + e]
+#define B16(s, e) sb[(s) * 64u + e]
+#else
+#define A16(s, e) h[(base + (s) * 256u + 128u) * 2u + e]
+#define B16(s, e) h[(base + (s) * 256u + 160u) * 2u + e]
+#endif
+
+void main()
+{
+   const uint lane = gl_SubgroupInvocationID;
+   const uint group = gl_WorkGroupID.x % WRAP;
+   const uint base = group * STEPS * 256u;
+   const uint e0 = 2u * lane, e1 = e0 + 1u;
+
+#if SHARED
+   for (uint s = 0u; s < STEPS; ++s) {
+      const uint t = base + s * 256u;
+      sa[s * 64u + e0] = h[(t + 128u) * 2u + e0];
+      sa[s * 64u + e1] = h[(t + 128u) * 2u + e1];
+      sb[s * 64u + e0] = h[(t + 160u) * 2u + e0];
+      sb[s * 64u + e1] = h[(t + 160u) * 2u + e1];
+   }
+   memoryBarrierShared();
+   barrier();
+#endif
+
+   coopmat<float, gl_ScopeSubgroup, 8, 8, gl_MatrixUseAccumulator> D;
+   D[0] = v[base + 192u + e0];
+   D[1] = v[base + 192u + e1];
+   for (uint s = 0u; s < STEPS; ++s) {
+      const uint t = base + s * 256u;
+      coopmat<float, gl_ScopeSubgroup, 8, 8, gl_MatrixUseA> A;
+      coopmat<float, gl_ScopeSubgroup, 8, 8, gl_MatrixUseB> B;
+#if FORM == 0
+      A[0] = v[t + e0];
+      A[1] = v[t + e1];
+#else
+      A[0] = float(A16(s, e0));
+      A[1] = float(A16(s, e1));
+#endif
+#if FORM == 1
+      B[0] = v[t + 64u + e0];
+      B[1] = v[t + 64u + e1];
+#else
+      B[0] = float(B16(s, e0));
+      B[1] = float(B16(s, e1));
+#endif
+      D = coopMatMulAdd(A, B, D);
+   }
+   o[group * 64u + e0] = D[0];
+   o[group * 64u + e1] = D[1];
+}

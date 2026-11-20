@@ -1,7 +1,11 @@
 // Build: c++ -O2 compute_runner.cpp -lvulkan -o compute_runner
 // Usage: compute_runner shader.spv in.bin out.bin out_bytes groups
+// COMPUTE_RUNNER_REPS=N submits the dispatch N times and prints the median
+// fence wall time as "median_ms X" on stderr.
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,7 +67,7 @@ int main(int argc, char** argv) {
   uint32_t groups = std::strtoul(argv[5], nullptr, 10);
 
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-  app.apiVersion = VK_API_VERSION_1_1;
+  app.apiVersion = VK_API_VERSION_1_3;
   VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   ici.pApplicationInfo = &app;
   VkInstance inst;
@@ -90,9 +94,25 @@ int main(int argc, char** argv) {
   dqi.queueFamilyIndex = qi;
   dqi.queueCount = 1;
   dqi.pQueuePriorities = &prio;
+  // Everything the device offers, plus cooperative matrices where available.
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+  VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+  f13.pNext = &cm;
+  VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  f12.pNext = &f13;
+  VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+  f11.pNext = &f12;
+  VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+  f2.pNext = &f11;
+  vkGetPhysicalDeviceFeatures2(pd, &f2);
+  f2.features.robustBufferAccess = VK_FALSE;  // keep the default buffer access code
+  const char* cmext = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
   VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  dci.pNext = &f2;
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &dqi;
+  dci.enabledExtensionCount = cm.cooperativeMatrix ? 1 : 0;
+  dci.ppEnabledExtensionNames = &cmext;
   VkDevice dev;
   CK(vkCreateDevice(pd, &dci, nullptr, &dev));
   VkQueue q;
@@ -187,8 +207,18 @@ int main(int argc, char** argv) {
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &cb;
-  CK(vkQueueSubmit(q, 1, &si, fence));
-  CK(vkWaitForFences(dev, 1, &fence, VK_TRUE, 60000000000ull));
+  const char* reps_env = std::getenv("COMPUTE_RUNNER_REPS");
+  const int reps = reps_env ? std::max(std::atoi(reps_env), 1) : 1;
+  std::vector<double> ms;
+  for (int i = 0; i < reps; ++i) {
+    auto t0 = std::chrono::steady_clock::now();
+    CK(vkQueueSubmit(q, 1, &si, fence));
+    CK(vkWaitForFences(dev, 1, &fence, VK_TRUE, 60000000000ull));
+    ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    CK(vkResetFences(dev, 1, &fence));
+  }
+  std::sort(ms.begin(), ms.end());
+  if (reps_env) std::fprintf(stderr, "median_ms %.4f\n", ms[ms.size() / 2]);
   std::ofstream of(argv[3], std::ios::binary);
   of.write((const char*)bout.map, out_bytes);
   vkDeviceWaitIdle(dev);

@@ -275,6 +275,11 @@ struct agx_device_key {
     */
    bool g13;
 
+   /* Fold f2f32 into simd_matrix_fmadd32 A/B? The mixed fp32/fp16 operand
+    * forms are measured on G13G only.
+    */
+   bool simdmat_fold;
+
    /* Hoist device loads of compute shaders above independent ALU, barriers
     * and workgroup memory accesses (agx_hoist_loads). Measured on G13 and
     * G14 only.
@@ -345,6 +350,17 @@ agx_simdmat_enabled(void)
 {
    return debug_get_bool_option("AGX_SIMDMAT", true);
 }
+
+/* Fold fp16 -> fp32 converts into simd_matrix_fmadd32 A/B. On by default;
+ * AGX_SIMDMAT_FOLD=0 disables it. Part of the compiler flags, so toggling it
+ * never serves a shader cached under the other setting.
+ */
+static inline bool
+agx_simdmat_fold_enabled(void)
+{
+   return debug_get_bool_option("AGX_SIMDMAT_FOLD", true);
+}
+
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s);

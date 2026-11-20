@@ -129,7 +129,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)(getenv("AGX_LOCAL_FOLD_OFF") != NULL) << 35) |
          ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36) |
          ((uint64_t)hk_hoist_loads_enabled(pdev) << 37) |
-         ((uint64_t)hk_large_constants() << 40);
+         ((uint64_t)hk_large_constants() << 40) |
+         ((uint64_t)agx_simdmat_fold_enabled() << 41);
 }
 
 const nir_shader_compiler_options *

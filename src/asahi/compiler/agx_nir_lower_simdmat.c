@@ -33,7 +33,8 @@
  * Precision: the accumulator type selects the opcode (fp16 C -> fmadd16, fp32
  * C -> fmadd32, in agx_compile.c); A/B are passed at their own width. Verified
  * operand forms: fmadd32 with fp32 or fp16 A/B (the fp16 A/B, fp32 C form is
- * what Apple's own mul_mm emits), fmadd16 with fp16 A/B. fp32 A/B with an fp16
+ * what Apple's own mul_mm emits), fmadd32 with one fp16 and one fp32 operand
+ * (G13G only, see agx_nir_fold_simdmat_f2f32), fmadd16 with fp16 A/B. fp32 A/B with an fp16
  * accumulator is not advertised and not lowered. bf16 A/B (fp32 C) have no
  * hardware form: fragments stay 16-bit bf16 patterns and widen exactly to
  * fp32 at the MulAdd, which then runs the fp32 A/B form.
@@ -606,4 +607,55 @@ agx_nir_lower_simdmat(nir_shader *shader, unsigned subgroup_size)
 
    _mesa_hash_table_destroy(tm, NULL);
    return progress;
+}
+
+/* Fold fp16 -> fp32 conversions into the A/B operands of an fp32-accumulator
+ * matrix MAC. A/B carry their own size bits, so simd_matrix_fmadd32 reads a
+ * 16-bit source pair directly (as it does for the fp16 A/B, fp32 C form),
+ * and the two f2f32 per operand (emitted as fadd x, -0.0) disappear. This
+ * reaches the fp32 A x fp16 B form that the cooperative-matrix API cannot
+ * express (A, B and C types are advertised per shape, same type for A and
+ * B). An fp16 -> fp32 conversion is exact, so the product is unchanged as
+ * long as the unit widens 16-bit sources exactly; that is gated physically.
+ * Runs on scalarized NIR, on G13G only. AGX_SIMDMAT_FOLD=0 disables it.
+ */
+static bool
+fold_operand(nir_builder *b, nir_intrinsic_instr *intr, unsigned s)
+{
+   nir_def *v = intr->src[s].ssa;
+   if (v->bit_size != 32 || v->num_components != 2)
+      return false;
+
+   nir_scalar h[2];
+   for (unsigned c = 0; c < 2; c++) {
+      nir_scalar x = nir_scalar_resolved(v, c);
+      if (!nir_scalar_is_alu(x) || nir_scalar_alu_op(x) != nir_op_f2f32)
+         return false;
+      h[c] = nir_scalar_chase_alu_src(x, 0);
+      if (h[c].def->bit_size != 16)
+         return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(&intr->src[s], nir_vec_scalars(b, h, 2));
+   return true;
+}
+
+static bool
+fold_f2f32(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_simd_matrix_fmadd_agx ||
+       intr->def.bit_size != 32)
+      return false;
+
+   bool progress = fold_operand(b, intr, 0);
+   progress |= fold_operand(b, intr, 1);
+   return progress;
+}
+
+bool
+agx_nir_fold_simdmat_f2f32(nir_shader *shader)
+{
+   return nir_shader_intrinsics_pass(shader, fold_f2f32,
+                                     nir_metadata_control_flow, NULL);
 }
