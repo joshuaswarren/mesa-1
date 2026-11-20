@@ -6168,7 +6168,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Launch the vertex shader first */
    if (agx_native_graphics(&dev->dev) || agx_chip_g17_m5(dev->dev.chip)) {
-      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, wg);
+      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, wg, false);
    } else {
       hk_reserve_scratch(cmd, cs, vs);
       hk_dispatch_with_usc(
@@ -6177,7 +6177,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              vs->info.stage == MESA_SHADER_VERTEX
                                 ? gfx->linked[MESA_SHADER_VERTEX]
                                 : vs->only_linked),
-         grid_vs, wg);
+         grid_vs, wg, false);
    }
 
    /* Transform feedback and various queries require extra dispatching,
@@ -6198,7 +6198,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* If we need counts, launch the count shader and prefix sum the results. */
       if (count_words) {
          perf_debug(dev, "Geometry shader count");
-         hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg);
+         hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg, false);
       }
 
       if (count->info.gs.prefix_sum) {
@@ -6210,11 +6210,11 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* Transform feedback / query program */
       perf_debug(dev, "Transform feedback / geometry query");
       hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
-                                  agx_workgroup(1, 1, 1));
+                                  agx_workgroup(1, 1, 1), false);
    }
 
    /* Pre-rast geometry shader */
-   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg);
+   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg, false);
 
    if (poly_gs_indexed(count->info.gs.shape)) {
       enum agx_index_size index_size =
@@ -6344,10 +6344,10 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              state);
    } else if (agx_native_graphics(&dev->dev) || agx_chip_g17_m5(dev->dev.chip)) {
       hk_dispatch_with_local_size(cmd, cs, vs, grid_vs,
-                                  agx_workgroup(64, 1, 1));
+                                  agx_workgroup(64, 1, 1), false);
       hk_dispatch_with_local_size(
          cmd, cs, tcs, grid_tcs,
-         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1), false);
    } else {
       /* Legacy launches do not reserve scratch in hk_dispatch_with_usc(). */
       hk_reserve_scratch(cmd, cs, vs);
@@ -6355,12 +6355,12 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_dispatch_with_usc(
          dev, cs, &vs->b.info,
          hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]),
-         grid_vs, agx_workgroup(64, 1, 1));
+         grid_vs, agx_workgroup(64, 1, 1), false);
 
       hk_dispatch_with_usc(
          dev, cs, &tcs->b.info,
          hk_upload_usc_words(cmd, tcs, tcs->only_linked), grid_tcs,
-         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1), false);
    }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
@@ -13206,7 +13206,7 @@ hk_dispatch_task_kernel(struct hk_cmd_buffer *cmd, struct hk_shader *task,
       ? agx_grid_indirect(record + offsetof(struct libagx_task_record, dispatch))
       : agx_3d(cpu_grid[0] * wg[0], cpu_grid[1] * wg[1], cpu_grid[2] * wg[2]);
    hk_dispatch_with_local_size(cmd, ccs, task, task_grid,
-                               agx_workgroup(wg[0], wg[1], wg[2]));
+                               agx_workgroup(wg[0], wg[1], wg[2]), false);
 
    /* The launch ends in a weak ordering record, which doesn't make the
     * entries visible to the mesh draws that read them; strengthen it into a

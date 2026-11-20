@@ -96,6 +96,8 @@ static const struct debug_named_value hk_perf_options[] = {
    {"nobatch",   HK_PERF_NOBATCH,  "Disable submission batching"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
    {"weakbarrier", HK_PERF_WEAKBARRIER, "Keep ordering-only barriers between compute dispatches"},
+   {"alwayscdmbarrier", HK_PERF_ALWAYSCDMBARRIER,
+    "Flush after every application compute dispatch"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -1109,6 +1111,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
    dev->dev.compute_timeout_ms = instance->drirc.misc.compute_timeout_ms;
+   if (pdev->dev.chip != AGX_CHIP_G13X &&
+       !(pdev->dev.chip == AGX_CHIP_G14X &&
+         pdev->dev.params.gpu_generation == 14))
+      dev->perftest |= HK_PERF_ALWAYSCDMBARRIER;
 
    /* Native graphics compiles the emulation in only once a custom border
     * sampler exists, and most samples then pay one branch, so D3D content keeps

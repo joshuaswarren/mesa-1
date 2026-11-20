@@ -1146,6 +1146,7 @@ struct hk_cs {
     * application dispatch overwrites it, so consecutive application dispatches
     * carry no barrier between them; any other record still follows it. */
    void *app_dispatch_end;
+   bool app_cdm_dirty;
 
    /* Whether there is more than just the root chunk */
    bool stream_linked;
@@ -1858,6 +1859,9 @@ struct hk_cmd_buffer {
     * conditional rendering. */
    bool conditional_meta;
 
+   /* Keep declared CDM dependencies across compute pipeline state resets. */
+   bool cdm_barrier_pending;
+
    /* Single-kick vkCmdTraceRays* on M5: while set, hk_dispatch_m5_native
     * writes the kernel's launch record (40-byte direct launch + barrier) here
     * instead of into the control stream. */
@@ -2458,6 +2462,8 @@ hk_cmd_buffer_get_cs(struct hk_cmd_buffer *cmd, bool compute)
 void hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             size_t space);
 
+void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
+
 static inline uint64_t
 hk_cs_alloc_for_indirect(struct hk_cs *cs, size_t size_B)
 {
@@ -2555,6 +2561,7 @@ static void
 hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
 {
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.cs);
+   cmd->cdm_barrier_pending = false;
 }
 
 /* Return true when the VDM was replaced/removed, false when it needs normal
@@ -2793,15 +2800,26 @@ void hk_cdm_visibility_flush(struct hk_device *dev, struct hk_cs *cs,
 bool hk_cdm_visibility_flush_needed(const struct hk_device *dev,
                                     const struct hk_cs *cs, bool memory);
 
+/* Whether dispatch_grid may skip the post-launch flush of an application
+ * compute dispatch. Tracking replaces the unconditional per-launch drain
+ * with one barrier carried before the next launch, at the next compute
+ * stream end or at hk_EndCommandBuffer; HK_PERFTEST=alwayscdmbarrier
+ * restores the drain. The decision keys on cmd->in_meta, never on the
+ * shader stage: meta copies are compute. Only AGX2 CDM streams flow through
+ * hk_dispatch_with_usc_launch, so other generations never elide. */
+bool hk_app_dispatch_elides_post_flush(const struct hk_cmd_buffer *cmd);
+
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,
                                  uint32_t usc, struct agx_grid grid,
-                                 struct agx_workgroup local_size);
+                                 struct agx_workgroup local_size,
+                                 bool elide_post_flush);
 
 void hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                           struct agx_shader_info *info, uint32_t usc,
                           struct agx_grid grid,
-                          struct agx_workgroup local_size);
+                          struct agx_workgroup local_size,
+                          bool elide_post_flush);
 
 void hk_dispatch_m5_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_shader *s, struct agx_grid grid,
@@ -2878,7 +2896,8 @@ void hk_cmd_dispatch_indirect_addr(VkCommandBuffer command_buffer,
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_shader *s, struct agx_grid grid,
-                            struct agx_workgroup local_size)
+                            struct agx_workgroup local_size,
+                            bool elide_post_flush)
 {
    if (agx_is_shader_empty(&s->b))
       return;
@@ -2915,7 +2934,8 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t usc = uploaded;
 
    hk_reserve_scratch(cmd, cs, s);
-   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size);
+   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size,
+                        elide_post_flush);
 }
 
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,

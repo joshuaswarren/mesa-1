@@ -463,6 +463,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->current_cs.cs = NULL;
    cmd->current_cs.post_gfx = NULL;
    cmd->current_cs.pre_gfx = NULL;
+   cmd->cdm_barrier_pending = false;
 
    assert(!cmd->in_meta);
    assert(!cmd->conditional_meta);
@@ -1050,6 +1051,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    perf_debug(cmd, "End command buffer");
    hk_flush_deferred_clears(cmd);
    hk_sync_flush_pending_timestamp(cmd);
+
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
    hk_resolve_deferred_oq_available(cmd);
@@ -1251,6 +1253,15 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    /* M5 records its barriers with the native dependency tracker. */
    if (!agx_native_graphics(&dev->dev) && !agx_chip_g17_m5(dev->dev.chip)) {
+      struct hk_cs *cs = cmd->current_cs.cs;
+      if (cs && cs->app_cdm_dirty &&
+          !cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
+          !cmd->current_cs.post_gfx) {
+         cmd->cdm_barrier_pending = true;
+         hk_sync_barrier(cmd, HK_SYNC_ALL, HK_SYNC_ALL);
+         return;
+      }
+
       hk_cmd_buffer_end_compute(cmd);
       hk_cmd_buffer_end_graphics(cmd);
       /* Preserve the same conservative ordering in the shared submit graph,
@@ -4266,7 +4277,7 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,
                                agx_usc_addr(&dev->dev, t.gpu), grid,
-                               prog->b.workgroup);
+                               prog->b.workgroup, false);
 }
 
 uint64_t

@@ -582,6 +582,11 @@ hk_cdm_flush(struct hk_device *dev, struct hk_cs *cs, bool memory)
    switch (agx_chip_command_stream_generation(dev->dev.chip)) {
    case AGX_CS_GENERATION_AGX2:
       cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+      if (cs->app_cdm_dirty) {
+         cs->app_cdm_dirty = false;
+         if (cs == cs->cmd->current_cs.cs)
+            cs->cmd->cdm_barrier_pending = false;
+      }
       break;
 
    case AGX_CS_GENERATION_G15:
@@ -743,6 +748,12 @@ hk_cdm_end_stream_flush(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
+   if (cs->app_cdm_dirty) {
+      hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
+      hk_cdm_cache_flush(dev, cs);
+      return;
+   }
+
    /* A dependency recorded while no compute stream holding work is open
     * records no flush: the first barrier of a command buffer, or one after a
     * timestamp closed the stream. The writes of this stream may then be read
@@ -771,7 +782,7 @@ void
 hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_cdm_launch_word_0_packed launch,
                             uint32_t usc, struct agx_grid grid,
-                            struct agx_workgroup wg)
+                            struct agx_workgroup wg, bool elide_post_flush)
 {
    switch (agx_chip_command_stream_generation(dev->dev.chip)) {
    case AGX_CS_GENERATION_AGX2:
@@ -801,16 +812,24 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
 
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
    cs->stats.cmds++;
+
+   if (cs->cmd->cdm_barrier_pending && cs == cs->cmd->current_cs.cs)
+      hk_cdm_cache_flush(dev, cs);
+
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
-   hk_cdm_cache_flush(dev, cs);
+   if (elide_post_flush)
+      cs->app_cdm_dirty = true;
+   else
+      hk_cdm_cache_flush(dev, cs);
 }
 
 void
 hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                      struct agx_shader_info *info, uint32_t usc,
-                     struct agx_grid grid, struct agx_workgroup local_size)
+                     struct agx_grid grid, struct agx_workgroup local_size,
+                     bool elide_post_flush)
 {
    struct agx_cdm_launch_word_0_packed launch;
    agx_pack(&launch, CDM_LAUNCH_WORD_0, cfg) {
@@ -821,7 +840,17 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
       cfg.preshader_register_count = info->nr_preamble_gprs;
    }
 
-   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
+   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size,
+                               elide_post_flush);
+}
+
+bool
+hk_app_dispatch_elides_post_flush(const struct hk_cmd_buffer *cmd)
+{
+   const struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   return agx_chip_command_stream_generation(dev->dev.chip) ==
+             AGX_CS_GENERATION_AGX2 &&
+          !cmd->in_meta && !HK_PERF(dev, ALWAYSCDMBARRIER);
 }
 
 static bool
@@ -2489,8 +2518,10 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Every launch already ends in a barrier record; the only open question is
     * its flags. This path passes 0, a barrier that orders the launches but
     * does not make the producer's writes visible to the consumer. Every other
-    * compute path in the driver flushes: hk_dispatch_with_usc_launch() calls
-    * hk_cdm_cache_flush() after each AGX2 launch, and hk_dispatch_precomp_g17p()
+    * compute path in the driver flushes: hk_dispatch_with_usc_launch() flushes
+    * after each AGX2 launch except a tracked application dispatch (whose
+    * drain moves to the next dependency edge, compute stream end or
+    * hk_EndCommandBuffer), and hk_dispatch_precomp_g17p()
     * passes Apple's witnessed strong value 5 for AGX_BARRIER_ALL. So the
     * "flush after every launch" policy hk_cdm_cache_flush() documents is not
     * actually held on the one path every API dispatch and every vk_meta copy,
@@ -2964,7 +2995,8 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
       if (!cs)
          return;
    }
-   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size);
+   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size,
+                               hk_app_dispatch_elides_post_flush(cmd));
    cs->uses_global_atomics |= s->b.info.uses_global_atomics;
    cs->pack_loops |= s->b.info.has_loops;
    if (agx_is_indirect(grid)) {

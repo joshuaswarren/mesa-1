@@ -733,6 +733,23 @@ if with_tests
     ),
     suite : ['asahi'],
   )
+  test(
+    'hk_cdm_barrier',
+    executable(
+      'hk_cdm_barrier_test',
+      [files('tests/test-hk-cdm-barrier.c'), hk_entrypoints],
+      include_directories : [
+        include_directories('.'),
+        inc_gallium, inc_gallium_aux, inc_include, inc_src, inc_asahi,
+        inc_virtio_gpu, inc_virtio_vdrm,
+      ],
+      link_with : [libhk],
+      dependencies : [hk_deps],
+      link_args : [ld_args_gc_sections],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
 endif
 
 libvulkan_asahi = shared_library(
