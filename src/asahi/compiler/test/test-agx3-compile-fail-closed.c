@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 static bool
@@ -2449,29 +2448,14 @@ check_g18g_half_icmpsel_case(bool ge, unsigned arms)
    return valid;
 }
 
-/*
- * The compiler reads AGX_MESA_DEBUG once per process, so run the cases in a
- * child with shader debug set and leave the other checks quiet.
- */
 static bool
 check_g18g_half_icmpsel(void)
 {
-   fflush(stderr);
-   const pid_t pid = fork();
-   if (pid < 0)
-      return false;
-   if (pid == 0) {
-      setenv("AGX_MESA_DEBUG", "shaders", 1);
-      bool ok = true;
-      for (unsigned ge = 0; ge < 2; ++ge)
-         for (unsigned arms = 0; arms < 3; ++arms)
-            ok &= check_g18g_half_icmpsel_case(ge, arms);
-      fflush(stderr);
-      _exit(ok ? 0 : 1);
-   }
-   int status = 0;
-   return waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
-          WEXITSTATUS(status) == 0;
+   bool ok = true;
+   for (unsigned ge = 0; ge < 2; ++ge)
+      for (unsigned arms = 0; arms < 3; ++arms)
+         ok &= check_g18g_half_icmpsel_case(ge, arms);
+   return ok;
 }
 
 int
@@ -2822,9 +2806,6 @@ main(int argc, char **argv)
 
       ralloc_free(b.shader);
    }
-
-   if (!check_g18g_half_icmpsel())
-      return 1;
 
    glsl_type_singleton_decref();
 

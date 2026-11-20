@@ -5405,7 +5405,7 @@ g18g_log_icmpsel(const agx_context *ctx, const agx_instr *I, bool rewritten)
            I->src[3].abs ? " abs" : "", I->src[3].neg ? " neg" : "");
 }
 
-static bool
+bool
 agx_lower_agx3_g18g_half_icmpsel(agx_context *ctx)
 {
    if (!agx_is_g18g(&ctx->key->dev))
@@ -5446,8 +5446,17 @@ agx_lower_agx3_g18g_half_icmpsel(agx_context *ctx)
             }
             I->src[s] = agx_mov_imm(&wb, 32, v);
          } else if (src.type == AGX_INDEX_UNIFORM) {
+            /* A move zero-extends, but a signed comparison reads its
+               comparand signed: sign-extend a 16-bit uniform comparand
+               exactly like the half-register path below. */
             agx_index w = agx_temp(ctx, AGX_SIZE_32);
-            agx_mov_to(&wb, w, src);
+            if (comparand && cond_signed && src.size == AGX_SIZE_16) {
+               agx_index t16 = agx_temp(ctx, AGX_SIZE_16);
+               agx_mov_to(&wb, t16, src);
+               agx_signext_to(&wb, w, t16);
+            } else {
+               agx_mov_to(&wb, w, src);
+            }
             I->src[s] = w;
          } else if (G18G_IS_REG(src) && src.size == AGX_SIZE_32) {
             if (!src.abs && !src.neg)

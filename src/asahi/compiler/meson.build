@@ -537,16 +537,24 @@ if with_tests
     suite : ['asahi'],
   )
 
+  agx3_compile_fail_closed_test = executable(
+    'agx3_compile_fail_closed_test',
+    files('test/test-agx3-compile-fail-closed.c'),
+    c_args : [c_msvc_compat_args, no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
   test(
     'agx3_compile_fail_closed',
-    executable(
-      'agx3_compile_fail_closed_test',
-      files('test/test-agx3-compile-fail-closed.c'),
-      c_args : [c_msvc_compat_args, no_override_init_args],
-      gnu_symbol_visibility : 'hidden',
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_compiler],
-    ),
+    agx3_compile_fail_closed_test,
+    suite : ['asahi'],
+  )
+  test(
+    'g18g_half_icmpsel',
+    agx3_compile_fail_closed_test,
+    args : ['--g18g-half-icmpsel-only'],
+    env : ['AGX_MESA_DEBUG=shaders'],
     suite : ['asahi'],
   )
 
@@ -744,6 +752,7 @@ if with_tests
          'test/test-agx3-cube-scratch.cpp',
          'test/test-fminmax-constant-denorm.cpp',
          'test/test-denorm-preserve-fma.cpp',
+         'test/test-g18g-icmpsel-uniform-ftz.cpp',
          'test/test-fminmax-signed-zero.cpp',
          'test/test-shared-byte-offsets.cpp',
          'test/test-device-load-batches.cpp',
