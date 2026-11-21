@@ -61,6 +61,19 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    } else if (HK_PERF(dev, USCCDMBARRIER)) {
       /* Perftest only: keep the USC cache invalidate, drop the rest. */
       cs->current = agx_cdm_barrier_usc(cs->current);
+   } else if (unlikely(p_atomic_read(&dev->sparse_used))) {
+      /* Sparse resources change page mappings behind the launches. The
+       * reduced G13X word leaves sparse-image atomics wrong and the GPU
+       * faulting, so a device that created one keeps the full word
+       * (bits 0-19, the barrier before the reduction).
+       */
+      uint32_t *word = cs->current;
+      *word = 0xfffff | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
+   } else if (dev->cdm_barrier_default_mask) {
+      uint32_t *word = cs->current;
+      *word = dev->cdm_barrier_default_mask | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
    } else {
       cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
    }
