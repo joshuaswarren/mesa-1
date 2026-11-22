@@ -33,6 +33,7 @@ main(void)
    expect(agx_drm_name_is_native("aurora"), "aurora is admitted");
    expect(agx_drm_name_is_native("asahi"), "legacy name is admitted");
    expect(!agx_drm_name_is_native("virtio_gpu"), "virtio is not native");
+   expect(!agx_drm_name_is_native(NULL), "NULL name rejected");
    expect(!agx_drm_name_is_native("aurora-dri"), "prefix match rejected");
    expect(!agx_drm_name_is_native(""), "empty name rejected");
 
