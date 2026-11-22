@@ -1093,10 +1093,14 @@ struct hk_cs {
     * fold the leading record into the destination's trailing one. */
    void *leading_barrier_end;
 
-   /* AGX3 CDM: weak_barrier_end when that barrier ends an application
-    * dispatch. Where agx_chip_elide_app_dispatch_barrier() holds, a following
-    * application dispatch overwrites it, so consecutive application dispatches
-    * carry no barrier between them; any other record still follows it. */
+   /* weak_barrier_end when that barrier ends an application dispatch. Where
+    * agx_chip_elide_app_dispatch_barrier() holds, a following application
+    * dispatch overwrites or rewinds it, so consecutive application
+    * dispatches carry no barrier between them; any other record still
+    * follows it. On AGX3 the barrier is the launch's weak tail record and the
+    * following launch overwrites it; on AGX2 it is the launch's trailing
+    * cache flush and the following launch rewinds over it
+    * (hk_cs_elide_dispatch_tail()). */
    void *app_dispatch_end;
 
    /* Whether there is more than just the root chunk */
@@ -2562,15 +2566,31 @@ void hk_cdm_visibility_flush(struct hk_device *dev, struct hk_cs *cs,
 bool hk_cdm_visibility_flush_needed(const struct hk_device *dev,
                                     const struct hk_cs *cs, bool memory);
 
+/* AGX2 CDM: rewind the trailing cache flush of an application dispatch when
+ * the next record would be another application dispatch and the chip elides
+ * inter-dispatch barriers. Exact only while the marker is the stream tail:
+ * any record in between — an application barrier, meta work, a stream link —
+ * moves current past it and keeps the flush. */
+static inline bool
+hk_cs_elide_dispatch_tail(struct hk_cs *cs)
+{
+   if (!cs->app_dispatch_end || cs->current != cs->app_dispatch_end)
+      return false;
+   cs->current = (uint8_t *)cs->current - AGX_CDM_BARRIER_LENGTH;
+   cs->app_dispatch_end = NULL;
+   return true;
+}
+
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,
                                  uint32_t usc, struct agx_grid grid,
-                                 struct agx_workgroup local_size);
+                                 struct agx_workgroup local_size,
+                                 bool app_dispatch);
 
 void hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                           struct agx_shader_info *info, uint32_t usc,
                           struct agx_grid grid,
-                          struct agx_workgroup local_size);
+                          struct agx_workgroup local_size, bool app_dispatch);
 
 void hk_dispatch_m5_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_shader *s, struct agx_grid grid,
@@ -2668,7 +2688,11 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t usc = uploaded;
 
    hk_reserve_scratch(cmd, cs, s);
-   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size);
+   /* Only an application compute dispatch may elide the previous one's
+    * trailing barrier. Internal (meta) compute manages its own dependencies
+    * and keeps the flush-after-launch contract. */
+   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size,
+                        !cmd->in_meta && s->info.stage == MESA_SHADER_COMPUTE);
 }
 
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,

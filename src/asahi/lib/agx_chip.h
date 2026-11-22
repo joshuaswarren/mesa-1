@@ -382,11 +382,16 @@ agx_chip_cdm_wide_visibility(enum agx_chip chip)
  * ordering barrier between them.  Vulkan orders dispatches only through
  * explicit barriers, and Apple's G15 encoder emits none between independent
  * dispatches; every other record (internal or indirect launch, cache flush,
- * link, stream end) still follows a barrier. */
+ * link, stream end) still follows a barrier.  AGX2 chips take the same
+ * elision: their per-launch flush is the conservative record
+ * agx_cdm_barrier() documents ("set these after every launch to be safe"),
+ * and an application-requested dependency still emits its own barrier,
+ * which ends elision until the next pair of adjacent dispatches. */
 static inline bool
 agx_chip_elide_app_dispatch_barrier(enum agx_chip chip)
 {
-   return agx_chip_native_g15(chip);
+   return agx_chip_native_g15(chip) ||
+          agx_chip_command_stream_generation(chip) == AGX_CS_GENERATION_AGX2;
 }
 
 /* Number of helper-table slots in the USC code-container lead block.  G15

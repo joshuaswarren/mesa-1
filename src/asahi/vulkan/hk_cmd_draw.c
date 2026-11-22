@@ -6044,7 +6044,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              vs->info.stage == MESA_SHADER_VERTEX
                                 ? gfx->linked[MESA_SHADER_VERTEX]
                                 : vs->only_linked),
-         grid_vs, wg);
+         grid_vs, wg, false);
    }
 
    /* Transform feedback and various queries require extra dispatching,
@@ -6219,12 +6219,12 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_dispatch_with_usc(
          dev, cs, &vs->b.info,
          hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]),
-         grid_vs, agx_workgroup(64, 1, 1));
+         grid_vs, agx_workgroup(64, 1, 1), false);
 
       hk_dispatch_with_usc(
          dev, cs, &tcs->b.info,
          hk_upload_usc_words(cmd, tcs, tcs->only_linked), grid_tcs,
-         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1), false);
    }
 
    /* First generate counts, then prefix sum them, and then tessellate. */

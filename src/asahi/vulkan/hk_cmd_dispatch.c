@@ -671,7 +671,7 @@ void
 hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_cdm_launch_word_0_packed launch,
                             uint32_t usc, struct agx_grid grid,
-                            struct agx_workgroup wg)
+                            struct agx_workgroup wg, bool app_dispatch)
 {
    switch (agx_chip_command_stream_generation(dev->dev.chip)) {
    case AGX_CS_GENERATION_AGX2:
@@ -701,16 +701,27 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
 
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
    cs->stats.cmds++;
+
+   /* Two application dispatches in a row need no barrier between them, as on
+    * the native AGX3 path: rewind the previous launch's trailing flush,
+    * which nothing else has followed or strengthened, and let this launch's
+    * own flush end the pair instead. */
+   if (app_dispatch && agx_chip_elide_app_dispatch_barrier(dev->dev.chip) &&
+       hk_cs_elide_dispatch_tail(cs))
+      cs->stats.flushes--;
+
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
    hk_cdm_cache_flush(dev, cs);
+   cs->app_dispatch_end = app_dispatch ? cs->current : NULL;
 }
 
 void
 hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                      struct agx_shader_info *info, uint32_t usc,
-                     struct agx_grid grid, struct agx_workgroup local_size)
+                     struct agx_grid grid, struct agx_workgroup local_size,
+                     bool app_dispatch)
 {
    struct agx_cdm_launch_word_0_packed launch;
    agx_pack(&launch, CDM_LAUNCH_WORD_0, cfg) {
@@ -721,7 +732,8 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
       cfg.preshader_register_count = info->nr_preamble_gprs;
    }
 
-   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
+   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size,
+                               app_dispatch);
 }
 
 static bool

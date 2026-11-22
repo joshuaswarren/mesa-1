@@ -174,6 +174,39 @@ check_merge_memory_scope(void)
    assert(a.memory_flush_end == a.current);
 }
 
+/* AGX2 CDM: where the chip elides the ordering barrier between application
+ * dispatches, a following application dispatch rewinds the previous launch's
+ * trailing flush so the pair carries one barrier. The tail marker only
+ * holds while nothing else recorded after it. */
+static void
+check_elide_dispatch_tail(void)
+{
+   uint8_t bytes[HK_CS_SPACE_PADDING + 128] = {0};
+   struct hk_cs cs = {
+      .type = HK_CS_CDM, .start = bytes,
+      .current = bytes + LAUNCH_BYTES + AGX_CDM_BARRIER_LENGTH,
+      .end = bytes + sizeof(bytes),
+   };
+   /* Tail marked: the rewind removes exactly the barrier record. */
+   cs.app_dispatch_end = cs.current;
+   assert(hk_cs_elide_dispatch_tail(&cs));
+   assert(cs.current == bytes + LAUNCH_BYTES);
+   assert(cs.app_dispatch_end == NULL);
+   assert(!hk_cs_elide_dispatch_tail(&cs));
+
+   /* A record emitted after the tail moves current past the marker. */
+   cs.current = bytes + LAUNCH_BYTES + AGX_CDM_BARRIER_LENGTH;
+   cs.app_dispatch_end = bytes + LAUNCH_BYTES;
+   assert(!hk_cs_elide_dispatch_tail(&cs));
+   assert(cs.current == bytes + LAUNCH_BYTES + AGX_CDM_BARRIER_LENGTH);
+   assert(cs.app_dispatch_end == bytes + LAUNCH_BYTES);
+
+   /* No marker: nothing to elide. */
+   cs.app_dispatch_end = NULL;
+   assert(!hk_cs_elide_dispatch_tail(&cs));
+   assert(cs.current == bytes + LAUNCH_BYTES + AGX_CDM_BARRIER_LENGTH);
+}
+
 static void
 check_as_contracts(void)
 {
@@ -233,5 +266,6 @@ int main(void)
          for (unsigned link = 0; link < 2; ++link)
             check_merge(a, b, link);
    check_merge_memory_scope();
+   check_elide_dispatch_tail();
    return 0;
 }
