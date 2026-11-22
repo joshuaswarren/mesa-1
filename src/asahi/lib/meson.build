@@ -76,6 +76,7 @@ if with_tests
       files(
         'tests/test-packing.cpp',
         'tests/test-tilebuffer.cpp',
+        'tests/test-drm-name.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
