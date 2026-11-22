@@ -14,6 +14,8 @@
 static inline bool
 agx_drm_name_is_native(const char *name)
 {
+   if (!name)
+      return false;
    return strcmp(name, "asahi") == 0 || strcmp(name, "aurora") == 0;
 }
 

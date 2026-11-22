@@ -15,6 +15,7 @@ TEST(drm_name, native_names_are_admitted)
 
 TEST(drm_name, other_names_are_rejected)
 {
+   EXPECT_FALSE(agx_drm_name_is_native(NULL));
    EXPECT_FALSE(agx_drm_name_is_native("virtio_gpu"));
    EXPECT_FALSE(agx_drm_name_is_native("aurora-dri"));
    EXPECT_FALSE(agx_drm_name_is_native(""));
