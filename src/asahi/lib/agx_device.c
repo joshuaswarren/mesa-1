@@ -17,6 +17,7 @@
 #include "agx_bo.h"
 #include "agx_compile.h"
 #include "agx_device_virtio.h"
+#include "agx_drm_name.h"
 #include "agx_scratch.h"
 #include "decode.h"
 #include "glsl_types.h"
@@ -516,7 +517,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          return NULL;
       }
 
-      if (!strcmp(version->name, "asahi")) {
+      if (agx_drm_name_is_native(version->name)) {
          dev->is_virtio = false;
          dev->ops = agx_device_drm_ops;
       } else if (!strcmp(version->name, "virtio_gpu")) {
