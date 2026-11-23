@@ -705,8 +705,11 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
    /* Two application dispatches in a row need no barrier between them, as on
     * the native AGX3 path: rewind the previous launch's trailing flush,
     * which nothing else has followed or strengthened, and let this launch's
-    * own flush end the pair instead. */
-   if (app_dispatch && agx_chip_elide_app_dispatch_barrier(dev->dev.chip) &&
+    * own flush end the pair instead. Indirect launches keep their barrier
+    * (agx_chip_elide_app_dispatch_barrier()), so they neither rewind the
+    * previous marker nor leave one of their own. */
+   const bool app = app_dispatch && !agx_is_indirect(grid);
+   if (app && agx_chip_elide_app_dispatch_barrier(dev->dev.chip) &&
        hk_cs_elide_dispatch_tail(cs))
       cs->stats.flushes--;
 
@@ -714,7 +717,7 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
    hk_cdm_cache_flush(dev, cs);
-   cs->app_dispatch_end = app_dispatch ? cs->current : NULL;
+   cs->app_dispatch_end = app ? cs->current : NULL;
 }
 
 void
@@ -2664,6 +2667,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * strengthened, and let this launch's own tail end the stream instead. */
    const bool app_dispatch =
       !cmd->in_meta && s && s->info.stage == MESA_SHADER_COMPUTE &&
+      !agx_is_indirect(grid) &&
       agx_chip_elide_app_dispatch_barrier(dev->dev.chip);
    if (app_dispatch && cs->app_dispatch_end &&
        cs->current == cs->app_dispatch_end &&

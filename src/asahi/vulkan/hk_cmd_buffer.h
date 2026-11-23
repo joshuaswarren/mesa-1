@@ -1093,7 +1093,8 @@ struct hk_cs {
     * fold the leading record into the destination's trailing one. */
    void *leading_barrier_end;
 
-   /* weak_barrier_end when that barrier ends an application dispatch. Where
+   /* On AGX3, weak_barrier_end when that barrier ends an application
+    * dispatch; on AGX2 the launch's trailing cache-flush record end. Where
     * agx_chip_elide_app_dispatch_barrier() holds, a following application
     * dispatch overwrites or rewinds it, so consecutive application
     * dispatches carry no barrier between them; any other record still
@@ -2569,11 +2570,13 @@ bool hk_cdm_visibility_flush_needed(const struct hk_device *dev,
 /* AGX2 CDM: rewind the trailing cache flush of an application dispatch when
  * the next record would be another application dispatch and the chip elides
  * inter-dispatch barriers. Exact only while the marker is the stream tail:
- * any record in between — an application barrier, meta work, a stream link —
- * moves current past it and keeps the flush. */
+ * meta work or a stream link moves current past it and keeps the flush; an
+ * application barrier ends the compute stream (hk_CmdPipelineBarrier2), so
+ * a dispatch after one always opens a fresh stream with no marker. */
 static inline bool
 hk_cs_elide_dispatch_tail(struct hk_cs *cs)
 {
+   assert(cs->type == HK_CS_CDM);
    if (!cs->app_dispatch_end || cs->current != cs->app_dispatch_end)
       return false;
    cs->current = (uint8_t *)cs->current - AGX_CDM_BARRIER_LENGTH;
