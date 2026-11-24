@@ -278,11 +278,31 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                &set->layout->binding[write->dstBinding];
             uint32_t offset =
                bl->offset + write->dstArrayElement * bl->stride;
-            assert(offset + sizeof(struct hk_buffer_address) <= set->size);
+            assert(offset + (write->descriptorCount - 1) * bl->stride +
+                      sizeof(struct hk_buffer_address) <=
+                   set->size);
             char *dst = (char *)set->mapped_ptr + offset;
             for (uint32_t j = 0; j < write->descriptorCount; j++) {
-               struct hk_buffer_address desc =
-                  get_buffer_address(write->pBufferInfo + j, read_only);
+               const VkDescriptorBufferInfo *info = write->pBufferInfo + j;
+               VK_FROM_HANDLE(hk_buffer, buffer, info->buffer);
+               struct hk_buffer_address desc;
+               if (unlikely(buffer == NULL || info->range == 0)) {
+                  desc = (struct hk_buffer_address){
+                     .base_addr = AGX_ZERO_PAGE_ADDRESS,
+                     .size = 0,
+                  };
+               } else {
+                  uint64_t addr = vk_buffer_address(&buffer->vk, info->offset);
+                  if (unlikely(read_only && buffer->va))
+                     addr = agx_rw_addr_to_ro(&dev->dev, addr);
+                  uint64_t range =
+                     vk_buffer_range(&buffer->vk, info->offset, info->range);
+                  assert(range <= UINT32_MAX);
+                  desc = (struct hk_buffer_address){
+                     .base_addr = addr,
+                     .size = range,
+                  };
+               }
                memcpy(dst, &desc, sizeof(desc));
                dst += bl->stride;
             }
@@ -547,7 +567,8 @@ hk_CreateDescriptorPool(VkDevice _device,
    bo_size += HK_MIN_UBO_ALIGNMENT * pCreateInfo->maxSets;
 
    if (bo_size) {
-      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, 0, "Descriptor pool");
+      enum agx_bo_flags bo_flags = dev->fast_submit ? AGX_BO_WRITEBACK : 0;
+      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, bo_flags, "Descriptor pool");
       if (!pool->bo) {
          hk_destroy_descriptor_pool(dev, pAllocator, pool);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
