@@ -67,6 +67,77 @@ TEST(G18GIcmpsel, SignedHalfUniformComparandSignExtends)
    }
 }
 
+TEST(G18GIcmpsel, UnfusedSignedHalfCompareWidensBeforeRa)
+{
+   /* An icmp that survives to agx_lower_pseudo becomes
+    * `icmpsel h,h,#1,#0` after register allocation, where the pre-RA
+    * widening can no longer reach it: the G18G encoder refuses every such
+    * 16-bit-comparand form with immediate selects (mesa#739). The lowering
+    * therefore widens the compare while it is still an icmp. */
+   /* (icond, dest size, refuses) — ULT into a half result is the one
+    * witnessed native form; the same compares into a word result are
+    * refused because the lowered selects are always two immediates. */
+   const struct {
+      enum agx_icond icond;
+      enum agx_size dest_size;
+      bool refuses;
+   } cases[] = {{AGX_ICOND_SLT, AGX_SIZE_16, true},
+                {AGX_ICOND_SGT, AGX_SIZE_16, true},
+                {AGX_ICOND_SLT, AGX_SIZE_32, true},
+                {AGX_ICOND_ULT, AGX_SIZE_32, true},
+                {AGX_ICOND_UEQ, AGX_SIZE_32, true},
+                {AGX_ICOND_ULT, AGX_SIZE_16, false},
+                {AGX_ICOND_UEQ, AGX_SIZE_16, false}};
+   for (const auto &c : cases) {
+      void *mem = ralloc_context(NULL);
+      agx_builder *b = agx_test_builder(mem);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.emit_agx3d = true;
+      b->shader->key = &key;
+
+      /* d = icmp h60, h62, kept alive by a second use */
+      agx_index dst = agx_temp(b->shader, c.dest_size);
+      agx_icmp_to(b, dst, agx_register(60, AGX_SIZE_16),
+                  agx_register(62, AGX_SIZE_16), c.icond, false);
+      agx_iadd_to(b, agx_temp(b->shader, c.dest_size), dst,
+                  agx_immediate(0), 0);
+      agx_stop(b);
+
+      ASSERT_EQ(agx_lower_agx3_g18g_half_icmpsel(b->shader), c.refuses);
+      if (!c.refuses) {
+         ralloc_free(mem);
+         continue;
+      }
+
+      agx_instr *cmp = NULL;
+      agx_foreach_instr_global(b->shader, I) {
+         if (I->op == AGX_OPCODE_ICMP)
+            cmp = I;
+      }
+      ASSERT_NE(cmp, nullptr);
+      EXPECT_EQ(cmp->dest[0].size, AGX_SIZE_32)
+         << "half icmp must keep a word result for the post-RA "
+            "icmpsel lowering";
+      const bool cond_signed =
+         c.icond == AGX_ICOND_SLT || c.icond == AGX_ICOND_SGT;
+      for (unsigned s = 0; s < 2; ++s) {
+         EXPECT_EQ(cmp->src[s].size, AGX_SIZE_32)
+            << "half comparand must be widened";
+         EXPECT_EQ(cmp->src[s].type, AGX_INDEX_NORMAL);
+         agx_instr *def = def_of(b->shader, cmp->src[s]);
+         ASSERT_NE(def, nullptr);
+         if (cond_signed)
+            EXPECT_EQ(def->op, AGX_OPCODE_SIGNEXT)
+               << "signed compare must sign-extend half comparands";
+         else
+            EXPECT_EQ(def->op, AGX_OPCODE_MOV)
+               << "unsigned compare must zero-extend half comparands";
+      }
+      ralloc_free(mem);
+   }
+}
+
 TEST(G18GFtz, LoadsKeepBitsAndFloatOperationsFlush)
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,

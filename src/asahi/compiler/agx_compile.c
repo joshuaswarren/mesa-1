@@ -5231,15 +5231,16 @@ g18g_probe_reg_value(agx_index s)
 /* Build the same encoder description the packer builds, with no waits and
  * no lifetime hints, and report whether that shape encodes. */
 static bool
-g18g_icmpsel_encodes(const agx_instr *I)
+g18g_icmpsel_shape_encodes(agx_index dest, agx_index a_in, agx_index b_in,
+                           agx_index sel_true, agx_index sel_false,
+                           enum agx_icond icond)
 {
 #define G18G_IS_REG(s) (!(s).memory && ((s).type == AGX_INDEX_REGISTER || \
                                         (s).type == AGX_INDEX_NORMAL))
    struct agx3_isel_desc d;
    memset(&d, 0, sizeof(d));
 
-   agx_index a = I->src[0], b = I->src[1];
-   const agx_index dest = I->dest[0];
+   agx_index a = a_in, b = b_in;
 
    const bool narrow_first =
       G18G_IS_REG(a) && G18G_IS_REG(b) &&
@@ -5282,7 +5283,7 @@ g18g_icmpsel_encodes(const agx_instr *I)
       return false;
 
    unsigned cond;
-   switch (I->icond) {
+   switch (icond) {
    case AGX_ICOND_UEQ:
    case AGX_ICOND_SEQ:
       cond = AGX3_ISEL_ICOND_EQ;
@@ -5303,7 +5304,7 @@ g18g_icmpsel_encodes(const agx_instr *I)
       }
    }
 
-   const agx_index sel[2] = {I->src[2], I->src[3]};
+   const agx_index sel[2] = {sel_true, sel_false};
    enum agx3_isel_operand kind[2];
    uint16_t value[2];
    for (unsigned n = 0; n < 2; ++n) {
@@ -5336,7 +5337,7 @@ g18g_icmpsel_encodes(const agx_instr *I)
    d.cmp1_16 = narrow_second;
    d.explicit_hints = true;
    d.dest_cache = dest.cache;
-   const agx_index hinted[4] = {a, b, I->src[2], I->src[3]};
+   const agx_index hinted[4] = {a, b, sel_true, sel_false};
    for (unsigned n = 0; n < 4; ++n) {
       if (hinted[n].type == AGX_INDEX_REGISTER) {
          d.cache[n] = hinted[n].cache;
@@ -5367,6 +5368,24 @@ g18g_icmpsel_encodes(const agx_instr *I)
 #undef G18G_IS_REG
 }
 
+static bool
+g18g_icmpsel_encodes(const agx_instr *I)
+{
+   return g18g_icmpsel_shape_encodes(I->dest[0], I->src[0], I->src[1],
+                                     I->src[2], I->src[3], I->icond);
+}
+
+/* An unfused icmp survives to agx_lower_pseudo, which spells it
+ * `icmpsel dest, a, b, #1, #0` after register allocation. Probe that
+ * future shape; invert_cond only swaps the two immediate selects. */
+static bool
+g18g_icmp_lowered_encodes(const agx_instr *I)
+{
+   return g18g_icmpsel_shape_encodes(I->dest[0], I->src[0], I->src[1],
+                                     agx_immediate(1), agx_immediate(0),
+                                     I->icond);
+}
+
 static char
 g18g_opchar(const agx_index s)
 {
@@ -5384,6 +5403,11 @@ g18g_log_icmpsel(const agx_context *ctx, const agx_instr *I, bool rewritten)
 {
    if (!(agx_compiler_debug & AGX_DBG_SHADERS))
       return;
+   /* A lowered icmp has immediate selects at this point; print those. */
+   const agx_index sel_true = I->op == AGX_OPCODE_ICMP ? agx_immediate(1)
+                                                     : I->src[2];
+   const agx_index sel_false = I->op == AGX_OPCODE_ICMP ? agx_immediate(0)
+                                                      : I->src[3];
    fprintf(stderr,
            "[g18g-icmpsel] %s stage=%d icond=%d dest=r%u/%u "
            "c0=%c%u/%u%s%s c1=%c%u/%u%s%s "
@@ -5397,12 +5421,12 @@ g18g_log_icmpsel(const agx_context *ctx, const agx_instr *I, bool rewritten)
            g18g_opchar(I->src[1]), I->src[1].value,
            I->src[1].size == AGX_SIZE_16 ? 16 : 32,
            I->src[1].abs ? " abs" : "", I->src[1].neg ? " neg" : "",
-           g18g_opchar(I->src[2]), I->src[2].value,
-           I->src[2].size == AGX_SIZE_16 ? 16 : 32,
-           I->src[2].abs ? " abs" : "", I->src[2].neg ? " neg" : "",
-           g18g_opchar(I->src[3]), I->src[3].value,
-           I->src[3].size == AGX_SIZE_16 ? 16 : 32,
-           I->src[3].abs ? " abs" : "", I->src[3].neg ? " neg" : "");
+           g18g_opchar(sel_true), sel_true.value,
+           sel_true.size == AGX_SIZE_16 ? 16 : 32,
+           sel_true.abs ? " abs" : "", sel_true.neg ? " neg" : "",
+           g18g_opchar(sel_false), sel_false.value,
+           sel_false.size == AGX_SIZE_16 ? 16 : 32,
+           sel_false.abs ? " abs" : "", sel_false.neg ? " neg" : "");
 }
 
 bool
@@ -5415,13 +5439,18 @@ agx_lower_agx3_g18g_half_icmpsel(agx_context *ctx)
                                         (s).type == AGX_INDEX_NORMAL))
    bool progress = false;
    agx_foreach_instr_global_safe(ctx, I) {
-      if (I->op != AGX_OPCODE_ICMPSEL || I->nr_dests != 1 ||
-          I->nr_srcs != 4 ||
+      /* An unfused icmp becomes an icmpsel only in agx_lower_pseudo, after
+       * register allocation, where this widening can no longer reach it.
+       * Catch it here while the shape is still legalizable. */
+      const bool is_icmp = I->op == AGX_OPCODE_ICMP;
+      if ((I->op != AGX_OPCODE_ICMPSEL && !is_icmp) || I->nr_dests != 1 ||
+          I->nr_srcs != (is_icmp ? 2 : 4) ||
           (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_32) ||
           agx_channels(I->dest[0]) != 1)
          continue;
 
-      if (g18g_icmpsel_encodes(I))
+      if (is_icmp ? g18g_icmp_lowered_encodes(I)
+                  : g18g_icmpsel_encodes(I))
          continue;
 
       g18g_log_icmpsel(ctx, I, true);
@@ -5430,9 +5459,9 @@ agx_lower_agx3_g18g_half_icmpsel(agx_context *ctx)
          I->icond == AGX_ICOND_SLT || I->icond == AGX_ICOND_SGT;
 
       agx_builder wb = agx_init_builder(ctx, agx_before_instr(I));
-      for (unsigned s = 0; s < 4; ++s) {
+      for (unsigned s = 0; s < I->nr_srcs; ++s) {
          agx_index src = I->src[s];
-         const bool comparand = s < 2;
+         const bool comparand = is_icmp || s < 2;
 
          if (src.type == AGX_INDEX_IMMEDIATE) {
             uint64_t v = src.value;
@@ -5490,7 +5519,8 @@ agx_lower_agx3_g18g_half_icmpsel(agx_context *ctx)
          wb.cursor = agx_after_instr(I);
          agx_subdivide_to(&wb, half, I->dest[0], 0);
       }
-      if (!g18g_icmpsel_encodes(I))
+      if (!(is_icmp ? g18g_icmp_lowered_encodes(I)
+                    : g18g_icmpsel_encodes(I)))
          g18g_log_icmpsel(ctx, I, false);
       progress = true;
    }

@@ -585,6 +585,19 @@ if with_tests
   )
 
   test(
+    'g18g_half_icmpsel',
+    executable(
+      'g18g_half_icmpsel_test',
+      files('test/test-g18g-half-icmpsel.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_int64',
     executable(
       'agx3_int64_test',
