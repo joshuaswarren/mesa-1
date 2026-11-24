@@ -369,6 +369,22 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
          return;
    }
 
+   if (!HK_PERF(dev, ALWAYSCDMBARRIER) && dev->cdm_defer_flush &&
+       dev->fast_submit) {
+      /* In cdm_defer_flush mode, compute barriers only need the deferred CDM
+       * flush emitted in-place rather than splitting and later merging CSs.
+       */
+      if (!cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
+          !cmd->current_cs.post_gfx &&
+          (!cmd->current_cs.cs ||
+           (!cmd->current_cs.cs->imm_writes.size &&
+            !cmd->current_cs.cs->timestamp.end.handle))) {
+         if (cmd->current_cs.cs)
+            hk_cs_finish_pending_flush(cmd, cmd->current_cs.cs);
+         return;
+      }
+   }
+
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
 }
@@ -442,6 +458,7 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
             vk_to_hk_descriptor_set_layout(pipeline_layout->set_layouts[s]);
 
          if (set != NULL && set_layout->vk.dynamic_descriptor_count > 0) {
+            desc->has_dynamic_buffers = true;
             for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count; j++) {
                struct hk_buffer_address addr = set->dynamic_buffers[j];
                addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
@@ -485,6 +502,9 @@ hk_push_constants(UNUSED struct hk_cmd_buffer *cmd,
                   const VkPushConstantsInfoKHR *info)
 {
    memcpy(desc->root.push + info->offset, info->pValues, info->size);
+   uint32_t end = info->offset + info->size;
+   if (end > desc->push_max_end)
+      desc->push_max_end = MIN2(end, HK_MAX_PUSH_SIZE);
    desc->root_dirty = true;
 }
 
@@ -608,8 +628,35 @@ uint64_t
 hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
                           VkPipelineBindPoint bind_point)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    struct hk_root_descriptor_table *root = &desc->root;
+
+   if (dev->fast_submit && bind_point == VK_PIPELINE_BIND_POINT_COMPUTE &&
+       !desc->has_dynamic_buffers) {
+      /* Compute without dynamic buffers never accesses draw.* or
+       * dynamic_buffers[]. Keep root struct offsets intact, only copying the
+       * compute prefix and written push constant range.
+       */
+      const size_t cs_end =
+         offsetof(struct hk_root_descriptor_table, cs) + sizeof(root->cs);
+      const size_t push_off =
+         offsetof(struct hk_root_descriptor_table, push);
+      const size_t copy_push = desc->push_max_end
+         ? MIN2((size_t)align(desc->push_max_end, 16), (size_t)HK_MAX_PUSH_SIZE)
+         : 0;
+      const size_t alloc_size = copy_push ? (push_off + HK_MAX_PUSH_SIZE) : cs_end;
+
+      struct agx_ptr root_ptr = hk_pool_alloc(cmd, alloc_size, 8);
+      if (!root_ptr.gpu)
+         return 0;
+
+      root->root_desc_addr = root_ptr.gpu;
+      memcpy(root_ptr.cpu, root, cs_end);
+      if (copy_push)
+         memcpy((uint8_t *)root_ptr.cpu + push_off, root->push, copy_push);
+      return root_ptr.gpu;
+   }
 
    struct agx_ptr root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
    if (!root_ptr.gpu)

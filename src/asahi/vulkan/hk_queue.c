@@ -733,6 +733,56 @@ hk_queue_submit_bind_sparse_memory(struct hk_device *device,
    return VK_SUCCESS;
 }
 
+static unsigned
+queue_submit_build_payload(struct hk_device *dev,
+                           const struct vk_queue_submit *submit,
+                           struct util_dynarray *payload)
+{
+   unsigned nr_vdm = 0, nr_cdm = 0;
+
+   for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+      struct hk_cmd_buffer *cmdbuf =
+         (struct hk_cmd_buffer *)submit->command_buffers[i];
+
+      list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node) {
+         /* Barrier on previous command */
+         struct drm_asahi_cmd_header header =
+            agx_cmd_header(cs->type == HK_CS_CDM, nr_vdm, nr_cdm);
+
+         util_dynarray_append(payload, header);
+
+         if (cs->type == HK_CS_CDM) {
+            perf_debug(
+               cmdbuf,
+               "%u: Submitting CDM with %u API calls, %u dispatches, %u flushes, %u merged",
+               i, cs->stats.calls, cs->stats.cmds, cs->stats.flushes,
+               cs->stats.merged);
+
+            assert(cs->stats.cmds > 0 || cs->stats.flushes > 0 ||
+                   cs->timestamp.end.handle);
+
+            struct drm_asahi_cmd_compute cmd;
+            asahi_fill_cdm_command(dev, cs, &cmd);
+            util_dynarray_append(payload, cmd);
+            nr_cdm++;
+         } else {
+            assert(cs->type == HK_CS_VDM);
+            perf_debug(cmdbuf, "%u: Submitting VDM with %u API draws, %u draws",
+                       i, cs->stats.calls, cs->stats.cmds);
+            assert(cs->stats.cmds > 0 || cs->cr.process_empty_tiles ||
+                   cs->timestamp.end.handle);
+
+            struct drm_asahi_cmd_render cmd;
+            asahi_fill_vdm_command(dev, cs, &cmd);
+            util_dynarray_append(payload, cmd);
+            nr_vdm++;
+         }
+      }
+   }
+
+   return nr_vdm + nr_cdm;
+}
+
 static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
@@ -746,54 +796,80 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          return result;
    }
 
+   uint8_t stack_buf[2048];
+   struct util_dynarray payload;
    unsigned command_count = 0;
 
-   /* Gather the number of individual commands to submit up front */
-   for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
-      struct hk_cmd_buffer *cmdbuf =
-         (struct hk_cmd_buffer *)submit->command_buffers[i];
+   if (dev->fast_submit) {
+      /* Build payload in a single pass into stack storage when small enough,
+       * avoiding both list_length pre-walk and heap allocation.
+       */
+      util_dynarray_init_from_stack(&payload, stack_buf, sizeof(stack_buf));
+      command_count = queue_submit_build_payload(dev, submit, &payload);
 
-      command_count += list_length(&cmdbuf->control_streams);
+      perf_debug_dev(&dev->dev,
+                     "Submitting %u control streams (%u command buffers)",
+                     command_count, submit->command_buffer_count);
+
+      if (command_count == 0) {
+         util_dynarray_fini(&payload);
+         return queue_submit_empty(dev, queue, submit);
+      }
+   } else {
+      payload = UTIL_DYNARRAY_INIT;
+
+      /* Gather the number of individual commands to submit up front */
+      for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+         struct hk_cmd_buffer *cmdbuf =
+            (struct hk_cmd_buffer *)submit->command_buffers[i];
+
+         command_count += list_length(&cmdbuf->control_streams);
+      }
+
+      perf_debug_dev(&dev->dev,
+                     "Submitting %u control streams (%u command buffers)",
+                     command_count, submit->command_buffer_count);
+
+      if (command_count == 0)
+         return queue_submit_empty(dev, queue, submit);
    }
-
-   perf_debug_dev(&dev->dev,
-                  "Submitting %u control streams (%u command buffers)",
-                  command_count, submit->command_buffer_count);
-
-   if (command_count == 0)
-      return queue_submit_empty(dev, queue, submit);
 
    unsigned wait_count = 0;
    struct drm_asahi_sync *syncs =
       alloca((submit->wait_count + submit->signal_count + 1) *
              sizeof(struct drm_asahi_sync));
 
-   for (unsigned i = 0; i < submit->wait_count; ++i) {
-      /* The kernel rejects the submission if we try to wait on the same
-       * timeline semaphore at multiple points.
-       *
-       * TODO: Can we relax the UAPI?
-       *
-       * XXX: This is quadratic time.
-       */
-      bool skip = false;
-      if (submit->waits[i].sync->flags & VK_SYNC_IS_TIMELINE) {
-         uint32_t v1 = submit->waits[i].wait_value;
-         for (unsigned j = 0; j < submit->wait_count; ++j) {
-            uint32_t v2 = submit->waits[j].wait_value;
-            if (i != j && submit->waits[i].sync == submit->waits[j].sync &&
-                (v1 < v2 || (v1 == v2 && i < j))) {
-               skip = true;
-               break;
+   if (dev->fast_submit && submit->wait_count == 1) {
+      asahi_fill_sync(&syncs[wait_count++], submit->waits[0].sync,
+                      submit->waits[0].wait_value);
+   } else {
+      for (unsigned i = 0; i < submit->wait_count; ++i) {
+         /* The kernel rejects the submission if we try to wait on the same
+          * timeline semaphore at multiple points.
+          *
+          * TODO: Can we relax the UAPI?
+          *
+          * XXX: This is quadratic time.
+          */
+         bool skip = false;
+         if (submit->waits[i].sync->flags & VK_SYNC_IS_TIMELINE) {
+            uint32_t v1 = submit->waits[i].wait_value;
+            for (unsigned j = 0; j < submit->wait_count; ++j) {
+               uint32_t v2 = submit->waits[j].wait_value;
+               if (i != j && submit->waits[i].sync == submit->waits[j].sync &&
+                   (v1 < v2 || (v1 == v2 && i < j))) {
+                  skip = true;
+                  break;
+               }
             }
+
+            if (skip)
+               continue;
          }
 
-         if (skip)
-            continue;
+         asahi_fill_sync(&syncs[wait_count++], submit->waits[i].sync,
+                         submit->waits[i].wait_value);
       }
-
-      asahi_fill_sync(&syncs[wait_count++], submit->waits[i].sync,
-                      submit->waits[i].wait_value);
    }
 
    for (unsigned i = 0; i < submit->signal_count; ++i) {
@@ -808,49 +884,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       .timeline_value = ++queue->drm.timeline_value,
    };
 
-   /* Now setup the command structs */
-   struct util_dynarray payload = UTIL_DYNARRAY_INIT;
-
-   unsigned nr_vdm = 0, nr_cdm = 0;
-
-   for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
-      struct hk_cmd_buffer *cmdbuf =
-         (struct hk_cmd_buffer *)submit->command_buffers[i];
-
-      list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node) {
-         /* Barrier on previous command */
-         struct drm_asahi_cmd_header header =
-            agx_cmd_header(cs->type == HK_CS_CDM, nr_vdm, nr_cdm);
-
-         util_dynarray_append(&payload, header);
-
-         if (cs->type == HK_CS_CDM) {
-            perf_debug(
-               cmdbuf,
-               "%u: Submitting CDM with %u API calls, %u dispatches, %u flushes, %u merged",
-               i, cs->stats.calls, cs->stats.cmds, cs->stats.flushes,
-               cs->stats.merged);
-
-            assert(cs->stats.cmds > 0 || cs->stats.flushes > 0 ||
-                   cs->timestamp.end.handle);
-
-            struct drm_asahi_cmd_compute cmd;
-            asahi_fill_cdm_command(dev, cs, &cmd);
-            util_dynarray_append(&payload, cmd);
-            nr_cdm++;
-         } else {
-            assert(cs->type == HK_CS_VDM);
-            perf_debug(cmdbuf, "%u: Submitting VDM with %u API draws, %u draws",
-                       i, cs->stats.calls, cs->stats.cmds);
-            assert(cs->stats.cmds > 0 || cs->cr.process_empty_tiles ||
-                   cs->timestamp.end.handle);
-
-            struct drm_asahi_cmd_render cmd;
-            asahi_fill_vdm_command(dev, cs, &cmd);
-            util_dynarray_append(&payload, cmd);
-            nr_vdm++;
-         }
-      }
+   if (!dev->fast_submit) {
+      /* Now setup the command structs */
+      queue_submit_build_payload(dev, submit, &payload);
    }
 
    if (dev->dev.debug & AGX_DBG_TRACE) {
