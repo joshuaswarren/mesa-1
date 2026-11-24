@@ -22,9 +22,7 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, bool usc, struct hk_cmd_bo **bo_out)
    if (bo == NULL)
       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   enum agx_bo_flags bo_flags =
-      (usc ? AGX_BO_LOW_VA : 0) | (dev->fast_submit ? AGX_BO_WRITEBACK : 0);
-   bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0, bo_flags,
+   bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0, usc ? AGX_BO_LOW_VA : 0,
                           usc ? "USC command pool" : "Main command pool");
    if (bo->bo == NULL) {
       vk_free(&pool->vk.alloc, bo);

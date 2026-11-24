@@ -567,8 +567,7 @@ hk_CreateDescriptorPool(VkDevice _device,
    bo_size += HK_MIN_UBO_ALIGNMENT * pCreateInfo->maxSets;
 
    if (bo_size) {
-      enum agx_bo_flags bo_flags = dev->fast_submit ? AGX_BO_WRITEBACK : 0;
-      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, bo_flags, "Descriptor pool");
+      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, 0, "Descriptor pool");
       if (!pool->bo) {
          hk_destroy_descriptor_pool(dev, pAllocator, pool);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
