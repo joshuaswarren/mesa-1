@@ -379,6 +379,7 @@ typedef struct {
       uint32_t component;
       uint32_t channels;
       uint32_t bfi_mask;
+      uint32_t matrix_type;
       uint16_t pixel_offset;
       uint16_t zs;
       int16_t stack_size;

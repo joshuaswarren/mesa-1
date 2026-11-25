@@ -20,6 +20,7 @@
 #include "agx3_alu_core.h"
 #include "agx3_atomic_core.h"
 #include "agx3_binder.h"
+#include "agx3_matrix_core.h"
 #include "agx3_cf_core.h"
 #include "agx3_copy_core.h"
 #include "agx3_compose/agx3_decode.h"
@@ -12349,6 +12350,82 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          const uint16_t outstanding_here = outstanding;
          if (slot)
             outstanding |= (uint16_t)(1u << (slot - 1));
+
+         if (I->op == AGX_OPCODE_MATMAD16_AGX3) {
+            if (enc != AGX_ISA_ENCODING_AGX3C || ctx->is_preamble ||
+                ctx->stage != MESA_SHADER_COMPUTE || I->nr_dests != 1 ||
+                I->nr_srcs != 3 || I->saturate || wait > 0xff ||
+                !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+                I->dest[0].size != AGX_SIZE_32 ||
+                agx_channels(I->dest[0]) != 8 ||
+                I->dest[0].value != I->src[2].value)
+               AGX3_REFUSE(I);
+            for (unsigned s = 0; s < 3; ++s) {
+               const agx_index src = I->src[s];
+               if (!agx3_src_is_register(src) || src.memory || src.abs ||
+                   src.neg || agx_channels(src) != 8 ||
+                   src.size != (s == 2 ? AGX_SIZE_32 : AGX_SIZE_16))
+                  AGX3_REFUSE(I);
+            }
+            struct agx3_matrix_gemm16_desc d = {
+               .dest = I->dest[0].value,
+               .a = I->src[0].value,
+               .b = I->src[1].value,
+               .input_type = I->matrix_type & 15,
+               .b_input_type = (I->matrix_type >> 4) & 15,
+               .wait_mask = wait,
+               .preserve_a = !I->src[0].discard,
+               .preserve_b = !I->src[1].discard,
+            };
+            uint8_t bytes[10], length;
+            if (!agx3_matrix_encode_gemm16(enc, &d, bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         if (I->op == AGX_OPCODE_MATMAD8_AGX3) {
+            if ((I->matrix_type & 15) != ((I->matrix_type >> 4) & 15))
+               AGX3_REFUSE(I);
+            /* 8x8 matmad is available on AGX3B (G15/G16/G17P) as well as M5
+             * (AGX3C); the encoder packs the right form for each. The 16x16
+             * GEMM above stays AGX3C only. */
+            const unsigned wait_max =
+               enc == AGX_ISA_ENCODING_AGX3B ? 0x3f : 0xff;
+            if ((enc != AGX_ISA_ENCODING_AGX3C &&
+                 enc != AGX_ISA_ENCODING_AGX3B) || ctx->is_preamble ||
+                ctx->stage != MESA_SHADER_COMPUTE || I->nr_dests != 1 ||
+                I->nr_srcs != 3 || I->saturate || wait > wait_max ||
+                !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+                I->dest[0].size != AGX_SIZE_32 ||
+                agx_channels(I->dest[0]) != 2)
+               AGX3_REFUSE(I);
+
+            struct agx3_matrix_mma8_desc d = {
+               .dest = I->dest[0].value,
+               .a = I->src[0].value,
+               .b = I->src[1].value,
+               .c = I->src[2].value,
+               .dest_cache = I->dest[0].cache,
+               .wait_mask = wait,
+               .input_type = I->matrix_type & 15,
+            };
+            for (unsigned s = 0; s < 3; ++s) {
+               const agx_index src = I->src[s];
+               if (!agx3_src_is_register(src) || src.memory || src.abs ||
+                   src.neg || agx_channels(src) != 2 ||
+                   src.size != (s == 2 || (I->matrix_type & 15) == AGX3_MATRIX_INPUT_F32
+                                  ? AGX_SIZE_32 : AGX_SIZE_16))
+                  AGX3_REFUSE(I);
+               d.cache[s] = src.cache;
+               d.discard[s] = src.discard;
+            }
+            uint8_t bytes[14], length;
+            if (!agx3_matrix_encode_mma8(enc, &d, bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
+         }
 
          /* Give every control-flow boundary an empty scoreboard, rather
           * than refusing the shader when something is still in flight. */

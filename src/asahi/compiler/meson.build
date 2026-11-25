@@ -18,6 +18,7 @@ libasahi_agx_files = files(
   'agx_nir_lower_interpolation.c',
   'agx_nir_lower_g17p_combined_sampler.c',
   'agx_nir_lower_shared_bitsize.c',
+  'agx_nir_lower_cmat.c',
   'agx_nir_lower_subgroups.c',
   'agx_nir_lower_texture.c',
   'agx_nir_opt_preamble.c',
@@ -77,6 +78,7 @@ libasahi_agx_files = files(
   'agx3_alu_core.c',
   'agx3_funop_core.c',
   'agx3_sr_core.c',
+  'agx3_matrix_core.c',
   'agx_performance.c',
   'agx_print.c',
   'agx_pressure_schedule.c',
@@ -448,6 +450,19 @@ if with_tests
     executable(
       'agx3_compile_fail_closed_test',
       files('test/test-agx3-compile-fail-closed.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_cmat_mixed_mma8',
+    executable(
+      'agx3_cmat_mixed_mma8_test',
+      files('test/test-agx3-cmat-mixed-mma8.c'),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],

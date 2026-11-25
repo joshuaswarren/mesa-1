@@ -8,8 +8,26 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "asahi/lib/agx_chip.h"
+#include "util/u_debug.h"
+
 struct nir_shader;
 struct nir_instr;
+
+/* G18G cooperative matrix is opt-in by env, since the path is unqualified
+ * on that part. */
+static inline bool
+g18g_coopmat_enabled(enum agx_chip chip)
+{
+   return chip == AGX_CHIP_G18G &&
+          debug_get_bool_option("ASAHI_G18G_COOPERATIVE_MATRIX", false);
+}
+
+bool agx_nir_lower_cmat(struct nir_shader *s);
+bool agx_nir_lower_cmat_calls(struct nir_shader *s);
+bool agx_nir_cmat_supported(struct nir_shader *s);
+bool agx_nir_lower_cmat_tensor(struct nir_shader *s, bool pairing);
+bool agx_nir_lower_cmat_flexible(struct nir_shader *s, bool *pairing);
 
 /* BASE bit3 selects an explicit byte-scaled AGX3 load/store index. */
 #define AGX_NIR_MEMORY_INDEX_BYTES 8u

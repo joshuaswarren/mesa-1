@@ -423,7 +423,8 @@ lvp_shader_lower(struct lvp_device *pdevice, nir_shader *nir, struct lvp_pipelin
    NIR_PASS(_, nir, nir_lower_is_helper_invocation);
 
    bool progress = false;
-   NIR_PASS(progress, nir, nir_lower_cooperative_matrix_flexible_dimensions, 8, 8, 8);
+   const struct nir_lower_coopmat_args coopmat_args = { 8, 8, 8 };
+   NIR_PASS(progress, nir, nir_lower_cooperative_matrix_flexible_dimensions, &coopmat_args);
    if (progress) {
       NIR_PASS(_, nir, nir_opt_deref);
       NIR_PASS(_, nir, nir_opt_dce);

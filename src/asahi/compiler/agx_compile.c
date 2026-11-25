@@ -27,6 +27,7 @@
 #include "agx_nir.h"
 #include "agx_opcodes.h"
 #include "agx3_pack.h"
+#include "agx3_matrix_core.h"
 #include "glsl_types.h"
 #include "nir.h"
 #include "nir_serialize.h"
@@ -2443,6 +2444,22 @@ agx_lower_agx3_device_atomic_sources(agx_context *ctx)
    return progress;
 }
 
+static bool
+agx_lower_agx3_matrix_sources(agx_context *ctx)
+{
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_MATMAD16_AGX3)
+         continue;
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index tied = agx_vec_temp(ctx, AGX_SIZE_32, 8);
+      agx_mov_to(&b, tied, I->src[2]);
+      I->src[2] = tied;
+      progress = true;
+   }
+   return progress;
+}
+
 static enum agx_format
 format_for_bitsize(unsigned bitsize)
 {
@@ -3150,6 +3167,35 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    mesa_shader_stage stage = b->shader->stage;
 
    switch (instr->intrinsic) {
+   case nir_intrinsic_cmat_muladd_agx: {
+      unsigned type = nir_intrinsic_src_type(instr) == nir_type_uint16
+         ? AGX3_MATRIX_INPUT_BF16 : nir_intrinsic_src_type(instr) == nir_type_float32
+         ? AGX3_MATRIX_INPUT_F32 : AGX3_MATRIX_INPUT_F16;
+      unsigned type_b = nir_intrinsic_src_type2(instr) == nir_type_uint16
+         ? AGX3_MATRIX_INPUT_BF16 : nir_intrinsic_src_type2(instr) == nir_type_float32
+         ? AGX3_MATRIX_INPUT_F32 : AGX3_MATRIX_INPUT_F16;
+      type |= type_b << 4;
+      /* The 16x16 GEMM form is M5 (AGX3C) only; the 8x8 matmad also exists on
+       * the AGX3B encoding (G15/G16/G17P), so the 2-component path is allowed
+       * there too. */
+      const enum agx_isa_encoding mm_enc = b->shader->key->dev.encoding;
+      assert(stage == MESA_SHADER_COMPUTE && !b->shader->is_preamble &&
+             (mm_enc == AGX_ISA_ENCODING_AGX3C ||
+              (mm_enc == AGX_ISA_ENCODING_AGX3B &&
+               instr->def.num_components == 2)));
+      if (instr->def.num_components == 8) {
+         agx_matmad16_agx3_to(b, dst, agx_src_index(&instr->src[0]),
+                            agx_src_index(&instr->src[1]),
+                            agx_src_index(&instr->src[2]), type);
+      } else {
+         assert(instr->def.num_components == 2);
+         agx_matmad8_agx3_to(b, dst, agx_src_index(&instr->src[0]),
+                            agx_src_index(&instr->src[1]),
+                            agx_src_index(&instr->src[2]), type);
+      }
+      agx_emit_cached_split(b, dst, instr->def.num_components);
+      return NULL;
+   }
    case nir_intrinsic_load_barycentric_pixel:
    case nir_intrinsic_load_barycentric_centroid:
    case nir_intrinsic_load_barycentric_at_sample:
@@ -10663,6 +10709,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_merge_unread_pixel_waits);
 
    AGX_PASS(ctx, agx_lower_agx3_device_atomic_sources);
+   AGX_PASS(ctx, agx_lower_agx3_matrix_sources);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);

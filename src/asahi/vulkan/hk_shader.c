@@ -245,6 +245,23 @@ hk_fs_force_shader_depth_write(nir_shader *nir)
 void
 hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 {
+   /* Matrices of flexible dimensions become 16x16 pieces, then tensor loads
+    * and stores are lowered: they inline the decode functions they call,
+    * which the rest of the lowering must then see. The pieces of a matrix
+    * may pair K 64 deep, which the tensor loads then take. */
+   if (g18g_coopmat_enabled(((struct hk_physical_device *)vk_pdev)->dev.chip)) {
+      bool split = false, pairing = false;
+      NIR_PASS(split, nir, agx_nir_lower_cmat_flexible, &pairing);
+      if (split) {
+         NIR_PASS(_, nir, nir_opt_deref);
+         NIR_PASS(_, nir, nir_opt_dce);
+         NIR_PASS(_, nir, nir_remove_dead_variables,
+                  nir_var_function_temp | nir_var_shader_temp, NULL);
+      }
+      NIR_PASS(_, nir, agx_nir_lower_cmat_tensor, pairing);
+      NIR_PASS(_, nir, agx_nir_lower_cmat_calls);
+   }
+
    /* Must lower before io to temps */
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_terminate_to_demote);

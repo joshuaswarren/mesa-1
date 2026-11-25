@@ -582,7 +582,8 @@ radv_shader_spirv_to_nir(struct radv_device *device, struct radv_shader_stage *s
       radv_shader_choose_subgroup_size(device, nir, &stage->key, vk_spirv_version(spirv, stage->spirv.size));
 
       progress = false;
-      NIR_PASS(progress, nir, nir_lower_cooperative_matrix_flexible_dimensions, 16, 16, 16);
+      const struct nir_lower_coopmat_args coopmat_args = { 16, 16, 16 };
+      NIR_PASS(progress, nir, nir_lower_cooperative_matrix_flexible_dimensions, &coopmat_args);
       if (progress) {
          NIR_PASS(_, nir, nir_opt_deref);
          NIR_PASS(_, nir, nir_opt_dce);

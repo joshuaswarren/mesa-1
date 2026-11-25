@@ -66,6 +66,7 @@ L = (1 << 15)
 _ = None
 
 FORMAT = immediate("format", "enum agx_format")
+MATRIX_TYPE = immediate("matrix_type")
 IMM = immediate("imm", "uint64_t")
 WRITEOUT = immediate("writeout")
 INDEX = immediate("index")
@@ -239,6 +240,8 @@ op("fmul", encoding = (0x1A, 4, 6), srcs = 2, is_float = True)
 op("hadd", encoding = (0x26, 4, 6), srcs = 2, is_float = True)
 op("hfma", encoding = (0x36, 6, 8), srcs = 3, is_float = True)
 op("hmul", encoding = (0x16, 4, 6), srcs = 2, is_float = True)
+op("matmad8_agx3", None, srcs = 3, imms = [MATRIX_TYPE], can_reorder = False)
+op("matmad16_agx3", None, srcs = 3, imms = [MATRIX_TYPE], can_reorder = False)
 # Apple's AGX3 backend calls the same semantic operation `ldimm`.  This is the
 # first source-grounded AGX2 IR -> AGX3 mnemonic mapping: the native immediate
 # field reproduces all 14 probe constants exactly on G15, G16 and G17, while

@@ -9,6 +9,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/compiler/agx_debug.h"
+#include "asahi/compiler/agx_nir.h"
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/disk_cache.h"
@@ -1685,6 +1686,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * subgroup quad shuffle operations exposed above. */
       supported_extensions.KHR_shader_quad_control = false;
    }
+
+   if (g18g_coopmat_enabled(pdev->dev.chip))
+      supported_extensions.KHR_cooperative_matrix = true;
 
    struct vk_features supported_features;
    hk_get_device_features(&pdev->dev, instance, &supported_extensions,

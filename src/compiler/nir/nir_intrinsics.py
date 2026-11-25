@@ -257,6 +257,8 @@ index("nir_resource_type", "resource_type")
 # The nir_alu_type of input data to a store or conversion
 index("nir_alu_type", "src_type")
 
+index("nir_alu_type", "src_type2")
+
 # The nir_alu_type of the data output from a load or conversion
 index("nir_alu_type", "dest_type")
 
@@ -360,7 +362,7 @@ index("bool", "legacy_fneg")
 index("bool", "legacy_fsat")
 
 # For Cooperative Matrix intrinsics.
-index("struct glsl_cmat_description", "cmat_desc")
+index("struct glsl_cmat_description", "cmat_desc", size = 2)
 index("enum glsl_matrix_layout", "matrix_layout")
 index("nir_cmat_signed", "cmat_signed_mask")
 index("nir_op", "alu_op")
@@ -372,8 +374,8 @@ index("unsigned", "systolic_depth")
 index("unsigned", "repeat_count")
 
 # For Intel convert_cmat_intel intrinsic.
-index("struct glsl_cmat_description", "dst_cmat_desc")
-index("struct glsl_cmat_description", "src_cmat_desc")
+index("struct glsl_cmat_description", "dst_cmat_desc", size = 2)
+index("struct glsl_cmat_description", "src_cmat_desc", size = 2)
 
 # For an AGX tilebuffer intrinsics, whether the coordinates are implicit or
 # explicit. Implicit coordinates are used in fragment shaders, explicit
@@ -482,6 +484,15 @@ intrinsic("get_ubo_size", src_comp=[-1], dest_comp=1,
           indices=[ACCESS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 intrinsic("ssbo_descriptor_amd", src_comp=[-1], dest_comp=4, bit_sizes=[32],
+          indices=[ACCESS], flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# Gets the 32-bit byte offset of a buffer deref in its binding, as its
+# address holds it (zero in address formats that hold no such offset)
+intrinsic("deref_buffer_offset", src_comp=[-1], dest_comp=1,
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# Gets the device address of a buffer deref, as its address holds it
+intrinsic("deref_buffer_address", src_comp=[-1], dest_comp=0,
           indices=[ACCESS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Intrinsics which provide a run-time mode-check.  Unlike the compile-time
@@ -1458,6 +1469,8 @@ intrinsic("cmat_extract", src_comp=[-1, 1], dest_comp=1)
 intrinsic("cmat_insert", src_comp=[-1, 1, -1, 1])
 intrinsic("cmat_copy", src_comp=[-1, -1])
 intrinsic("cmat_transpose", src_comp=[-1, -1], indices=[FP_MATH_CTRL])
+intrinsic("cmat_muladd_agx", src_comp=[0, 0, 0], dest_comp=0, bit_sizes=[32], indices=[SRC_TYPE, SRC_TYPE2],
+          flags=[CAN_ELIMINATE, SUBGROUP])
 
 # src[] = { deref }.
 load("buffer_ptr_deref", [-1], [ACCESS, RESOURCE_TYPE],
