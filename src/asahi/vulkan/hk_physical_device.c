@@ -1249,7 +1249,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    }
 
    bool is_asahi = agx_drm_name_is_native(version->name);
-   is_asahi |= strcmp(version->name, "virtio_gpu") == 0;
+   is_asahi |=
+      version->name != NULL && strcmp(version->name, "virtio_gpu") == 0;
    drmFreeVersion(version);
 
    if (!is_asahi) {
