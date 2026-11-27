@@ -294,3 +294,63 @@ TEST_F(HoistLoads, AddrProducerStopsAtUniformStoreConflict)
       agx_unit_test(b, v);
    });
 }
+
+static void
+pass_with_use_order(agx_context *ctx)
+{
+   struct agx_shader_key key = {};
+   key.dev.hoist_load_addrs = true;
+   key.dev.hoist_load_use_order = true;
+   ctx->key = &key;
+   agx_hoist_loads(ctx);
+   ctx->key = NULL;
+   agx_reindex_ssa(ctx);
+}
+
+#define CASE_UO(instr, expected) INSTRUCTION_CASE(instr, expected, pass_with_use_order)
+
+TEST_F(HoistLoads, UseOrderKeepsEarlyConsumerLoadFirst)
+{
+   CASE_UO(
+      {
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_index v0 = load(b, agx_immediate(0), false);
+         agx_index v1 = load(b, agx_immediate(4), false);
+         agx_unit_test(b, v0);
+         agx_unit_test(b, y);
+         agx_unit_test(b, v1);
+      },
+      {
+         agx_index v0 = load(b, agx_immediate(0), false);
+         agx_index v1 = load(b, agx_immediate(4), false);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_unit_test(b, v0);
+         agx_unit_test(b, y);
+         agx_unit_test(b, v1);
+      });
+}
+
+TEST_F(HoistLoads, UseOrderPromotesEarlierConsumedLoadAboveLateLoad)
+{
+   CASE_UO(
+      {
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_index v_late = load(b, agx_immediate(4), false);
+         agx_index v_early = load(b, agx_immediate(0), false);
+         agx_unit_test(b, v_early);
+         agx_unit_test(b, y);
+         agx_unit_test(b, v_late);
+      },
+      {
+         agx_index v_early = load(b, agx_immediate(0), false);
+         agx_index v_late = load(b, agx_immediate(4), false);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_unit_test(b, v_early);
+         agx_unit_test(b, y);
+         agx_unit_test(b, v_late);
+      });
+}

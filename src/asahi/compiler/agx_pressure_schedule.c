@@ -309,15 +309,53 @@ hoist_uniform_store_conflict(const agx_instr *store, const agx_instr *load)
    return false;
 }
 
+static unsigned
+hoist_first_use_pos(const agx_block *block, const agx_instr *I)
+{
+   unsigned pos = 0;
+   bool seen = false;
+
+   agx_foreach_instr_in_block(block, J) {
+      if (!seen) {
+         if (J == I)
+            seen = true;
+         pos++;
+         continue;
+      }
+      if (J->op == AGX_OPCODE_THREADGROUP_BARRIER ||
+          J->op == AGX_OPCODE_MEMORY_BARRIER)
+         return pos;
+      agx_foreach_ssa_dest(I, d) {
+         agx_foreach_ssa_src(J, s) {
+            if (J->src[s].value == I->dest[d].value)
+               return pos;
+         }
+      }
+      pos++;
+   }
+
+   return pos;
+}
+
 static bool
-hoist_can_cross(const agx_instr *P, const agx_instr *load)
+hoist_can_cross(const agx_instr *P, const agx_instr *load,
+                bool use_order, const agx_block *block,
+                unsigned load_use_pos)
 {
    if (P->op == AGX_OPCODE_THREADGROUP_BARRIER ||
        P->op == AGX_OPCODE_LOCAL_LOAD || P->op == AGX_OPCODE_LOCAL_STORE)
       return true;
 
-   if (P->op == AGX_OPCODE_DEVICE_LOAD)
-      return !P->coherent;
+   if (P->op == AGX_OPCODE_DEVICE_LOAD) {
+      if (P->coherent)
+         return false;
+      if (!use_order)
+         return true;
+      /* Keep hoisted bursts in ascending first-use order: only cross an
+       * earlier non-coherent load if this load is consumed strictly earlier.
+       */
+      return load_use_pos < hoist_first_use_pos(block, P);
+   }
 
    if (P->op == AGX_OPCODE_UNIFORM_STORE)
       return !hoist_uniform_store_conflict(P, load);
@@ -364,6 +402,7 @@ void
 agx_hoist_loads(agx_context *ctx)
 {
    const bool hoist_addrs = ctx->key && ctx->key->dev.hoist_load_addrs;
+   const bool use_order = ctx->key && ctx->key->dev.hoist_load_use_order;
 
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block_safe(block, I) {
@@ -372,6 +411,9 @@ agx_hoist_loads(agx_context *ctx)
 
          if (I->op != AGX_OPCODE_DEVICE_LOAD || I->coherent)
             continue;
+
+         const unsigned load_use_pos =
+            use_order ? hoist_first_use_pos(block, I) : 0;
 
          agx_instr *chain[4];
          unsigned chain_len = 1;
@@ -406,7 +448,7 @@ agx_hoist_loads(agx_context *ctx)
 
             bool can_cross_all = true;
             for (unsigned ci = 0; ci < chain_len; ++ci) {
-               if (!hoist_can_cross(P, chain[ci])) {
+               if (!hoist_can_cross(P, chain[ci], use_order, block, load_use_pos)) {
                   can_cross_all = false;
                   break;
                }

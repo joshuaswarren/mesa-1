@@ -291,6 +291,12 @@ struct agx_device_key {
     * agx_insert_waits. Measured on G13C.
     */
    bool smart_waits;
+
+   /* Keep hoisted compute device_loads in ascending first-use order (avoiding
+    * LIFO head-of-line blocking of early-consumed loads behind late-consumed
+    * loads in agx_hoist_loads). Measured on G14C.
+    */
+   bool hoist_load_use_order;
 };
 
 struct agx_shader_key {
