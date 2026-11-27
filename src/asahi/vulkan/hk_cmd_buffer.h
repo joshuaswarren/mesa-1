@@ -135,6 +135,8 @@ struct hk_descriptor_state {
 
    struct hk_push_descriptor_set *push[HK_MAX_SETS];
    uint32_t push_dirty;
+   uint16_t push_max_end;
+   bool has_dynamic_buffers;
 };
 
 struct hk_attachment {

@@ -380,6 +380,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       debug_get_bool_option("HK_CDM_DEFER_FLUSH",
                             pdev->dev.chip == AGX_CHIP_G13G);
 
+   dev->fast_submit = debug_get_bool_option("HK_FAST_SUBMIT", false);
+
    /* Bounded poll before blocking syncobj waits (see vk_device.sync_wait_poll_us).
     * Off by default; pays CPU to skip wake-up latency on short submit->signal
     * round trips. */

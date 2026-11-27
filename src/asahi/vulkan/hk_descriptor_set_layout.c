@@ -258,6 +258,7 @@ hk_CreateDescriptorSetLayout(VkDevice device,
 
    layout->non_variable_descriptor_buffer_size = buffer_size;
    layout->vk.dynamic_descriptor_count = dynamic_buffer_count;
+   layout->has_immutable_samplers = immutable_sampler_count > 0;
 
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);

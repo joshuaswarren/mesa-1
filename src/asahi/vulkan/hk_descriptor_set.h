@@ -67,6 +67,13 @@ struct hk_descriptor_pool {
    struct agx_bo *bo;
    uint8_t *mapped_ptr;
    struct util_vma_heap heap;
+
+   bool bump_alloc;
+   uint64_t bump_offset;
+   uint64_t bo_size;
+   struct hk_descriptor_set *set_slab;
+   uint32_t slab_capacity;
+   uint32_t slab_used;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_descriptor_pool, base, VkDescriptorPool,

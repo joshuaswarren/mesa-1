@@ -111,6 +111,8 @@ struct hk_device {
    /* HK_CDM_DEFER_FLUSH (hk_device.c): emit the CDM barrier at the end of
     * each compute batch, not after vkCmdPipelineBarrier2. */
    bool cdm_defer_flush;
+   /* HK_FAST_SUBMIT (hk_device.c): cut host submit/dispatch overhead. */
+   bool fast_submit;
 
    struct {
       struct u_rwlock lock;

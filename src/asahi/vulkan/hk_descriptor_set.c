@@ -233,6 +233,9 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                         uint32_t descriptorCopyCount,
                         const VkCopyDescriptorSet *pDescriptorCopies)
 {
+   VK_FROM_HANDLE(hk_device, dev, device);
+   const bool fast_submit = dev->fast_submit;
+
    for (uint32_t w = 0; w < descriptorWriteCount; w++) {
       const VkWriteDescriptorSet *write = &pDescriptorWrites[w];
       VK_FROM_HANDLE(hk_descriptor_set, set, write->dstSet);
@@ -268,11 +271,48 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
 
       case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
       case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-         for (uint32_t j = 0; j < write->descriptorCount; j++) {
-            write_buffer_desc(
-               set, write->pBufferInfo + j, write->dstBinding,
-               write->dstArrayElement + j,
-               write->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+         if (fast_submit && write->descriptorCount > 0) {
+            const bool read_only =
+               write->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            const struct hk_descriptor_set_binding_layout *bl =
+               &set->layout->binding[write->dstBinding];
+            uint32_t offset =
+               bl->offset + write->dstArrayElement * bl->stride;
+            assert(offset + (write->descriptorCount - 1) * bl->stride +
+                      sizeof(struct hk_buffer_address) <=
+                   set->size);
+            char *dst = (char *)set->mapped_ptr + offset;
+            for (uint32_t j = 0; j < write->descriptorCount; j++) {
+               const VkDescriptorBufferInfo *info = write->pBufferInfo + j;
+               VK_FROM_HANDLE(hk_buffer, buffer, info->buffer);
+               struct hk_buffer_address desc;
+               if (unlikely(buffer == NULL || info->range == 0)) {
+                  desc = (struct hk_buffer_address){
+                     .base_addr = AGX_ZERO_PAGE_ADDRESS,
+                     .size = 0,
+                  };
+               } else {
+                  uint64_t addr = vk_buffer_address(&buffer->vk, info->offset);
+                  if (unlikely(read_only && buffer->va))
+                     addr = agx_rw_addr_to_ro(&dev->dev, addr);
+                  uint64_t range =
+                     vk_buffer_range(&buffer->vk, info->offset, info->range);
+                  assert(range <= UINT32_MAX);
+                  desc = (struct hk_buffer_address){
+                     .base_addr = addr,
+                     .size = range,
+                  };
+               }
+               memcpy(dst, &desc, sizeof(desc));
+               dst += bl->stride;
+            }
+         } else {
+            for (uint32_t j = 0; j < write->descriptorCount; j++) {
+               write_buffer_desc(
+                  set, write->pBufferInfo + j, write->dstBinding,
+                  write->dstArrayElement + j,
+                  write->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+            }
          }
          break;
 
@@ -403,11 +443,44 @@ hk_push_descriptor_set_update(struct hk_push_descriptor_set *push_set,
 static void hk_descriptor_pool_free(struct hk_descriptor_pool *pool,
                                     uint64_t addr, uint64_t size);
 
+static inline bool
+hk_descriptor_set_in_slab(const struct hk_descriptor_pool *pool,
+                          const struct hk_descriptor_set *set)
+{
+   return pool->set_slab && set >= pool->set_slab &&
+          set < pool->set_slab + pool->slab_capacity;
+}
+
+static void
+hk_descriptor_pool_reset_slab(struct hk_device *dev,
+                              struct hk_descriptor_pool *pool)
+{
+   for (uint32_t i = 0; i < pool->slab_used; i++) {
+      struct hk_descriptor_set *set = &pool->set_slab[i];
+      if (set->layout != NULL) {
+         vk_descriptor_set_layout_unref(&dev->vk, &set->layout->vk);
+         set->layout = NULL;
+         vk_object_base_finish(&set->base);
+      }
+   }
+   pool->slab_used = 0;
+   pool->bump_offset = 0;
+}
+
 static void
 hk_descriptor_set_destroy(struct hk_device *dev,
                           struct hk_descriptor_pool *pool,
                           struct hk_descriptor_set *set)
 {
+   if (hk_descriptor_set_in_slab(pool, set)) {
+      if (set->layout != NULL) {
+         vk_descriptor_set_layout_unref(&dev->vk, &set->layout->vk);
+         set->layout = NULL;
+         vk_object_base_finish(&set->base);
+      }
+      return;
+   }
+
    list_del(&set->link);
    if (set->size > 0)
       hk_descriptor_pool_free(pool, set->addr, set->size);
@@ -421,10 +494,15 @@ hk_destroy_descriptor_pool(struct hk_device *dev,
                            const VkAllocationCallbacks *pAllocator,
                            struct hk_descriptor_pool *pool)
 {
+   hk_descriptor_pool_reset_slab(dev, pool);
+
    list_for_each_entry_safe(struct hk_descriptor_set, set, &pool->sets, link)
       hk_descriptor_set_destroy(dev, pool, set);
 
-   util_vma_heap_finish(&pool->heap);
+   if (!pool->bump_alloc)
+      util_vma_heap_finish(&pool->heap);
+   if (pool->set_slab)
+      vk_free2(&dev->vk.alloc, pAllocator, pool->set_slab);
    agx_bo_unreference(&dev->dev, pool->bo);
 
    vk_object_free(&dev->vk, pAllocator, pool);
@@ -501,7 +579,24 @@ hk_CreateDescriptorPool(VkDevice _device,
        * make that extra space available to the client.
        */
       assert(pool->bo->size >= bo_size);
-      util_vma_heap_init(&pool->heap, pool->bo->va->addr, pool->bo->size);
+      if (dev->fast_submit &&
+          !(pCreateInfo->flags & VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT)) {
+         /* Pools without FREE_DESCRIPTOR_SET_BIT can only reclaim on full
+          * reset/destroy, so a bump cursor + set slab avoids VMA/calloc churn.
+          */
+         pool->bump_alloc = true;
+         pool->bump_offset = 0;
+         pool->bo_size = pool->bo->size;
+         if (pCreateInfo->maxSets > 0 && pCreateInfo->maxSets <= 4096) {
+            pool->set_slab = vk_zalloc2(
+               &dev->vk.alloc, pAllocator,
+               pCreateInfo->maxSets * sizeof(struct hk_descriptor_set), 8,
+               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+            pool->slab_capacity = pool->set_slab ? pCreateInfo->maxSets : 0;
+         }
+      } else {
+         util_vma_heap_init(&pool->heap, pool->bo->va->addr, pool->bo->size);
+      }
    } else {
       util_vma_heap_init(&pool->heap, 0, 0);
    }
@@ -515,6 +610,16 @@ hk_descriptor_pool_alloc(struct hk_descriptor_pool *pool, uint64_t size,
                          uint64_t alignment, uint64_t *addr_out, void **map_out)
 {
    assert(size > 0);
+   if (pool->bump_alloc) {
+      uint64_t off = align64(pool->bump_offset, alignment);
+      if (off > pool->bo_size || size > pool->bo_size - off)
+         return VK_ERROR_OUT_OF_POOL_MEMORY;
+      pool->bump_offset = off + size;
+      *addr_out = pool->bo->va->addr + off;
+      *map_out = pool->mapped_ptr + off;
+      return VK_SUCCESS;
+   }
+
    uint64_t addr = util_vma_heap_alloc(&pool->heap, size, alignment);
    if (addr == 0)
       return VK_ERROR_OUT_OF_POOL_MEMORY;
@@ -533,57 +638,20 @@ static void
 hk_descriptor_pool_free(struct hk_descriptor_pool *pool, uint64_t addr,
                         uint64_t size)
 {
+   if (pool->bump_alloc)
+      return;
+
    assert(size > 0);
    assert(addr >= pool->bo->va->addr);
    assert(addr + size <= pool->bo->va->addr + pool->bo->size);
    util_vma_heap_free(&pool->heap, addr, size);
 }
 
-static VkResult
-hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
-                         struct hk_descriptor_set_layout *layout,
-                         uint32_t variable_count,
-                         struct hk_descriptor_set **out_set)
+static void
+hk_descriptor_set_init_immutable_samplers(
+   struct hk_descriptor_set *set, const struct hk_descriptor_set_layout *layout,
+   uint32_t variable_count)
 {
-   struct hk_descriptor_set *set;
-   VkResult result;
-
-   uint32_t mem_size =
-      sizeof(struct hk_descriptor_set) +
-      layout->vk.dynamic_descriptor_count * sizeof(struct hk_buffer_address);
-
-   set =
-      vk_object_zalloc(&dev->vk, NULL, mem_size, VK_OBJECT_TYPE_DESCRIPTOR_SET);
-   if (!set)
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   set->size = layout->non_variable_descriptor_buffer_size;
-
-   if (layout->binding_count > 0 &&
-       (layout->binding[layout->binding_count - 1].flags &
-        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)) {
-      uint32_t stride = layout->binding[layout->binding_count - 1].stride;
-
-      /* Off by one so we don't underallocate the end. Otherwise vkd3d-proton
-       * descriptor-performance underallocates.
-       */
-      set->size += stride * (variable_count + 1);
-   }
-
-   set->size = align64(set->size, HK_MIN_UBO_ALIGNMENT);
-
-   if (set->size > 0) {
-      result = hk_descriptor_pool_alloc(pool, set->size, HK_MIN_UBO_ALIGNMENT,
-                                        &set->addr, &set->mapped_ptr);
-      if (result != VK_SUCCESS) {
-         vk_object_free(&dev->vk, NULL, set);
-         return result;
-      }
-   }
-
-   vk_descriptor_set_layout_ref(&layout->vk);
-   set->layout = layout;
-
    for (uint32_t b = 0; b < layout->binding_count; b++) {
       if (layout->binding[b].type != VK_DESCRIPTOR_TYPE_SAMPLER &&
           layout->binding[b].type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
@@ -602,6 +670,84 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
                                        layout->binding[b].type);
       }
    }
+}
+
+static VkResult
+hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
+                         struct hk_descriptor_set_layout *layout,
+                         uint32_t variable_count,
+                         struct hk_descriptor_set **out_set)
+{
+   struct hk_descriptor_set *set;
+   VkResult result;
+
+   uint32_t set_size = layout->non_variable_descriptor_buffer_size;
+
+   if (layout->binding_count > 0 &&
+       (layout->binding[layout->binding_count - 1].flags &
+        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT)) {
+      uint32_t stride = layout->binding[layout->binding_count - 1].stride;
+
+      /* Off by one so we don't underallocate the end. Otherwise vkd3d-proton
+       * descriptor-performance underallocates.
+       */
+      set_size += stride * (variable_count + 1);
+   }
+
+   set_size = align64(set_size, HK_MIN_UBO_ALIGNMENT);
+
+   if (pool->bump_alloc && layout->vk.dynamic_descriptor_count == 0 &&
+       pool->slab_used < pool->slab_capacity) {
+      uint64_t addr = 0;
+      void *mapped_ptr = NULL;
+      if (set_size > 0) {
+         result = hk_descriptor_pool_alloc(pool, set_size, HK_MIN_UBO_ALIGNMENT,
+                                           &addr, &mapped_ptr);
+         if (result != VK_SUCCESS)
+            return result;
+      }
+
+      set = &pool->set_slab[pool->slab_used++];
+      vk_object_base_init(&dev->vk, &set->base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
+      list_inithead(&set->link);
+      set->size = set_size;
+      set->addr = addr;
+      set->mapped_ptr = mapped_ptr;
+      vk_descriptor_set_layout_ref(&layout->vk);
+      set->layout = layout;
+
+      if (unlikely(layout->has_immutable_samplers))
+         hk_descriptor_set_init_immutable_samplers(set, layout, variable_count);
+
+      *out_set = set;
+      return VK_SUCCESS;
+   }
+
+   uint32_t mem_size =
+      sizeof(struct hk_descriptor_set) +
+      layout->vk.dynamic_descriptor_count * sizeof(struct hk_buffer_address);
+
+   set =
+      vk_object_zalloc(&dev->vk, NULL, mem_size, VK_OBJECT_TYPE_DESCRIPTOR_SET);
+   if (!set)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   set->size = set_size;
+
+   if (set->size > 0) {
+      result = hk_descriptor_pool_alloc(pool, set->size, HK_MIN_UBO_ALIGNMENT,
+                                        &set->addr, &set->mapped_ptr);
+      if (result != VK_SUCCESS) {
+         vk_object_free(&dev->vk, NULL, set);
+         return result;
+      }
+   }
+
+   vk_descriptor_set_layout_ref(&layout->vk);
+   set->layout = layout;
+
+   if (unlikely(layout->has_immutable_samplers))
+      hk_descriptor_set_init_immutable_samplers(set, layout, variable_count);
 
    list_addtail(&set->link, &pool->sets);
    *out_set = set;
@@ -693,6 +839,8 @@ hk_ResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool,
 {
    VK_FROM_HANDLE(hk_device, dev, device);
    VK_FROM_HANDLE(hk_descriptor_pool, pool, descriptorPool);
+
+   hk_descriptor_pool_reset_slab(dev, pool);
 
    list_for_each_entry_safe(struct hk_descriptor_set, set, &pool->sets, link)
       hk_descriptor_set_destroy(dev, pool, set);
