@@ -147,6 +147,21 @@ hk_smart_waits_enabled(const struct hk_physical_device *pdev)
           debug_get_bool_option("AGX_SMART_WAITS", default_on);
 }
 
+/* First-use-ordered compute load hoisting: on by default on G14C (M2 Max),
+ * opt-in on other gen 13/14 variants with AGX_HOIST_USE_ORDER=1, off everywhere
+ * with AGX_HOIST_USE_ORDER=0. Requires hoist_loads. Part of the compiler flags
+ * so toggling it never serves a shader cached under the other setting.
+ */
+static bool
+hk_hoist_load_use_order_enabled(const struct hk_physical_device *pdev)
+{
+   const unsigned gen = pdev->dev.params.gpu_generation;
+   const bool is_g14c = (gen == 14 && pdev->dev.params.gpu_variant == 'C');
+
+   return hk_hoist_loads_enabled(pdev) &&
+          debug_get_bool_option("AGX_HOIST_USE_ORDER", is_g14c);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -159,7 +174,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36) |
          ((uint64_t)hk_hoist_loads_enabled(pdev) << 37) |
          ((uint64_t)hk_hoist_load_addrs_enabled(pdev) << 38) |
-         ((uint64_t)hk_smart_waits_enabled(pdev) << 39);
+         ((uint64_t)hk_smart_waits_enabled(pdev) << 39) |
+         ((uint64_t)hk_hoist_load_use_order_enabled(pdev) << 40);
 }
 
 const nir_shader_compiler_options *
@@ -1243,6 +1259,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       hk_hoist_load_addrs_enabled(hk_device_physical(dev));
    backend_key.dev.smart_waits =
       hk_smart_waits_enabled(hk_device_physical(dev));
+   backend_key.dev.hoist_load_use_order =
+      hk_hoist_load_use_order_enabled(hk_device_physical(dev));
 
    /* For now, sample shading is always dynamic. Indicate that. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
