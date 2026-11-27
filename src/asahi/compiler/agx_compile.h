@@ -280,6 +280,17 @@ struct agx_device_key {
     * G14 only.
     */
    bool hoist_loads;
+
+   /* Also hoist pure SSA address-producer chains (depth <= 4) alongside
+    * non-coherent device_loads in agx_hoist_loads. Measured on G13C.
+    */
+   bool hoist_load_addrs;
+
+   /* Partition compute async scoreboard slots by first-use distance to avoid
+    * slot-0 overflow stalls when late-use loads mix with early-use loads in
+    * agx_insert_waits. Measured on G13C.
+    */
+   bool smart_waits;
 };
 
 struct agx_shader_key {

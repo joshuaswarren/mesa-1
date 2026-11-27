@@ -110,6 +110,7 @@ if with_tests
       files(
          'test/test-compact-constants.cpp',
          'test/test-hoist-loads.cpp',
+         'test/test-insert-waits.cpp',
          'test/test-lower-cmat.cpp',
          'test/test-lower-math.cpp',
          'test/test-minifloat.cpp',
