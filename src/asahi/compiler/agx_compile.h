@@ -304,6 +304,11 @@ struct agx_device_key {
     */
    bool preamble_bases_low;
 
+   /* Fold constant shared-memory offsets into local_load/local_store base
+    * immediates (agx_fold_shared_offsets). Default ON on G13 and G14C.
+    */
+   bool fold_shared_offsets;
+
 };
 
 struct agx_shader_key {

@@ -182,6 +182,24 @@ hk_preamble_bases_low_enabled(const struct hk_physical_device *pdev)
 }
 
 
+/* Fold constant shared-memory offsets into local_load/local_store base
+ * immediates: default ON on G13 and G14C (M2 Max), opt-in on other gen 14
+ * variants with AGX_LOCAL_FOLD=1, off everywhere with AGX_LOCAL_FOLD=0 or
+ * AGX_LOCAL_FOLD_OFF. Part of the compiler flags so toggling it never serves a
+ * shader cached under the other setting.
+ */
+static bool
+hk_fold_shared_offsets_enabled(const struct hk_physical_device *pdev)
+{
+   const unsigned gen = pdev->dev.params.gpu_generation;
+   const bool default_on =
+      (gen == 13) || (gen == 14 && pdev->dev.params.gpu_variant == 'C');
+
+   return (gen == 13 || gen == 14) &&
+          getenv("AGX_LOCAL_FOLD_OFF") == NULL &&
+          debug_get_bool_option("AGX_LOCAL_FOLD", default_on);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -196,7 +214,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)hk_hoist_load_addrs_enabled(pdev) << 38) |
          ((uint64_t)hk_smart_waits_enabled(pdev) << 39) |
          ((uint64_t)hk_hoist_load_use_order_enabled(pdev) << 40) |
-         ((uint64_t)hk_preamble_bases_low_enabled(pdev) << 41);
+         ((uint64_t)hk_preamble_bases_low_enabled(pdev) << 41) |
+         ((uint64_t)hk_fold_shared_offsets_enabled(pdev) << 42);
 }
 
 const nir_shader_compiler_options *
@@ -1284,6 +1303,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       hk_hoist_load_use_order_enabled(hk_device_physical(dev));
    backend_key.dev.preamble_bases_low =
       hk_preamble_bases_low_enabled(hk_device_physical(dev));
+   backend_key.dev.fold_shared_offsets =
+      hk_fold_shared_offsets_enabled(hk_device_physical(dev));
 
    /* For now, sample shading is always dynamic. Indicate that. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
