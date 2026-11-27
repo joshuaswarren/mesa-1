@@ -147,35 +147,38 @@ hk_smart_waits_enabled(const struct hk_physical_device *pdev)
           debug_get_bool_option("AGX_SMART_WAITS", default_on);
 }
 
-/* First-use-ordered compute load hoisting: on by default on G14C (M2 Max),
- * opt-in on other gen 13/14 variants with AGX_HOIST_USE_ORDER=1, off everywhere
- * with AGX_HOIST_USE_ORDER=0. Requires hoist_loads. Part of the compiler flags
- * so toggling it never serves a shader cached under the other setting.
+/* First-use-ordered compute load hoisting: on by default on G13C (M1 Max) and
+ * G14C (M2 Max), opt-in on other gen 13/14 variants with AGX_HOIST_USE_ORDER=1,
+ * off everywhere with AGX_HOIST_USE_ORDER=0. Requires hoist_loads. Part of the
+ * compiler flags so toggling it never serves a shader cached under the other
+ * setting.
  */
 static bool
 hk_hoist_load_use_order_enabled(const struct hk_physical_device *pdev)
 {
    const unsigned gen = pdev->dev.params.gpu_generation;
-   const bool is_g14c = (gen == 14 && pdev->dev.params.gpu_variant == 'C');
+   const bool default_on =
+      (gen == 13 || gen == 14) && pdev->dev.params.gpu_variant == 'C';
 
    return hk_hoist_loads_enabled(pdev) &&
-          debug_get_bool_option("AGX_HOIST_USE_ORDER", is_g14c);
+          debug_get_bool_option("AGX_HOIST_USE_ORDER", default_on);
 }
 
 /* Pack 64-bit compute/graphics load/store/atomic preamble base pointers into
- * low uniform slots (< 256 halfwords): default ON on G14C (M2 Max), opt-in on
- * other gen 13/14 variants with AGX_PREAMBLE_BASES_LOW=1, off everywhere with
- * AGX_PREAMBLE_BASES_LOW=0. Part of the compiler flags so toggling it never
- * serves a shader cached under the other setting.
+ * low uniform slots (< 256 halfwords): default ON on G13C (M1 Max) and G14C
+ * (M2 Max), opt-in on other gen 13/14 variants with AGX_PREAMBLE_BASES_LOW=1,
+ * off everywhere with AGX_PREAMBLE_BASES_LOW=0. Part of the compiler flags so
+ * toggling it never serves a shader cached under the other setting.
  */
 static bool
 hk_preamble_bases_low_enabled(const struct hk_physical_device *pdev)
 {
    const unsigned gen = pdev->dev.params.gpu_generation;
-   const bool is_g14c = (gen == 14 && pdev->dev.params.gpu_variant == 'C');
+   const bool default_on =
+      (gen == 13 || gen == 14) && pdev->dev.params.gpu_variant == 'C';
 
    return (gen == 13 || gen == 14) &&
-          debug_get_bool_option("AGX_PREAMBLE_BASES_LOW", is_g14c);
+          debug_get_bool_option("AGX_PREAMBLE_BASES_LOW", default_on);
 }
 
 
