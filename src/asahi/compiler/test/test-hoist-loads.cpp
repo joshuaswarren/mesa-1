@@ -181,3 +181,116 @@ TEST_F(HoistLoads, CoherentLoadStays)
       agx_unit_test(b, y);
    });
 }
+
+static void
+pass_with_addrs(agx_context *ctx)
+{
+   struct agx_shader_key key = {};
+   key.dev.hoist_load_addrs = true;
+   ctx->key = &key;
+   agx_hoist_loads(ctx);
+   ctx->key = NULL;
+   agx_reindex_ssa(ctx);
+}
+
+#define CASE_ADDR(instr, expected) INSTRUCTION_CASE(instr, expected, pass_with_addrs)
+#define NEGCASE_ADDR(instr)        INSTRUCTION_CASE(instr, instr, pass_with_addrs)
+
+TEST_F(HoistLoads, HoistsPureAddrProducerChain)
+{
+   CASE_ADDR(
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_threadgroup_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      },
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_threadgroup_barrier(b);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      });
+}
+
+TEST_F(HoistLoads, HoistsTwoStepAddrChainPreservingOrder)
+{
+   CASE_ADDR(
+      {
+         agx_index idx = agx_mov_imm(b, AGX_SIZE_32, 8);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_index scaled = agx_iadd(b, idx, idx, 0);
+         agx_index off = agx_iadd(b, scaled, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      },
+      {
+         agx_index idx = agx_mov_imm(b, AGX_SIZE_32, 8);
+         agx_index scaled = agx_iadd(b, idx, idx, 0);
+         agx_index off = agx_iadd(b, scaled, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      });
+}
+
+TEST_F(HoistLoads, AddrProducerNeverMovesDownward)
+{
+   /* Producer `off` is blocked above by memory_barrier and has another consumer
+    * (`mid`) between it and the load. Only the load may hoist above `mid`;
+    * `off` must stay above `mid` to preserve SSA dominance.
+    */
+   CASE_ADDR(
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_memory_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index mid = agx_iadd(b, off, agx_immediate(8), 0);
+         agx_index v = load(b, off, false);
+         agx_unit_test(b, v);
+         agx_unit_test(b, mid);
+      },
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_memory_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_index mid = agx_iadd(b, off, agx_immediate(8), 0);
+         agx_unit_test(b, v);
+         agx_unit_test(b, mid);
+      });
+}
+
+TEST_F(HoistLoads, AddrProducerStopsAtMemoryBarrier)
+{
+   NEGCASE_ADDR({
+      agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+      agx_memory_barrier(b);
+      agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+      agx_index v = load(b, off, false);
+      agx_unit_test(b, v);
+   });
+}
+
+TEST_F(HoistLoads, AddrProducerStopsAtUniformStoreConflict)
+{
+   NEGCASE_ADDR({
+      agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+      agx_uniform_store(b, x, agx_immediate(20), 1);
+      agx_index off = agx_iadd(b, agx_uniform(20, AGX_SIZE_32), agx_immediate(4), 0);
+      agx_index v = load(b, off, false);
+      agx_unit_test(b, v);
+   });
+}

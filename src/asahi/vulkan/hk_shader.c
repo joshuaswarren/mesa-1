@@ -110,6 +110,36 @@ hk_hoist_loads_enabled(const struct hk_physical_device *pdev)
           debug_get_bool_option("AGX_HOIST_LOADS", gen == 13);
 }
 
+/* Pure SSA address-producer chain hoist alongside compute device loads: on by
+ * default on G13C (M1 Max), opt-in on gen 13/14 with AGX_HOIST_ADDR=1, off
+ * everywhere with AGX_HOIST_ADDR=0. Requires hoist_loads. Part of the compiler
+ * flags so toggling it never serves a shader cached under the other setting.
+ */
+static bool
+hk_hoist_load_addrs_enabled(const struct hk_physical_device *pdev)
+{
+   const unsigned gen = pdev->dev.params.gpu_generation;
+   const bool is_g13c = (gen == 13 && pdev->dev.params.gpu_variant == 'C');
+
+   return hk_hoist_loads_enabled(pdev) &&
+          debug_get_bool_option("AGX_HOIST_ADDR", is_g13c);
+}
+
+/* Use-distance-aware compute scoreboard slot partitioning: on by default on
+ * G13C (M1 Max), opt-in on gen 13/14 with AGX_SMART_WAITS=1, off everywhere
+ * with AGX_SMART_WAITS=0. Part of the compiler flags so toggling it never
+ * serves a shader cached under the other setting.
+ */
+static bool
+hk_smart_waits_enabled(const struct hk_physical_device *pdev)
+{
+   const unsigned gen = pdev->dev.params.gpu_generation;
+   const bool is_g13c = (gen == 13 && pdev->dev.params.gpu_variant == 'C');
+
+   return (gen == 13 || gen == 14) &&
+          debug_get_bool_option("AGX_SMART_WAITS", is_g13c);
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -120,7 +150,9 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)(getenv("AGX_HWMAT_VEC2_OFF") != NULL) << 34) |
          ((uint64_t)(getenv("AGX_LOCAL_FOLD_OFF") != NULL) << 35) |
          ((uint64_t)(getenv("AGX_SCHED_COMPUTE") != NULL) << 36) |
-         ((uint64_t)hk_hoist_loads_enabled(pdev) << 37);
+         ((uint64_t)hk_hoist_loads_enabled(pdev) << 37) |
+         ((uint64_t)hk_hoist_load_addrs_enabled(pdev) << 38) |
+         ((uint64_t)hk_smart_waits_enabled(pdev) << 39);
 }
 
 const nir_shader_compiler_options *
@@ -1200,6 +1232,10 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    backend_key.dev.hoist_loads =
       hk_hoist_loads_enabled(hk_device_physical(dev));
+   backend_key.dev.hoist_load_addrs =
+      hk_hoist_load_addrs_enabled(hk_device_physical(dev));
+   backend_key.dev.smart_waits =
+      hk_smart_waits_enabled(hk_device_physical(dev));
 
    /* For now, sample shading is always dynamic. Indicate that. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
