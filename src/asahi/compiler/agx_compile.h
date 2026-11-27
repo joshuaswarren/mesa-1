@@ -297,6 +297,13 @@ struct agx_device_key {
     * loads in agx_hoist_loads). Measured on G14C.
     */
    bool hoist_load_use_order;
+
+   /* Pack 64-bit preamble load/store/atomic base pointers into low uniform
+    * slots (< 256 halfwords) so AGX2 memory instructions read them directly
+    * without emitting per-load mov1 copies. Default ON on G14C, opt-in via AGX_PREAMBLE_BASES_LOW=1.
+    */
+   bool preamble_bases_low;
+
 };
 
 struct agx_shader_key {

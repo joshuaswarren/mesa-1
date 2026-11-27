@@ -162,6 +162,23 @@ hk_hoist_load_use_order_enabled(const struct hk_physical_device *pdev)
           debug_get_bool_option("AGX_HOIST_USE_ORDER", is_g14c);
 }
 
+/* Pack 64-bit compute/graphics load/store/atomic preamble base pointers into
+ * low uniform slots (< 256 halfwords): default ON on G14C (M2 Max), opt-in on
+ * other gen 13/14 variants with AGX_PREAMBLE_BASES_LOW=1, off everywhere with
+ * AGX_PREAMBLE_BASES_LOW=0. Part of the compiler flags so toggling it never
+ * serves a shader cached under the other setting.
+ */
+static bool
+hk_preamble_bases_low_enabled(const struct hk_physical_device *pdev)
+{
+   const unsigned gen = pdev->dev.params.gpu_generation;
+   const bool is_g14c = (gen == 14 && pdev->dev.params.gpu_variant == 'C');
+
+   return (gen == 13 || gen == 14) &&
+          debug_get_bool_option("AGX_PREAMBLE_BASES_LOW", is_g14c);
+}
+
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -175,7 +192,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
          ((uint64_t)hk_hoist_loads_enabled(pdev) << 37) |
          ((uint64_t)hk_hoist_load_addrs_enabled(pdev) << 38) |
          ((uint64_t)hk_smart_waits_enabled(pdev) << 39) |
-         ((uint64_t)hk_hoist_load_use_order_enabled(pdev) << 40);
+         ((uint64_t)hk_hoist_load_use_order_enabled(pdev) << 40) |
+         ((uint64_t)hk_preamble_bases_low_enabled(pdev) << 41);
 }
 
 const nir_shader_compiler_options *
@@ -1261,6 +1279,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       hk_smart_waits_enabled(hk_device_physical(dev));
    backend_key.dev.hoist_load_use_order =
       hk_hoist_load_use_order_enabled(hk_device_physical(dev));
+   backend_key.dev.preamble_bases_low =
+      hk_preamble_bases_low_enabled(hk_device_physical(dev));
 
    /* For now, sample shading is always dynamic. Indicate that. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&

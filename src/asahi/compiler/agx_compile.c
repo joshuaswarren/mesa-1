@@ -3009,8 +3009,8 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
 }
 
 static void
-agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
-                 uint8_t *ts_count, uint8_t *ss_count)
+agx_optimize_nir(nir_shader *nir, bool soft_fault, bool preamble_bases_low,
+                 uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count)
 {
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
@@ -3140,7 +3140,13 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
       if (sizes[2] == 0)
          sizes[2]++;
 
+      const unsigned reserved_preamble = sizes[0];
       NIR_PASS(_, nir, agx_nir_opt_preamble, sizes);
+
+      if (preamble_bases_low && sizes[0] > reserved_preamble) {
+         NIR_PASS(_, nir, agx_nir_place_preamble_bases_low, reserved_preamble,
+                  sizes[0], &sizes[0]);
+      }
 
       *preamble_size = sizes[0];
 
@@ -3895,7 +3901,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    info->push_count = key->reserved_preamble;
    agx_optimize_nir(
-      nir, key->dev.soft_fault, key->secondary ? NULL : &info->push_count,
+      nir, key->dev.soft_fault, key->dev.preamble_bases_low,
+      key->secondary ? NULL : &info->push_count,
       (key->secondary || !key->promote_textures) ? NULL
                                                  : &info->texture_state_count,
       (key->secondary || !key->promote_textures) ? NULL
