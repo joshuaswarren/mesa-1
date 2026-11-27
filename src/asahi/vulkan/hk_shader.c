@@ -96,48 +96,55 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
-/* Compute load hoist: on by default on generation 13 (M1 family), opt-in on
- * generation 14 with AGX_HOIST_LOADS=1, never on other generations.
- * AGX_HOIST_LOADS=0 turns it off everywhere. Part of the compiler flags, so
- * toggling it never serves a shader cached under the other setting.
+/* Compute load hoist: on by default on generation 13 (M1 family) and G14C
+ * (M2 Max), opt-in on other generation 14 variants with AGX_HOIST_LOADS=1,
+ * never on other generations. AGX_HOIST_LOADS=0 turns it off everywhere.
+ * Part of the compiler flags, so toggling it never serves a shader cached
+ * under the other setting.
  */
 static bool
 hk_hoist_loads_enabled(const struct hk_physical_device *pdev)
 {
    const unsigned gen = pdev->dev.params.gpu_generation;
+   const bool default_on =
+      (gen == 13) || (gen == 14 && pdev->dev.params.gpu_variant == 'C');
 
    return (gen == 13 || gen == 14) &&
-          debug_get_bool_option("AGX_HOIST_LOADS", gen == 13);
+          debug_get_bool_option("AGX_HOIST_LOADS", default_on);
 }
 
 /* Pure SSA address-producer chain hoist alongside compute device loads: on by
- * default on G13C (M1 Max), opt-in on gen 13/14 with AGX_HOIST_ADDR=1, off
- * everywhere with AGX_HOIST_ADDR=0. Requires hoist_loads. Part of the compiler
- * flags so toggling it never serves a shader cached under the other setting.
+ * default on G13C (M1 Max) and G14C (M2 Max), opt-in on other gen 13/14
+ * variants with AGX_HOIST_ADDR=1, off everywhere with AGX_HOIST_ADDR=0.
+ * Requires hoist_loads. Part of the compiler flags so toggling it never serves
+ * a shader cached under the other setting.
  */
 static bool
 hk_hoist_load_addrs_enabled(const struct hk_physical_device *pdev)
 {
    const unsigned gen = pdev->dev.params.gpu_generation;
-   const bool is_g13c = (gen == 13 && pdev->dev.params.gpu_variant == 'C');
+   const bool default_on =
+      (gen == 13 || gen == 14) && pdev->dev.params.gpu_variant == 'C';
 
    return hk_hoist_loads_enabled(pdev) &&
-          debug_get_bool_option("AGX_HOIST_ADDR", is_g13c);
+          debug_get_bool_option("AGX_HOIST_ADDR", default_on);
 }
 
 /* Use-distance-aware compute scoreboard slot partitioning: on by default on
- * G13C (M1 Max), opt-in on gen 13/14 with AGX_SMART_WAITS=1, off everywhere
- * with AGX_SMART_WAITS=0. Part of the compiler flags so toggling it never
- * serves a shader cached under the other setting.
+ * G13C (M1 Max) and G14C (M2 Max), opt-in on other gen 13/14 variants with
+ * AGX_SMART_WAITS=1, off everywhere with AGX_SMART_WAITS=0. Part of the
+ * compiler flags so toggling it never serves a shader cached under the other
+ * setting.
  */
 static bool
 hk_smart_waits_enabled(const struct hk_physical_device *pdev)
 {
    const unsigned gen = pdev->dev.params.gpu_generation;
-   const bool is_g13c = (gen == 13 && pdev->dev.params.gpu_variant == 'C');
+   const bool default_on =
+      (gen == 13 || gen == 14) && pdev->dev.params.gpu_variant == 'C';
 
    return (gen == 13 || gen == 14) &&
-          debug_get_bool_option("AGX_SMART_WAITS", is_g13c);
+          debug_get_bool_option("AGX_SMART_WAITS", default_on);
 }
 
 uint64_t
