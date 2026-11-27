@@ -3913,7 +3913,9 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       assign_coefficient_regs(nir, &info->varyings.fs);
    }
 
-   if (key->dev.g13 && !getenv("AGX_LOCAL_FOLD_OFF")) {
+   if ((key->dev.fold_shared_offsets ||
+        (key->dev.g13 && !getenv("AGX_LOCAL_FOLD"))) &&
+       !getenv("AGX_LOCAL_FOLD_OFF")) {
       NIR_PASS(_, nir, agx_fold_shared_offsets);
       NIR_PASS(_, nir, nir_opt_dce);
    }
