@@ -131,17 +131,18 @@ hk_hoist_load_addrs_enabled(const struct hk_physical_device *pdev)
 }
 
 /* Use-distance-aware compute scoreboard slot partitioning: on by default on
- * G13C (M1 Max) and G14C (M2 Max), opt-in on other gen 13/14 variants with
- * AGX_SMART_WAITS=1, off everywhere with AGX_SMART_WAITS=0. Part of the
- * compiler flags so toggling it never serves a shader cached under the other
- * setting.
+ * G13G (M1), G13C (M1 Max), and G14C (M2 Max), opt-in on other gen 13/14
+ * variants with AGX_SMART_WAITS=1, off everywhere with AGX_SMART_WAITS=0. Part
+ * of the compiler flags so toggling it never serves a shader cached under the
+ * other setting.
  */
 static bool
 hk_smart_waits_enabled(const struct hk_physical_device *pdev)
 {
    const unsigned gen = pdev->dev.params.gpu_generation;
+   const char var = pdev->dev.params.gpu_variant;
    const bool default_on =
-      (gen == 13 || gen == 14) && pdev->dev.params.gpu_variant == 'C';
+      (gen == 13 && (var == 'G' || var == 'C')) || (gen == 14 && var == 'C');
 
    return (gen == 13 || gen == 14) &&
           debug_get_bool_option("AGX_SMART_WAITS", default_on);
