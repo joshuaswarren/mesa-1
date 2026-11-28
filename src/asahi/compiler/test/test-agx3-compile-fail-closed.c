@@ -2120,6 +2120,7 @@ check_mixed_compare_half_select_compute(void)
       }
    }
    return true;
+}
 
 /* G17G/G18G have no negated-addend imad: x*y - z must still compile, split
  * into a multiply and a subtract. */
