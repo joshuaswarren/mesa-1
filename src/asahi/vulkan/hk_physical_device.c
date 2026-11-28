@@ -2291,15 +2291,25 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    /* The implemented cooperative-matrix paths are selected by ISA, without
     * a process-wide feature opt-in. */
    const bool m5_cmat = agx_chip_g17_m5(pdev->dev.chip);
-   supported_extensions.KHR_cooperative_matrix =
-      agx_chip_cooperative_matrix_supported(pdev->dev.chip);
+   /* Gen-15 chips (G15G/G15S/G15C) carry the AGX3B 8x8 matmad the KHR path
+    * lowers to, but the path is unqualified on M3: its CDM flush is the
+    * distinct G15 form (hk_cmd_dispatch.c), not the gen-14-bound barrier
+    * the qualification receipts were taken beside. Keep the capability
+    * predicate true (the ISA support is real) and expose the extension on
+    * gen-15 only under the explicit HK_COOPMAT_GEN15 opt-in until an M3
+    * qualification receipt lands. */
+   const bool coopmat_exposed =
+      agx_chip_cooperative_matrix_supported(pdev->dev.chip) &&
+      (!agx_chip_native_g15(pdev->dev.chip) ||
+       debug_get_bool_option("HK_COOPMAT_GEN15", false));
+   supported_extensions.KHR_cooperative_matrix = coopmat_exposed;
 
    /* bf16 inputs widen to f32: exact because every bf16 value is representable
     * in f32, so the accumulated f32 product matches bit for bit. bf16
     * therefore follows the cooperative matrix paths across all supported
-    * encodings. */
-   supported_extensions.KHR_shader_bfloat16 =
-      agx_chip_cooperative_matrix_supported(pdev->dev.chip);
+    * encodings, and the same exposure gate: an unqualified coopmat path
+    * carries no qualified bf16 path. */
+   supported_extensions.KHR_shader_bfloat16 = coopmat_exposed;
 
    /* Most of VK_NV_cooperative_matrix2 (flexible dimensions, tensor
     * addressing, block loads, per-element operations, reductions) is lowered

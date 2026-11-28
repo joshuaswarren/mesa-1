@@ -164,6 +164,10 @@ static unsigned checks;
    ROW(agx_chip_has_agx3_ray_opcodes(c), "0000 01111 1111 111111 0 0")          \
    ROW(agx_chip_needs_scheduling_stalls(c), "0000 01000 0000 000000 0 0")       \
    ROW(agx_chip_cooperative_matrix_supported(c), "1111 01111 1111 111111 0 0")  \
+   /* Exposure gate in hk_physical_device.c (HK_COOPMAT_GEN15 opts gen-15    \
+    * back in): */                                                          \
+   ROW(agx_chip_cooperative_matrix_supported(c) && !agx_chip_native_g15(c), \
+       "1111 00001 1111 111111 0 0")                                          \
    ROW(agx_chip_local_read_tilebuffer(c), "0000 00000 1111 111111 0 0")         \
    /* Per-record allowlists: VDM. */                                           \
    ROW(agx_vdm_state_vertex_pipeline_pair_supported(c),                        \
