@@ -1,5 +1,10 @@
 name: macOS-CI
-on: push
+# Disabled on this fork (joshuaswarren/mesa-1): the job asks for the retired
+# macos-11 image, so every push sat ~24h and ended cancelled - 78 such runs
+# in D1's 30-day CI baseline. Manual dispatch only; see the commit for the
+# numbers. The fork's Mesa work builds on Linux, not macOS.
+on:
+  workflow_dispatch
 
 permissions:
   contents: read
@@ -10,6 +15,7 @@ jobs:
       matrix:
         glx_option: ['dri', 'xlib']
     runs-on: macos-11
+    timeout-minutes: 120
     env:
       GALLIUM_DUMP_CPU: true
       MESON_EXEC: /Users/runner/Library/Python/3.11/bin/meson
