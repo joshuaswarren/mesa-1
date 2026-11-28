@@ -350,6 +350,10 @@ TEST_F(Optimizer, G17PFoldsBothHalvesOfATiedConstantFmax)
 
 TEST_F(Optimizer, G17PVertexConstantWidth)
 {
+   /* On AGX3 the packer has no grounded encoding for a full-width float op
+    * over a 16-bit register source -- the minifloat forms carry an
+    * immediate, not a register -- so agx_opt_compact_constants keeps the
+    * constant wide. AGX2 still narrows: its packer encodes the form. */
    for (unsigned mode = 0; mode < 4; ++mode) {
       agx_builder *b = agx_test_builder(mem_ctx);
       struct agx_shader_key key = {};
@@ -357,6 +361,7 @@ TEST_F(Optimizer, G17PVertexConstantWidth)
       b->shader->key = &key;
       b->shader->stage = mode == 1 ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
       b->shader->is_preamble = mode == 2;
+      const bool narrows = mode == 3;
       agx_index constant = agx_mov_imm(b, 32, fui(1.0f / 1024.0f));
       agx_index out = agx_temp(b->shader, AGX_SIZE_32);
       agx_ffma_to(b, out, wx, constant, wy);
@@ -364,9 +369,10 @@ TEST_F(Optimizer, G17PVertexConstantWidth)
       agx_opt_compact_constants(b->shader);
       agx_foreach_instr_global(b->shader, I) {
          if (I->op == AGX_OPCODE_FFMA)
-            EXPECT_EQ(I->src[1].size, AGX_SIZE_16);
+            EXPECT_EQ(I->src[1].size,
+                      narrows ? AGX_SIZE_16 : AGX_SIZE_32);
          if (I->op == AGX_OPCODE_MOV_IMM)
-            EXPECT_EQ(I->imm, 0x1400u);
+            EXPECT_EQ(I->imm, narrows ? 0x1400u : fui(1.0f / 1024.0f));
       }
    }
 }
