@@ -760,6 +760,150 @@ TEST_F(Optimizer, G17PPreservesStandaloneSaturate)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+/* AGX3B FFMA and FADD take the saturate of their result; FMUL and G18G keep
+ * the standalone saturate. */
+TEST_F(Optimizer, Agx3bFoldsSaturateIntoFfmaAndFadd)
+{
+   struct Case {
+      const char *name;
+      enum agx_isa_encoding enc;
+      bool emit_agx3d;
+      enum agx_opcode op;
+      bool expect_folded;
+   } cases[] = {
+      {"agx3b_ffma", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FFMA, true},
+      {"agx3b_fadd", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FADD, true},
+      {"agx3b_fmul", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FMUL, false},
+      {"g18g_ffma", AGX_ISA_ENCODING_AGX3C, true, AGX_OPCODE_FFMA, false},
+      {"g18g_fadd", AGX_ISA_ENCODING_AGX3C, true, AGX_OPCODE_FADD, false},
+   };
+
+   for (const Case &c : cases) {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = c.enc;
+      key.dev.emit_agx3d = c.emit_agx3d;
+      b->shader->key = &key;
+
+      agx_index x = agx_preload(b, wx), y = agx_preload(b, wy),
+                z = agx_preload(b, wz);
+      agx_index value = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *I = c.op == AGX_OPCODE_FFMA  ? agx_ffma_to(b, value, x, y, z)
+                     : c.op == AGX_OPCODE_FADD ? agx_fadd_to(b, value, x, y)
+                                               : agx_fmul_to(b, value, x, y);
+      agx_index out = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, out, value)->saturate = true;
+      agx_unit_test(b, out);
+
+      agx_optimize_and_dce(b->shader);
+
+      unsigned fmovs = 0;
+      agx_foreach_instr_global(b->shader, J)
+         fmovs += J->op == AGX_OPCODE_FADD &&
+                  agx_is_equiv(J->src[1], agx_negzero());
+      EXPECT_EQ(I->saturate, c.expect_folded) << c.name;
+      EXPECT_EQ(fmovs, c.expect_folded ? 0u : 1u) << c.name;
+   }
+}
+
+/* AGX3B saturate folding must stay 32-bit and must not leave an immediate
+ * addend on a saturated FFMA (nor inline one afterwards). */
+TEST_F(Optimizer, Agx3bSaturateFoldGuardsHalfDestAndImmediateAddend)
+{
+   /* 1. 16-bit-dest FADD with a negated source (f2f16(-x) and -h) must keep
+    *    its standalone 16-bit saturate. */
+   for (unsigned wide_src = 0; wide_src < 2; ++wide_src) {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+
+      agx_index x = agx_preload(b, wide_src ? wx : hx);
+      agx_index narrowed = agx_temp(b->shader, AGX_SIZE_16);
+      agx_instr *I = agx_fmov_to(b, narrowed, agx_neg(x));
+      agx_index out = agx_temp(b->shader, AGX_SIZE_16);
+      agx_fmov_to(b, out, narrowed)->saturate = true;
+      agx_unit_test(b, out);
+
+      agx_optimize_and_dce(b->shader);
+
+      EXPECT_FALSE(I->saturate) << "wide_src=" << wide_src;
+      unsigned sat_fmovs = 0;
+      agx_foreach_instr_global(b->shader, J)
+         sat_fmovs += J->op == AGX_OPCODE_FADD && J->saturate &&
+                      J->dest[0].size == AGX_SIZE_16;
+      EXPECT_EQ(sat_fmovs, 1u) << "wide_src=" << wide_src;
+   }
+
+   /* 2. FFMA followed by saturate where src[2] is a minifloat constant
+    *    (1.0f): backward folds saturate before forward inlines immediates, so
+    *    src[2] must stay in its register rather than being inlined into a
+    *    saturated AGX3B FFMA. */
+   {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+
+      agx_index x = agx_preload(b, wx), y = agx_preload(b, wy);
+      agx_index one = agx_mov_imm(b, 32, fui(1.0f));
+      agx_index val = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *I = agx_ffma_to(b, val, x, y, one);
+      agx_index out = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, out, val)->saturate = true;
+      agx_unit_test(b, out);
+
+      agx_optimize_and_dce(b->shader);
+
+      EXPECT_TRUE(I->saturate);
+      EXPECT_NE(I->src[2].type, AGX_INDEX_IMMEDIATE);
+   }
+
+   /* 3. Pre-existing immediate src[2] on FFMA must refuse backward saturate
+    *    folding rather than creating an unencodable saturated immediate-addend
+    *    FFMA. */
+   {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+
+      agx_index x = agx_preload(b, wx), y = agx_preload(b, wy);
+      agx_index val = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *I = agx_ffma_to(b, val, x, y, agx_immediate_f(1.0f));
+      agx_index out = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, out, val)->saturate = true;
+      agx_unit_test(b, out);
+
+      agx_optimize_and_dce(b->shader);
+
+      EXPECT_FALSE(I->saturate);
+      EXPECT_EQ(I->src[2].type, AGX_INDEX_IMMEDIATE);
+   }
+
+   /* 4. Immediate multiplier (src[0]) + register addend still folds saturate
+    *    cleanly. */
+   {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+
+      agx_index x = agx_preload(b, wx), z = agx_preload(b, wz);
+      agx_index half = agx_mov_imm(b, 32, fui(0.5f));
+      agx_index val = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *I = agx_ffma_to(b, val, half, x, z);
+      agx_index out = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, out, val)->saturate = true;
+      agx_unit_test(b, out);
+
+      agx_optimize_and_dce(b->shader);
+
+      EXPECT_TRUE(I->saturate);
+      EXPECT_EQ(I->src[0].type, AGX_INDEX_IMMEDIATE);
+   }
+}
+
 TEST_F(Optimizer, FsatWithPhi)
 {
    /*
@@ -1943,16 +2087,16 @@ TEST_F(Optimizer, Agx3bFoldsUnmodifiedHalfGprIntoFfma)
        false, false, false, false, true},
       {"agx3b_fadd_plain", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FADD,
        false, false, false, false, true},
-      {"agx3b_fmul_blocked", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FMUL,
-       false, false, false, false, false},
+      {"agx3b_fmul_half", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FMUL,
+       false, false, false, false, true},
       {"agx3b_ffma_saturate_blocked", AGX_ISA_ENCODING_AGX3B, false,
        AGX_OPCODE_FFMA, true, false, false, false, false},
       {"agx3b_ffma_neg_blocked", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FFMA,
        false, true, false, false, false},
       {"agx3b_ffma_imm_blocked", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FFMA,
        false, false, true, false, false},
-      {"agx3b_ffma_uniform_blocked", AGX_ISA_ENCODING_AGX3B, false,
-       AGX_OPCODE_FFMA, false, false, false, true, false},
+      {"agx3b_ffma_uniform_half", AGX_ISA_ENCODING_AGX3B, false,
+       AGX_OPCODE_FFMA, false, false, false, true, true},
       {"g18g_ffma_blocked", AGX_ISA_ENCODING_AGX3C, true, AGX_OPCODE_FFMA,
        false, false, false, false, false},
    };
@@ -2057,8 +2201,8 @@ TEST_F(Optimizer, Agx3bFoldsUnmodifiedHalfGprIntoFadd)
        false, false, false, false, true, false, false},
       {"agx3b_fadd_uniform_blocked", AGX_ISA_ENCODING_AGX3B, false,
        AGX_OPCODE_FADD, false, false, false, false, false, true, false},
-      {"agx3b_fmul_blocked", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FMUL,
-       false, false, false, false, false, false, false},
+      {"agx3b_fmul_half", AGX_ISA_ENCODING_AGX3B, false, AGX_OPCODE_FMUL,
+       false, false, false, false, false, false, true},
       {"g18g_fadd_blocked", AGX_ISA_ENCODING_AGX3C, true, AGX_OPCODE_FADD,
        false, false, false, false, false, false, false},
    };
@@ -2765,5 +2909,320 @@ TEST_F(Optimizer, AGX3BRedundantByteMaskNegative)
       }
       agx_optimize_and_dce(actual->shader);
       ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
+}
+
+TEST_F(Optimizer, Agx2ConvertByteMask)
+{
+   const struct {
+      const char *name;
+      enum agx_isa_encoding encoding;
+      unsigned mode;
+      uint16_t mask;
+      bool expect_fold;
+   } cases[] = {
+      {"agx2-u8-to-f-0xff", AGX_ISA_ENCODING_AGX2, AGX_CONVERT_U8_TO_F, 0xff,
+       true},
+      {"agx2-s8-to-f-0xff", AGX_ISA_ENCODING_AGX2, AGX_CONVERT_S8_TO_F, 0xff,
+       true},
+      {"agx2-u8-to-f-0x1ff", AGX_ISA_ENCODING_AGX2, AGX_CONVERT_U8_TO_F, 0x1ff,
+       true},
+      {"agx2-u8-to-f-0x7f", AGX_ISA_ENCODING_AGX2, AGX_CONVERT_U8_TO_F, 0x7f,
+       false},
+      {"agx2-u16-to-f-0xff", AGX_ISA_ENCODING_AGX2, AGX_CONVERT_U16_TO_F, 0xff,
+       false},
+      {"agx3-s8-to-f-0xff", AGX_ISA_ENCODING_AGX3B, AGX_CONVERT_S8_TO_F, 0xff,
+       false},
+   };
+
+   for (const auto &c : cases) {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = c.encoding;
+      b->shader->key = &key;
+
+      agx_index raw = agx_temp(b->shader, AGX_SIZE_16);
+      agx_iadd_to(b, raw, hx, hy, 0);
+      agx_index masked = agx_temp(b->shader, AGX_SIZE_16);
+      agx_and_to(b, masked, raw, agx_immediate(c.mask));
+      agx_index flt = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *cvt = agx_convert_to(b, flt, agx_immediate(c.mode), masked,
+                                      AGX_ROUND_RTE);
+      agx_unit_test(b, flt);
+
+      agx_optimize_and_dce(b->shader);
+
+      EXPECT_EQ(cvt->src[1].value, c.expect_fold ? raw.value : masked.value)
+         << c.name;
+   }
+}
+
+TEST_F(Optimizer, Agx3AsrImmediateRange)
+{
+   const struct {
+      const char *name;
+      enum agx_isa_encoding encoding;
+      enum agx_size val_size;
+      uint32_t shift;
+      bool expect_imm;
+   } cases[] = {
+      {"agx3c-32-zero", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_32, 0, false},
+      {"agx3c-32-one", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_32, 1, true},
+      {"agx3c-32-max", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_32, 31, true},
+      {"agx3c-32-over", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_32, 32, false},
+      {"agx3c-16-zero", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_16, 0, false},
+      {"agx3c-16-max", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_16, 15, true},
+      {"agx3c-16-over", AGX_ISA_ENCODING_AGX3C, AGX_SIZE_16, 16, false},
+      {"agx3b-32-zero", AGX_ISA_ENCODING_AGX3B, AGX_SIZE_32, 0, false},
+      {"agx3b-32-one", AGX_ISA_ENCODING_AGX3B, AGX_SIZE_32, 1, true},
+      {"agx2-32-zero", AGX_ISA_ENCODING_AGX2, AGX_SIZE_32, 0, true},
+   };
+
+   for (const auto &c : cases) {
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = c.encoding;
+      b->shader->key = &key;
+
+      agx_index val = c.val_size == AGX_SIZE_16 ? hx : wx;
+      agx_index amt = agx_mov_imm(b, 32, c.shift);
+      agx_index dst = agx_temp(b->shader, c.val_size);
+      agx_instr *asr = agx_asr_to(b, dst, val, amt);
+      agx_unit_test(b, dst);
+
+      agx_optimize_and_dce(b->shader);
+
+      EXPECT_EQ(asr->src[1].type == AGX_INDEX_IMMEDIATE, c.expect_imm) << c.name;
+   }
+}
+
+TEST_F(Optimizer, NestedBitAnd32)
+{
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+
+   /* Redundant outer mask: (wx & 15) & 31 -> wx & 15. */
+   {
+      agx_builder *actual = agx_test_builder(mem_ctx);
+      agx_builder *expected = agx_test_builder(mem_ctx);
+      actual->shader->key = &key;
+      expected->shader->key = &key;
+
+      agx_index inner = agx_temp(actual->shader, AGX_SIZE_32);
+      agx_and_to(actual, inner, wx, agx_immediate(15));
+      agx_index outer = agx_temp(actual->shader, AGX_SIZE_32);
+      agx_and_to(actual, outer, inner, agx_immediate(31));
+      agx_unit_test(actual, outer);
+
+      inner = agx_temp(expected->shader, AGX_SIZE_32);
+      agx_and_to(expected, inner, wx, agx_immediate(15));
+      agx_temp(expected->shader, AGX_SIZE_32);
+      agx_unit_test(expected, inner);
+
+      agx_optimize_and_dce(actual->shader);
+      ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
+
+   /* Intersected masks: (wx & 0x3f) & 0x0f -> wx & 0x0f. */
+   {
+      agx_builder *actual = agx_test_builder(mem_ctx);
+      agx_builder *expected = agx_test_builder(mem_ctx);
+      actual->shader->key = &key;
+      expected->shader->key = &key;
+
+      agx_index inner = agx_temp(actual->shader, AGX_SIZE_32);
+      agx_and_to(actual, inner, wx, agx_immediate(0x3f));
+      agx_index outer = agx_temp(actual->shader, AGX_SIZE_32);
+      agx_and_to(actual, outer, inner, agx_immediate(0x0f));
+      agx_unit_test(actual, outer);
+
+      agx_temp(expected->shader, AGX_SIZE_32);
+      outer = agx_temp(expected->shader, AGX_SIZE_32);
+      agx_and_to(expected, outer, wx, agx_immediate(0x0f));
+      agx_unit_test(expected, outer);
+
+      agx_optimize_and_dce(actual->shader);
+      ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
+
+   /* Strictly AGX3B: AGX2 and AGX3C leave nested 32-bit bit-ANDs unchanged. */
+   for (enum agx_isa_encoding enc :
+        {AGX_ISA_ENCODING_AGX2, AGX_ISA_ENCODING_AGX3C}) {
+      struct agx_shader_key neg_key = {};
+      neg_key.dev.encoding = enc;
+      agx_builder *actual = agx_test_builder(mem_ctx);
+      agx_builder *expected = agx_test_builder(mem_ctx);
+      actual->shader->key = &neg_key;
+      expected->shader->key = &neg_key;
+
+      agx_index inner = agx_temp(actual->shader, AGX_SIZE_32);
+      agx_and_to(actual, inner, wx, agx_immediate(0x3f));
+      agx_index outer = agx_temp(actual->shader, AGX_SIZE_32);
+      agx_and_to(actual, outer, inner, agx_immediate(0x0f));
+      agx_unit_test(actual, outer);
+
+      agx_index einner = agx_temp(expected->shader, AGX_SIZE_32);
+      agx_and_to(expected, einner, wx, agx_immediate(0x3f));
+      agx_index eouter = agx_temp(expected->shader, AGX_SIZE_32);
+      agx_and_to(expected, eouter, einner, agx_immediate(0x0f));
+      agx_unit_test(expected, eouter);
+
+      agx_optimize_and_dce(actual->shader);
+      ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
+}
+
+TEST_F(Optimizer, Agx3bFoldHalfGprIntoFmulAndFfma)
+{
+   const enum agx_chip chips[] = {
+      AGX_CHIP_G15S,
+      AGX_CHIP_G16G,
+      AGX_CHIP_G17P,
+   };
+   const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX,
+      MESA_SHADER_FRAGMENT,
+      MESA_SHADER_COMPUTE,
+   };
+
+   for (enum agx_chip chip : chips) {
+      for (mesa_shader_stage stage : stages) {
+         SCOPED_TRACE(chip);
+         SCOPED_TRACE(stage);
+
+         struct agx_shader_key key = {};
+         key.dev.chip = chip;
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+
+         /* FMUL with explicit f16->f32 widening move and f32 GPR folds widening. */
+         [&]() {
+            agx_builder *actual = agx_test_builder(mem_ctx);
+            agx_builder *expected = agx_test_builder(mem_ctx);
+            actual->shader->key = &key;
+            expected->shader->key = &key;
+            actual->shader->stage = stage;
+            expected->shader->stage = stage;
+
+            agx_index wide = agx_temp(actual->shader, AGX_SIZE_32);
+            agx_fmov_to(actual, wide, hx);
+            agx_index res = agx_temp(actual->shader, AGX_SIZE_32);
+            agx_fmul_to(actual, res, wide, wy);
+            agx_unit_test(actual, res);
+
+            agx_temp(expected->shader, AGX_SIZE_32);
+            res = agx_temp(expected->shader, AGX_SIZE_32);
+            agx_fmul_to(expected, res, hx, wy);
+            agx_unit_test(expected, res);
+
+            agx_optimize_and_dce(actual->shader);
+            ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+         }();
+
+         /* FFMA with explicit f16->f32 widening move and two aligned 32-bit
+          * uniforms folds widening. */
+         [&]() {
+            agx_builder *actual = agx_test_builder(mem_ctx);
+            agx_builder *expected = agx_test_builder(mem_ctx);
+            actual->shader->key = &key;
+            expected->shader->key = &key;
+            actual->shader->stage = stage;
+            expected->shader->stage = stage;
+
+            agx_index u1 = agx_uniform(12, AGX_SIZE_32);
+            agx_index u2 = agx_uniform(14, AGX_SIZE_32);
+            agx_index wide = agx_temp(actual->shader, AGX_SIZE_32);
+            agx_fmov_to(actual, wide, hx);
+            agx_index res = agx_temp(actual->shader, AGX_SIZE_32);
+            agx_ffma_to(actual, res, wide, u1, u2);
+            agx_unit_test(actual, res);
+
+            agx_temp(expected->shader, AGX_SIZE_32);
+            res = agx_temp(expected->shader, AGX_SIZE_32);
+            agx_ffma_to(expected, res, hx, u1, u2);
+            agx_unit_test(expected, res);
+
+            agx_optimize_and_dce(actual->shader);
+            ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+         }();
+
+         /* FFMA with explicit f16->f32 widening move and two minifloat
+          * immediates folds widening. */
+         [&]() {
+            agx_builder *actual = agx_test_builder(mem_ctx);
+            agx_builder *expected = agx_test_builder(mem_ctx);
+            actual->shader->key = &key;
+            expected->shader->key = &key;
+            actual->shader->stage = stage;
+            expected->shader->stage = stage;
+
+            agx_index wide = agx_temp(actual->shader, AGX_SIZE_32);
+            agx_fmov_to(actual, wide, hx);
+            agx_index res = agx_temp(actual->shader, AGX_SIZE_32);
+            agx_ffma_to(actual, res, wide, agx_immediate(0x40),
+                        agx_immediate(0x30));
+            agx_unit_test(actual, res);
+
+            agx_temp(expected->shader, AGX_SIZE_32);
+            res = agx_temp(expected->shader, AGX_SIZE_32);
+            agx_ffma_to(expected, res, hx, agx_immediate(0x40),
+                        agx_immediate(0x30));
+            agx_unit_test(expected, res);
+
+            agx_optimize_and_dce(actual->shader);
+            ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+         }();
+      }
+   }
+
+   /* Negative control: AGX3B preamble blocks uniform-FFMA half widening, and
+    * G18G (AGX3D) keeps explicit f16->f32 widening on all three shapes. */
+   {
+      struct agx_shader_key key = {};
+      key.dev.chip = AGX_CHIP_G16G;
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+
+      agx_builder *b = agx_test_builder(mem_ctx);
+      b->shader->key = &key;
+      b->shader->is_preamble = true;
+
+      agx_index u1 = agx_uniform(12, AGX_SIZE_32);
+      agx_index u2 = agx_uniform(14, AGX_SIZE_32);
+      agx_index wide = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, wide, hx);
+      agx_index res = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *fma = agx_ffma_to(b, res, wide, u1, u2);
+      agx_unit_test(b, res);
+
+      agx_optimize_and_dce(b->shader);
+      EXPECT_EQ(fma->src[0].size, AGX_SIZE_32);
+   }
+
+   {
+      struct agx_shader_key key = {};
+      key.dev.chip = AGX_CHIP_G18G;
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.emit_agx3d = true;
+
+      for (unsigned shape = 0; shape < 3; ++shape) {
+         agx_builder *b = agx_test_builder(mem_ctx);
+         b->shader->key = &key;
+
+         agx_index wide = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, wide, hx);
+         agx_index res = agx_temp(b->shader, AGX_SIZE_32);
+         agx_instr *I = NULL;
+         if (shape == 0)
+            I = agx_fmul_to(b, res, wide, wy);
+         else if (shape == 1)
+            I = agx_ffma_to(b, res, wide, agx_uniform(12, AGX_SIZE_32),
+                            agx_uniform(14, AGX_SIZE_32));
+         else
+            I = agx_ffma_to(b, res, wide, agx_immediate(0x40),
+                            agx_immediate(0x30));
+         agx_unit_test(b, res);
+
+         agx_optimize_and_dce(b->shader);
+         EXPECT_EQ(I->src[0].size, AGX_SIZE_32) << "g18g shape " << shape;
+      }
    }
 }

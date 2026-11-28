@@ -111,12 +111,24 @@ uniform_float_encode(enum agx_isa_encoding encoding,
    const unsigned count = op == AGX3_UNIFORM_FMA ? 3 : 2;
    bool uniform = false, reg = false;
    unsigned half_uniforms = 0;
+   unsigned half_regs = 0;
    for (unsigned i = 0; i < count; ++i) {
       const bool source_half = half || src[i].half;
-      if (src[i].half && !half && src[i].kind != AGX3_FLOAT_UNIFORM)
+      const bool allow_agx3b_half_reg =
+         !m5 && !half && !uniform_dest && op == AGX3_UNIFORM_FMA &&
+         !saturate && src[i].kind == AGX3_FLOAT_REGISTER &&
+         !src[i].abs && !src[i].neg;
+      if (src[i].half && !half && src[i].kind != AGX3_FLOAT_UNIFORM &&
+          !allow_agx3b_half_reg)
          return false;
-      if (src[i].half && !half && (++half_uniforms > 1 || saturate))
-         return false;
+      if (src[i].half && !half) {
+         if (src[i].kind == AGX3_FLOAT_UNIFORM) {
+            if (++half_uniforms > 1 || saturate)
+               return false;
+         } else if (++half_regs > 1) {
+            return false;
+         }
+      }
       if (uniform_dest && (src[i].kind == AGX3_FLOAT_UNIFORM ||
                            src[i].abs || src[i].neg))
          return false;
@@ -134,7 +146,7 @@ uniform_float_encode(enum agx_isa_encoding encoding,
          break;
       case AGX3_FLOAT_REGISTER:
          reg = true;
-         if (src[i].value >= 256 || (!half && (src[i].value & 1)) ||
+         if (src[i].value >= 256 || (!source_half && (src[i].value & 1)) ||
              (src[i].cache && src[i].discard))
             return false;
          break;
@@ -152,7 +164,7 @@ uniform_float_encode(enum agx_isa_encoding encoding,
    /* Native main-program witnesses all retain at least one GPR operand.
     * All-uniform/immediate expressions keep one materialized input until
     * their port and constant-program contracts have their own witness. */
-   if (!reg || (!uniform_dest && !uniform))
+   if (!reg || (!uniform_dest && !uniform) || (half_uniforms && half_regs))
       return false;
 
    /* Apple G17P/G16G uniform_repeat: 09010e0d210e02c2. Domain 3 selects
@@ -179,9 +191,12 @@ uniform_float_encode(enum agx_isa_encoding encoding,
       struct agx3_field_kv fields[48] = {
          {uniform_dest ? 3 : 2, dest},
          {9, uniform_dest ? 3 : 2}, {10, half ? 1 : 2},
-         {11, dest_cache}, {14, saturate},
       };
-      unsigned n = 5;
+      unsigned n = 3;
+      if (dest_cache)
+         fields[n++] = (struct agx3_field_kv){11, 1};
+      if (saturate)
+         fields[n++] = (struct agx3_field_kv){14, 1};
       for (unsigned i = 0; i < count; ++i) {
          const struct agx3_uniform_float_src *s = &src[i < 2 ? i ^ swap : i];
          const unsigned base = (half ? 16 : 17) + 17 * i;
@@ -192,16 +207,19 @@ uniform_float_encode(enum agx_isa_encoding encoding,
             if (s->neg)
                value ^= 0x80;
          }
-         fields[n++] = (struct agx3_field_kv){base + s->kind - 1, value};
+         if (value)
+            fields[n++] = (struct agx3_field_kv){base + s->kind - 1, value};
          fields[n++] = (struct agx3_field_kv){base + 8, s->kind};
          fields[n++] =
             (struct agx3_field_kv){base + 9, half || s->half ? 1 : 2};
-         fields[n++] = (struct agx3_field_kv){base + 10, s->cache};
-         fields[n++] = (struct agx3_field_kv){base + 12, s->discard};
-         fields[n++] = (struct agx3_field_kv){
-            base + 13, s->kind != AGX3_FLOAT_IMMEDIATE && s->abs};
-         fields[n++] = (struct agx3_field_kv){
-            base + 14, s->kind != AGX3_FLOAT_IMMEDIATE && s->neg};
+         if (s->cache)
+            fields[n++] = (struct agx3_field_kv){base + 10, 1};
+         if (s->discard)
+            fields[n++] = (struct agx3_field_kv){base + 12, 1};
+         if (s->kind != AGX3_FLOAT_IMMEDIATE && s->abs)
+            fields[n++] = (struct agx3_field_kv){base + 13, 1};
+         if (s->kind != AGX3_FLOAT_IMMEDIATE && s->neg)
+            fields[n++] = (struct agx3_field_kv){base + 14, 1};
       }
       if (!half && op == AGX3_UNIFORM_FMUL) {
          fields[n++] = (struct agx3_field_kv){60, 2};
@@ -221,13 +239,15 @@ uniform_float_encode(enum agx_isa_encoding encoding,
             op == AGX3_UNIFORM_FMA ? 96 : op == AGX3_UNIFORM_FMUL ? 79 : 51,
             op == AGX3_UNIFORM_FMA ? 55 : op == AGX3_UNIFORM_FMUL ? 62 : 48};
       }
-      const unsigned wait_base = half ? (op == AGX3_UNIFORM_FMA ? 68 : 51)
-                                 : op == AGX3_UNIFORM_FADD ? 52
-                                 : op == AGX3_UNIFORM_FMUL ? 80
-                                                           : 97;
-      for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
-         fields[n++] =
-            (struct agx3_field_kv){wait_base + i, (wait_mask >> i) & 1};
+      if (wait_mask) {
+         const unsigned wait_base = half ? (op == AGX3_UNIFORM_FMA ? 68 : 51)
+                                    : op == AGX3_UNIFORM_FADD ? 52
+                                    : op == AGX3_UNIFORM_FMUL ? 80
+                                                              : 97;
+         for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
+            if (wait_mask & (1u << i))
+               fields[n++] = (struct agx3_field_kv){wait_base + i, 1};
+      }
 
       /* M5 adds the slot-seven/eight endpoints, and its MUL endpoints
        * are not ordered by length. Use the same complete endpoint domain
@@ -243,25 +263,12 @@ uniform_float_encode(enum agx_isa_encoding encoding,
       const unsigned first_ep = (wait_mask & (wait_mask - 1))
                                    ? (m5 && op == AGX3_UNIFORM_FMUL ? 3 : last_ep)
                                    : 0;
-      for (unsigned ep = first_ep; ep <= last_ep; ++ep) {
-         /* Only a strictly shorter encoding can replace the first swap's,
-          * and the endpoints grow in length: stop trying once they reach it. */
-         if (best_length &&
-             agx3_bind_form_size(encoding, mnemonic, ep) >= best_length) {
-            if (m5)
-               continue;
-            break;
-         }
-         uint8_t bytes[16], size;
-         if (agx3_bind_compose(encoding, mnemonic, ep, NULL, 0, fields, n,
-                               bytes, &size)) {
-            if (!best_length || size < best_length) {
-               memcpy(best, bytes, size);
-               best_length = size;
-            }
-            /* These arithmetic endpoints are ordered by increasing length. */
-            break;
-         }
+      uint8_t bytes[16], size;
+      if (agx3_bind_compose_ep_range(encoding, mnemonic, first_ep, last_ep,
+                                     -1, best_length, !m5, NULL, 0, fields, n,
+                                     bytes, &size)) {
+         memcpy(best, bytes, size);
+         best_length = size;
       }
    }
    if (!best_length)

@@ -541,6 +541,46 @@ avoid_instr(const nir_instr *instr, const void *data)
    return false;
 }
 
+static bool
+in_loop(const nir_block *block)
+{
+   for (const nir_cf_node *n = block->cf_node.parent; n; n = n->parent) {
+      if (n->type == nir_cf_node_loop)
+         return true;
+   }
+   return false;
+}
+
+/*
+ * On the AGX3B encoding, a 16-bit float ALU instruction that reads a 16-bit
+ * operand from the uniform file runs slower than one that reads it from a
+ * register, while 32-bit operands read from the uniform file cost nothing
+ * extra. Compiled for every AGX3B GPU, our own fp16 FMA loop kernels read
+ * their 16-bit loop-invariant operands from registers and their 32-bit ones
+ * from the uniform file.
+ *
+ * So a 16-bit float value that code inside a loop reads is computed in the
+ * shader, once per invocation into a register, instead of being stored to
+ * the uniform file by the preamble. Its own inputs can still come from the
+ * preamble.
+ */
+static bool
+keep_half_loop_operand_in_registers(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+   if (alu->def.bit_size != 16 ||
+       nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) !=
+          nir_type_float)
+      return false;
+   nir_foreach_use(src, &alu->def) {
+      if (in_loop(nir_src_use_instr(src)->block))
+         return true;
+   }
+   return false;
+}
+
 static const nir_opt_preamble_options preamble_options = {
    .drawid_uniform = true,
    .subgroup_size_uniform = true,
@@ -1059,9 +1099,12 @@ agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p,
       options.instr_cost_cb = agx3c ? instr_cost_agx3c : instr_cost_g17p;
       options.rewrite_cost_cb = agx3c ? rewrite_cost_agx3c : rewrite_cost_g17p;
    }
-   /* Every AGX3B chip: the uniform file it fills is the encoding's. */
+   /* The AGX3B encoding: the uniform file the preamble fills is the
+    * encoding's. */
+   const bool agx3b = g17p && !agx3c;
    struct set *branches = NULL;
-   if (g17p && !agx3c) {
+   if (agx3b) {
+      options.avoid_instr_cb = keep_half_loop_operand_in_registers;
       branches = surviving_branches(nir, &options, sizes, flatten);
       options.cb_data = branches;
    }
@@ -1741,6 +1784,267 @@ agx_nir_place_preamble_handles_low(nir_shader *nir, unsigned reserved,
                nir_intrinsic_set_desc_set(intr,
                   slots[find_slot(slots, n, base)].new_base);
             }
+         }
+      }
+      nir_progress(true, impl, nir_metadata_all);
+   }
+
+   return true;
+}
+
+static void
+agx2_cf_depths(const nir_instr *instr, unsigned *loop_depth_out,
+               unsigned *if_depth_out)
+{
+   unsigned loop_depth = 0;
+   unsigned if_depth = 0;
+   for (nir_cf_node *node = &instr->block->cf_node; node; node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         loop_depth++;
+      else if (node->type == nir_cf_node_if)
+         if_depth++;
+   }
+   *loop_depth_out = loop_depth;
+   *if_depth_out = if_depth;
+}
+
+static bool
+agx2_is_mem_base(const nir_def *def, unsigned *best_loop_depth,
+                 unsigned *best_if_depth)
+{
+   if (def->bit_size != 64 || def->num_components != 1)
+      return false;
+
+   bool found = false;
+   unsigned max_loop = 0;
+   unsigned min_if = UINT_MAX;
+
+   nir_foreach_use(use, def) {
+      nir_instr *parent = nir_src_use_instr(use);
+      if (parent->type != nir_instr_type_intrinsic)
+         continue;
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(parent);
+      bool match = false;
+      switch (intr->intrinsic) {
+      case nir_intrinsic_load_agx:
+      case nir_intrinsic_load_constant_agx:
+      case nir_intrinsic_global_atomic_agx:
+      case nir_intrinsic_global_atomic_swap_agx:
+         match = (use == &intr->src[0]);
+         break;
+      case nir_intrinsic_store_agx:
+         match = (use == &intr->src[1]);
+         break;
+      default:
+         break;
+      }
+      if (!match)
+         continue;
+
+      unsigned ld = 0, id = 0;
+      agx2_cf_depths(parent, &ld, &id);
+      if (!found || ld > max_loop || (ld == max_loop && id < min_if)) {
+         max_loop = ld;
+         min_if = id;
+      }
+      found = true;
+   }
+
+   if (found) {
+      *best_loop_depth = max_loop;
+      *best_if_depth = min_if;
+   }
+   return found;
+}
+
+struct agx2_preamble_slot {
+   uint16_t base, size, align;
+   bool is_base;
+   unsigned loop_depth;
+   unsigned if_depth;
+   uint16_t new_base;
+};
+
+static int
+agx2_find_preamble_slot(const struct agx2_preamble_slot *slots, unsigned n,
+                        unsigned half)
+{
+   for (unsigned i = 0; i < n; ++i) {
+      if (half >= slots[i].base && half < slots[i].base + slots[i].size)
+         return (int)i;
+   }
+   return -1;
+}
+
+/*
+ * AGX2 memory instructions accept uniform base addresses only in the low half
+ * of the uniform file (< 256 halfwords). Repack general preamble exports in
+ * [reserved, exports_end) so 64-bit memory base pointers come first
+ * (inner-loop bases first, then least conditional), followed by remaining
+ * exports sorted by descending alignment for zero padding growth.
+ */
+bool
+agx_nir_place_preamble_bases_low(nir_shader *nir, unsigned reserved,
+                                 unsigned exports_end,
+                                 unsigned *allocated_inout)
+{
+   if (nir->info.stage != MESA_SHADER_COMPUTE)
+      return false;
+
+   const unsigned allocated = *allocated_inout;
+   if (!nir_shader_get_entrypoint(nir)->preamble || allocated > 512 ||
+       exports_end > allocated)
+      return false;
+
+   struct agx2_preamble_slot slots[512];
+   unsigned n = 0;
+   bool any_high_base = false;
+
+   nir_function_impl *preamble = nir_shader_get_preamble(nir);
+   nir_foreach_block(block, preamble) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_preamble ||
+             nir_intrinsic_preamble_class(intr) != nir_preamble_class_general)
+            continue;
+
+         const nir_def *value = intr->src[0].ssa;
+         const unsigned base = nir_intrinsic_base(intr);
+         const unsigned align = MAX2(value->bit_size, 16) / 16;
+         const unsigned size = align * value->num_components;
+         if (base < reserved || base + size > exports_end)
+            return false;
+
+         const int s = agx2_find_preamble_slot(slots, n, base);
+         if (s >= 0) {
+            if (slots[s].base != base || slots[s].size != size)
+               return false;
+            continue;
+         }
+         if (agx2_find_preamble_slot(slots, n, base + size - 1) >= 0)
+            return false;
+         if (n >= ARRAY_SIZE(slots))
+            return false;
+
+         slots[n++] = (struct agx2_preamble_slot){
+            .base = base,
+            .size = size,
+            .align = align,
+            .is_base = false,
+            .loop_depth = 0,
+            .if_depth = UINT_MAX,
+         };
+      }
+   }
+
+   if (n == 0)
+      return false;
+
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_load_preamble ||
+                nir_intrinsic_preamble_class(intr) != nir_preamble_class_general)
+               continue;
+
+            const unsigned base = nir_intrinsic_base(intr);
+            const unsigned size =
+               MAX2(intr->def.bit_size, 16) * intr->def.num_components / 16;
+            if (base < reserved || base >= exports_end)
+               continue;
+
+            const int s = agx2_find_preamble_slot(slots, n, base);
+            if (s < 0 || base + size > slots[s].base + slots[s].size)
+               return false;
+
+            unsigned ld = 0, id = UINT_MAX;
+            if (agx2_is_mem_base(&intr->def, &ld, &id)) {
+               if (base != slots[s].base || slots[s].size != 4)
+                  return false;
+               if (!slots[s].is_base || ld > slots[s].loop_depth ||
+                   (ld == slots[s].loop_depth && id < slots[s].if_depth)) {
+                  slots[s].loop_depth = ld;
+                  slots[s].if_depth = id;
+               }
+               slots[s].is_base = true;
+               slots[s].align = MAX2(slots[s].align, 4);
+               any_high_base |= base >= 256;
+            }
+         }
+      }
+   }
+
+   if (!any_high_base)
+      return false;
+
+   uint16_t order[512];
+   for (unsigned i = 0; i < n; ++i)
+      order[i] = i;
+
+   for (unsigned i = 1; i < n; ++i) {
+      uint16_t key = order[i];
+      const struct agx2_preamble_slot *sk = &slots[key];
+      unsigned j = i;
+      while (j > 0) {
+         const struct agx2_preamble_slot *sp = &slots[order[j - 1]];
+         bool key_before = false;
+         if (sk->is_base != sp->is_base) {
+            key_before = sk->is_base;
+         } else if (sk->is_base) {
+            if (sk->loop_depth != sp->loop_depth)
+               key_before = sk->loop_depth > sp->loop_depth;
+            else if (sk->if_depth != sp->if_depth)
+               key_before = sk->if_depth < sp->if_depth;
+            else
+               key_before = sk->base < sp->base;
+         } else {
+            if (sk->align != sp->align)
+               key_before = sk->align > sp->align;
+            else
+               key_before = sk->base < sp->base;
+         }
+         if (!key_before)
+            break;
+         order[j] = order[j - 1];
+         j--;
+      }
+      order[j] = key;
+   }
+
+   unsigned next = reserved;
+   for (unsigned i = 0; i < n; ++i) {
+      struct agx2_preamble_slot *s = &slots[order[i]];
+      next = ALIGN_POT(next, s->align);
+      s->new_base = next;
+      next += s->size;
+   }
+
+   if (next > 512)
+      return false;
+   *allocated_inout = MAX2(allocated, next);
+
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if ((intr->intrinsic != nir_intrinsic_load_preamble &&
+                 intr->intrinsic != nir_intrinsic_store_preamble) ||
+                nir_intrinsic_preamble_class(intr) != nir_preamble_class_general)
+               continue;
+
+            const unsigned base = nir_intrinsic_base(intr);
+            if (base < reserved || base >= exports_end)
+               continue;
+            const struct agx2_preamble_slot *s =
+               &slots[agx2_find_preamble_slot(slots, n, base)];
+            nir_intrinsic_set_base(intr, s->new_base + (base - s->base));
          }
       }
       nir_progress(true, impl, nir_metadata_all);

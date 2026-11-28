@@ -37,7 +37,41 @@ struct hk_sync_queue;
 #define HK_PACK_MAX_DISPATCHES 256u
 #define HK_PACK_MAX_THREADS (UINT64_C(1) << 28)
 #define HK_PACK_MAX_STATIC_WORK (UINT64_C(1) << 35)
+/* Observed-duration packing bounds for repeated multi-CB looping submissions.
+ * Firmware compute command timeouts are ~2 s on AGX2/AGX3, so admitting only
+ * whole submissions observed at <= HK_PACK_OBS_ADMIT_NS (200 ms) keeps ~10x
+ * headroom below timeout even if data-dependent loop trip counts grow between
+ * submits. Because any packet holds a subset of the admitted command buffers,
+ * the whole-submission admission bound (200 ms) is the hard safety limit,
+ * while HK_PACK_MAX_OBS_NS (32 ms) splits admitted runs using the observed
+ * per-loop average and HK_PACK_OBS_BACKOFF_NS (150 ms) tightens or resets
+ * monitored packed runs if duration climbs. */
+#define HK_PACK_MAX_OBS_NS (UINT64_C(32) * 1000000)
+#define HK_PACK_OBS_ADMIT_NS (UINT64_C(200) * 1000000)
+#define HK_PACK_OBS_BACKOFF_NS (UINT64_C(150) * 1000000)
+#define HK_PACK_OBS_SLOTS 8u
 #define HK_PACK_CDM_TERMINATE_MAX 8u
+
+struct hk_pack_obs_entry {
+   uint64_t hash;
+   uint64_t pending_pt;
+   uint64_t submit_ns;
+   uint64_t obs_per_loop_ns;
+   uint64_t lru_tick;
+   uint32_t cb_count;
+   uint32_t loop_count;
+   bool in_flight_packed;
+};
+
+/* Retires completed observed-duration entries using a point-tagged completion
+ * timestamp: `sig_ns` is used only when `pending_pt <= sig_point` and
+ * `submit_ns < sig_ns <= now_ns`; otherwise `now_ns` is used conservatively so
+ * an untimestamped or stale `signalled_ns` can never under-report duration. */
+void hk_pack_obs_retire_entries(struct hk_pack_obs_entry *entries,
+                                unsigned slot_count, uint32_t *obs_pending,
+                                uint64_t *obs_epoch, uint64_t signalled,
+                                uint64_t sig_point, uint64_t sig_ns,
+                                uint64_t now_ns);
 
 /* One command buffer of a submission, as the planner sees it. */
 struct hk_pack_member {
@@ -45,6 +79,9 @@ struct hk_pack_member {
    const struct hk_cs *cs;
    /* Stream bytes before the terminate. */
    size_t bytes;
+   /* Observed conservative upper-bound duration (ns) for a looping member
+    * from completed queue history; 0 when unobserved (at most one per run). */
+   uint64_t obs_ns;
    /* Synchronization kinds of the stream. */
    uint8_t kinds;
    /* Render (VDM) kinds the stream itself waits for, and per stream kind k
@@ -56,6 +93,9 @@ struct hk_pack_member {
    uint8_t render_tail[HK_SYNC_NUM_KINDS];
    /* The render subqueue ran work before this command buffer. */
    bool render_ran;
+   /* Pure vkCmdResetQueryPool compute stream (only packs with other
+    * query-reset streams so regular compute packets keep NO_QUERY_ACCESS). */
+   bool query_reset;
 };
 
 struct hk_pack_limits {
@@ -63,6 +103,9 @@ struct hk_pack_limits {
    uint32_t max_attachments;
    /* Bytes a packet needs beyond its members' streams. */
    size_t overhead;
+   /* Per-packet static thread-instruction budget; 0 uses
+    * HK_PACK_MAX_STATIC_WORK. */
+   uint64_t max_static_work;
 };
 
 struct hk_pack_run {
@@ -95,18 +138,41 @@ enum hk_pack_boundary hk_pack_boundary(const struct hk_device *dev);
 size_t hk_pack_cdm_terminate(enum agx_chip chip,
                              uint8_t out[HK_PACK_CDM_TERMINATE_MAX]);
 
+/* Per-packet static work budget scaled by GPU core count (1x at <=20 cores,
+ * linear up to 4x at >=80 cores) so wall-clock packet duration stays uniform
+ * across small and wide GPUs. */
+uint64_t hk_pack_max_static_work_for_cores(unsigned cores);
+uint64_t hk_pack_max_static_work(const struct hk_device *dev);
+
 bool hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
                                    bool has_loops, uint64_t loop_bound,
                                    uint64_t *work_out);
+
+bool hk_pack_account_dispatch_work_limit(uint64_t threads, uint64_t instrs,
+                                         bool has_loops, uint64_t loop_bound,
+                                         uint64_t max_work, uint64_t *work_out);
 
 bool hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
                                        bool has_loops, uint64_t eff_instrs,
                                        uint64_t *work_out);
 
+bool hk_pack_account_dispatch_work_eff_limit(uint64_t threads, uint64_t instrs,
+                                             bool has_loops,
+                                             uint64_t eff_instrs,
+                                             uint64_t max_work,
+                                             uint64_t *work_out);
+
 bool hk_pack_fusion_fits_run(uint64_t run_work, unsigned run_loops,
                              uint64_t replaced_work, unsigned replaced_loops,
                              uint64_t fused_work, bool fused_loops,
                              uint64_t *new_work_out, unsigned *new_loops_out);
+
+bool hk_pack_fusion_fits_run_limit(uint64_t run_work, unsigned run_loops,
+                                   uint64_t replaced_work,
+                                   unsigned replaced_loops, uint64_t fused_work,
+                                   bool fused_loops, uint64_t max_work,
+                                   uint64_t *new_work_out,
+                                   unsigned *new_loops_out);
 
 /* Whether a member may end with a strong flush without memory scope, as an
  * application barrier at the end of a command buffer leaves it: at every
@@ -178,7 +244,7 @@ void hk_pack_finish_sync(struct hk_cmd_buffer *packet, struct hk_cs *cs);
 bool hk_pack_add_bo(struct util_dynarray *bos, struct agx_bo *bo);
 
 #define HK_PACK_FOOTPRINT_MAX_READS 8u
-#define HK_PACK_FOOTPRINT_MAX_WRITES 6u
+#define HK_PACK_FOOTPRINT_MAX_WRITES 8u
 #define HK_PACK_HAZARD_MAX_INTERVALS 64u
 #define HK_PACK_LIVENESS_MAX_INTERVALS 64u
 

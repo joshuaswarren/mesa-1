@@ -9,6 +9,7 @@
 #include <strings.h>
 
 #include "util/bitscan.h"
+#include "util/u_atomic.h"
 #include "util/u_debug.h"
 #include "util/macros.h"
 #include "hk_cmd_buffer.h"
@@ -156,6 +157,38 @@ hk_compute_pair_stream_eligible(const struct hk_cs *cs)
           !cs->as_build && cs->alias_sites <= 1 && !cs->g18_dispatch_sealed;
 }
 
+/* Conservative instruction count per query thread for libagx_reset_query_struct
+ * when bounding packed query-reset command buffers. */
+#define HK_PACK_QUERY_RESET_INSTRS 32u
+
+static inline bool
+hk_pack_is_query_reset_stream(const struct hk_cs *cs)
+{
+   return cs->query_access && !cs->query_reset_pending &&
+          cs->stats.calls == 0 && cs->stats.cmds > 0 &&
+          cs->stats.query_reset_dispatches == cs->stats.cmds &&
+          cs->stats.query_reset_queries > 0;
+}
+
+static inline uint64_t
+hk_pack_member_threads(const struct hk_cs *cs, bool query_reset)
+{
+   return query_reset ? cs->stats.query_reset_queries : cs->pack_threads;
+}
+
+static inline uint64_t
+hk_pack_member_static_work(const struct hk_cs *cs, bool query_reset)
+{
+   if (!query_reset)
+      return cs->pack_static_work;
+
+   uint64_t work = 0;
+   if (__builtin_mul_overflow((uint64_t)cs->stats.query_reset_queries,
+                              HK_PACK_QUERY_RESET_INSTRS, &work))
+      return UINT64_MAX;
+   return work;
+}
+
 const struct hk_cs *
 hk_pack_run_member(const struct hk_device *dev, const struct hk_cmd_buffer *cmd,
                    const uint8_t *terminate, bool atomics)
@@ -172,20 +205,30 @@ hk_pack_run_member(const struct hk_device *dev, const struct hk_cmd_buffer *cmd,
 
    const struct hk_cs *cs =
       list_first_entry(&cmd->control_streams, struct hk_cs, node);
+   const bool query_reset = hk_pack_is_query_reset_stream(cs);
    const unsigned kinds = cs->sync.kind & ~HK_SYNC_GFX_MEM;
    if (cs->type != HK_CS_CDM || !kinds ||
-       ((kinds & ~(HK_SYNC_COMPUTE | HK_SYNC_XFER)) && kinds != HK_SYNC_ALL))
+       ((kinds & ~(HK_SYNC_COMPUTE | HK_SYNC_XFER)) && kinds != HK_SYNC_ALL &&
+        !(query_reset && kinds == HK_SYNC_QRESET)))
       return NULL;
 
-   /* Every launch is a direct dispatch the work estimate counts. */
-   if (!cs->stats.cmds || cs->stats.cmds != cs->stats.calls ||
-       cs->pack_dispatches != cs->stats.calls || !cs->pack_threads)
-      return NULL;
+   if (query_reset) {
+      if ((kinds != HK_SYNC_QRESET && kinds != HK_SYNC_ALL) ||
+          cs->pack_dispatches || cs->pack_threads || cs->pack_loops)
+         return NULL;
+   } else {
+      /* Every launch is a direct dispatch the work estimate counts. */
+      if (!cs->stats.cmds || cs->stats.cmds != cs->stats.calls ||
+          cs->pack_dispatches != cs->stats.calls || !cs->pack_threads)
+         return NULL;
+   }
 
    if ((cs->uses_global_atomics && !atomics) || cs->calls_stream ||
-       cs->stream_linked || cs->sib_indirect || cs->query_access ||
+       cs->stream_linked || cs->sib_indirect ||
+       (cs->query_access && !query_reset) ||
        cs->query_reset_pending || cs->timestamp.start.handle ||
-       cs->timestamp.end.handle || cs->g17p_timestamp_query ||
+       cs->timestamp.end.handle ||
+       (cs->g17p_timestamp_query && !query_reset) ||
        cs->gen1_native_rq || cs->as_build || cs->imm_writes.size)
       return NULL;
 
@@ -256,6 +299,7 @@ hk_pack_describe(struct hk_pack_member *member, const struct hk_cmd_buffer *cmd,
       member->render_tail[k] =
          cmd->sync.req[k][HK_SYNC_VDM].prior & render_kinds;
    member->render_ran = render_kinds != 0;
+   member->query_reset = hk_pack_is_query_reset_stream(cs);
 }
 
 /* The render kinds come from the fields the resolver reads, so the two agree
@@ -297,12 +341,15 @@ hk_pack_tail(const uint8_t tails[HK_SYNC_NUM_KINDS], uint8_t kinds)
 /* Whether `m` may start a run on its own. */
 static bool
 hk_pack_within_bounds(const struct hk_pack_member *m,
-                      const struct hk_pack_limits *limits)
+                      const struct hk_pack_limits *limits, uint64_t max_work)
 {
    const struct hk_cs *cs = m->cs;
+   const uint64_t m_threads = hk_pack_member_threads(cs, m->query_reset);
+   const uint64_t m_work = hk_pack_member_static_work(cs, m->query_reset);
    return cs->stats.cmds <= HK_PACK_MAX_DISPATCHES &&
-          cs->pack_threads <= HK_PACK_MAX_THREADS &&
-          cs->pack_static_work <= HK_PACK_MAX_STATIC_WORK &&
+          m_threads <= HK_PACK_MAX_THREADS &&
+          m_work <= max_work &&
+          (!cs->pack_loops || m->obs_ns <= HK_PACK_MAX_OBS_NS) &&
           m->bytes <= UINT32_MAX - limits->overhead &&
           cs->compute_resources.size <= UINT16_MAX &&
           cs->compute_attachments.count <= limits->max_attachments;
@@ -332,10 +379,15 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
    unsigned run_count = 0;
    struct hk_pack_run run = {0};
    uint64_t dispatches = 0, threads = 0, work = 0;
+   const uint64_t max_work =
+      limits->max_static_work ? limits->max_static_work
+                              : HK_PACK_MAX_STATIC_WORK;
    size_t resources = 0;
    uint32_t attachments = 0;
    uint8_t kinds = 0, waits = 0, tails[HK_SYNC_NUM_KINDS] = {0};
-   bool loops = false;
+   bool unbounded_loops = false;
+   bool run_query_reset = false;
+   uint64_t obs_ns = 0;
 
    *packed_members = 0;
    *total = 0;
@@ -343,15 +395,25 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
    for (unsigned i = 0; i <= n; ++i) {
       const struct hk_pack_member *m = i < n ? &members[i] : NULL;
       const struct hk_cs *cs = m ? m->cs : NULL;
+      const bool m_unbounded = cs && cs->pack_loops && !m->obs_ns;
+      const uint64_t m_obs = (cs && cs->pack_loops) ? m->obs_ns : 0;
+      const uint64_t m_threads =
+         cs ? hk_pack_member_threads(cs, m->query_reset) : 0;
+      const uint64_t m_work =
+         cs ? hk_pack_member_static_work(cs, m->query_reset) : 0;
 
       const bool fits = cs && run.count &&
+         m->query_reset == run_query_reset &&
+         (!m->query_reset || ((m->kinds ^ kinds) & ~HK_SYNC_GFX_MEM) == 0) &&
          !(m->render_ran && (m->kinds & ~kinds)) &&
          !((m->render_waits | hk_pack_tail(tails, kinds | m->kinds)) &
            ~waits) &&
-         !(loops && cs->pack_loops) &&
+         !(unbounded_loops && cs->pack_loops) &&
+         !(m_unbounded && obs_ns > 0) &&
+         m_obs <= HK_PACK_MAX_OBS_NS - obs_ns &&
          dispatches + cs->stats.cmds <= HK_PACK_MAX_DISPATCHES &&
-         cs->pack_threads <= HK_PACK_MAX_THREADS - threads &&
-         cs->pack_static_work <= HK_PACK_MAX_STATIC_WORK - work &&
+         m_threads <= HK_PACK_MAX_THREADS - threads &&
+         m_work <= max_work - work &&
          m->bytes <= UINT32_MAX - limits->overhead - run.bytes &&
          cs->compute_resources.size <= UINT16_MAX - resources &&
          cs->compute_attachments.count <=
@@ -360,14 +422,15 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
          run.count++;
          run.bytes += m->bytes;
          dispatches += cs->stats.cmds;
-         threads += cs->pack_threads;
-         work += cs->pack_static_work;
+         threads += m_threads;
+         work += m_work;
          resources += cs->compute_resources.size;
          attachments += cs->compute_attachments.count;
          kinds |= m->kinds;
          for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k)
             tails[k] |= m->render_tail[k];
-         loops |= cs->pack_loops;
+         unbounded_loops |= m_unbounded;
+         obs_ns += m_obs;
          continue;
       }
 
@@ -383,19 +446,24 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
       dispatches = threads = work = 0;
       resources = 0;
       attachments = 0;
+      unbounded_loops = false;
+      run_query_reset = false;
+      obs_ns = 0;
 
       /* Start a new run with this member when it is within the bounds. */
-      if (cs && hk_pack_within_bounds(m, limits)) {
+      if (cs && hk_pack_within_bounds(m, limits, max_work)) {
          run = (struct hk_pack_run){.first = i, .count = 1, .bytes = m->bytes};
          dispatches = cs->stats.cmds;
-         threads = cs->pack_threads;
-         work = cs->pack_static_work;
+         threads = m_threads;
+         work = m_work;
          resources = cs->compute_resources.size;
          attachments = cs->compute_attachments.count;
          kinds = m->kinds;
          waits = m->render_waits;
          memcpy(tails, m->render_tail, sizeof(tails));
-         loops = cs->pack_loops;
+         unbounded_loops = m_unbounded;
+         run_query_reset = m->query_reset;
+         obs_ns = m_obs;
       }
    }
 
@@ -458,6 +526,7 @@ hk_pack_fold_member(struct hk_cmd_buffer *packet, struct hk_cs *cs,
             cs->sync.dep[sq].prior |= req->prior;
       }
    }
+   packet->sync.has_gpu_query_reset |= source->sync.has_gpu_query_reset;
    *preceding_kinds |= item->sync.kind;
 }
 
@@ -485,10 +554,29 @@ hk_pack_add_bo(struct util_dynarray *bos, struct agx_bo *bo)
    return true;
 }
 
+uint64_t
+hk_pack_max_static_work_for_cores(unsigned cores)
+{
+   /* HK_PACK_MAX_STATIC_WORK (2^35) was calibrated for ~16-20 core GPUs
+    * (~18 ms at M4 ALU rate). Scale linearly with core count between 20 and
+    * 80 cores (1x at <=20, 1.6x at 32, 2x at 40, 4x at >=80) so wall-clock
+    * packet budget stays bounded while larger graphs and fused variants fit. */
+   const unsigned clamped = CLAMP(cores, 20u, 80u);
+   return (HK_PACK_MAX_STATIC_WORK / 4u) * (uint64_t)clamped / 5u;
+}
+
+uint64_t
+hk_pack_max_static_work(const struct hk_device *dev)
+{
+   if (!dev)
+      return HK_PACK_MAX_STATIC_WORK;
+   return hk_pack_max_static_work_for_cores(agx_get_num_cores(&dev->dev));
+}
+
 bool
-hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
-                                  bool has_loops, uint64_t eff_instrs,
-                                  uint64_t *work_out)
+hk_pack_account_dispatch_work_eff_limit(uint64_t threads, uint64_t instrs,
+                                        bool has_loops, uint64_t eff_instrs,
+                                        uint64_t max_work, uint64_t *work_out)
 {
    uint64_t work = 0;
    if (__builtin_mul_overflow(threads, instrs, &work))
@@ -502,7 +590,7 @@ hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
    if (eff_instrs > 0) {
       uint64_t bounded = 0;
       if (!__builtin_mul_overflow(threads, eff_instrs, &bounded) &&
-          bounded <= HK_PACK_MAX_STATIC_WORK) {
+          bounded <= max_work) {
          *work_out = bounded;
          return false;
       }
@@ -515,28 +603,49 @@ hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
 }
 
 bool
-hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
-                              bool has_loops, uint64_t loop_bound,
-                              uint64_t *work_out)
+hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
+                                  bool has_loops, uint64_t eff_instrs,
+                                  uint64_t *work_out)
+{
+   return hk_pack_account_dispatch_work_eff_limit(
+      threads, instrs, has_loops, eff_instrs, HK_PACK_MAX_STATIC_WORK,
+      work_out);
+}
+
+bool
+hk_pack_account_dispatch_work_limit(uint64_t threads, uint64_t instrs,
+                                    bool has_loops, uint64_t loop_bound,
+                                    uint64_t max_work, uint64_t *work_out)
 {
    if (!has_loops || loop_bound == 0)
-      return hk_pack_account_dispatch_work_eff(threads, instrs, has_loops, 0,
-                                               work_out);
+      return hk_pack_account_dispatch_work_eff_limit(
+         threads, instrs, has_loops, 0, max_work, work_out);
 
    uint64_t eff_instrs = 0;
    if (__builtin_mul_overflow(instrs, loop_bound, &eff_instrs)) {
       *work_out = UINT64_MAX;
       return true;
    }
-   return hk_pack_account_dispatch_work_eff(threads, instrs, true, eff_instrs,
-                                            work_out);
+   return hk_pack_account_dispatch_work_eff_limit(
+      threads, instrs, true, eff_instrs, max_work, work_out);
 }
 
 bool
-hk_pack_fusion_fits_run(uint64_t run_work, unsigned run_loops,
-                        uint64_t replaced_work, unsigned replaced_loops,
-                        uint64_t fused_work, bool fused_loops,
-                        uint64_t *new_work_out, unsigned *new_loops_out)
+hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
+                              bool has_loops, uint64_t loop_bound,
+                              uint64_t *work_out)
+{
+   return hk_pack_account_dispatch_work_limit(
+      threads, instrs, has_loops, loop_bound, HK_PACK_MAX_STATIC_WORK,
+      work_out);
+}
+
+bool
+hk_pack_fusion_fits_run_limit(uint64_t run_work, unsigned run_loops,
+                              uint64_t replaced_work, unsigned replaced_loops,
+                              uint64_t fused_work, bool fused_loops,
+                              uint64_t max_work, uint64_t *new_work_out,
+                              unsigned *new_loops_out)
 {
    if (replaced_work > run_work || replaced_loops > run_loops)
       return false;
@@ -547,13 +656,25 @@ hk_pack_fusion_fits_run(uint64_t run_work, unsigned run_loops,
       return false;
    uint64_t new_work = 0;
    if (__builtin_add_overflow(rem_work, fused_work, &new_work) ||
-       new_work > HK_PACK_MAX_STATIC_WORK)
+       new_work > max_work)
       return false;
    if (new_work_out)
       *new_work_out = new_work;
    if (new_loops_out)
       *new_loops_out = new_loops;
    return true;
+}
+
+bool
+hk_pack_fusion_fits_run(uint64_t run_work, unsigned run_loops,
+                        uint64_t replaced_work, unsigned replaced_loops,
+                        uint64_t fused_work, bool fused_loops,
+                        uint64_t *new_work_out, unsigned *new_loops_out)
+{
+   return hk_pack_fusion_fits_run_limit(run_work, run_loops, replaced_work,
+                                        replaced_loops, fused_work, fused_loops,
+                                        HK_PACK_MAX_STATIC_WORK, new_work_out,
+                                        new_loops_out);
 }
 
 static bool
@@ -765,4 +886,56 @@ hk_pack_liveness_step_backward(struct hk_pack_liveness_state *st,
       hk_pack_liveness_add_overwrite(st, &fp->writes[i]);
    for (unsigned i = 0; i < fp->num_reads; ++i)
       hk_pack_liveness_kill_read(st, &fp->reads[i]);
+}
+
+void
+hk_pack_obs_retire_entries(struct hk_pack_obs_entry *entries,
+                           unsigned slot_count, uint32_t *obs_pending,
+                           uint64_t *obs_epoch, uint64_t signalled,
+                           uint64_t sig_point, uint64_t sig_ns,
+                           uint64_t now_ns)
+{
+   for (unsigned i = 0; i < slot_count; ++i) {
+      struct hk_pack_obs_entry *e = &entries[i];
+      if (!e->pending_pt || e->pending_pt > signalled)
+         continue;
+
+      const uint64_t done_ns =
+         (e->pending_pt <= sig_point && sig_ns > e->submit_ns &&
+          sig_ns <= now_ns)
+            ? sig_ns
+            : now_ns;
+      const uint64_t elapsed_ns =
+         done_ns > e->submit_ns ? done_ns - e->submit_ns : 1000ull;
+      e->pending_pt = 0;
+      p_atomic_dec(obs_pending);
+
+      if (!e->in_flight_packed) {
+         if (elapsed_ns <= HK_PACK_OBS_ADMIT_NS && e->loop_count >= 2) {
+            const uint64_t per =
+               MAX2(1000ull, (elapsed_ns + e->loop_count - 1u) / e->loop_count);
+            if (per != e->obs_per_loop_ns) {
+               e->obs_per_loop_ns = per;
+               (*obs_epoch)++;
+            }
+         } else if (e->obs_per_loop_ns != 0) {
+            e->obs_per_loop_ns = 0;
+            (*obs_epoch)++;
+         }
+      } else {
+         if (elapsed_ns > HK_PACK_OBS_ADMIT_NS) {
+            if (e->obs_per_loop_ns != 0) {
+               e->obs_per_loop_ns = 0;
+               (*obs_epoch)++;
+            }
+         } else if (elapsed_ns > HK_PACK_OBS_BACKOFF_NS && e->loop_count >= 2) {
+            const uint64_t per =
+               MAX2(1000ull, (elapsed_ns + e->loop_count - 1u) / e->loop_count);
+            if (per > e->obs_per_loop_ns) {
+               e->obs_per_loop_ns = per;
+               (*obs_epoch)++;
+            }
+         }
+      }
+   }
 }

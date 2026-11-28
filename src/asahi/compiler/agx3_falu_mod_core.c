@@ -628,20 +628,22 @@ agx3_falu_fma_addend_imm(enum agx_isa_encoding enc, uint16_t dest,
 static bool
 fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
             uint16_t src, uint8_t multiplier, uint8_t addend,
-            bool dest_half, bool src_abs, bool saturate,
+            bool dest_half, bool src_half, bool src_abs, bool saturate,
             const struct agx3_falu_runtime *runtime,
             uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
    const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
    if ((enc != AGX_ISA_ENCODING_AGX3B && !m5) || !runtime || !out || !len ||
-       dest >= 256 || src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
+       dest >= 256 || src >= 256 || (!src_half && (src & 1)) ||
+       (!dest_half && (dest & 1)) || (src_half && m5) ||
        (!m5 && (dest_half || src_abs || saturate)) ||
        runtime->wait_mask > (m5 ? 0xff : 0x3f) ||
        (runtime->cache[0] && runtime->discard[0]))
       return false;
    const struct agx3_field_kv base[] = {
-      KV(9,2), KV(10,dest_half ? 1 : 2), KV(25,2), KV(26,2), KV(42,1), KV(43,2),
-      KV(59,1), KV(60,2), KV(77,2), KV(91,2), KV(95,3), KV(96,55), KV(104,1),
+      KV(9,2), KV(10,dest_half ? 1 : 2), KV(25,2), KV(26,src_half ? 1 : 2),
+      KV(42,1), KV(43,2), KV(59,1), KV(60,2), KV(77,2), KV(91,2), KV(95,3),
+      KV(96,55), KV(104,1),
    };
    struct agx3_field_kv ov[32] = {
       KV(2,dest), KV(18,src), KV(34,multiplier), KV(51,addend),
@@ -669,7 +671,17 @@ agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
                      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
    return fma_two_imm(enc, dest, src, multiplier, addend, false, false, false,
-                       runtime, out, len);
+                       false, runtime, out, len);
+}
+
+bool
+agx3_falu_fma_two_imm_half(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, uint8_t multiplier, uint8_t addend,
+                           const struct agx3_falu_runtime *runtime,
+                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   return fma_two_imm(enc, dest, src, multiplier, addend, false, true, false,
+                       false, runtime, out, len);
 }
 
 /* G17G narrows a full-input FMA directly through f32fma's result width f10.
@@ -683,7 +695,7 @@ agx3_falu_fma_two_imm_narrow_m5(uint16_t dest, uint16_t src,
                                 uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
    return fma_two_imm(AGX_ISA_ENCODING_AGX3C, dest, src, multiplier, addend,
-                       true, src_abs, saturate, runtime, out, len);
+                       true, false, src_abs, saturate, runtime, out, len);
 }
 
 /* Immediate multiplier (f34, selected by f42=1) with a modifier-bearing

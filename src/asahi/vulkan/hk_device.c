@@ -21,6 +21,7 @@
 #include "hk_compute_kick.h"
 #include "hk_descriptor_table.h"
 #include "hk_entrypoints.h"
+#include "hk_event.h"
 #include "hk_instance.h"
 #include "hk_native_sampler.h"
 #include "hk_ray_tracing_pipeline.h"
@@ -185,15 +186,16 @@ hk_upload_rodata(struct hk_device *dev)
     * own buffer object so the sampler table next to the texel-fetch sampler
     * never changes after device creation.
     */
-   dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
-                                       0, "Geometry heap descriptor");
+   dev->rodata.heap_bo = agx_bo_create(&dev->dev,
+                                       HK_HEAP_SLOTS * sizeof(struct poly_heap),
+                                       0, 0, "Geometry heap descriptor");
    if (!dev->rodata.heap_bo)
       goto fail;
 
    void *heap_map = agx_bo_map(dev->rodata.heap_bo);
    if (!heap_map)
       goto fail;
-   memset(heap_map, 0, sizeof(struct poly_heap));
+   memset(heap_map, 0, HK_HEAP_SLOTS * sizeof(struct poly_heap));
    dev->rodata.heap = dev->rodata.heap_bo->va->addr;
 
    return VK_SUCCESS;
@@ -1070,7 +1072,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    u_rwlock_init(&dev->host_alias.patch_lock);
    dev->host_alias.trace = agx_chip_g17_m5(pdev->dev.chip) &&
       debug_get_bool_option("ASAHI_M5_HOST_ALIAS_TRACE", false);
+   /* A device whose dependencies always take memory scope has none to
+    * decide per resource (agx_cdm_ordering_memory_scope()). */
    if (dev->may_alias_memory && agx_chip_g17_m5(pdev->dev.chip) &&
+       !agx_cdm_ordering_memory_scope(&pdev->dev) &&
        !debug_get_option_m5_host_alias_static()) {
       /* The word hk_cdm_flush() records for a memory-scoped strong flush. */
       const struct agx3_cdm_barrier_info info = {
@@ -1151,12 +1156,20 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_fd;
    }
 
+   /* The kernel's feature word, read when the device was opened: queues copy
+    * this into their submission tracking when they are created. */
+   dev->load_hazard_frag = dev->dev.params.features &
+                           DRM_ASAHI_FEATURE_ORDERED_PARTIAL_RENDERS;
+
    /* Splitting a long submission lets the GPU start work from the first ioctl
     * while the kernel validates later ioctls, so a profile may cap batch size. */
    dev->submit_batch_size = instance->drirc.performance.submit_batch_size;
 
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
-   dev->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
+   hk_gpu_waits_init(dev);
+   dev->vk.copy_sync_payloads = dev->gpu_waits.enabled
+      ? hk_gpu_waits_copy_sync_payloads
+      : vk_drm_syncobj_copy_payloads;
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
    dev->vk.check_status = hk_check_status;
    dev->vk.get_timestamp = hk_get_timestamp;
@@ -1328,12 +1341,14 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    hk_cmd_pending_init(dev);
    hk_query_stamps_init(dev);
+   hk_events_init(dev);
    simple_mtx_init(&dev->vdm.lock, mtx_plain);
    for (unsigned class = 0; class < HK_CMD_SLAB_COUNT; ++class) {
       list_inithead(&dev->vdm.slabs[class]);
       list_inithead(&dev->vdm.full[class]);
    }
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
+   simple_mtx_init(&dev->heap_lock, mtx_plain);
    simple_mtx_init(&dev->sparse_buffers.lock, mtx_plain);
    list_inithead(&dev->sparse_buffers.list);
    simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
@@ -1397,6 +1412,7 @@ fail_dev:
    agx_bo_unreference(&dev->dev, dev->code_heap.chunk);
    agx_close_device(&dev->dev);
    /* agx_close_device owns the DRM fd after agx_open_device succeeds. */
+   hk_gpu_waits_finish(dev);
    goto fail_init;
 fail_fd:
    close(dev->dev.fd);
@@ -1459,11 +1475,13 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    hk_compute_kick_finish(dev);
 
    vk_device_finish(&dev->vk);
+   hk_gpu_waits_finish(dev);
 
    /* All submit workers/queues are gone. No command bytes can be handed to
     * a new recording during teardown. Kernel job pins retain failed work. */
    hk_cmd_pending_finish(dev);
    simple_mtx_destroy(&dev->cmd_pending_lock);
+   hk_events_finish(dev);
    hk_query_stamps_finish(dev);
    hk_device_finish_vdm_slabs(dev);
    simple_mtx_destroy(&dev->vdm.lock);
@@ -1488,7 +1506,9 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
-   agx_bo_unreference(&dev->dev, dev->heap);
+   for (unsigned s = 0; s < HK_HEAP_SLOTS; ++s)
+      agx_bo_unreference(&dev->dev, dev->heap_slots[s]);
+   simple_mtx_destroy(&dev->heap_lock);
    hk_g17p_bg_eot_dev_cache_finish(dev);
    agx_bg_eot_cleanup(&dev->bg_eot);
    hk_finish_vm_status_mirror(dev);

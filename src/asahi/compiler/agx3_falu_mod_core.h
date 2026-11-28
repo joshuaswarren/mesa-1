@@ -163,6 +163,10 @@ bool agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t src, uint8_t multiplier, uint8_t addend,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
+bool agx3_falu_fma_two_imm_half(enum agx_isa_encoding enc, uint16_t dest,
+                                uint16_t src, uint8_t multiplier, uint8_t addend,
+                                const struct agx3_falu_runtime *runtime,
+                                uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
 
 bool agx3_falu_fma_two_imm_narrow_m5(
    uint16_t dest, uint16_t src, uint8_t multiplier, uint8_t addend,

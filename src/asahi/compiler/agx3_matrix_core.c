@@ -146,12 +146,44 @@ agx3_matrix_encode_gemm16(enum agx_isa_encoding encoding,
                          const struct agx3_matrix_gemm16_desc *d,
                          uint8_t out[10], uint8_t *length)
 {
-   if (!d)
+   if (!d || encoding != AGX_ISA_ENCODING_AGX3C || !out || !length ||
+       (d->dest & 15) || d->dest > 240)
       return false;
    enum agx3_matrix_input_type b_type = d->b_input_type ? d->b_input_type : d->input_type;
-   if (encoding != AGX_ISA_ENCODING_AGX3C || !out || !length ||
+   if (agx3_matrix_input_is_int8(d->input_type) ||
+       agx3_matrix_input_is_int8(b_type)) {
+      if (!agx3_matrix_input_is_int8(d->input_type) ||
+          !agx3_matrix_input_is_int8(b_type) ||
+          (d->a & 3) || d->a > 252 || (d->b & 3) || d->b > 252)
+         return false;
+
+      const struct agx3_field_kv base[] = {
+         {1, 2}, {2, 2}, {9, 2}, {10, 0}, {14, 1}, {20, 2}, {21, 0},
+         {25, 1}, {30, 3}, {31, 83},
+      };
+      struct agx3_field_kv fields[24];
+      unsigned count = 0;
+      fields[count++] = (struct agx3_field_kv){0, d->dest};
+      fields[count++] = (struct agx3_field_kv){3, d->dest_hint};
+      fields[count++] = (struct agx3_field_kv){7, d->zero_accumulator};
+      fields[count++] = (struct agx3_field_kv){8, d->a};
+      fields[count++] = (struct agx3_field_kv){12, d->input_type == AGX3_MATRIX_INPUT_S8};
+      fields[count++] = (struct agx3_field_kv){14, !d->preserve_a};
+      fields[count++] = (struct agx3_field_kv){15, d->transpose_a};
+      fields[count++] = (struct agx3_field_kv){19, d->b};
+      fields[count++] = (struct agx3_field_kv){23, b_type == AGX3_MATRIX_INPUT_S8};
+      fields[count++] = (struct agx3_field_kv){25, !d->preserve_b};
+      fields[count++] = (struct agx3_field_kv){26, d->transpose_b};
+      fields[count++] = (struct agx3_field_kv){40, d->saturate};
+      for (unsigned i = 0; i < 8; ++i)
+         if (d->wait_mask & (1u << i))
+            fields[count++] = (struct agx3_field_kv){32 + i, 1};
+      return agx3_bind_compose(encoding, AGX3_MN_iGeMM16x16x16, 0, base,
+                               sizeof(base) / sizeof(base[0]), fields, count,
+                               out, length);
+   }
+   if (d->saturate ||
        (b_type != AGX3_MATRIX_INPUT_F16 && b_type != AGX3_MATRIX_INPUT_BF16) ||
-       (d->dest & 15) || d->dest > 240 ||
        (d->a & 7) || d->a > 248 || (d->b & 7) || d->b > 248 ||
        (d->input_type != AGX3_MATRIX_INPUT_F16 &&
         d->input_type != AGX3_MATRIX_INPUT_BF16))

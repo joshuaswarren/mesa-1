@@ -20,6 +20,7 @@ libasahi_agx_files = files(
   'agx_nir_opt_nonneg_idiv.c',
   'agx_nir_opt_half_bitfield_extract.c',
   'agx_nir_opt_flatten_loads.c',
+  'agx_nir_opt_shared_index_sort.c',
   'agx_nir_opt_shared_vec2.c',
   'agx_nir_unroll_and_jam.c',
   'agx_nir_unroll_runtime_loops.c',
@@ -28,6 +29,7 @@ libasahi_agx_files = files(
   'agx_nir_merge_global_words.c',
   'agx_nir_fold_m5_offsets.c',
   'agx_nir_opt_popcount_idiom.c',
+  'agx_nir_opt_top2_min.c',
   'agx_nir_opt_factor_loop_mac.c',
   'agx_nir_opt_merge_nested_early_exits.c',
   'agx_nir_opt_narrow_subword_loads.c',
@@ -58,6 +60,7 @@ libasahi_agx_files = files(
   'agx_nir_lower_g17p_combined_sampler.c',
   'agx_nir_ray_query.c',
   'agx_nir_gen1_ray_query.c',
+  'agx_nir_lower_math.c',
   'agx_nir_lower_shared_bitsize.c',
   'agx_nir_opt_shared_phase_cse.c',
   'agx_nir_lower_subgroups.c',
@@ -424,6 +427,25 @@ if with_tests
   )
 
   test(
+    'agx3c_fsel_uniform',
+    executable(
+      'agx3c_fsel_uniform_test',
+      files(
+        'agx3_alu_core.c',
+        'agx3_falu_mod_core.c',
+        'agx3_binder.c',
+        'agx3_pack.c',
+        'test/test-agx3c-fsel-uniform.c',
+      ),
+      link_with : [libagx3_compose],
+      c_args : [c_msvc_compat_args, no_override_init_args, '-UNDEBUG'],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_g17p_producers',
     executable(
       'agx3_g17p_producers_test',
@@ -763,6 +785,7 @@ if with_tests
       files(
          'test/test-compact-constants.cpp',
          'test/test-agx3-pack-binary.cpp',
+         'test/test-lower-math.cpp',
          'test/test-minifloat.cpp',
          'test/test-optimizer.cpp',
          'test/test-pressure-cse.cpp',
@@ -776,6 +799,7 @@ if with_tests
          'test/test-aligned-bounds.cpp',
          'test/test-agx2-image-acquire.cpp',
          'test/test-agx2-cmat.cpp',
+         'test/test-agx2-texel-buffer.cpp',
          'test/test-agx3-shared-fence.cpp',
          'test/test-byte-swap.cpp',
          'test/test-minmax-canonical.cpp',
@@ -792,6 +816,7 @@ if with_tests
          'test/test-lower-divmod64.cpp',
          'test/test-spill-fallback.cpp',
          'test/test-spill-repeat-pair.cpp',
+         'test/test-spill-phi-sources.cpp',
          'test/test-agx-register-cache.cpp',
          'test/test-agx3c-collect-split.cpp',
          'test/test-opt-licm.cpp',
@@ -810,9 +835,11 @@ if with_tests
          'test/test-preamble-speculative-buffer.cpp',
          'test/test-preamble-modifiers.cpp',
          'test/test-preamble-texture-policy.cpp',
+        'test/test-preamble-bases.cpp',
          'test/test-cprog-cleanup.cpp',
          'test/test-m5-packed-lod.cpp',
          'test/test-preamble-half-exports.cpp',
+         'test/test-preamble-half-loop-operands.cpp',
          'test/test-demote-early-kill.cpp',
          'test/test-preamble-half-word-exports.cpp',
          'test/test-preamble-hoist.cpp',
@@ -872,13 +899,16 @@ if with_tests
          'test/test-shared-phase-cse.cpp',
          'test/test-u8x4-hsum.cpp',
          'test/test-guard-chains.cpp',
+         'test/test-hoist-loads.cpp',
+      'test/test-insert-waits.cpp',
          # agx_chip_isa_encoding() (test-native-form-regressions.cpp) lives
          # in libasahi_lib, which this test does not link.
          '../lib/agx_chip.c',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
-      dependencies: [idep_gtest, idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil],
+      dependencies: [idep_gtest, idep_nir, idep_agx_opcodes_h, idep_agx_builder_h,
+                     idep_agx_pack, idep_mesautil],
       link_with : [libasahi_compiler, libagx3b_disasm],
     ),
     suite : ['asahi'],

@@ -559,3 +559,27 @@ TEST(RegisterCache, Agx3bCubeSampleInvalidatesPhysicalCopyCache)
       EXPECT_EQ(movs, 2u);
    }
 }
+
+TEST(RegisterCache, Agx3bBoundsCacheWindowInLongBlock)
+{
+   Shader s(AGX_ISA_ENCODING_AGX3B);
+   agx_builder *b = s.b;
+   agx_block *entry = agx_start_block(b->shader);
+   b->cursor = agx_after_block(entry);
+
+   /* r0 is read 20 ALU instructions later (cold); r2 is read 2 instructions
+    * later (hot). AGX3B caches r2 and leaves r0 uncached. */
+   agx_instr *cold_def = agx_iadd_to(b, reg(0), reg(4), reg(6), 0);
+   agx_instr *hot_def = agx_iadd_to(b, reg(2), reg(4), reg(6), 0);
+   agx_iadd_to(b, reg(8), reg(10), reg(12), 0);
+   agx_iadd_to(b, reg(14), reg(2), reg(8), 0);
+   for (unsigned i = 0; i < 18; ++i)
+      agx_iadd_to(b, reg(16), reg(16), reg(14), 0);
+   agx_iadd_to(b, reg(18), reg(0), reg(16), 0);
+   agx_unit_test(b, reg(18));
+
+   agx_opt_register_cache(b->shader);
+
+   EXPECT_FALSE(cold_def->dest[0].cache);
+   EXPECT_TRUE(hot_def->dest[0].cache);
+}

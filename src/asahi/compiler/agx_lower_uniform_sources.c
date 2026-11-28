@@ -11,6 +11,7 @@
 #include "util/u_debug.h"
 #include "agx3_uniform_alu.h"
 #include "agx3_isel_core.h"
+#include "agx3_alu_core.h"
 
 /*
  * Not all instructions can take uniforms. Memory instructions can take
@@ -132,13 +133,18 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       return src_index == (op == AGX_OPCODE_LOCAL_LOAD ? 0 : 1);
    case AGX_OPCODE_IMAGE_WRITE:
       return src_index == 3;
+   case AGX_OPCODE_BLOCK_IMAGE_STORE:
+      /* AGX3B compute block stores read their PBE heap from a uniform, as
+       * image writes do. */
+      if (encoding == AGX_ISA_ENCODING_AGX3B)
+         return src_index == 0 && is_64 && memory_base;
+      return false;
    case AGX_OPCODE_ST_VARY:
       /* G17P's vertex output store reads a 16-bit index from the uniform
        * file (agx3_vary_uvsw_uniform_index), as an unlinked vertex shader's
        * per-draw output indices are. */
       return encoding == AGX_ISA_ENCODING_AGX3B && src_index == 0 &&
              size == AGX_SIZE_16;
-   case AGX_OPCODE_BLOCK_IMAGE_STORE:
    case AGX_OPCODE_ZS_EMIT:
    case AGX_OPCODE_ZS_EMIT_AGX3:
    case AGX_OPCODE_ST_TILE:
@@ -764,7 +770,13 @@ agx3_isel_uniforms_kept(const agx_context *ctx, const agx_instr *I,
        ctx->is_preamble || I->op != AGX_OPCODE_ICMPSEL ||
        I->nr_dests != 1 || I->nr_srcs != 4 ||
        I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
-       I->src[0].size != AGX_SIZE_32 || I->src[1].size != AGX_SIZE_32)
+       I->src[0].size != AGX_SIZE_32)
+      return;
+
+   const bool imm1_ok =
+      I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value <= UINT8_MAX &&
+      !I->src[1].abs && !I->src[1].neg && !I->src[1].memory;
+   if (!imm1_ok && I->src[1].size != AGX_SIZE_32)
       return;
 
    bool uniform_ok[4], reg32[4];
@@ -776,13 +788,77 @@ agx3_isel_uniforms_kept(const agx_context *ctx, const agx_instr *I,
       reg32[j] = x.type == AGX_INDEX_NORMAL && x.size == AGX_SIZE_32 &&
                  !x.abs && !x.neg && agx_channels(x) == 1;
    }
-   if (uniform_ok[2] || uniform_ok[3]) {
+   if ((uniform_ok[2] || uniform_ok[3]) && (!imm1_ok || reg32[0])) {
       keep[2] = uniform_ok[2];
       keep[3] = uniform_ok[3];
-   } else if (uniform_ok[0] && reg32[1] && reg32[2] && reg32[3]) {
+   } else if (!imm1_ok && uniform_ok[0] && reg32[1] && reg32[2] && reg32[3]) {
       keep[0] = true;
-   } else if (uniform_ok[1] && reg32[0] && reg32[2] && reg32[3]) {
+   } else if (!imm1_ok && uniform_ok[1] && reg32[0] && reg32[2] && reg32[3]) {
       keep[1] = true;
+   }
+}
+
+/* Whether the general M5 float select encodes with the uniform operands in
+ * `keep` read in place and the others copied to registers. The copies of one
+ * uniform are one SSA value, as the lowering below makes them. */
+static bool
+m5_native_fsel_uniforms(const agx_context *ctx, const agx_instr *I,
+                        const bool keep[4])
+{
+   agx_instr candidate = *I;
+   agx_index sources[4];
+   memcpy(sources, I->src, sizeof(sources));
+   candidate.src = sources;
+   for (unsigned i = 0; i < 4; ++i) {
+      if (sources[i].type == AGX_INDEX_UNIFORM && !keep[i]) {
+         agx_index copy = agx_get_index(ctx->alloc + sources[i].value,
+                                        sources[i].size);
+         sources[i] = agx_replace_index(sources[i], copy);
+      }
+   }
+   struct agx3_fsel32_gpu1_desc d;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+   return agx3_m5_fcmpsel_gpu1_desc(ctx, &candidate, true, &d) &&
+          agx3_alu_fcmp_select32_gpu1(&d, bytes, &length);
+}
+
+/* The uniform operands an M5 float select reads in place: every one when
+ * that encodes, otherwise the first one that encodes alone. A tied min/max
+ * keeps all of its uniforms or none, so its compared and selected operands
+ * stay the same value. */
+static void
+m5_fsel_uniforms_kept(const agx_context *ctx, const agx_instr *I,
+                      bool keep[4])
+{
+   memset(keep, 0, 4 * sizeof(*keep));
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C ||
+       ctx->key->dev.emit_agx3d || ctx->is_preamble ||
+       I->op != AGX_OPCODE_FCMPSEL || I->nr_srcs != 4)
+      return;
+
+   bool all[4], any = false;
+   for (unsigned i = 0; i < 4; ++i) {
+      all[i] = I->src[i].type == AGX_INDEX_UNIFORM;
+      any |= all[i];
+   }
+   if (!any)
+      return;
+   if (m5_native_fsel_uniforms(ctx, I, all)) {
+      memcpy(keep, all, sizeof(all));
+      return;
+   }
+   if (!I->invert_cond &&
+       (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
+       agx_is_equiv(I->src[0], I->src[2]) &&
+       agx_is_equiv(I->src[1], I->src[3]))
+      return;
+   for (unsigned i = 0; i < 4; ++i) {
+      bool one[4] = {false};
+      one[i] = all[i];
+      if (all[i] && m5_native_fsel_uniforms(ctx, I, one)) {
+         keep[i] = true;
+         return;
+      }
    }
 }
 
@@ -935,16 +1011,31 @@ agx_lower_uniform_sources(agx_context *ctx)
          copy_float_uniforms = I->nr_dests != 1 ||
                                I->dest[0].size != size || (half_float && I->saturate);
          bool has_gpr = false;
+         unsigned half_gprs = 0;
+         bool any_mod = false;
          unsigned half_uniforms = 0;
+         agx_foreach_src(I, s) {
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+               any_mod |= I->src[s].abs || I->src[s].neg;
+         }
          agx_foreach_src(I, s) {
             const bool native_half_uniform =
                full_float && I->src[s].type == AGX_INDEX_UNIFORM &&
                I->src[s].size == AGX_SIZE_16 && !I->src[s].abs &&
                !I->src[s].neg;
+            const bool native_half_gpr =
+               full_float && I->op == AGX_OPCODE_FFMA && !I->saturate &&
+               !any_mod &&
+               (I->src[s].type == AGX_INDEX_NORMAL ||
+                I->src[s].type == AGX_INDEX_REGISTER) &&
+               !I->src[s].memory && agx_channels(I->src[s]) == 1 &&
+               I->src[s].size == AGX_SIZE_16;
             half_uniforms += native_half_uniform;
+            half_gprs += native_half_gpr;
             if (I->src[s].type != AGX_INDEX_IMMEDIATE)
                copy_float_uniforms |=
-                  I->src[s].size != size && !native_half_uniform;
+                  I->src[s].size != size && !native_half_uniform &&
+                  !native_half_gpr;
             if (half_float)
                copy_float_uniforms |= I->src[s].abs || I->src[s].neg;
             has_gpr |= I->src[s].type != AGX_INDEX_UNIFORM &&
@@ -957,7 +1048,8 @@ agx_lower_uniform_sources(agx_context *ctx)
          else if (half_uniforms)
             copy_float_uniforms = true;
          copy_float_uniforms |=
-            half_uniforms > 1 || (half_uniforms && I->saturate);
+            half_uniforms > 1 || half_gprs > 1 ||
+            (half_uniforms && (I->saturate || half_gprs));
       }
 
       bool keep_isel_uniform[4];
@@ -969,6 +1061,8 @@ agx_lower_uniform_sources(agx_context *ctx)
          agx3_m5_fcmpsel_uniform_cmp0(I, &m5_fsel_cond, &m5_fsel_swap);
       m5_canonicalize_isel_uniform_cmp(ctx, I);
       agx3_isel_uniforms_kept(ctx, I, keep_isel_uniform);
+      bool keep_m5_fsel_uniform[4];
+      m5_fsel_uniforms_kept(ctx, I, keep_m5_fsel_uniform);
 
       /* An unwitnessed descriptor pair (agx3_tex_uniform_pair_unwitnessed)
        * materializes its uniform operand, keeping the register form. */
@@ -1171,6 +1265,7 @@ agx_lower_uniform_sources(agx_context *ctx)
               !(native_integer || native_m5_float || uniform_imm_compare ||
                 (s < 3 && keep_m5_float_uniform[s]) ||
                 (s < 4 && keep_isel_uniform[s]) ||
+                (s < 4 && keep_m5_fsel_uniform[s]) ||
                 (m5_tex_uniform_pair && (s == 3 || s == 4)) ||
                 (m5_fsel_uniform && s == 0) ||
                 agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
@@ -1200,10 +1295,26 @@ agx_lower_uniform_sources(agx_context *ctx)
                agx_instr *split = agx_split(&b, 2, word);
                split->dest[0] = agx_temp(ctx, AGX_SIZE_16);
                split->dest[1] = agx_temp(ctx, AGX_SIZE_16);
-               agx_replace_src(I, s, split->dest[idx.value & 1]);
+               agx_index extracted = split->dest[idx.value & 1];
                if (materialized < ARRAY_SIZE(materialized_from)) {
                   materialized_from[materialized] = idx;
-                  materialized_to[materialized++] = split->dest[idx.value & 1];
+                  materialized_to[materialized++] = extracted;
+               }
+               /* agx_materialize_agx3_alu_constants() already ran before
+                * uniform lowering, so widening a 16-bit uniform into a 32-bit
+                * FADD with an immediate (e.g. saturate(f32(u16) + 1.0f)) must
+                * happen here rather than leaving a 16-bit GPR beside an
+                * immediate. */
+               if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                   I->op == AGX_OPCODE_FADD && I->nr_dests == 1 &&
+                   I->nr_srcs == 2 && I->dest[0].size == AGX_SIZE_32 &&
+                   I->src[1 - s].type == AGX_INDEX_IMMEDIATE &&
+                   (I->saturate || !agx_is_equiv(I->src[1 - s], agx_negzero()))) {
+                  agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+                  agx_fmov_to(&b, wide, extracted);
+                  agx_replace_src(I, s, wide);
+               } else {
+                  agx_replace_src(I, s, extracted);
                }
             } else {
                agx_index copy = agx_mov(&b, idx);

@@ -531,9 +531,17 @@ agx_opt_register_cache(agx_context *ctx)
       }
 
       /* Set of registers read "soon" by an ALU instruction. These are
-       * candidates for the .cache bit.
+       * candidates for the .cache bit. On AGX3B, bound the lookahead window to
+       * 16 ALU instructions so long basic blocks do not evict hot short-lived
+       * temporaries from the register cache for cold state read dozens or
+       * hundreds of instructions later.
        */
+      const bool bound_agx3b_cache =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
+      const uint32_t agx3b_cache_window = 16;
       BITSET_DECLARE(alu_reads, AGX_NUM_REGS) = {0};
+      uint32_t next_alu_read[AGX_NUM_REGS] = {0};
+      uint32_t alu_pos = 1;
 
       agx_foreach_instr_in_block_rev(block, I) {
          agx_block *target = fused_break_target(I);
@@ -549,14 +557,28 @@ agx_opt_register_cache(agx_context *ctx)
             uint64_t reg = I->dest[d].value;
             unsigned nr = agx_index_size_16(I->dest[d]);
 
-            I->dest[d].cache = BITSET_TEST(alu_reads, I->dest[d].value);
+            if (bound_agx3b_cache) {
+               uint32_t next = next_alu_read[reg];
+               I->dest[d].cache = next != 0 && (alu_pos - next) <= agx3b_cache_window;
+               for (unsigned c = 0; c < nr; ++c)
+                  next_alu_read[reg + c] = 0;
+            } else {
+               I->dest[d].cache = BITSET_TEST(alu_reads, I->dest[d].value);
+            }
             BITSET_CLEAR_COUNT(alu_reads, reg, nr);
          }
 
          agx_foreach_reg_src(I, s) {
-            I->src[s].cache = BITSET_TEST(alu_reads, I->src[s].value);
+            uint64_t reg = I->src[s].value;
+            if (bound_agx3b_cache) {
+               uint32_t next = next_alu_read[reg];
+               I->src[s].cache = next != 0 && (alu_pos - next) <= agx3b_cache_window;
+            } else {
+               I->src[s].cache = BITSET_TEST(alu_reads, reg);
+            }
          }
 
+         const bool is_alu = agx_is_alu(I);
          agx_foreach_reg_src(I, s) {
             uint64_t reg = I->src[s].value;
             unsigned nr = agx_index_size_16(I->src[s]);
@@ -589,17 +611,20 @@ agx_opt_register_cache(agx_context *ctx)
             I->src[s].discard = lu && (!block->cf_divergent || physical);
 
             /* Mark any source read by an ALU instruction in the same block as
-             * wanting a .cache hint. This is better than just marking
-             * everything, although it overly hints for very long blocks and
-             * underhints for registers used across block boundaries. It's
-             * probably good enough, though, and it's not clear how to do much
-             * better given our limited understanding of the hardware.
+             * wanting a .cache hint.
              */
-            if (agx_is_alu(I))
+            if (is_alu) {
                BITSET_SET_COUNT(alu_reads, reg, nr);
+               if (bound_agx3b_cache) {
+                  for (unsigned c = 0; c < nr; ++c)
+                     next_alu_read[reg + c] = alu_pos;
+               }
+            }
 
             assert(!(I->src[s].discard && I->src[s].cache));
          }
+         if (is_alu)
+            alu_pos++;
 
          /* M5 (AGX3C): a register read by more than one source of the same
           * instruction is not discarded by any of them. With both sources

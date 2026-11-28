@@ -2069,7 +2069,7 @@ agx_get_num_cores(const struct agx_device *dev)
 }
 
 struct agx_device_key
-agx_gather_device_key(struct agx_device *dev)
+agx_gather_device_key(const struct agx_device *dev)
 {
    bool g13x_coh = (dev->params.gpu_generation == 13 &&
                     dev->params.num_clusters_total > 1) ||

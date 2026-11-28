@@ -22,8 +22,11 @@
 #include "agx3_stage_core.h"
 #include "agx3_pixel_core.h"
 #include "agx3_fltnorm_core.h"
+#include "agx3_compose/agx3_decode.h"
 #include "agx3_pack.h"
+#include "asahi/lib/agx_bg_eot.h"
 #include "asahi/lib/agx_bg_eot_key.h"
+#include "asahi/lib/agx_device.h"
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir_builder.h"
 #include <stdio.h>
@@ -1828,6 +1831,140 @@ int main(void)
       ok &= compiled && part.info.binary_size > 0;
       free(part.binary);
       ralloc_free(b.shader);
+   }
+   /* AGX3c fltnorm accepts 16-bit half-float register sources (even or odd
+    * half-registers) for 8-bit normalized outputs, while AGX3b/AGX3d and
+    * non-register operands refuse is_f16. Decode back through the AGX3c table
+    * to assert f24=f41=1 and the exact source half-register indices. */
+   {
+      static const struct {
+         uint16_t s0, s1;
+         uint8_t srgb;
+      } f16_cases[] = {
+         {0, 1, AGX3_FLTNORM_SRGB_NONE},
+         {3, 2, AGX3_FLTNORM_SRGB_LANE0},
+         {255, 254, AGX3_FLTNORM_SRGB_NONE},
+      };
+      uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH];
+      uint8_t len = 0;
+      bool f16_ok = true;
+      for (unsigned i = 0; i < sizeof(f16_cases) / sizeof(f16_cases[0]); ++i) {
+         struct agx3_fltnorm_desc d = {
+            .dest = 4,
+            .src = {
+               {.kind = AGX3_FLTNORM_SRC_REGISTER, .value = f16_cases[i].s0, .is_f16 = true},
+               {.kind = AGX3_FLTNORM_SRC_REGISTER, .value = f16_cases[i].s1, .is_f16 = true},
+            },
+            .srgb = f16_cases[i].srgb,
+            .two_lanes = true,
+         };
+         uint64_t fields[AGX3_MAX_FIELDS];
+         const bool enc =
+            agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3C, &d, bytes, &len) &&
+            len == 12;
+         const int32_t form =
+            enc ? agx3_decode(&agx3c_table, bytes, len, AGX3_MN_fltnorm, fields)
+                : -1;
+         f16_ok &= enc && form >= 0 && fields[24] == 1 && fields[41] == 1 &&
+                   fields[16] == f16_cases[i].s0 &&
+                   fields[33] == f16_cases[i].s1;
+         f16_ok &= !agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len);
+         f16_ok &= !agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3D, &d, bytes, &len);
+      }
+      struct agx3_fltnorm_desc bad_imm = {
+         .dest = 4,
+         .src = {
+            {.kind = AGX3_FLTNORM_SRC_IMMEDIATE, .value = 48, .is_f16 = true},
+            {.kind = AGX3_FLTNORM_SRC_REGISTER, .value = 2, .is_f16 = true},
+         },
+         .two_lanes = true,
+      };
+      f16_ok &=
+         !agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3C, &bad_imm, bytes, &len);
+      printf("M5_FLTNORM_F16_ENCODING_%s\n", f16_ok ? "PASS" : "FAIL");
+      ok &= f16_ok;
+   }
+   /* M5 packed MRT clear alignment gate: in a 5-RT pass with RGBA16F, R16F,
+    * R11G11B10F, BGRA8 and RG16F, RG16F (offset 14) and BGRA8 (offset 18) are
+    * not 4-byte aligned and must stay on the typed clear instead of emitting
+    * R32_UINT word stores that overwrite neighbouring attachments. */
+   {
+      const enum pipe_format fmts[5] = {
+         PIPE_FORMAT_R16G16B16A16_FLOAT,
+         PIPE_FORMAT_R16_FLOAT,
+         PIPE_FORMAT_R11G11B10_FLOAT,
+         PIPE_FORMAT_B8G8R8A8_UNORM,
+         PIPE_FORMAT_R16G16_FLOAT,
+      };
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(fmts, 5, 1, false);
+      bool align_ok =
+         agx_tilebuffer_offset_B(&tib, 0) == 4 &&
+         agx_tilebuffer_offset_B(&tib, 1) == 12 &&
+         agx_tilebuffer_offset_B(&tib, 2) == 0 &&
+         agx_tilebuffer_offset_B(&tib, 3) == 18 &&
+         agx_tilebuffer_offset_B(&tib, 4) == 14 &&
+         agx_m5_packed_clear_rt_ok(&tib, 0) &&
+         agx_m5_packed_clear_rt_ok(&tib, 1) &&
+         agx_m5_packed_clear_rt_ok(&tib, 2) &&
+         !agx_m5_packed_clear_rt_ok(&tib, 3) &&
+         !agx_m5_packed_clear_rt_ok(&tib, 4);
+
+      struct agx_device dev = {.chip = AGX_CHIP_G17S};
+      struct agx_bg_eot_key bg = {
+         .tib = tib,
+         .op = {AGX_BG_CLEAR, AGX_BG_CLEAR, AGX_BG_CLEAR, AGX_BG_CLEAR,
+                AGX_BG_CLEAR},
+         .reserved_preamble = 4 + 8 * 5,
+         .mixed_mrt = true,
+         .packed_clear_mask = 0x7,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_background_shader(&dev, &bg, &part);
+      align_ok &= compiled && part.info.binary_size > 0 && part.info.nr_gprs > 0 &&
+                  part.info.agx3_staging_known && !part.info.scratch_size;
+      free(part.binary);
+      printf("M5_BG_PACKED_CLEAR_ALIGNMENT_%s\n", align_ok ? "PASS" : "FAIL");
+      ok &= align_ok;
+   }
+   /* M5 8x MSAA MRT reload regression (dEQP-VK multisample dynamic_rendering
+    * random_107): RGBA16F @ RT0, RGBA16_SINT @ RT1, NONE @ RT2, RGBA8_UNORM @
+    * RT3 under the production M5 imageblock budget (all three resident at byte
+    * offsets 0, 8, 16 with a 24-byte sample stride) must stay on W32 and
+    * compile cleanly in both single-layer and layered forms without
+    * overflowing the tile-store payload bank. */
+   {
+      const enum pipe_format fmts[4] = {
+         PIPE_FORMAT_R16G16B16A16_FLOAT,
+         PIPE_FORMAT_R16G16B16A16_SINT,
+         PIPE_FORMAT_NONE,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+      };
+      struct agx_device dev = {.chip = AGX_CHIP_G17S};
+      bool msaa_ok = true;
+      for (unsigned layered = 0; layered < 2; ++layered) {
+         struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_resident(
+            fmts, 4, 8, layered != 0, AGX_MAX_RENDER_TARGETS * 16, 65536, 2048,
+            0);
+         msaa_ok &= !tib.spilled[0] && !tib.spilled[1] && !tib.spilled[3] &&
+                    tib.sample_size_B == 24 &&
+                    agx_tilebuffer_offset_B(&tib, 0) == 0 &&
+                    agx_tilebuffer_offset_B(&tib, 1) == 8 &&
+                    agx_tilebuffer_offset_B(&tib, 3) == 16;
+         struct agx_bg_eot_key bg = {
+            .tib = tib,
+            .op = {AGX_BG_LOAD, AGX_BG_LOAD, AGX_BG_EOT_NONE, AGX_BG_LOAD},
+            .mixed_mrt = true,
+         };
+         struct agx_shader_part part = {0};
+         const bool compiled = agx_compile_background_shader(&dev, &bg, &part);
+         msaa_ok &= compiled && part.info.binary_size > 0 &&
+                    part.info.nr_gprs > 0 && part.info.agx3_staging_known &&
+                    !part.info.scratch_size && part.info.uses_txf;
+         free(part.binary);
+      }
+      printf("M5_BG_MSAA8_MRT_RELOAD_%s\n", msaa_ok ? "PASS" : "FAIL");
+      ok &= msaa_ok;
    }
    glsl_type_singleton_decref();
    return !ok;

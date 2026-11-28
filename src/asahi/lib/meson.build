@@ -802,9 +802,15 @@ endif
 if with_tests
   test('agx3_m5_instructions', executable('agx3_m5_instructions',
     '../compiler/test/test-agx3-m5-instructions.c',
-    include_directories: [inc_include, inc_src, inc_asahi],
-    dependencies: [idep_mesautil, idep_nir, idep_agx_opcodes_h],
-    link_with: [libasahi_compiler, libasahi_lib]), suite: ['asahi'])
+    include_directories: [
+      inc_include, inc_src, inc_asahi, libasahi_lib_includes,
+      include_directories('../libagx'),
+    ],
+    dependencies: [
+      idep_mesautil, idep_nir, idep_agx_opcodes_h, idep_libagx_shaders_h,
+      idep_agx_pack,
+    ],
+    link_with: [libasahi_compiler, libasahi_lib, libasahi_layout]), suite: ['asahi'])
 endif
 
 if with_tests

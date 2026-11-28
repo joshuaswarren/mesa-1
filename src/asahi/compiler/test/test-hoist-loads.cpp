@@ -34,12 +34,29 @@ class HoistLoads : public testing::Test {
 };
 
 static agx_index
-load(agx_builder *b, agx_index off, bool coherent)
+load_ext(agx_builder *b, agx_index off, bool coherent, bool reorder)
 {
    agx_index v = agx_temp(b->shader, AGX_SIZE_32);
    agx_device_load_to(b, v, agx_uniform(0, AGX_SIZE_64), off, AGX_FORMAT_I32, 1,
                       0, coherent);
+   agx_last_instr(b->cursor.block)->memory_can_reorder = reorder;
    return v;
+}
+
+static agx_index
+load(agx_builder *b, agx_index off, bool coherent)
+{
+   return load_ext(b, off, coherent, false);
+}
+
+/* A non-coherent device_load nir_opt_access proved reads memory no invocation
+ * may write: it may hoist across a workgroup rendezvous where an unproven
+ * load may not.
+ */
+static agx_index
+reorderable_load(agx_builder *b, agx_index off)
+{
+   return load_ext(b, off, false, true);
 }
 
 TEST_F(HoistLoads, AboveAluAndThreadgroupBarrier)
@@ -50,14 +67,14 @@ TEST_F(HoistLoads, AboveAluAndThreadgroupBarrier)
          agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
          agx_index y = agx_fadd(b, x, x);
          agx_threadgroup_barrier(b);
-         agx_index v = load(b, off, false);
+         agx_index v = reorderable_load(b, off);
          agx_unit_test(b, v);
          agx_unit_test(b, y);
       },
       {
-         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
          agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
-         agx_index v = load(b, off, false);
+         agx_index v = reorderable_load(b, off);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
          agx_index y = agx_fadd(b, x, x);
          agx_threadgroup_barrier(b);
          agx_unit_test(b, v);
@@ -65,16 +82,77 @@ TEST_F(HoistLoads, AboveAluAndThreadgroupBarrier)
       });
 }
 
-TEST_F(HoistLoads, StopsAtItsOwnSource)
+TEST_F(HoistLoads, HoistsPureAddrProducerChain)
 {
-   NEGCASE({
-      agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
-      agx_index y = agx_fadd(b, x, x);
-      agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
-      agx_index v = load(b, off, false);
-      agx_unit_test(b, v);
-      agx_unit_test(b, y);
-   });
+   CASE(
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_threadgroup_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = reorderable_load(b, off);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      },
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = reorderable_load(b, off);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_threadgroup_barrier(b);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      });
+}
+
+TEST_F(HoistLoads, HoistsTwoStepAddrChainPreservingOrder)
+{
+   CASE(
+      {
+         agx_index idx = agx_mov_imm(b, AGX_SIZE_32, 8);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_index scaled = agx_iadd(b, idx, idx, 0);
+         agx_index off = agx_iadd(b, scaled, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      },
+      {
+         agx_index idx = agx_mov_imm(b, AGX_SIZE_32, 8);
+         agx_index scaled = agx_iadd(b, idx, idx, 0);
+         agx_index off = agx_iadd(b, scaled, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+         agx_index y = agx_fadd(b, x, x);
+         agx_unit_test(b, v);
+         agx_unit_test(b, y);
+      });
+}
+
+TEST_F(HoistLoads, AddrProducerNeverMovesDownward)
+{
+   CASE(
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_memory_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index mid = agx_iadd(b, off, agx_immediate(8), 0);
+         agx_index v = load(b, off, false);
+         agx_unit_test(b, v);
+         agx_unit_test(b, mid);
+      },
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_memory_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = load(b, off, false);
+         agx_index mid = agx_iadd(b, off, agx_immediate(8), 0);
+         agx_unit_test(b, v);
+         agx_unit_test(b, mid);
+      });
 }
 
 TEST_F(HoistLoads, NotAboveDeviceStore)
@@ -92,8 +170,9 @@ TEST_F(HoistLoads, NotAboveDeviceStore)
 TEST_F(HoistLoads, NotAboveMemoryBarrier)
 {
    NEGCASE({
-      agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
+      agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
       agx_memory_barrier(b);
+      agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
       agx_index v = load(b, off, false);
       agx_unit_test(b, v);
    });
@@ -109,18 +188,18 @@ TEST_F(HoistLoads, NotAboveDoorbell)
    });
 }
 
-TEST_F(HoistLoads, NotAboveUniformStoreToItsBase)
+TEST_F(HoistLoads, NotAboveUniformStoreConflict)
 {
    NEGCASE({
-      agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
       agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
-      agx_uniform_store(b, x, agx_immediate(0), 1);
+      agx_uniform_store(b, x, agx_immediate(20), 1);
+      agx_index off = agx_iadd(b, agx_uniform(20, AGX_SIZE_32), agx_immediate(4), 0);
       agx_index v = load(b, off, false);
       agx_unit_test(b, v);
    });
 }
 
-TEST_F(HoistLoads, AboveUniformStoreToOtherRegisters)
+TEST_F(HoistLoads, AboveUniformStoreDisjoint)
 {
    CASE(
       {
@@ -137,37 +216,6 @@ TEST_F(HoistLoads, AboveUniformStoreToOtherRegisters)
          agx_uniform_store(b, x, agx_immediate(32), 1);
          agx_unit_test(b, v);
       });
-}
-
-TEST_F(HoistLoads, AboveUniformStoreAdjacentRegisters)
-{
-   CASE(
-      {
-         agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
-         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
-         agx_uniform_store(b, x, agx_immediate(4), 1);
-         agx_index v = load(b, off, false);
-         agx_unit_test(b, v);
-      },
-      {
-         agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
-         agx_index v = load(b, off, false);
-         agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
-         agx_uniform_store(b, x, agx_immediate(4), 1);
-         agx_unit_test(b, v);
-      });
-}
-
-TEST_F(HoistLoads, NotAboveUniformStorePartialOverlap)
-{
-   NEGCASE({
-      agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
-      agx_uniform_store(b, x, agx_immediate(3), 1);
-      agx_index v = agx_temp(b->shader, AGX_SIZE_32);
-      agx_device_load_to(b, v, agx_uniform(0, AGX_SIZE_64),
-                         agx_immediate(4), AGX_FORMAT_I32, 1, 0, false);
-      agx_unit_test(b, v);
-   });
 }
 
 TEST_F(HoistLoads, CoherentLoadStays)
@@ -179,5 +227,48 @@ TEST_F(HoistLoads, CoherentLoadStays)
       agx_index v = load(b, off, true);
       agx_unit_test(b, v);
       agx_unit_test(b, y);
+   });
+}
+
+TEST_F(HoistLoads, ComputeSyncCrossesThreadgroupBarrierStopsAtMemoryBarrier)
+{
+   /* In compute shaders, threadgroup_barrier synchronizes threadgroup/shared
+    * execution only (not global device memory), so an independent non-coherent
+    * device_load may hoist across it. A preceding memory_barrier orders global
+    * memory and must stop the load from crossing past the memory boundary.
+    */
+   CASE(
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_memory_barrier(b);
+         agx_threadgroup_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = reorderable_load(b, off);
+         agx_unit_test(b, v);
+      },
+      {
+         agx_index base = agx_mov_imm(b, AGX_SIZE_32, 0x100);
+         agx_memory_barrier(b);
+         agx_index off = agx_iadd(b, base, agx_immediate(4), 0);
+         agx_index v = reorderable_load(b, off);
+         agx_threadgroup_barrier(b);
+         agx_unit_test(b, v);
+      });
+}
+
+TEST_F(HoistLoads, NotAboveDeviceScopedRendezvous)
+{
+   /* A device_load that nir_opt_access did not prove read-only may not hoist
+    * across the workgroup rendezvous: the value another invocation stores
+    * before the barrier is not visible above it. */
+   NEGCASE({
+      agx_index off = agx_mov_imm(b, AGX_SIZE_32, 4);
+      agx_index x = agx_mov_imm(b, AGX_SIZE_32, 0xcafe);
+      agx_device_store(b, x, agx_uniform(0, AGX_SIZE_64), off, AGX_FORMAT_I32,
+                       1, 0, false);
+      agx_memory_barrier(b);
+      agx_threadgroup_barrier(b);
+      agx_index v = load(b, off, false);
+      agx_unit_test(b, v);
    });
 }

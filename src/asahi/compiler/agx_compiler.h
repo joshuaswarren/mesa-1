@@ -47,8 +47,9 @@ extern "C" {
 
 /* Representable spill-slot bitfield capacity in agx_index::reg (8192 halves =
  * 16 KiB). Actual RA spill allocation is bounded per-target and per-stage in
- * agx_register_allocate.c; AGX2 stays at AGX2_MAX_SPILL_SLOTS (4 KiB) to
- * preserve its per-core agx_scratch memory bound.
+ * agx_register_allocate.c; AGX2 defaults to AGX2_MAX_SPILL_SLOTS (4 KiB) when
+ * max_scratch_B is unset and honors larger max_scratch_B up to
+ * AGX_NUM_MODELED_REGS within its 64 KiB immediate stack offset ceiling.
  */
 #define AGX_NUM_MODELED_REGS_LOG2 (13)
 #define AGX_NUM_MODELED_REGS      (1 << AGX_NUM_MODELED_REGS_LOG2)
@@ -454,6 +455,12 @@ typedef struct {
    /* TODO: Handle tilebuffer ops more efficient */
    bool explicit_coords : 1;
 
+   /* AGX3B: this ld_tile is PIXINFO (nir_intrinsic_load_sample_groups_agx).
+    * Its source is the coverage word and its 16-bit destination the packed
+    * sample groups. It names no target bytes: the tile protocols give it the
+    * colour transaction of a first read, and nothing else. */
+   bool sample_groups : 1;
+
    /* Logical attachment identity, independent of the physical pixel_offset. */
    uint8_t colour_target;
 
@@ -664,6 +671,11 @@ typedef struct {
 
    /* Mask of pixel fences we've definitely already waited for. */
    uint16_t already_pixel_waited;
+
+   /* Tile stores a multisample reload background has left before it releases
+    * the colour class (agx_background_holds_colour); -1 once it is known not
+    * to hold it. */
+   int background_stores_left;
 
    /* G17P depth/stencil writes not yet emitted. Every sample's write shares
     * one class-1 transaction, released after the last. */
@@ -1121,14 +1133,16 @@ enum agx_cursor_option {
 /* The stages whose AGX3 samples take an explicit level the vertex way: the
  * packer's vertex_explicit_lod (agx3_pack_binary.c), which also lets an array
  * comparison keep an immediate level (agx_optimizer_inline_imm). A G17P mesh
- * program is VDM-launched like a vertex program. */
+ * program and M5 mesh/task programs are VDM-launched like vertex programs. */
 static inline bool
 agx3_vertex_explicit_lod_stage(mesa_shader_stage stage,
                                enum agx_isa_encoding enc)
 {
    return stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_GEOMETRY ||
           stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL ||
-          (enc == AGX_ISA_ENCODING_AGX3B && stage == MESA_SHADER_MESH);
+          (enc == AGX_ISA_ENCODING_AGX3B && stage == MESA_SHADER_MESH) ||
+          (enc == AGX_ISA_ENCODING_AGX3C &&
+           (stage == MESA_SHADER_MESH || stage == MESA_SHADER_TASK));
 }
 
 typedef struct {
@@ -1353,6 +1367,7 @@ void agx_opt_promote_constants(agx_context *ctx);
 void agx_opt_promote_m5_float_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
+void agx_hoist_loads(agx_context *ctx);
 void agx_ilp_schedule(agx_context *ctx);
 void agx_hoist_loads(agx_context *ctx);
 int agx_ilp_m5_device_load_cap(int program_peak);
@@ -1450,6 +1465,11 @@ void agx_pack_binary(agx_context *ctx, struct util_dynarray *emission);
  * encoding. */
 bool agx3_g17p_interleaved_zs(const agx_context *ctx);
 bool agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission);
+/* The general M5 float select's encoder descriptor, as the packer builds it
+ * (agx3_pack_binary.c); `ssa` before register allocation. */
+struct agx3_fsel32_gpu1_desc;
+bool agx3_m5_fcmpsel_gpu1_desc(const agx_context *ctx, const agx_instr *I,
+                               bool ssa, struct agx3_fsel32_gpu1_desc *d);
 /* agx3_pack_binary, packed once more for a G18G vertex shader whose texture
  * reads reach past AGX3_G18G_READ_STAGING_LIMIT, with its outputs above
  * them (agx3_pack_binary.c). */
@@ -1504,7 +1524,7 @@ agx_validate_ra(UNUSED agx_context *ctx)
 #endif
 
 enum agx_size agx_split_width(const agx_instr *I);
-bool agx_allows_16bit_immediate(agx_instr *I);
+bool agx_allows_16bit_immediate(agx_instr *I, enum agx_isa_encoding enc);
 unsigned agx_negate_src_index(agx_instr *I);
 
 static inline bool
@@ -1670,6 +1690,13 @@ bool agx_nir_place_preamble_handles_low(nir_shader *s, unsigned reserved,
                                          unsigned exports_end,
                                          unsigned *allocated,
                                         bool load_bases);
+bool agx_nir_place_preamble_bases_low(nir_shader *nir, unsigned reserved,
+                                      unsigned exports_end,
+                                      unsigned *allocated_inout);
+bool agx_should_place_preamble_bases_low(const nir_shader *nir,
+                                         const struct agx_shader_key *key,
+                                         bool form_preamble,
+                                         unsigned push_count);
 agx_block *agx_reconverged_mrt_tail(agx_context *ctx);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
@@ -1680,6 +1707,7 @@ void agx_lower_agx3_half_converts(agx_context *ctx);
 void agx_opt_agx3_normflt_byte_pairs(agx_context *ctx);
 void agx_materialize_agx3_alu_constants(agx_context *ctx);
 void agx_lower_agx3_mixed_width_unary(agx_context *ctx);
+void agx_lower_m5_alu_operands(agx_context *ctx);
 bool agx_lower_g17g_retry_float_operands(agx_context *ctx);
 
 struct agx_cycle_estimate {

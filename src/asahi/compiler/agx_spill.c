@@ -424,7 +424,8 @@ remat_load_elem_bytes(const agx_instr *L)
 static bool
 can_remat_load(const agx_context *ctx, const agx_instr *L)
 {
-   if (L->op != AGX_OPCODE_DEVICE_LOAD || !L->memory_can_reorder ||
+   if (!ctx->key || !agx_isa_is_agx3(ctx->key->dev.encoding) ||
+       L->op != AGX_OPCODE_DEVICE_LOAD || !L->memory_can_reorder ||
        L->memory_is_packed || ctx->is_preamble || L->nr_dests != 1 ||
        L->dest[0].type != AGX_INDEX_NORMAL || L->dest[0].memory ||
        L->mask != BITFIELD_MASK(agx_channels(L->dest[0])))
@@ -458,14 +459,20 @@ can_repeat_alu(const agx_context *ctx, const agx_instr *I)
    case AGX_OPCODE_FADD:
    case AGX_OPCODE_FMUL:
    case AGX_OPCODE_FFMA:
+   case AGX_OPCODE_HADD:
+   case AGX_OPCODE_HMUL:
+   case AGX_OPCODE_HFMA:
    case AGX_OPCODE_FCMPSEL:
    case AGX_OPCODE_ICMPSEL:
    case AGX_OPCODE_IADD:
    case AGX_OPCODE_IMAD:
    case AGX_OPCODE_ASR:
    case AGX_OPCODE_BFEIL:
+   case AGX_OPCODE_EXTR:
    case AGX_OPCODE_BITOP:
    case AGX_OPCODE_CONVERT:
+   case AGX_OPCODE_FLTNORM_AGX3:
+   case AGX_OPCODE_NORMFLT_AGX3:
       break;
    default:
       return false;
@@ -910,12 +917,28 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
       agx_builder b =
          agx_init_builder(ctx->shader, agx_before_function(ctx->shader));
 
-      /* Copy immediate/uniform phi sources to memory variables at the start of
+      /* An immediate or uniform phi source needs no memory variable of its
+       * own: parallel copy lowering writes it to the phi's slot on the edge,
+       * through the scratch register a memory-memory copy uses
+       * (agx_lower_parallel_copy.c do_copy()). A variable made at the start
+       * of the program would instead stay live, in a slot of its own, until
+       * the phi, and the edge would copy it from memory to memory. That is
+       * a fill per traversal of the edge where a uniform read suffices.
+       *
+       * A uniform the program writes must still be read at the start.
+       */
+      if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
+          (I->src[s].type == AGX_INDEX_UNIFORM &&
+           !ctx->shader->uniforms_written)) {
+         record_spill(ctx);
+         continue;
+      }
+
+      /* Copy other uniform phi sources to memory variables at the start of
        * the program, where pressure is zero and hence the copy is legal.
        */
       if (I->src[s].type != AGX_INDEX_NORMAL) {
-         assert(I->src[s].type == AGX_INDEX_IMMEDIATE ||
-                I->src[s].type == AGX_INDEX_UNIFORM);
+         assert(I->src[s].type == AGX_INDEX_UNIFORM);
 
          agx_index mem = agx_temp_like(ctx->shader, I->dest[0]);
          assert(mem.memory);
@@ -1541,17 +1564,27 @@ compute_w_entry(struct spill_ctx *ctx)
          all_found &= found;
       }
 
+      const dist_t dist =
+         search_next_uses(&sb->next_use_in, I->dest[0].value);
+
       /* Heuristic: if any phi source is spilled, spill the whole phi. This is
        * suboptimal, but it massively reduces pointless fill/spill chains with
        * massive phi webs. A remat-only pass never spills: the missing sources
        * are constants, rematerialized along their edges.
+       *
+       * A phi this block reads is the exception. Spilled, it is filled before
+       * that read on every path into the block, and its sources still in
+       * registers are spilled on their edges. In registers, only its spilled
+       * sources are filled, each on its own edge, so that costs no more
+       * memory traffic and frees the slot. Whether it fits is left to the
+       * next-use order below, like any other candidate.
        */
-      if (!all_found && !ctx->remat_only)
+      if (!all_found && !ctx->remat_only && dist >= sb->cycles)
          continue;
 
       candidates[j++] = (struct candidate){
          .node = I->dest[0].value,
-         .dist = search_next_uses(&sb->next_use_in, I->dest[0].value),
+         .dist = dist,
       };
    }
 
@@ -1626,12 +1659,46 @@ struct block_local_defs {
    unsigned n_defined;
 };
 
+/* Braun & Hack Section 4.1: penalize loop-exit edges so spilling inside a hot
+ * loop evicts outer/post-loop values ahead of loop-carried inner values. */
+#define AGX_SPILL_LOOP_EXIT_PENALTY 10000u
+#define AGX_SPILL_MAX_DIST (DIST_INFINITY / 2u)
+
+static inline dist_t
+dist_add_clamped(dist_t d, uint32_t penalty)
+{
+   if (d == DIST_INFINITY)
+      return DIST_INFINITY;
+   dist_t sum = dist_sum(d, penalty);
+   return MIN2(sum, AGX_SPILL_MAX_DIST);
+}
+
 static ATTRIBUTE_NOINLINE void
 global_next_use_distances(agx_context *ctx, void *memctx,
                           struct spill_block *blocks)
 {
    u_worklist worklist;
    u_worklist_init(&worklist, ctx->num_blocks, NULL);
+
+   /* Compute structured loop-nesting depth per block: for each loop header h,
+    * find its furthest back-edge predecessor and count the loop once even when
+    * multiple continue edges target the same header. */
+   uint32_t *loop_depth = calloc(MAX2(ctx->num_blocks, 1), sizeof(*loop_depth));
+   uint32_t *loop_end = calloc(MAX2(ctx->num_blocks, 1), sizeof(*loop_end));
+   agx_foreach_block(ctx, block) {
+      agx_foreach_successor(block, succ) {
+         if (succ->loop_header && succ->index <= block->index &&
+             block->index < ctx->num_blocks) {
+            loop_end[succ->index] = MAX2(loop_end[succ->index],
+                                         (uint32_t)block->index + 1u);
+         }
+      }
+   }
+   for (unsigned h = 0; h < ctx->num_blocks; ++h) {
+      for (unsigned i = h; i < loop_end[h]; ++i)
+         loop_depth[i]++;
+   }
+   free(loop_end);
 
    BITSET_WORD *defined = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *phi_dests = BITSET_CALLOC(ctx->alloc);
@@ -1731,11 +1798,18 @@ global_next_use_distances(agx_context *ctx, void *memctx,
       agx_foreach_predecessor(blk, pred) {
          struct spill_block *sp = &blocks[(*pred)->index];
          bool progress = false;
+         uint32_t exit_penalty = 0;
+         if (loop_depth[(*pred)->index] > loop_depth[blk->index]) {
+            const uint32_t delta =
+               MIN2(loop_depth[(*pred)->index] - loop_depth[blk->index], 100u);
+            exit_penalty = delta * AGX_SPILL_LOOP_EXIT_PENALTY;
+         }
 
          if (has_phis) {
             foreach_next_use(&sb->next_use_in, node, dist) {
                if (!BITSET_TEST(phi_dests, node) &&
-                   set_next_use_min(&sp->next_use_out, node, dist))
+                   set_next_use_min(&sp->next_use_out, node,
+                                    dist_add_clamped(dist, exit_penalty)))
                   progress = true;
             }
 
@@ -1743,12 +1817,14 @@ global_next_use_distances(agx_context *ctx, void *memctx,
             agx_foreach_phi_in_block(blk, I) {
                agx_index operand = I->src[pred_idx];
                if (operand.type == AGX_INDEX_NORMAL &&
-                   set_next_use_min(&sp->next_use_out, operand.value, 0))
+                   set_next_use_min(&sp->next_use_out, operand.value,
+                                    exit_penalty))
                   progress = true;
             }
          } else {
             foreach_next_use(&sb->next_use_in, node, dist) {
-               if (set_next_use_min(&sp->next_use_out, node, dist))
+               if (set_next_use_min(&sp->next_use_out, node,
+                                    dist_add_clamped(dist, exit_penalty)))
                   progress = true;
             }
          }
@@ -1766,6 +1842,7 @@ global_next_use_distances(agx_context *ctx, void *memctx,
    for (unsigned i = 0; i < ctx->num_blocks; ++i)
       free(local_defs[i].defined);
    free(local_defs);
+   free(loop_depth);
    free(phi_dests);
    free(defined);
    u_worklist_fini(&worklist);

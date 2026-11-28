@@ -875,6 +875,46 @@ g17p_equiv_find_probe(const struct g17p_equiv_probe *probes,
    return -1;
 }
 
+/* Intrinsics whose value depends on which sample, or which lanes of the
+ * subgroup, run the body. Shading one sample for several changes them. */
+static bool
+g17p_equiv_sample_dependent(nir_intrinsic_op op)
+{
+   switch (op) {
+   case nir_intrinsic_load_sample_id:
+   case nir_intrinsic_load_sample_pos:
+   case nir_intrinsic_load_samples_log2_agx:
+   case nir_intrinsic_load_barycentric_sample:
+   case nir_intrinsic_load_barycentric_at_sample:
+   case nir_intrinsic_load_exported_agx:
+   case nir_intrinsic_is_helper_invocation:
+   case nir_intrinsic_ballot:
+   case nir_intrinsic_vote_all:
+   case nir_intrinsic_vote_any:
+   case nir_intrinsic_vote_ieq:
+   case nir_intrinsic_vote_feq:
+   case nir_intrinsic_elect:
+   case nir_intrinsic_first_invocation:
+   case nir_intrinsic_read_invocation:
+   case nir_intrinsic_read_first_invocation:
+   case nir_intrinsic_shuffle:
+   case nir_intrinsic_shuffle_xor:
+   case nir_intrinsic_shuffle_up:
+   case nir_intrinsic_shuffle_down:
+   case nir_intrinsic_quad_broadcast:
+   case nir_intrinsic_quad_swap_horizontal:
+   case nir_intrinsic_quad_swap_vertical:
+   case nir_intrinsic_quad_swap_diagonal:
+   case nir_intrinsic_quad_ballot_agx:
+   case nir_intrinsic_reduce:
+   case nir_intrinsic_inclusive_scan:
+   case nir_intrinsic_exclusive_scan:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void
 specialize_g17p_equiv_copy(nir_function_impl *impl, nir_cf_list *copy,
                            nir_def *load_samples, nir_def *store_samples,
@@ -933,6 +973,146 @@ specialize_g17p_equiv_copy(nir_function_impl *impl, nir_cf_list *copy,
    }
 }
 
+static uint8_t
+g17p_equiv_probe_bits(const struct g17p_equiv_probe *p, bool reuse_small)
+{
+   uint8_t probe_bits = p->raw_bit_size;
+   if (g17p_equiv_probe_is_body_read(p) && !reuse_small && probe_bits == 32 &&
+       (p->format == PIPE_FORMAT_R8_UNORM ||
+        p->format == PIPE_FORMAT_R8_SNORM)) {
+      probe_bits = 16;
+   }
+   return probe_bits;
+}
+
+static void
+g17p_equiv_load_sample(nir_builder *b, const struct g17p_equiv_probe *probes,
+                       unsigned num_probes,
+                       const struct g17p_equiv_chunk *chunks,
+                       unsigned num_chunks, const int *chunk_of,
+                       bool reuse_small, nir_def *sample_mask,
+                       nir_def **out_chunks, nir_def **out_probes)
+{
+   for (unsigned c = 0; c < num_chunks; ++c) {
+      out_chunks[c] = nir_load_local_pixel_agx(
+         b, chunks[c].words, 32, sample_mask, .base = chunks[c].base,
+         .format = PIPE_FORMAT_R32_UINT, .target = chunks[c].target);
+   }
+
+   for (unsigned k = 0; k < num_probes; ++k) {
+      if (chunk_of[k] >= 0) {
+         const struct g17p_equiv_chunk *c = &chunks[chunk_of[k]];
+         const unsigned first = (probes[k].base - c->base) / 4;
+         out_probes[k] = nir_channels(
+            b, out_chunks[chunk_of[k]],
+            BITFIELD_MASK(probes[k].raw_components) << first);
+      } else {
+         const uint8_t probe_bits =
+            g17p_equiv_probe_bits(&probes[k], reuse_small);
+         out_probes[k] = nir_load_local_pixel_agx(
+            b, probes[k].raw_components, probe_bits, sample_mask,
+            .base = probes[k].base, .format = probes[k].raw_format,
+            .target = probes[k].target);
+      }
+   }
+}
+
+static nir_def *
+g17p_equiv_diff_sample(nir_builder *b, const struct g17p_equiv_probe *probes,
+                       unsigned num_probes,
+                       const struct g17p_equiv_chunk *chunks,
+                       unsigned num_chunks, const int *chunk_of,
+                       nir_def *const *a_chunks, nir_def *const *a_probes,
+                       nir_def *const *b_chunks, nir_def *const *b_probes)
+{
+   nir_def *diff16 = NULL, *diff32 = NULL;
+
+   for (unsigned c = 0; c < num_chunks; ++c) {
+      nir_def *diff = nir_ixor(b, a_chunks[c], b_chunks[c]);
+      for (unsigned i = 0; i < chunks[c].words; ++i) {
+         nir_def *d = nir_channel(b, diff, i);
+         diff32 = diff32 ? nir_ior(b, diff32, d) : d;
+      }
+   }
+
+   for (unsigned k = 0; k < num_probes; ++k) {
+      if (chunk_of[k] >= 0)
+         continue;
+      nir_def *diff = nir_ixor(b, a_probes[k], b_probes[k]);
+      for (unsigned c = 0; c < probes[k].raw_components; ++c) {
+         nir_def *d = nir_channel(b, diff, c);
+         nir_def **acc = &diff16;
+         if (d->bit_size != 16) {
+            d = nir_u2u32(b, d);
+            acc = &diff32;
+         }
+         *acc = *acc ? nir_ior(b, *acc, d) : d;
+      }
+   }
+
+   if (diff16 && diff32)
+      return nir_ior(b, diff32, nir_u2u32(b, diff16));
+   if (diff32)
+      return diff32;
+   if (diff16)
+      return nir_u2u32(b, diff16);
+   return nir_imm_int(b, 0);
+}
+
+static void
+g17p_equiv_inner_dedup(nir_builder *b, nir_function_impl *impl,
+                       const struct g17p_equiv_probe *probes,
+                       unsigned num_probes,
+                       const struct g17p_equiv_chunk *chunks,
+                       unsigned num_chunks, const int *chunk_of,
+                       bool reuse_small, nir_def *const *cur_chunks,
+                       nir_def *const *cur_probes, nir_def **store_mask_io,
+                       nir_def **next_rem_io)
+{
+   nir_variable *var_store =
+      nir_local_variable_create(impl, glsl_uint16_t_type(), "equiv_sm");
+   nir_variable *var_rem =
+      nir_local_variable_create(impl, glsl_uint16_t_type(), "equiv_nr");
+   nir_store_var(b, var_store, *store_mask_io, 1);
+   nir_store_var(b, var_rem, *next_rem_io, 1);
+
+   nir_if *dedup_if = nir_push_if(b, nir_ine_imm(b, *next_rem_io, 0));
+   {
+      nir_variable *var_scan =
+         nir_local_variable_create(impl, glsl_uint16_t_type(), "equiv_scan");
+      nir_store_var(b, var_scan, *next_rem_io, 1);
+      nir_loop *scan_loop = nir_push_loop(b);
+      scan_loop->control = nir_loop_control_dont_unroll;
+      {
+         nir_def *scan = nir_load_var(b, var_scan);
+         nir_break_if(b, nir_ieq_imm(b, scan, 0));
+         nir_def *obit = nir_iand(b, scan, nir_ineg(b, scan));
+         nir_store_var(b, var_scan, nir_ixor(b, scan, obit), 1);
+
+         nir_def *o_chunks[G17P_EQUIV_MAX_PROBES];
+         nir_def *o_probes[G17P_EQUIV_MAX_PROBES];
+         g17p_equiv_load_sample(b, probes, num_probes, chunks, num_chunks,
+                                chunk_of, reuse_small, obit, o_chunks,
+                                o_probes);
+         nir_def *odiff = g17p_equiv_diff_sample(
+            b, probes, num_probes, chunks, num_chunks, chunk_of, cur_chunks,
+            cur_probes, o_chunks, o_probes);
+         nir_def *same = nir_ieq_imm(b, odiff, 0);
+         nir_def *sm = nir_load_var(b, var_store);
+         nir_def *nr = nir_load_var(b, var_rem);
+         nir_store_var(b, var_store,
+                       nir_bcsel(b, same, nir_ior(b, sm, obit), sm), 1);
+         nir_store_var(b, var_rem,
+                       nir_bcsel(b, same, nir_ixor(b, nr, obit), nr), 1);
+      }
+      nir_pop_loop(b, scan_loop);
+   }
+   nir_pop_if(b, dedup_if);
+
+   *store_mask_io = nir_load_var(b, var_store);
+   *next_rem_io = nir_load_var(b, var_rem);
+}
+
 /*
  * Monolithic MSAA local-read shaders often run on interior pixels where every
  * sample in the subgroup has full coverage and identical input tilebuffer
@@ -958,12 +1138,18 @@ agx_nir_unroll_g17p_samples_equiv(nir_shader *shader, unsigned nr_samples,
    unsigned total_dwords = 0;
    unsigned store_count = 0;
    bool saw_store = false;
+   bool has_derivatives = false;
    nir_intrinsic_instr *force_early_instr = NULL;
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (instr->type == nir_instr_type_call)
             return false;
+         if (instr->type == nir_instr_type_tex) {
+            if (nir_tex_instr_has_implicit_derivative(nir_instr_as_tex(instr)))
+               has_derivatives = true;
+            continue;
+         }
          if (instr->type != nir_instr_type_intrinsic)
             continue;
 
@@ -1021,40 +1207,23 @@ agx_nir_unroll_g17p_samples_equiv(nir_shader *shader, unsigned nr_samples,
          case nir_intrinsic_load_sample_mask:
             continue;
 
-         case nir_intrinsic_load_sample_id:
-         case nir_intrinsic_load_sample_pos:
-         case nir_intrinsic_load_samples_log2_agx:
-         case nir_intrinsic_load_barycentric_sample:
-         case nir_intrinsic_load_barycentric_at_sample:
-         case nir_intrinsic_load_exported_agx:
-         case nir_intrinsic_ballot:
-         case nir_intrinsic_vote_all:
-         case nir_intrinsic_vote_any:
-         case nir_intrinsic_vote_ieq:
-         case nir_intrinsic_vote_feq:
-         case nir_intrinsic_elect:
-         case nir_intrinsic_first_invocation:
-         case nir_intrinsic_read_invocation:
-         case nir_intrinsic_read_first_invocation:
-         case nir_intrinsic_shuffle:
-         case nir_intrinsic_shuffle_xor:
-         case nir_intrinsic_shuffle_up:
-         case nir_intrinsic_shuffle_down:
-         case nir_intrinsic_quad_broadcast:
-         case nir_intrinsic_quad_swap_horizontal:
-         case nir_intrinsic_quad_swap_vertical:
-         case nir_intrinsic_quad_swap_diagonal:
-         case nir_intrinsic_quad_ballot_agx:
-         case nir_intrinsic_reduce:
-         case nir_intrinsic_inclusive_scan:
-         case nir_intrinsic_exclusive_scan:
-            return false;
-
-         default:
-            if (!(nir_intrinsic_infos[intr->intrinsic].flags &
-                  NIR_INTRINSIC_CAN_ELIMINATE))
+         default: {
+            if (g17p_equiv_sample_dependent(intr->intrinsic))
+               return false;
+            const unsigned flags = nir_intrinsic_infos[intr->intrinsic].flags;
+            if (!(flags & NIR_INTRINSIC_CAN_ELIMINATE))
+               return false;
+            if (nir_intrinsic_has_access(intr) &&
+                (nir_intrinsic_access(intr) & ACCESS_VOLATILE))
+               return false;
+            if (flags & NIR_INTRINSIC_QUADGROUP) {
+               has_derivatives = true;
+               continue;
+            }
+            if (flags & NIR_INTRINSIC_SUBGROUP)
                return false;
             continue;
+         }
          }
       }
    }
@@ -1086,33 +1255,26 @@ agx_nir_unroll_g17p_samples_equiv(nir_shader *shader, unsigned nr_samples,
    for (unsigned s = 0; s < nr_samples; ++s)
       sample_masks[s] = nir_iand_imm(&b, cov_raw, BITFIELD_BIT(s));
 
-   /* Reuse sample 0's probed values across the branch when the live footprint
-    * is small and the probe read matches or directly unpacks to the body's
-    * own. For wider MRT local-read shaders, keeping all probed payloads live
-    * across the branch inflates register pressure; drop the probe values after
-    * the ballot and reload sample 0 in the shading body instead. A probe that
-    * reads the raw word of four 8-bit normalized lanes is decoded in place of
-    * the reload; other raw reads of decoded formats are never reused and the
-    * body decodes its own reload. Narrow the remaining 8-bit
-    * unorm/snorm probes (one or three lanes) to f16 when they are not reused
-    * (injective for all 256 values), so the probe preamble uses half the
-    * registers while the shading body still loads exact f32 values. */
    const bool reuse_small = total_dwords <= G17P_EQUIV_REUSE_DWORDS;
 
    nir_def *v0[G17P_EQUIV_MAX_PROBES];
    nir_def *reuse[G17P_EQUIV_MAX_PROBES];
    bool any_reuse = false;
-
-   /* OR every differing bit of every probe, one accumulator per bit size,
-    * and test them once: a compare and select per sample and channel would
-    * otherwise dominate a wide probe. */
-   nir_def *diff16 = NULL, *diff32 = NULL;
+   bool all_reusable = reuse_small;
 
    struct g17p_equiv_chunk chunks[G17P_EQUIV_MAX_PROBES];
    int chunk_of[G17P_EQUIV_MAX_PROBES];
    const unsigned num_chunks =
       g17p_equiv_build_chunks(probes, num_probes, chunks, chunk_of);
    nir_def *chunk_v0[G17P_EQUIV_MAX_PROBES];
+
+   /* Emit probes in chunk-major order (all samples of each merged chunk, then
+    * standalone probes) so each chunk's sample loads can batch together within
+    * a tight register footprint. Track per-sample diffs against sample 0 so the
+    * slow path can deduplicate samples matching sample 0 without extra probe
+    * work on the fast path. */
+   nir_def *diff16[4] = {NULL};
+   nir_def *diff32[4] = {NULL};
 
    for (unsigned c = 0; c < num_chunks; ++c) {
       chunk_v0[c] = nir_load_local_pixel_agx(
@@ -1126,72 +1288,71 @@ agx_nir_unroll_g17p_samples_equiv(nir_shader *shader, unsigned nr_samples,
          nir_def *diff = nir_ixor(&b, chunk_v0[c], vs);
          for (unsigned i = 0; i < chunks[c].words; ++i) {
             nir_def *d = nir_channel(&b, diff, i);
-            diff32 = diff32 ? nir_ior(&b, diff32, d) : d;
+            diff32[s] = diff32[s] ? nir_ior(&b, diff32[s], d) : d;
          }
       }
    }
 
    for (unsigned k = 0; k < num_probes; ++k) {
-      const bool body_read = g17p_equiv_probe_is_body_read(&probes[k]);
-
+      const bool can = reuse_small && g17p_equiv_probe_reuses_v0(&probes[k]);
       if (chunk_of[k] >= 0) {
          const struct g17p_equiv_chunk *c = &chunks[chunk_of[k]];
          const unsigned first = (probes[k].base - c->base) / 4;
-         v0[k] = nir_channels(&b, chunk_v0[chunk_of[k]],
-                              BITFIELD_MASK(probes[k].raw_components)
-                                 << first);
-         reuse[k] = reuse_small && g17p_equiv_probe_reuses_v0(&probes[k])
-                       ? v0[k]
-                       : NULL;
-         any_reuse |= reuse[k] != NULL;
-         continue;
-      }
-
-      uint8_t probe_bits = probes[k].raw_bit_size;
-      if (body_read && !reuse_small && probe_bits == 32 &&
-          (probes[k].format == PIPE_FORMAT_R8_UNORM ||
-           probes[k].format == PIPE_FORMAT_R8_SNORM)) {
-         probe_bits = 16;
-      }
-
-      v0[k] = nir_load_local_pixel_agx(
-         &b, probes[k].raw_components, probe_bits, sample_masks[0],
-         .base = probes[k].base, .format = probes[k].raw_format,
-         .target = probes[k].target);
-      reuse[k] = reuse_small && g17p_equiv_probe_reuses_v0(&probes[k])
-                    ? v0[k]
-                    : NULL;
-      any_reuse |= reuse[k] != NULL;
-
-      for (unsigned s = 1; s < nr_samples; ++s) {
-         nir_def *vs = nir_load_local_pixel_agx(
-            &b, probes[k].raw_components, probe_bits, sample_masks[s],
+         v0[k] = nir_channels(
+            &b, chunk_v0[chunk_of[k]],
+            BITFIELD_MASK(probes[k].raw_components) << first);
+      } else {
+         const uint8_t probe_bits =
+            g17p_equiv_probe_bits(&probes[k], reuse_small);
+         v0[k] = nir_load_local_pixel_agx(
+            &b, probes[k].raw_components, probe_bits, sample_masks[0],
             .base = probes[k].base, .format = probes[k].raw_format,
             .target = probes[k].target);
-         nir_def *diff = nir_ixor(&b, v0[k], vs);
-         for (unsigned c = 0; c < probes[k].raw_components; ++c) {
-            nir_def *d = nir_channel(&b, diff, c);
-            nir_def **acc = &diff16;
-            if (d->bit_size != 16) {
-               d = nir_u2u32(&b, d);
-               acc = &diff32;
+
+         for (unsigned s = 1; s < nr_samples; ++s) {
+            nir_def *vs = nir_load_local_pixel_agx(
+               &b, probes[k].raw_components, probe_bits, sample_masks[s],
+               .base = probes[k].base, .format = probes[k].raw_format,
+               .target = probes[k].target);
+            nir_def *diff = nir_ixor(&b, v0[k], vs);
+            for (unsigned c = 0; c < probes[k].raw_components; ++c) {
+               nir_def *d = nir_channel(&b, diff, c);
+               nir_def **acc = &diff16[s];
+               if (d->bit_size != 16) {
+                  d = nir_u2u32(&b, d);
+                  acc = &diff32[s];
+               }
+               *acc = *acc ? nir_ior(&b, *acc, d) : d;
             }
-            *acc = *acc ? nir_ior(&b, *acc, d) : d;
          }
       }
+      reuse[k] = can ? v0[k] : NULL;
+      any_reuse |= can;
+      all_reusable &= can;
+   }
+
+   nir_def *ds[4] = {NULL};
+   nir_def *diff_all = NULL;
+   for (unsigned s = 1; s < nr_samples; ++s) {
+      if (diff16[s] && diff32[s])
+         ds[s] = nir_ior(&b, diff32[s], nir_u2u32(&b, diff16[s]));
+      else if (diff32[s])
+         ds[s] = diff32[s];
+      else if (diff16[s])
+         ds[s] = nir_u2u32(&b, diff16[s]);
+      else
+         ds[s] = nir_imm_int(&b, 0);
+      diff_all = diff_all ? nir_ior(&b, diff_all, ds[s]) : ds[s];
    }
 
    /* A lane disqualifies the whole-pixel fast path if any sample is uncovered
     * (cov_low ^ full_mask != 0) or any probed bit differs across samples.
     * Fold all mismatch bits into one 32-bit word so the subgroup ballot lowers
     * directly to a single witnessed AGX3B 32-bit icmp_ballot(mismatch != 0). */
-   nir_def *mismatch16 =
-      nir_ixor(&b, cov_low, nir_imm_intN_t(&b, full_mask, 16));
-   if (diff16)
-      mismatch16 = nir_ior(&b, mismatch16, diff16);
-   nir_def *mismatch = nir_u2u32(&b, mismatch16);
-   if (diff32)
-      mismatch = nir_ior(&b, mismatch, diff32);
+   nir_def *mismatch = nir_u2u32(
+      &b, nir_ixor(&b, cov_low, nir_imm_intN_t(&b, full_mask, 16)));
+   if (diff_all)
+      mismatch = nir_ior(&b, mismatch, diff_all);
 
    nir_def *any_not_eq = nir_ballot(&b, 1, 32, nir_ine_imm(&b, mismatch, 0));
    nir_def *all_equiv = nir_ieq_imm(&b, any_not_eq, 0);
@@ -1206,20 +1367,242 @@ agx_nir_unroll_g17p_samples_equiv(nir_shader *shader, unsigned nr_samples,
    }
    nir_push_else(&b, nif);
    {
-      for (unsigned i = 0; i < nr_samples; ++i) {
-         nir_cf_list slow_copy;
-         nir_cf_list_clone(&slow_copy, &body, &impl->cf_node, NULL);
-         specialize_g17p_equiv_copy(impl, &slow_copy, sample_masks[i],
-                                    sample_masks[i], probes,
-                                    (i == 0 && any_reuse) ? reuse : NULL,
+      if (has_derivatives) {
+         /* Quad/derivative operations require uniform sample execution across
+          * every 2x2 quad; keep the unrolled per-sample slow path instead of
+          * a divergent per-lane deduplication loop. */
+         for (unsigned i = 0; i < nr_samples; ++i) {
+            nir_cf_list slow_copy;
+            nir_cf_list_clone(&slow_copy, &body, &impl->cf_node, NULL);
+            specialize_g17p_equiv_copy(impl, &slow_copy, sample_masks[i],
+                                       sample_masks[i], probes,
+                                       (i == 0 && any_reuse) ? reuse : NULL,
+                                       num_probes);
+            b.cursor = nir_cf_reinsert(&slow_copy, b.cursor);
+         }
+      } else {
+         /* Deduplicate samples in the slow path: shade sample 0 once for all
+          * covered samples matching sample 0 (reusing sample 0's probed words),
+          * then loop over the remaining covered samples with a single coalesced
+          * copy of the body (and inner deduplication among remaining samples
+          * for 4x MSAA so 2-region edges shade twice instead of four times). */
+         nir_def *eq0 = nir_imm_intN_t(&b, 1, 16);
+         for (unsigned s = 1; s < nr_samples; ++s) {
+            nir_def *same = nir_ieq_imm(&b, ds[s], 0);
+            eq0 = nir_ior(&b, eq0,
+                          nir_bcsel(&b, same,
+                                    nir_imm_intN_t(&b, BITFIELD_BIT(s), 16),
+                                    nir_imm_intN_t(&b, 0, 16)));
+         }
+         nir_def *eq0_mask = nir_bcsel(&b, nir_ine_imm(&b, sample_masks[0], 0),
+                                       nir_iand(&b, eq0, cov_low),
+                                       nir_imm_intN_t(&b, 0, 16));
+         nir_def *rem = nir_ixor(&b, cov_low, eq0_mask);
+
+         nir_cf_list pass0_copy;
+         nir_cf_list_clone(&pass0_copy, &body, &impl->cf_node, NULL);
+         specialize_g17p_equiv_copy(impl, &pass0_copy, sample_masks[0],
+                                    eq0_mask, probes, any_reuse ? reuse : NULL,
                                     num_probes);
-         b.cursor = nir_cf_reinsert(&slow_copy, b.cursor);
+         b.cursor = nir_cf_reinsert(&pass0_copy, b.cursor);
+
+         nir_variable *var_rem =
+            nir_local_variable_create(impl, glsl_uint16_t_type(), "equiv_rem");
+         nir_store_var(&b, var_rem, rem, 1);
+
+         nir_loop *loop = nir_push_loop(&b);
+         loop->control = nir_loop_control_dont_unroll;
+         {
+            nir_def *cur_rem = nir_load_var(&b, var_rem);
+            nir_break_if(&b, nir_ieq_imm(&b, cur_rem, 0));
+
+            nir_def *bit = nir_iand(&b, cur_rem, nir_ineg(&b, cur_rem));
+            nir_def *next_rem = nir_ixor(&b, cur_rem, bit);
+            nir_def *cur_store = bit;
+
+            if (all_reusable) {
+               nir_def *cur_chunks[G17P_EQUIV_MAX_PROBES];
+               nir_def *cur_probes[G17P_EQUIV_MAX_PROBES];
+               g17p_equiv_load_sample(&b, probes, num_probes, chunks,
+                                      num_chunks, chunk_of, reuse_small, bit,
+                                      cur_chunks, cur_probes);
+               if (nr_samples > 2) {
+                  g17p_equiv_inner_dedup(&b, impl, probes, num_probes, chunks,
+                                         num_chunks, chunk_of, reuse_small,
+                                         cur_chunks, cur_probes, &cur_store,
+                                         &next_rem);
+               }
+               nir_store_var(&b, var_rem, next_rem, 1);
+               nir_cf_list slow_copy;
+               nir_cf_list_clone(&slow_copy, &body, &impl->cf_node, NULL);
+               specialize_g17p_equiv_copy(impl, &slow_copy, bit, cur_store,
+                                          probes, cur_probes, num_probes);
+               b.cursor = nir_cf_reinsert(&slow_copy, b.cursor);
+            } else {
+               nir_store_var(&b, var_rem, next_rem, 1);
+               nir_cf_list slow_copy;
+               nir_cf_list_clone(&slow_copy, &body, &impl->cf_node, NULL);
+               specialize_g17p_equiv_copy(impl, &slow_copy, bit, bit, probes,
+                                          NULL, num_probes);
+               b.cursor = nir_cf_reinsert(&slow_copy, b.cursor);
+            }
+         }
+         nir_pop_loop(&b, loop);
       }
    }
    nir_pop_if(&b, nif);
 
    nir_cf_delete(&body);
-   return nir_progress(true, impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
+   if (!has_derivatives)
+      nir_lower_vars_to_ssa(shader);
+   return true;
+}
+
+/*
+ * AGX3B keeps track of which samples of a pixel hold the same tilebuffer
+ * contents, and PIXINFO returns those sample groups for the fragment's coverage
+ * (nir_intrinsic_load_sample_groups_agx). A monolithic multisample local-read
+ * body already lowered to per-sample form then needs one shading per group, not
+ * one per sample, and no software comparison of the samples:
+ *
+ *    w = groups(coverage)
+ *    loop {
+ *       load ..., mask w            ; a sample of group 0 of w
+ *       ... shade ...
+ *       store ..., mask coverage & w
+ *       w >>= 4; break if w == 0
+ *    }
+ *
+ * Every sample of a group holds the same bytes, so the group's shading is the
+ * shading of each of its samples. The body must not depend on the sample index
+ * or position, on other lanes (a divergent loop has no quads), or have side
+ * effects other than tile stores, exactly as for the probed path
+ * (agx_nir_unroll_g17p_samples_equiv()).
+ */
+bool
+agx_nir_unroll_g17p_samples_groups(nir_shader *shader, unsigned nr_samples,
+                                   enum agx_isa_encoding encoding)
+{
+   assert(shader->info.stage == MESA_SHADER_FRAGMENT);
+   if (encoding != AGX_ISA_ENCODING_AGX3B ||
+       (nr_samples != 2 && nr_samples != 4) ||
+       shader->info.fs.uses_discard || shader->info.writes_memory)
+      return false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   unsigned loads = 0, stores = 0;
+   nir_intrinsic_instr *force_early_instr = NULL;
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_call)
+            return false;
+         if (instr->type == nir_instr_type_tex) {
+            if (nir_tex_instr_has_implicit_derivative(nir_instr_as_tex(instr)))
+               return false;
+            continue;
+         }
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         switch (intr->intrinsic) {
+         case nir_intrinsic_sample_mask_agx:
+            if (shader->info.fs.early_fragment_tests && !force_early_instr &&
+                block == nir_start_block(impl) && loads == 0 && stores == 0 &&
+                nir_src_is_const(intr->src[0]) &&
+                nir_src_is_const(intr->src[1]) &&
+                nir_src_as_uint(intr->src[0]) == G17P_EQUIV_ALL_SAMPLES &&
+                nir_src_as_uint(intr->src[1]) == G17P_EQUIV_ALL_SAMPLES) {
+               force_early_instr = intr;
+               continue;
+            }
+            return false;
+
+         case nir_intrinsic_load_active_samples_agx:
+            if (!g17p_equiv_active_samples_uses_valid(&intr->def))
+               return false;
+            continue;
+
+         case nir_intrinsic_load_local_pixel_agx:
+            if (!g17p_equiv_is_valid_tile_mask(intr->src[0].ssa))
+               return false;
+            loads++;
+            continue;
+
+         case nir_intrinsic_store_local_pixel_agx:
+            if (!g17p_equiv_is_valid_tile_mask(intr->src[1].ssa))
+               return false;
+            stores++;
+            continue;
+
+         case nir_intrinsic_load_sample_mask:
+            continue;
+
+         default: {
+            if (g17p_equiv_sample_dependent(intr->intrinsic))
+               return false;
+            const unsigned flags = nir_intrinsic_infos[intr->intrinsic].flags;
+            if (!(flags & NIR_INTRINSIC_CAN_ELIMINATE) ||
+                (flags & (NIR_INTRINSIC_QUADGROUP | NIR_INTRINSIC_SUBGROUP)))
+               return false;
+            if (nir_intrinsic_has_access(intr) &&
+                (nir_intrinsic_access(intr) & ACCESS_VOLATILE))
+               return false;
+            continue;
+         }
+         }
+      }
+   }
+
+   if (loads == 0 || stores == 0)
+      return false;
+
+   if (force_early_instr)
+      nir_instr_remove(&force_early_instr->instr);
+
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   if (force_early_instr)
+      nir_sample_mask_agx(&b, nir_imm_intN_t(&b, G17P_EQUIV_ALL_SAMPLES, 16),
+                          nir_imm_intN_t(&b, G17P_EQUIV_ALL_SAMPLES, 16));
+
+   /* Coverage cannot change in the body: discard, demote, depth and stencil
+    * writes and every other sample-mask update were rejected above. */
+   /* The remaining groups are shifted as a 32-bit word: G17P's SRL takes an
+    * immediate count only at 32 bits. Its low half is the 16-bit mask. */
+   nir_def *coverage = nir_load_active_samples_agx(&b);
+   nir_variable *groups =
+      nir_local_variable_create(impl, glsl_uint_type(), "sample_groups");
+   nir_store_var(&b, groups,
+                 nir_u2u32(&b, nir_load_sample_groups_agx(&b, coverage)), 1);
+
+   nir_loop *loop = nir_push_loop(&b);
+   loop->control = nir_loop_control_dont_unroll;
+   {
+      nir_def *remaining = nir_load_var(&b, groups);
+      nir_def *group = nir_u2u16(&b, remaining);
+      nir_def *store_samples = nir_iand(&b, coverage, group);
+
+      nir_cf_list copy;
+      nir_cf_list_clone(&copy, &body, &impl->cf_node, NULL);
+      specialize_g17p_equiv_copy(impl, &copy, group, store_samples, NULL,
+                                 NULL, 0);
+      b.cursor = nir_cf_reinsert(&copy, b.cursor);
+
+      nir_def *rest = nir_ushr_imm(&b, remaining, 4);
+      nir_store_var(&b, groups, rest, 1);
+      nir_break_if(&b, nir_ieq_imm(&b, rest, 0));
+   }
+   nir_pop_loop(&b, loop);
+
+   nir_cf_delete(&body);
+   nir_progress(true, impl, nir_metadata_none);
+   nir_lower_vars_to_ssa(shader);
+   return true;
 }
 
 static bool movable_zs_source(nir_def *def);

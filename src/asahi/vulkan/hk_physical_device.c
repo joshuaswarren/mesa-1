@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include "hk_gpu_waits.h"
 #include "hk_physical_device.h"
 
 #include "asahi/compiler/agx_compile.h"
@@ -169,7 +170,11 @@ hk_get_device_extensions(const struct agx_device *dev,
     */
    const bool ray_tracing_pipeline = ray_query;
 
+   const bool has_shader_cores = agx_get_num_cores(dev) > 0;
+
    *ext = (struct vk_device_extension_table){
+      .AMD_shader_core_properties = has_shader_cores,
+      .AMD_shader_core_properties2 = has_shader_cores,
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
       .KHR_acceleration_structure = ray_query,
@@ -370,9 +375,10 @@ hk_get_device_extensions(const struct agx_device *dev,
       .EXT_swapchain_maintenance1 = true,
 #endif
       .EXT_texel_buffer_alignment = true,
-      /* Hardware ASTC HDR decode is supported across AGX2 and native AGX3
-       * (G13-G17P); keep HAL300 off until qualified on M5 hardware. */
-      .EXT_texture_compression_astc_hdr = !agx_chip_hal300_path(dev->chip),
+      /* Hardware ASTC HDR decode is supported across AGX2, native AGX3, and
+       * AGX3C/HAL300 (M5: G17G/G17S/G17C). Other HAL300 encodings such as
+       * AGX3D (G18G) stay off until qualified on their hardware. */
+      .EXT_texture_compression_astc_hdr = agx_chip_has_astc_hdr(dev->chip),
       .EXT_tooling_info = true,
       .EXT_transform_feedback = true,
       
@@ -412,7 +418,7 @@ hk_get_device_features(
       
       .taskShader = supported_extensions->EXT_mesh_shader &&
                     (dev->chip == AGX_CHIP_G17P ||
-                     (dev->chip == AGX_CHIP_G17S &&
+                     (agx_chip_g17_m5(dev->chip) &&
                       hk_m5_task_record(dev->params.features))),
       .meshShader = supported_extensions->EXT_mesh_shader,
       /* G17P replays a multiview mesh draw per view, as other draws. */
@@ -440,9 +446,7 @@ hk_get_device_features(
       .textureCompressionASTC_LDR = true,
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
-      .vertexPipelineStoresAndAtomics =
-         instance->drirc.misc.enable_vertex_pipeline_stores_atomics ||
-         agx_chip_g17_m5(dev->chip),
+      .vertexPipelineStoresAndAtomics = true,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
       .shaderImageGatherExtended = true,
@@ -518,7 +522,7 @@ hk_get_device_features(
 
       /* VK_NV_cooperative_matrix2: each feature is enabled where it is
        * implemented. */
-      .cooperativeMatrixWorkgroupScope = false,
+      .cooperativeMatrixWorkgroupScope = supported_extensions->NV_cooperative_matrix2,
       .cooperativeMatrixFlexibleDimensions = supported_extensions->NV_cooperative_matrix2,
       .cooperativeMatrixReductionsNV = supported_extensions->NV_cooperative_matrix2,
       .cooperativeMatrixConversionsNV = supported_extensions->NV_cooperative_matrix2,
@@ -1132,12 +1136,12 @@ hk_get_device_properties(const struct agx_device *dev,
 {
    const unsigned descriptor_generation =
       agx_chip_descriptor_generation(dev->chip);
-   /* AGX3 parts (G15/G16/G17P, M5, and G18G) view texel buffers through the
-    * 2D texture/PBE descriptor with the software alignment tail.
+   /* Both AGX2 and AGX3/M5/G18G view texel buffers through the 2D texture/PBE
+    * descriptor with a software alignment tail.
     */
-   const bool agx3_texel_buffer_tail = agx_chip_agx3_path(dev->chip);
    const bool texel_buffer_single_texel_alignment =
-      hk_descriptor_generation_is_agx2(descriptor_generation) || agx3_texel_buffer_tail;
+      hk_descriptor_generation_is_agx2(descriptor_generation) ||
+      agx_chip_agx3_path(dev->chip);
    /* G17P: what agx_nir_lower_gen1_mesh accepts and the CTS runs there
     * (misc.maximize_invocations_256); no larger mesh workgroup was run. */
    const uint32_t mesh_threads = dev->chip == AGX_CHIP_G17P ? 256 : 1024;
@@ -1181,6 +1185,11 @@ hk_get_device_properties(const struct agx_device *dev,
    *properties = (struct vk_properties){
       .cooperativeMatrixSupportedStages = features->cooperativeMatrix
          ? VK_SHADER_STAGE_COMPUTE_BIT : 0,
+      /* Keep max flexible dimension at 256: AGX3 has 256 16-bit GPRs/thread
+       * (128 32-bit GPRs/thread), and advertising >= 512 causes clients such
+       * as ggml-vulkan to select 128x256 f32 workgroup tiles across 256
+       * threads (128 f32 accumulators/lane = 100% of the register file),
+       * triggering severe register spilling. */
       .cooperativeMatrixFlexibleDimensionsMaxDimension =
          features->cooperativeMatrixFlexibleDimensions ? 256 : 0,
       .apiVersion = hk_get_vk_version(),
@@ -1200,13 +1209,13 @@ hk_get_device_properties(const struct agx_device *dev,
           agx_chip_g17_m5(dev->chip)) ? 2048 : 16384,
       .maxImageDimensionCube = 16384,
       .maxImageArrayLayers = 2048,
-      /* The native AGX3 and M5 texture/PBE includes the software alignment
-       * tail in its height. Reserve the worst-case 15 R8 texels so a
-       * maximally sized view at a single-texel offset still fits the native
-       * 2D descriptor.
+      /* Every 2D texel-buffer texture/PBE with single-texel alignment includes
+       * its software alignment tail in its height. Reserve the worst-case 15
+       * R8 texels so a maximally sized view at a single-texel offset still
+       * fits the 2D descriptor.
        */
       .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE -
-                               (agx3_texel_buffer_tail ? 15 : 0),
+                               (texel_buffer_single_texel_alignment ? 15 : 0),
       .maxUniformBufferRange = 65536,
 
       /* Storage buffers are lowered to global address arithmetic with a
@@ -1371,8 +1380,10 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxComputeSharedMemorySize = HK_MAX_SHARED_SIZE,
       .maxComputeWorkGroupCount = {0x7fffffff, 65535, 65535},
       .maxComputeWorkGroupInvocations = 1024,
-      .maxComputeWorkGroupSize = {
-         1024, 1024, agx_chip_g17_m5(dev->chip) ? 1024 : 64},
+      /* The CDM local size is three 32-bit words and local invocation IDs are
+       * three 16-bit components, so no axis is narrower than the invocation
+       * limit. */
+      .maxComputeWorkGroupSize = {1024, 1024, 1024},
       .subPixelPrecisionBits = 8,
       .subTexelPrecisionBits = 8,
       .mipmapPrecisionBits = 8,
@@ -1766,6 +1777,26 @@ hk_get_device_properties(const struct agx_device *dev,
       .advancedBlendNonPremultipliedDstColor = true,
       .advancedBlendCorrelatedOverlap = true,
       .advancedBlendAllOperations = true,
+
+      /* VK_AMD_shader_core_properties */
+      .shaderEngineCount = MAX2(dev->params.num_clusters_total, 1u),
+      .shaderArraysPerEngineCount = 1,
+      .computeUnitsPerShaderArray = MAX2(dev->params.num_cores_per_cluster, 1u),
+      .simdPerComputeUnit = 1,
+      .wavefrontsPerSimd = 1024 / 32,
+      .wavefrontSize = 32,
+      .sgprsPerSimd = 256,
+      .minSgprAllocation = 0,
+      .maxSgprAllocation = 256,
+      .sgprAllocationGranularity = 1,
+      .vgprsPerSimd = 128,
+      .minVgprAllocation = 4,
+      .maxVgprAllocation = 128,
+      .vgprAllocationGranularity = 4,
+
+      /* VK_AMD_shader_core_properties2 */
+      .shaderCoreFeatures = 0,
+      .activeComputeUnitCount = agx_get_num_cores(dev),
    };
 
    /* Strict residency on M5 relies on soft faults; see
@@ -1964,6 +1995,54 @@ hk_border_emulation_remember(struct hk_physical_device *pdev)
 #endif
 }
 
+static bool
+hk_min_lod_emulation_key(struct hk_physical_device *pdev, cache_key key)
+{
+#ifdef ENABLE_SHADER_CACHE
+   if (!pdev->vk.disk_cache)
+      return false;
+   static const char tag[] = "hk min_lod emulation";
+   const char *process = util_get_process_name();
+   struct mesa_blake3 ctx;
+   blake3_hash hash;
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, tag, sizeof(tag));
+   if (process)
+      _mesa_blake3_update(&ctx, process, strlen(process));
+   _mesa_blake3_final(&ctx, hash);
+   disk_cache_compute_key(pdev->vk.disk_cache, hash, sizeof(hash), key);
+   return true;
+#else
+   return false;
+#endif
+}
+
+void
+hk_min_lod_emulation_recall(struct hk_physical_device *pdev)
+{
+#ifdef ENABLE_SHADER_CACHE
+   cache_key key;
+   size_t size;
+   if (!hk_min_lod_emulation_key(pdev, key))
+      return;
+   void *seen = disk_cache_get(pdev->vk.disk_cache, key, &size);
+   if (seen)
+      p_atomic_set(&pdev->min_lod_emulation, 1);
+   free(seen);
+#endif
+}
+
+void
+hk_min_lod_emulation_remember(struct hk_physical_device *pdev)
+{
+#ifdef ENABLE_SHADER_CACHE
+   static const uint8_t seen = 1;
+   cache_key key;
+   if (hk_min_lod_emulation_key(pdev, key))
+      disk_cache_put(pdev->vk.disk_cache, key, &seen, sizeof(seen), NULL);
+#endif
+}
+
 static void
 hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 {
@@ -1998,6 +2077,7 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, disk_cache_id);
    if (pdev->vk.disk_cache != NULL) {
       hk_border_emulation_recall(pdev);
+      hk_min_lod_emulation_recall(pdev);
       pdev->vk.properties.pipelineBinaryInternalCache = true;
       pdev->vk.properties.pipelineBinaryInternalCacheControl = true;
       pdev->vk.properties.pipelineBinaryPrefersInternalCache = true;
@@ -2227,7 +2307,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
     * VK_KHR_cooperative_matrix does not advertise it. */
    supported_extensions.NV_cooperative_matrix2 = m5_cmat;
 
-   supported_extensions.EXT_mesh_shader = pdev->dev.chip == AGX_CHIP_G17S &&
+   supported_extensions.EXT_mesh_shader = agx_chip_g17_m5(pdev->dev.chip) &&
       (pdev->dev.params.features & DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2);
 
    /* Gen5 adds native component-wise minimum/maximum sampler reduction. */
@@ -2417,6 +2497,21 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    unsigned st_idx = 0;
    pdev->syncobj_sync_type = vk_drm_syncobj_get_type(fd);
+   /* Same-queue binary semaphore waits ordered on the GPU (hk_gpu_waits.h)
+    * need to see every change of a payload. */
+   pdev->syncobj_base_type = pdev->syncobj_sync_type;
+   if ((pdev->dev.params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
+       !pdev->dev.is_virtio && pdev->syncobj_sync_type.features) {
+      hk_gpu_waits_wrap_type(&pdev->syncobj_sync_type,
+                             &pdev->syncobj_base_type);
+      /* Everything that handles a drm_syncobj payload directly recognises
+       * the type with vk_sync_type_is_drm_syncobj(). Should the wrapper ever
+       * break that, keep the original type (hk_gpu_waits then stays off). */
+      if (!vk_sync_type_is_drm_syncobj(&pdev->syncobj_sync_type)) {
+         assert(!"wrapped sync type lost its drm_syncobj identity");
+         pdev->syncobj_sync_type = pdev->syncobj_base_type;
+      }
+   }
    pdev->sync_types[st_idx++] = &pdev->syncobj_sync_type;
    pdev->sync_types[st_idx++] = NULL;
    assert(st_idx <= ARRAY_SIZE(pdev->sync_types));
@@ -2643,6 +2738,36 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
       unsigned max_size =
          ((pdev->dev.params.features & DRM_ASAHI_FEATURE_COMPUTE_MATRIX) &&
           agx_chip_isa_encoding(pdev->dev.chip) == AGX_ISA_ENCODING_AGX3C) ? 16 : 8;
+      if (max_size == 16) {
+         const struct {
+            VkComponentTypeKHR a, b, c;
+            VkBool32 sat;
+         } int8_configs[] = {
+            {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+            {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+            {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT32_KHR, VK_FALSE},
+            {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+            {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+            {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+            {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+            {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+            {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+         };
+         for (unsigned i = 0; i < ARRAY_SIZE(int8_configs); ++i) {
+            vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+               *p = (VkCooperativeMatrixPropertiesKHR) {
+                  .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+                  .MSize = 16, .NSize = 16, .KSize = 16,
+                  .AType = int8_configs[i].a,
+                  .BType = int8_configs[i].b,
+                  .CType = int8_configs[i].c,
+                  .ResultType = int8_configs[i].c,
+                  .saturatingAccumulation = int8_configs[i].sat,
+                  .scope = VK_SCOPE_SUBGROUP_KHR,
+               };
+            }
+         }
+      }
       for (unsigned size = max_size; size >= 8; size /= 2) {
          const VkComponentTypeKHR types[] = {VK_COMPONENT_TYPE_FLOAT16_KHR,
             VK_COMPONENT_TYPE_BFLOAT16_KHR};
@@ -2711,12 +2836,23 @@ hk_GetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV(
    const bool bf16 = pdev->vk.supported_features.shaderBFloat16CooperativeMatrix;
    const struct {
       VkComponentTypeKHR a, b, c;
+      VkBool32 sat;
    } configs[] = {
-      {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
-      {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
-      {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR},
-      {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
-      {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+      {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+      {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+      {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
+      {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_FALSE},
+      {VK_COMPONENT_TYPE_UINT8_KHR, VK_COMPONENT_TYPE_SINT8_KHR, VK_COMPONENT_TYPE_SINT32_KHR, VK_TRUE},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(configs); ++i) {
       if (!bf16 && (configs[i].a == VK_COMPONENT_TYPE_BFLOAT16_KHR ||
@@ -2728,10 +2864,43 @@ hk_GetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV(
             .MGranularity = 16, .NGranularity = 16, .KGranularity = 16,
             .AType = configs[i].a, .BType = configs[i].b,
             .CType = configs[i].c, .ResultType = configs[i].c,
-            .saturatingAccumulation = VK_FALSE,
+            .saturatingAccumulation = configs[i].sat,
             .scope = VK_SCOPE_SUBGROUP_KHR,
             .workgroupInvocations = 0,
          };
+      }
+   }
+   if (pdev->vk.supported_features.cooperativeMatrixWorkgroupScope) {
+      const struct {
+         uint32_t wg_invocations;
+         uint32_t m_gran, n_gran, k_gran;
+      } wg_shapes[] = {
+         {128, 32, 16, 16},
+         {256, 32, 32, 16},
+      };
+      for (unsigned w = 0; w < ARRAY_SIZE(wg_shapes); ++w) {
+         for (unsigned i = 0; i < ARRAY_SIZE(configs); ++i) {
+            if (!bf16 && (configs[i].a == VK_COMPONENT_TYPE_BFLOAT16_KHR ||
+                          configs[i].b == VK_COMPONENT_TYPE_BFLOAT16_KHR))
+               continue;
+            /* 32x16@128 and 32x32@256 split to 8x8 subgroup tiles; iGeMM16x16x16 is 16x16 only. */
+            if (configs[i].a == VK_COMPONENT_TYPE_SINT8_KHR ||
+                configs[i].a == VK_COMPONENT_TYPE_UINT8_KHR)
+               continue;
+            vk_outarray_append_typed(VkCooperativeMatrixFlexibleDimensionsPropertiesNV, &out, p) {
+               *p = (VkCooperativeMatrixFlexibleDimensionsPropertiesNV) {
+                  .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_FLEXIBLE_DIMENSIONS_PROPERTIES_NV,
+                  .MGranularity = wg_shapes[w].m_gran,
+                  .NGranularity = wg_shapes[w].n_gran,
+                  .KGranularity = wg_shapes[w].k_gran,
+                  .AType = configs[i].a, .BType = configs[i].b,
+                  .CType = configs[i].c, .ResultType = configs[i].c,
+                  .saturatingAccumulation = VK_FALSE,
+                  .scope = VK_SCOPE_WORKGROUP_KHR,
+                  .workgroupInvocations = wg_shapes[w].wg_invocations,
+               };
+            }
+         }
       }
    }
    return vk_outarray_status(&out);

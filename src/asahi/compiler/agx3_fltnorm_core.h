@@ -170,6 +170,8 @@ struct agx3_fltnorm_src {
    bool kill; /* register sources only: this is the last read */
    /* Register sources only: take |value| and/or negate it first. */
    bool abs, neg;
+   /* AGX3c register sources only: source is a 16-bit half-float register. */
+   bool is_f16;
 };
 
 /* The packed word `pack` builds and `unpack` reads: pack's f92 and unpack's

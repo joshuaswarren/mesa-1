@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set_layout.h"
@@ -141,15 +142,44 @@ correctness(struct fixture *f)
    CHECK(cmd->state.cs.descriptors.root.dynamic_buffers[0].base_addr == 0x400010);
    CHECK(hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS) != root);
    CHECK(memcmp(old, f->root_map, sizeof(old)) == 0);
+   /* Pure dynamic-offset rebind marks only HK_ROOT_DIRTY_DYNBUF and keeps
+    * non_dynbuf_generation stable; changing set/layout advances it. */
+   {
+      struct hk_descriptor_state *gd = &cmd->state.gfx.descriptors;
+      hk_root_mark_clean(gd);
+      const uint64_t g0 = gd->generation;
+      const uint64_t np0 = gd->non_push_generation;
+      const uint64_t nd0 = gd->non_dynbuf_generation;
+      bind(f, 64, VK_SHADER_STAGE_ALL_GRAPHICS);
+      CHECK(gd->generation == g0 + 1);
+      CHECK(gd->non_push_generation == np0 + 1);
+      CHECK(gd->non_dynbuf_generation == nd0);
+      CHECK(hk_root_bypass_dirty(gd));
+      CHECK(gd->root_change.dynbuf_dirty_mask == BITFIELD64_BIT(0));
+      /* Identical rebind is a no-op and preserves state. */
+      bind(f, 64, VK_SHADER_STAGE_ALL_GRAPHICS);
+      CHECK(gd->generation == g0 + 1 && gd->non_dynbuf_generation == nd0);
+      bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
+      CHECK(gd->non_dynbuf_generation == nd0);
+   }
    /* Switching from push descriptors back to the same set is a real bind. */
    cmd->state.gfx.descriptors.push_active = 1;
    cmd->state.gfx.descriptors.root.sets[0] = 0x500000;
-   bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
+   {
+      const uint64_t nd_before = cmd->state.gfx.descriptors.non_dynbuf_generation;
+      bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
+      CHECK(cmd->state.gfx.descriptors.non_dynbuf_generation == nd_before + 1);
+      CHECK(!hk_root_bypass_dirty(&cmd->state.gfx.descriptors));
+   }
    CHECK(!cmd->state.gfx.descriptors.push_active);
    CHECK(cmd->state.gfx.descriptors.root.sets[0] == f->set->addr);
    /* An identical set with changed dynamic-layout indexing is a real change. */
    f->layout.dynamic_descriptor_offset[0] = 1;
-   bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
+   {
+      const uint64_t nd_before = cmd->state.gfx.descriptors.non_dynbuf_generation;
+      bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
+      CHECK(cmd->state.gfx.descriptors.non_dynbuf_generation == nd_before + 1);
+   }
    CHECK(cmd->state.gfx.descriptors.root.set_dynamic_buffer_start[0] == 1);
    CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[1].base_addr == 0x400020);
    f->layout.dynamic_descriptor_offset[0] = 0;
@@ -1779,12 +1809,16 @@ graphics_launch_replay_correctness(struct fixture *f)
    f->dev.dev.shader_base = shader_base;
    util_dynarray_init(&cmd->large_bos, NULL);
 
-   const enum agx_chip chips[] = {
-      AGX_CHIP_G16G, AGX_CHIP_G17P, AGX_CHIP_G17G, AGX_CHIP_G17S,
-      AGX_CHIP_G17C,
+   const struct {
+      enum agx_chip chip;
+      unsigned clusters;
+   } chips[] = {
+      {AGX_CHIP_G16G, 1}, {AGX_CHIP_G17P, 1}, {AGX_CHIP_G17G, 1},
+      {AGX_CHIP_G17S, 2}, {AGX_CHIP_G17C, 4}, {AGX_CHIP_G17D, 8},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
-      f->dev.dev.chip = chips[i];
+      f->dev.dev.chip = chips[i].chip;
+      f->dev.dev.params.num_clusters_total = chips[i].clusters;
       reset(f);
       cmd->vk.record_result = VK_SUCCESS;
       cmd->ioto = (struct hk_ioto_arena){
@@ -1882,7 +1916,7 @@ graphics_launch_replay_correctness(struct fixture *f)
          .max_bytes_per_tile = 32768,
       };
       const uint64_t msaa1 = hk_upload_usc_words(cmd, hw_fs, &linked_fs);
-      if (agx_chip_g17_m5(chips[i])) {
+      if (agx_chip_g17_m5(chips[i].chip)) {
          CHECK(msaa1 != 0 && cmd->vk.record_result == VK_SUCCESS);
          CHECK(cmd->ioto.programs == 1);
          CHECK(cmd->state.gfx.g17p_ioto[1].admit.s == hw_fs);
@@ -1919,6 +1953,7 @@ graphics_launch_replay_correctness(struct fixture *f)
    *hw_vs = saved_vs;
    *hw_fs = saved_fs;
    f->dev.dev.chip = AGX_CHIP_G17P;
+   f->dev.dev.params.num_clusters_total = 0;
    f->dev.dev.shader_base = 0;
    f->pdev.vk.instance = saved_instance;
    mtx_destroy(&inst.debug_utils.callbacks_mutex);
@@ -2002,6 +2037,485 @@ cached_root_snapshot_elision_correctness(struct fixture *f)
    reset(f);
 }
 
+static void
+direct_draw_fast_path_correctness(struct fixture *f)
+{
+   struct hk_cmd_buffer *cmd = &f->cmd;
+   struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+   const VkCommandBuffer cb = vk_command_buffer_to_handle(&cmd->vk);
+   const VkPipelineLayout layout = vk_pipeline_layout_to_handle(&f->layout);
+
+   /* 1. Direct hk_CmdPushConstants: 4/8/16/32B specialization + no-op elision. */
+   reset(f);
+   const uint32_t v4 = 0x11223344u;
+   const uint64_t v8 = UINT64_C(0x5566778899aabbcc);
+   const uint32_t v16[4] = {1u, 2u, 3u, 4u};
+   const uint32_t v32[8] = {10u, 11u, 12u, 13u, 14u, 15u, 16u, 17u};
+
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &v4);
+   CHECK(desc->generation == 1);
+   CHECK(desc->non_push_generation == 0);
+   CHECK(desc->root_change.dirty_mask == HK_ROOT_DIRTY_PUSH);
+   CHECK(desc->push_written_dwords == 0x1u);
+   CHECK(memcmp(desc->root.push, &v4, 4) == 0);
+
+   /* Identical re-push must be a no-op (generation and dirty state intact). */
+   hk_root_mark_clean(desc);
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &v4);
+   CHECK(desc->generation == 1);
+   CHECK(!hk_root_dirty(desc));
+
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 8, 8, &v8);
+   CHECK(desc->generation == 2);
+   CHECK(desc->root_change.dirty_mask == HK_ROOT_DIRTY_PUSH);
+   CHECK(memcmp(desc->root.push + 8, &v8, 8) == 0);
+   hk_root_mark_clean(desc);
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 8, 8, &v8);
+   CHECK(desc->generation == 2);
+   CHECK(!hk_root_dirty(desc));
+
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 16, 16, v16);
+   CHECK(desc->generation == 3);
+   CHECK(desc->root_change.dirty_mask == HK_ROOT_DIRTY_PUSH);
+   CHECK(memcmp(desc->root.push + 16, v16, 16) == 0);
+   hk_root_mark_clean(desc);
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 16, 16, v16);
+   CHECK(desc->generation == 3);
+   CHECK(!hk_root_dirty(desc));
+
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 32, 32, v32);
+   CHECK(desc->generation == 4);
+   CHECK(memcmp(desc->root.push + 32, v32, 32) == 0);
+   hk_root_mark_clean(desc);
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 32, 32, v32);
+   CHECK(desc->generation == 4);
+   CHECK(!hk_root_dirty(desc));
+
+   /* Compute stage updates identity_copy4_push_mask and cs descriptors. */
+   hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, v16);
+   CHECK(cmd->state.cs.descriptors.generation == 1);
+   CHECK(cmd->state.cs.descriptors.identity_copy4_push_mask == 0xffffu);
+
+   /* 2. Pre-baked push-bypass Ioto template matches hk_agx3_try_push_only_vs_program()
+    * byte-for-byte on both G17P (HAL200) and G17S (M5 HAL300), and armed
+    * hk_CmdDraw() emits identical VDM + Ioto + push bytes and updates state. */
+   const uint64_t shader_base = UINT64_C(0x1000000000);
+   const size_t ioto_capacity = 64 * 1024;
+   uint8_t *ioto_map = calloc(1, ioto_capacity);
+   uint8_t *vdm_buf = calloc(1, 16384);
+   CHECK(ioto_map && vdm_buf);
+
+   struct agx_va arena_va = {.addr = shader_base + 0x20000, .size_B = ioto_capacity};
+   struct agx_bo arena_bo = {
+      .dev = &f->dev.dev,
+      .va = &arena_va,
+      .size = ioto_capacity,
+      .refcnt = 1,
+   };
+   struct agx_va shader_va = {.addr = shader_base + 0x40000, .size_B = 4096};
+   struct agx_bo shader_bo = {
+      .dev = &f->dev.dev,
+      .va = &shader_va,
+      .size = 4096,
+      .refcnt = 1,
+   };
+
+   struct hk_shader *hw_vs = &f->vs_api->variants[HK_VS_VARIANT_HW];
+   const struct hk_shader saved_vs = *hw_vs;
+   hw_vs->info.stage = MESA_SHADER_VERTEX;
+   hw_vs->b.info.stage = MESA_SHADER_VERTEX;
+   hw_vs->info.agx3_uses_root = false;
+   hw_vs->info.agx3_root_uniform = 8;
+   hw_vs->info.set_count = 0;
+   hw_vs->b.info.agx3_root_uniform_usage_valid = true;
+   hw_vs->b.info.agx3_main_uses_root_uniform = false;
+   hw_vs->b.info.agx3_uniform_dma_count = 1;
+   hw_vs->b.info.agx3_uniform_dma[0] = (struct agx3_uniform_dma_span){
+      .source = AGX3_UNIFORM_DMA_POINTER,
+      .pointer = hw_vs->info.agx3_root_uniform,
+      .offset_B = hk_root_descriptor_offset(push),
+      .dest = 16,
+      .halfs = 8, /* 16 bytes of push constants */
+   };
+   hw_vs->agx3_vdm_state_update.source_layout =
+      AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
+
+   struct hk_linked_shader linked_vs = {0};
+   linked_vs.b.bo = &shader_bo;
+   linked_vs.b.entry_offset = 0x80;
+   linked_vs.b.size = 256;
+   linked_vs.b.nr_gprs = 16;
+   linked_vs.b.g17p_compiler_d_valid = true;
+   linked_vs.b.g17p_compiler_d = 16;
+
+   struct vk_instance inst = {0};
+   list_inithead(&inst.debug_utils.callbacks);
+   list_inithead(&inst.debug_utils.instance_callbacks);
+   mtx_init(&inst.debug_utils.callbacks_mutex, mtx_plain);
+   struct vk_instance *const saved_instance = f->pdev.vk.instance;
+   f->pdev.vk.instance = &inst;
+   f->dev.dev.shader_base = shader_base;
+   util_dynarray_init(&cmd->large_bos, NULL);
+
+   const struct {
+      enum agx_chip chip;
+      unsigned clusters;
+   } chips[] = {
+      {AGX_CHIP_G17P, 1},
+      {AGX_CHIP_G17S, 2},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(chips); ++i) {
+      f->dev.dev.chip = chips[i].chip;
+      f->dev.dev.params.num_clusters_total = chips[i].clusters;
+      reset(f);
+      cmd->vk.record_result = VK_SUCCESS;
+      cmd->ioto = (struct hk_ioto_arena){
+         .bo = &arena_bo,
+         .map = ioto_map,
+         .base = arena_va.addr,
+         .capacity = ioto_capacity,
+      };
+      cmd->state.gfx.root = 0x800000;
+      cmd->state.gfx.render.tilebuffer = (struct agx_tilebuffer_layout){
+         .tile_size = 32 * 32,
+         .sample_size_B = 8,
+         .nr_samples = 1,
+         .max_sample_size_B = 64,
+         .max_samples_per_tile = 2048,
+         .max_bytes_per_tile = 32768,
+      };
+
+      /* Initial upload records the launch and loader. */
+      const uint64_t p0 = hk_upload_usc_words(cmd, hw_vs, &linked_vs);
+      CHECK(p0 != 0 && cmd->vk.record_result == VK_SUCCESS);
+
+      /* First bypass draw via reference path establishes bypass_loader. */
+      const uint32_t push_a[4] = {0x101u, 0x202u, 0x303u, 0x404u};
+      hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 16, push_a);
+      const uint64_t p_ref1 =
+         hk_agx3_try_push_only_vs_program(cmd, hw_vs, &linked_vs);
+      CHECK(p_ref1 != 0);
+      hk_root_mark_bypass_launched(desc);
+
+      /* Prepare fast-path template. */
+      struct hk_agx3_direct_draw_fast *fast = &cmd->state.gfx.direct_draw_fast;
+      memset(fast, 0, sizeof(*fast));
+      CHECK(hk_agx3_push_bypass_ioto_prepare(cmd, hw_vs, &linked_vs, fast));
+      CHECK(fast->push_min_B == 0 && fast->push_size_B == 16);
+      CHECK(fast->push_reloc_count >= 1);
+      CHECK(fast->push_range_count == 1);
+
+      /* Compare reference vs fast-path Ioto bytes for identical push VA. */
+      const uint32_t saved_main_off = cmd->uploader.main.offset;
+      const uint32_t saved_ioto_cur = cmd->ioto.cursor;
+      const uint32_t push_b[4] = {0xaaaa0001u, 0xbbbb0002u, 0xcccc0003u, 0xdddd0004u};
+      hk_CmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 16, push_b);
+      const uint64_t p_ref2 =
+         hk_agx3_try_push_only_vs_program(cmd, hw_vs, &linked_vs);
+      CHECK(p_ref2 != 0);
+      uint8_t ref_ioto[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+      memcpy(ref_ioto, ioto_map + (p_ref2 - arena_va.addr), fast->ioto_length);
+
+      /* Rewind both uploaders and execute the armed fast-path hk_CmdDraw. */
+      cmd->uploader.main.offset = saved_main_off;
+      cmd->ioto.cursor = saved_ioto_cur;
+      cmd->state.gfx.g17p_ioto[0].loader_program = p_ref1;
+
+      struct hk_cs cs = {0};
+      cs.type = HK_CS_VDM;
+      cs.start = vdm_buf;
+      cs.current = vdm_buf;
+      cs.end = vdm_buf + 16384;
+      cs.chunk.cpu = vdm_buf;
+      cs.chunk.gpu = 0x900000;
+      cs.g17p_bind_tail.valid = true;
+      cs.g17p_bind_tail.state_compact = 0x12340;
+      cs.m5_ppp_emitted_valid = true;
+      cs.g17p_primitive_bound = 16;
+      cmd->current_cs.gfx = &cs;
+
+      fast->cs = &cs;
+      fast->cs_chunk_gpu = cs.chunk.gpu;
+      fast->dyn_generation = cmd->vk.dynamic_graphics_state.generation;
+      fast->non_push_generation = desc->non_push_generation;
+      fast->vertex_buffer_generation = cmd->state.gfx.vertex_buffer_generation;
+      fast->root = cmd->state.gfx.root;
+      fast->sync_epoch = cmd->sync.epoch;
+      fast->bind_tail_compact = cs.g17p_bind_tail.state_compact;
+      fast->is_hal200 = agx_chip_native_hal200(chips[i].chip);
+      fast->topology = (uint8_t)AGX_PRIMITIVE_TRIANGLES;
+      fast->draw_header_word =
+         (AGX_VDM_HAL200_DIRECT_DRAW_OPCODE << 16) |
+         ((uint32_t)AGX_PRIMITIVE_TRIANGLES << 8);
+      fast->vdm_words[0] = AGX_VDM_STATE_UPDATE_HEADER;
+      fast->vdm_raw_template = 0;
+      fast->push_bypass_ready = true;
+      fast->valid = true;
+
+      /* Push-dirty direct draw: emits 28B VDM state update + direct draw. */
+      hk_CmdDraw(cb, 6, 1, 0, 0);
+      CHECK(cs.stats.calls == 1 && cs.stats.cmds == 1);
+      CHECK(desc->root_change.bypass_launched);
+      CHECK(cmd->state.gfx.g17p_ioto[0].loader_program == p_ref2);
+      CHECK(memcmp(ioto_map + (p_ref2 - arena_va.addr), ref_ioto,
+                   fast->ioto_length) == 0);
+      CHECK(memcmp((uint8_t *)cmd->uploader.main.map + saved_main_off, push_b,
+                   16) == 0);
+      const size_t after_push_draw = (uint8_t *)cs.current - vdm_buf;
+      if (fast->is_hal200) {
+         CHECK(after_push_draw == AGX_VDM_STATE_UPDATE_LENGTH + 16);
+         uint32_t w[4];
+         memcpy(w, vdm_buf + AGX_VDM_STATE_UPDATE_LENGTH, sizeof(w));
+         CHECK(w[0] == fast->draw_header_word && w[1] == 6 && w[2] == 1 &&
+               w[3] == 0);
+      } else {
+         CHECK(after_push_draw > AGX_VDM_STATE_UPDATE_LENGTH);
+      }
+
+      /* Clean repeat draw (no push change): skips VDM state update & Ioto! */
+      const uint32_t ioto_before_clean = cmd->ioto.programs;
+      const uint32_t main_before_clean = cmd->uploader.main.offset;
+      hk_CmdDraw(cb, 12, 2, 3, 0);
+      CHECK(cs.stats.calls == 2 && cs.stats.cmds == 2);
+      CHECK(cmd->ioto.programs == ioto_before_clean);
+      CHECK(cmd->uploader.main.offset == main_before_clean);
+      if (fast->is_hal200) {
+         CHECK((size_t)((uint8_t *)cs.current - vdm_buf) ==
+               after_push_draw + 16);
+         uint32_t w[4];
+         memcpy(w, vdm_buf + after_push_draw, sizeof(w));
+         CHECK(w[0] == fast->draw_header_word && w[1] == 12 && w[2] == 2 &&
+               w[3] == 3);
+      }
+
+      /* Zero-count draw is a fast no-op. */
+      const void *cur_before_zero = cs.current;
+      hk_CmdDraw(cb, 0, 1, 0, 0);
+      CHECK(cs.current == cur_before_zero);
+      CHECK(cs.stats.calls == 2);
+
+      /* A pushed UBO changed between cached draws is uploaded only by the
+       * general path's push-descriptor flush, so the cached draw must not
+       * record over the stale set. */
+      {
+         struct hk_descriptor_set_layout *push_layout = calloc(
+            1, sizeof(*push_layout) + sizeof(push_layout->binding[0]));
+         struct hk_push_descriptor_set *push_set =
+            calloc(1, sizeof(*push_set));
+         CHECK(push_layout && push_set);
+         push_layout->vk.base.type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
+         push_layout->vk.flags =
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT;
+         push_layout->non_variable_descriptor_buffer_size = 64;
+         push_layout->max_buffer_size = 64;
+         push_layout->binding_count = 1;
+         push_layout->binding[0] = (struct hk_descriptor_set_binding_layout){
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .array_size = 1,
+            .offset = 0,
+            .stride = sizeof(struct hk_buffer_address),
+         };
+         struct vk_pipeline_layout push_pl = {0};
+         push_pl.base.type = VK_OBJECT_TYPE_PIPELINE_LAYOUT;
+         push_pl.set_layouts[0] = &push_layout->vk;
+
+         struct hk_buffer ubo = {0};
+         ubo.vk.base.type = VK_OBJECT_TYPE_BUFFER;
+         ubo.vk.base.device = &f->dev.vk;
+         ubo.vk.device_address = 0xa00000;
+         ubo.vk.size = 4096;
+
+         desc->push[0] = push_set;
+         VkDescriptorBufferInfo bi = {
+            .buffer = hk_buffer_to_handle(&ubo),
+            .offset = 256,
+            .range = 64,
+         };
+         VkWriteDescriptorSet write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo = &bi,
+         };
+         VkPushDescriptorSetInfoKHR push_info = {
+            .sType = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO_KHR,
+            .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
+            .layout = vk_pipeline_layout_to_handle(&push_pl),
+            .set = 0,
+            .descriptorWriteCount = 1,
+            .pDescriptorWrites = &write,
+         };
+
+         const uint64_t root_set0 = desc->root.sets[0];
+         const uint64_t npg = desc->non_push_generation;
+         hk_CmdPushDescriptorSet2KHR(cb, &push_info);
+         CHECK(desc->push_dirty == BITFIELD_BIT(0));
+         CHECK(desc->non_push_generation == npg);
+         CHECK(desc->root.sets[0] == root_set0);
+         CHECK(fast->valid);
+
+         /* With the push pending the cached draw declines and the general
+          * path flushes the new set; without the guard the cached draw
+          * records here over the old root.sets[0]. The general path cannot
+          * finish the draw in this fixture, so no command is counted. */
+         const void *cur_before_push = cs.current;
+         hk_CmdDraw(cb, 6, 1, 0, 0);
+         CHECK(cs.current == cur_before_push);
+         CHECK(cs.stats.calls == 2);
+         CHECK(desc->push_dirty == 0);
+         CHECK(desc->root.sets[0] != root_set0);
+         CHECK(desc->non_push_generation != npg);
+         cmd->vk.record_result = VK_SUCCESS;
+
+         /* The flushed set invalidated the cached draw until it re-arms. */
+         hk_CmdDraw(cb, 6, 1, 0, 0);
+         CHECK(cs.current == cur_before_push);
+         CHECK(cs.stats.calls == 2);
+         cmd->vk.record_result = VK_SUCCESS;
+
+         hk_push_descriptor_set_reset_upload(push_set);
+         desc->push[0] = NULL;
+         desc->push_active = 0;
+         free(push_set);
+         free(push_layout);
+      }
+
+      /* Only the draw that armed the cached direct draw may leave it valid.
+       * A vertex shader bind followed by a draw that consumes the dirty bits
+       * without re-arming (an indirect draw) must not let a later direct
+       * draw reuse what the old shader published: the new one reads
+       * firstInstance. */
+      {
+         struct vk_dynamic_graphics_state *dyn =
+            &cmd->vk.dynamic_graphics_state;
+         struct hk_buffer args = {0};
+         args.vk.base.type = VK_OBJECT_TYPE_BUFFER;
+         args.vk.base.device = &f->dev.vk;
+         args.vk.device_address = 0xb00000;
+         args.vk.size = 4096;
+
+         /* Re-admit the cached draw over the current state. */
+         hk_root_mark_clean(desc);
+         fast->non_push_generation = desc->non_push_generation;
+         fast->valid = true;
+         hk_CmdDraw(cb, 6, 1, 0, 0);
+         CHECK(cs.stats.calls == 3);
+
+         struct hk_api_shader *base_vs =
+            calloc(1, hk_api_shader_size(MESA_SHADER_VERTEX, false));
+         CHECK(base_vs);
+         base_vs->vk.stage = MESA_SHADER_VERTEX;
+         base_vs->variants[HK_VS_VARIANT_HW] = *hw_vs;
+         base_vs->variants[HK_VS_VARIANT_HW].b.info.uses_base_param = true;
+
+         hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_VERTEX, base_vs);
+         CHECK(!fast->valid);
+
+         /* A dirty draw that does not re-arm leaves the cached draw dropped
+          * even if the cache was still standing when it started. */
+         fast->valid = true;
+         hk_CmdDrawIndirect(cb, hk_buffer_to_handle(&args), 0, 1, 16);
+         CHECK(!fast->valid);
+         cmd->vk.record_result = VK_SUCCESS;
+
+         /* The indirect draw consumed the dirty bits; the direct draw with a
+          * new firstInstance still takes the general path. */
+         vk_dynamic_graphics_state_clear_dirty(dyn);
+         cmd->state.gfx.dirty = 0;
+         cmd->state.gfx.shaders_dirty = 0;
+         cmd->state.gfx.linked_dirty = 0;
+         hk_root_mark_clean(desc);
+         const uint32_t calls_before = cs.stats.calls;
+         hk_CmdDraw(cb, 6, 1, 0, 7);
+         CHECK(cs.stats.calls == calls_before);
+         cmd->vk.record_result = VK_SUCCESS;
+
+         hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_VERTEX, f->vs_api);
+         free(base_vs);
+      }
+
+      /* A cached draw armed while a stage was bound without image-view minLod
+       * emulation stands for that shader. Once the device creates a view with
+       * minLod > base, hk_draw_impl() switches the stage to its emulating
+       * twin, so the cached draw must decline and leave the draw to it. */
+      {
+         struct vk_dynamic_graphics_state *dyn =
+            &cmd->vk.dynamic_graphics_state;
+         vk_dynamic_graphics_state_clear_dirty(dyn);
+         cmd->state.gfx.dirty = 0;
+         cmd->state.gfx.shaders_dirty = 0;
+         cmd->state.gfx.linked_dirty = 0;
+         hk_root_mark_clean(desc);
+         cs.g17p_bind_tail.valid = true;
+         cs.g17p_bind_tail.state_compact = fast->bind_tail_compact;
+         cs.m5_ppp_emitted_valid = true;
+         fast->cs = &cs;
+         fast->cs_chunk_gpu = cs.chunk.gpu;
+         fast->dyn_generation = dyn->generation;
+         fast->non_push_generation = desc->non_push_generation;
+         fast->vertex_buffer_generation =
+            cmd->state.gfx.vertex_buffer_generation;
+         fast->root = cmd->state.gfx.root;
+         fast->sync_epoch = cmd->sync.epoch;
+         fast->min_lod_free_stages = BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+         fast->valid = true;
+         CHECK(!p_atomic_read(&f->pdev.min_lod_emulation));
+
+         /* Emulation not yet needed: the cached draw still records. */
+         const uint32_t calls_armed = cs.stats.calls;
+         hk_CmdDraw(cb, 6, 1, 0, 0);
+         CHECK(cs.stats.calls == calls_armed + 1);
+         CHECK(fast->valid);
+
+         /* The device needs emulation now: the cached draw declines and the
+          * general path records the draw, which drops the cached draw or
+          * re-arms it over the stages it bound. Without the guard the cached
+          * draw records and stays armed over the minLod-free stage. */
+         p_atomic_set(&f->pdev.min_lod_emulation, 1);
+         hk_CmdDraw(cb, 6, 1, 0, 0);
+         CHECK(!fast->valid || fast->min_lod_free_stages !=
+                                  BITFIELD_BIT(MESA_SHADER_FRAGMENT));
+         cmd->vk.record_result = VK_SUCCESS;
+
+         p_atomic_set(&f->pdev.min_lod_emulation, 0);
+         fast->min_lod_free_stages = 0;
+      }
+
+      cmd->current_cs.gfx = NULL;
+      hk_g17p_linked_graphics_cache_finish(&f->dev, &linked_vs);
+   }
+
+   /* A remembered unsupported vertex program never outlives a full state
+    * invalidation. */
+   static const struct hk_linked_shader unsupported_vs;
+   struct hk_agx3_direct_draw_fast *fast = &cmd->state.gfx.direct_draw_fast;
+   fast->valid = true;
+   fast->unsupported_linked_vs = &unsupported_vs;
+   hk_cmd_buffer_dirty_all(cmd);
+   CHECK(fast->unsupported_linked_vs == NULL);
+   CHECK(!fast->valid);
+   vk_dynamic_graphics_state_clear_dirty(&cmd->vk.dynamic_graphics_state);
+
+   util_dynarray_fini(&cmd->large_bos);
+   free(cmd->retained_set);
+   cmd->retained_set = NULL;
+   cmd->retained_set_capacity = 0;
+   cmd->retained_set_count = 0;
+   memset(cmd->recent_retained_bos, 0, sizeof(cmd->recent_retained_bos));
+   memset(&cmd->ioto, 0, sizeof(cmd->ioto));
+   *hw_vs = saved_vs;
+   f->dev.dev.chip = AGX_CHIP_G17P;
+   f->dev.dev.params.num_clusters_total = 0;
+   f->dev.dev.shader_base = 0;
+   f->pdev.vk.instance = saved_instance;
+   mtx_destroy(&inst.debug_utils.callbacks_mutex);
+   cmd->vk.record_result = VK_SUCCESS;
+   free(vdm_buf);
+   free(ioto_map);
+   reset(f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2015,6 +2529,7 @@ main(int argc, char **argv)
    xfer_clean_isolation_correctness(f);
    combined_sampler_retention_correctness(f);
    cached_root_snapshot_elision_correctness(f);
+   direct_draw_fast_path_correctness(f);
    run(f, "identical", 16, batches);
    run(f, "change_every_4", 4, batches);
    run(f, "change_every_draw", 1, batches);

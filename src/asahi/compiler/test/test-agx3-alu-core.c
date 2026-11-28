@@ -2336,6 +2336,8 @@ static void test_int_to_float_liveness(void)
    exact(out,len,"a70756000200ac60");
    assert(agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3B,0,2,true,AGX3_ALU_HINT_NONE,false,32,out,&len));
    exact(out,len,"a707560002048c60");
+   assert(agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3B,14,14,false,AGX3_ALU_HINT_DISCARD,true,0,out,&len));
+   exact(out,len,"a707540e031cac20");
    puts("Integer-to-float: four native signed/unsigned live/dead vectors PASS");
 }
 

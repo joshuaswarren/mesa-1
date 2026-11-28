@@ -185,3 +185,109 @@ TEST(BgShaderSchedule, NormalSingleStoreFragmentStillHoistsSamples)
    expect_tile_stores_in_low_bank(s.b->shader, 1u);
    ralloc_free(s.mem);
 }
+
+/* Regression test for issue #1253: on AGX3C, layered 8x MSAA RGBA32 reload
+ * background shaders emit 8 four-channel (8-half) ST_TILE stores to pixel
+ * offset 0 (16-half bank). ILP must not hoist four 8-half payloads (32 halves)
+ * ahead of wait_pix + st_tile and overflow agx3_tile_store_bank(). */
+static void
+test_layered_8x_rgba32_reload(enum agx_chip chip)
+{
+   tile_schedule_shader s;
+   shader_init(&s, chip, true);
+   s.key.fs.nr_samples = 8;
+
+   agx_builder *b = s.b;
+   b->cursor = agx_after_block(s.body);
+
+   agx_index coords = agx_preload(b, agx_register(0, AGX_SIZE_32));
+   agx_index layer = agx_preload(b, agx_register(2, AGX_SIZE_32));
+   agx_wait_pix(b, 0x0001);
+   for (unsigned i = 0; i < 8; ++i) {
+      agx_index sample_idx = agx_mov_imm(b, 32, i);
+      agx_index sample_coord = agx_vec_temp(b->shader, AGX_SIZE_32, 3);
+      agx_instr *cc = agx_collect_to(b, sample_coord, 3);
+      cc->src[0] = coords;
+      cc->src[1] = layer;
+      cc->src[2] = sample_idx;
+
+      agx_index texel = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+      agx_texture_load_to(b, texel, sample_coord, agx_immediate(0),
+                          agx_immediate(0), agx_immediate(0), agx_zero(),
+                          agx_null(), AGX_DIM_2D_MS_ARRAY,
+                          AGX_LOD_MODE_AUTO_LOD, 0xf, false, false);
+
+      agx_st_tile(b, texel, agx_immediate(1u << i), agx_null(),
+                  AGX_FORMAT_I32, 0xf, 0, false, 0);
+   }
+   agx_stop(b);
+
+   agx_ilp_schedule(s.b->shader);
+   EXPECT_LE(loads_before_first_tile_store(s.body), 2u);
+
+   agx_ra(s.b->shader);
+   EXPECT_FALSE(s.b->shader->ra_failed);
+   expect_tile_stores_in_low_bank(s.b->shader, 8u);
+   ralloc_free(s.mem);
+}
+
+TEST(BgShaderSchedule, Layered8xRgba32ReloadKeepsTileStoreBankOnG17S)
+{
+   test_layered_8x_rgba32_reload(AGX_CHIP_G17S);
+}
+
+TEST(BgShaderSchedule, Layered8xRgba32ReloadKeepsTileStoreBankOnG17G)
+{
+   test_layered_8x_rgba32_reload(AGX_CHIP_G17G);
+}
+
+/* A per-sample reload of an R32 target on AGX3 stores channel 0 split from
+ * each eight-half 2D_MS texel fetch. RA places the whole fetched vector
+ * in the tile-store bank (a split channel takes its vector's register), so
+ * hoisting all four fetches ahead of the first ST_TILE needs 32 halves of the
+ * 16-half bank even though the stored channels only total eight. ILP must
+ * count the vectors, not just the stored channels. */
+static void
+test_split_ms_reload(enum agx_chip chip)
+{
+   tile_schedule_shader s;
+   shader_init(&s, chip, true);
+
+   agx_builder *b = s.b;
+   b->cursor = agx_after_block(s.body);
+
+   agx_index coords = agx_preload(b, agx_register(0, AGX_SIZE_32));
+   for (unsigned i = 0; i < 4; ++i) {
+      agx_index texel = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+      agx_texture_load_to(b, texel, coords, agx_immediate(i),
+                          agx_immediate(0), agx_immediate(0), agx_zero(),
+                          agx_null(), AGX_DIM_2D_MS, AGX_LOD_MODE_AUTO_LOD,
+                          0xf, false, false);
+
+      agx_instr *split = agx_split(b, 4, texel);
+      for (unsigned c = 0; c < 4; ++c)
+         split->dest[c] = agx_temp(b->shader, AGX_SIZE_32);
+
+      agx_st_tile(b, split->dest[0], agx_immediate(1u << i), agx_null(),
+                  AGX_FORMAT_I32, 0x1, 0, false, 0);
+   }
+   agx_stop(b);
+
+   agx_ilp_schedule(s.b->shader);
+   EXPECT_LE(loads_before_first_tile_store(s.body), 2u);
+
+   agx_ra(s.b->shader);
+   EXPECT_FALSE(s.b->shader->ra_failed);
+   expect_tile_stores_in_low_bank(s.b->shader, 4u);
+   ralloc_free(s.mem);
+}
+
+TEST(BgShaderSchedule, SplitMsR32ReloadKeepsTileStoreBankOnG17P)
+{
+   test_split_ms_reload(AGX_CHIP_G17P);
+}
+
+TEST(BgShaderSchedule, SplitMsR32ReloadKeepsTileStoreBankOnG16G)
+{
+   test_split_ms_reload(AGX_CHIP_G16G);
+}
