@@ -503,6 +503,19 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
          AGX3_TEX_OPERAND_IMMEDIATE);
 
+   /* Every G17G cube witness compares, so a cube sample without a
+    * comparison has no AGX3c form and stays refused rather than
+    * extrapolated from the colour or gather profiles. */
+   if (enc == AGX_ISA_ENCODING_AGX3C && d->cube && !d->shadow)
+      return false;
+
+   /* Likewise the three-d sample: G17G's witnessed dimensioned forms are
+    * fetches (agx3_tex_encode_fetch) and shadow comparisons; a colour 3D
+    * sample has no AGX3c form and stays refused. */
+   if (enc == AGX_ISA_ENCODING_AGX3C && d->three_d && !d->shadow &&
+       !d->query_lod)
+      return false;
+
    /* The native clamp corpus covers non-array fragment 2D/3D samples,
     * including 2D comparison/offset and indexed descriptor operands. */
    /* Sparse residency is witnessed on AGX3b for the implicit, immediate
@@ -665,7 +678,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
    const unsigned sk = d->sampler_kind ? d->sampler_kind : 1;
    if (tk > 3 || sk > 3 ||
-       ((tk != 1 || sk != 1) && enc != AGX_ISA_ENCODING_AGX3B && !gpu1_binding &&
+       ((tk != 1 || sk != 1) && enc != AGX_ISA_ENCODING_AGX3B &&
+        !(gpu1_binding && d->cube) &&
         !gpu1_indirect_gather &&
         !((tk == AGX3_TEX_OPERAND_UNIFORM ||
            tk == AGX3_TEX_OPERAND_REGISTER) && sk == tk && d->array &&

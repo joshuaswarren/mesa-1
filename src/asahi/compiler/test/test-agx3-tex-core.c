@@ -1104,8 +1104,16 @@ test_gradient_and_register_bias(void)
       bad_gather.lod_x64 = 32;
       CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
                                     bytes, &length));
-      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &gd, bytes,
-                                    &length));
+      /* AGX3C publishes the same four gathers on its 15-byte-frame form;
+       * the component selector rides the same field the AGX3B pins use. */
+      const char *const gathers_c[] = {
+         "0f06160041800021011810000000", "0f06160041802021011810000000",
+         "0f06160041804021011810000000", "0f06160041806021011810000000",
+      };
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &gd, bytes,
+                                   &length));
+      CHECK(length == 14 &&
+            hex_eq(bytes, length, gathers_c[g - AGX3_TEX_GATHER_R]));
    }
 
    /* Apple's depth2d sample_compare differs from the ordinary sample by
@@ -1207,8 +1215,13 @@ test_gradient_and_register_bias(void)
 
    /* The gradient is AGX3b-only; the per-lane bias is witnessed on G17G too
     * and neither carries an immediate LOD. */
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &grad, bytes,
-                                 &length));
+   /* G18's gradient publication (g18-gradient-reference) covers this plain
+    * 2D fragment gradient on the wide AGX3C staging form. */
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &grad, bytes,
+                                &length));
+   CHECK(length == 22 &&
+         hex_eq(bytes, length,
+                "0f061200418061690118010000000000008000000000"));
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bias_reg, bytes,
                                 &length));
    CHECK(length == 22);
@@ -3332,8 +3345,10 @@ test_m5_indexed_reads(void)
    d.lod_x64 = 64;
    CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
    d.lod_x64 = 0;
+   /* Native659 also covers the scalar register-descriptor array read. */
    d.mask = 1;
-   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f061a00458080000028"));
    d.mask = 15;
    d.sampler_value = 1;
    CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
@@ -3428,8 +3443,10 @@ test_query_lod_witnesses(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(hex_eq(bytes, length, "15820ca830010000010010000100"));
 
+   /* Native949 grounds the AGX3c lod query on the compact form. */
    d = base;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(length == 10 && hex_eq(bytes, length, "0f061601418020290018"));
    d.width = AGX3_TEX_W16;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = base;
