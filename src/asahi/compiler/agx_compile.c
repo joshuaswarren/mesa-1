@@ -12872,6 +12872,17 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       return false;
    }
 
+   /* AGX3B has a grounded dynamic/static TPS path for the scratch fallback;
+    * AGX3C has no corresponding witness, so a shader still carrying scratch
+    * is refused before lowering rather than launched unproven. The output
+    * stays transactional: nothing below touches `out`. */
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       nir->scratch_size != 0) {
+      agx_set_refusal(NULL, "AGX3C scratch path has no TPS witness",
+                      __LINE__);
+      return false;
+   }
+
    /* If required, tag writes will be enabled by instruction selection */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       info->tag_write_disable = !nir->info.writes_memory;
