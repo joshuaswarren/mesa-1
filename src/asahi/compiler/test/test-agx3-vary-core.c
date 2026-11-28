@@ -23,13 +23,11 @@ int main(void){
       else pass++;
    }
    {
-      static const uint8_t centroid_c[] =
-         {0x27,0x01,0x04,0x0a,0x2a,0x20,0xaa,0x02,0x00,0x80};
       uint8_t out[AGX3_VARY_MAX_LENGTH]; uint8_t len=0;
-      if(!agx3_vary_interp_at(AGX_ISA_ENCODING_AGX3C,0,1,true,
-                              AGX3_VARY_CENTROID,out,&len) ||
-         len!=sizeof(centroid_c) || memcmp(out,centroid_c,sizeof(centroid_c)))
-         fail++;
+      /* G17G/G18G have no implicit centroid register: the token is
+       * allocated normally, so the bare centroid interp refuses. */
+      if(agx3_vary_interp_at(AGX_ISA_ENCODING_AGX3C,0,1,true,
+                             AGX3_VARY_CENTROID,out,&len)) fail++;
       else pass++;
 
       if(agx3_vary_interp(AGX_ISA_ENCODING_AGX3B,1,0,false,out,&len)) fail++; else pass++;
@@ -123,11 +121,17 @@ int main(void){
       else
          pass++;
 
-      if (agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3C, 0, 0, true, 0, out,
-                                  &len))
-         fail++;
-      else
-         pass++;
+      {
+         static const uint8_t scoords_c[] = {0x27,0x00,0x24,0x1a,0x2a,
+                                             0x00,0xab,0x02,0x00,0x02};
+         if (!agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3C, 0, 0, true, 0,
+                                      out, &len) ||
+             len != sizeof(scoords_c) ||
+             memcmp(out, scoords_c, sizeof(scoords_c)))
+            fail++;
+         else
+            pass++;
+      }
       if (agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3B, 1, 0, true, 0, out,
                                   &len))
          fail++;
@@ -182,7 +186,17 @@ int main(void){
       if(!agx3_vary_centroid_coords(AGX_ISA_ENCODING_AGX3B,4,0,true,1,out,&len) ||
          len!=sizeof(centroid_linear) ||
          memcmp(out,centroid_linear,sizeof(centroid_linear))) fail++; else pass++;
-      if(agx3_vary_centroid_coords(AGX_ISA_ENCODING_AGX3C,4,0,true,1,out,&len)) fail++; else pass++;
+      {
+         static const uint8_t ccoords_c[] = {0x27,0x04,0x24,0x1a,0x2a,
+                                             0x00,0xab,0x0a,0x00,0x00};
+         if (!agx3_vary_centroid_coords(AGX_ISA_ENCODING_AGX3C, 4, 0, true,
+                                        1, out, &len) ||
+             len != sizeof(ccoords_c) ||
+             memcmp(out, ccoords_c, sizeof(ccoords_c)))
+            fail++;
+         else
+            pass++;
+      }
       if(agx3_vary_interp_at(AGX_ISA_ENCODING_AGX3B,0,1,true,
                              AGX3_VARY_CENTROID,out,&len)) fail++; else pass++;
    }

@@ -38,9 +38,10 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
                       uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
    /* Native657's1x/2x/4x G17G/G18G center profiles also carry the
-    * private RHW marker, including first-input metadata on the first load. */
+    * private RHW marker, as first-input metadata on the first load only:
+    * the bare re-issue has no AGX3c form. */
    const bool native_center_rhw = enc == AGX_ISA_ENCODING_AGX3C &&
-      projective_rhw && !explicit_sample && perspective &&
+      projective_rhw && !explicit_sample && perspective && first &&
       location == AGX3_VARY_CENTER && coef_index <= 0x7f;
 
    /* Native G17G/G18G pipelines use the same explicit coordinate token for
