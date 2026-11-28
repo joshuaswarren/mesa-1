@@ -123,6 +123,191 @@
  * known, so it is not emitted; hardware will say whether it matters.
  */
 #include "agx3_transcode.h"
+
+#include <stdatomic.h>
+#include <stdlib.h>
+
+/*
+ * Lockless 4-way set-associative try-seqlock cache for G18G Ioto instruction
+ * re-encoding. Compute/graphics dispatches emit the same ~12-17 Ioto
+ * instructions repeatedly; caching non-branch, non-flag instruction encodings
+ * skips agx3c_instr_length, agx3_decode, agx3_compose_apple_order and
+ * agx3d_instr_length on hits while remaining byte-identical to uncached
+ * transcoding. Process-wide BSS (not TLS, matching agx3_compose.c's
+ * initial-exec TLS constraint).
+ */
+#define IOTO_CACHE_SETS 512u
+#define IOTO_CACHE_WAYS 4u
+#define IOTO_CACHE_MAX_BYTES 16u
+
+struct ioto_cache_slot {
+   _Atomic uint32_t seq;   /* 0 = empty, even > 0 = stable, odd = writer */
+   _Atomic uint64_t w[5];  /* in[16], out[16], packed metadata */
+};
+
+static struct ioto_cache_slot ioto_cache[IOTO_CACHE_SETS][IOTO_CACHE_WAYS];
+static _Atomic uint32_t ioto_cache_rr[IOTO_CACHE_SETS];
+static _Atomic int ioto_cache_mode = -1; /* -1 uninit, 0 off, 1 on, 2 verify */
+
+static inline int
+ioto_cache_get_mode(void)
+{
+   int m = atomic_load_explicit(&ioto_cache_mode, memory_order_relaxed);
+   if (m < 0) {
+      const char *v = getenv("AGX3_TRANSCODE_VERIFY");
+      const char *e = getenv("AGX3_TRANSCODE_CACHE");
+      if (v && v[0] && v[0] != '0')
+         m = 2;
+      else if (e && e[0] == '0')
+         m = 0;
+      else
+         m = 1;
+      atomic_store_explicit(&ioto_cache_mode, m, memory_order_relaxed);
+   }
+   return m;
+}
+
+static inline unsigned
+ioto_cache_set(const uint8_t *in, unsigned avail, bool helper_base_next)
+{
+   uint32_t h0 = 0;
+   if (avail >= 4)
+      memcpy(&h0, in, 4);
+   else if (avail >= 2) {
+      uint16_t t;
+      memcpy(&t, in, 2);
+      h0 = t;
+   }
+   uint32_t h = (h0 ^ (helper_base_next ? 0x9e3779b9u : 0u)) * 2654435761u;
+   return (h >> 23) & (IOTO_CACHE_SETS - 1u);
+}
+
+static inline uint64_t
+ioto_cache_pack_meta(unsigned in_len, unsigned out_len, bool api_program,
+                     bool helper_base_next, bool next_helper_base,
+                     bool depends_ioto, unsigned shader_gprs)
+{
+   return ((uint64_t)in_len) |
+          ((uint64_t)out_len << 8) |
+          ((uint64_t)(api_program ? 1u : 0u) << 16) |
+          ((uint64_t)(helper_base_next ? 1u : 0u) << 17) |
+          ((uint64_t)(next_helper_base ? 1u : 0u) << 18) |
+          ((uint64_t)(depends_ioto ? 1u : 0u) << 19) |
+          ((uint64_t)(shader_gprs & 0xffffu) << 32);
+}
+
+static bool
+ioto_cache_lookup(const uint8_t *in, unsigned avail,
+                  const struct agx3_transcode_ioto *ioto,
+                  bool helper_base_next,
+                  uint8_t out_bytes[IOTO_CACHE_MAX_BYTES],
+                  unsigned *in_len_out, unsigned *out_len_out,
+                  bool *next_helper_base_out)
+{
+   if (avail < 2 || ioto->shader_gprs > 0xffffu)
+      return false;
+
+   const unsigned set = ioto_cache_set(in, avail, helper_base_next);
+   for (unsigned way = 0; way < IOTO_CACHE_WAYS; ++way) {
+      const struct ioto_cache_slot *slot = &ioto_cache[set][way];
+      const uint32_t s1 = atomic_load_explicit(&slot->seq, memory_order_acquire);
+      if (s1 == 0u || (s1 & 1u) != 0u)
+         continue;
+      const uint64_t w0 = atomic_load_explicit(&slot->w[0], memory_order_relaxed);
+      const uint64_t w1 = atomic_load_explicit(&slot->w[1], memory_order_relaxed);
+      const uint64_t w2 = atomic_load_explicit(&slot->w[2], memory_order_relaxed);
+      const uint64_t w3 = atomic_load_explicit(&slot->w[3], memory_order_relaxed);
+      const uint64_t w4 = atomic_load_explicit(&slot->w[4], memory_order_relaxed);
+      atomic_thread_fence(memory_order_acquire);
+      const uint32_t s2 = atomic_load_explicit(&slot->seq, memory_order_relaxed);
+      if (s1 != s2)
+         continue;
+
+      const unsigned in_len = (unsigned)(w4 & 0xffu);
+      const unsigned out_len = (unsigned)((w4 >> 8) & 0xffu);
+      if (in_len == 0 || in_len > IOTO_CACHE_MAX_BYTES || in_len > avail ||
+          out_len == 0 || out_len > IOTO_CACHE_MAX_BYTES)
+         continue;
+      if ((((w4 >> 17) & 1u) != 0u) != helper_base_next)
+         continue;
+      const bool depends_ioto = ((w4 >> 19) & 1u) != 0u;
+      if (depends_ioto) {
+         if ((((w4 >> 16) & 1u) != 0u) != ioto->api_program ||
+             (unsigned)((w4 >> 32) & 0xffffu) != ioto->shader_gprs)
+            continue;
+      }
+
+      uint8_t cin[IOTO_CACHE_MAX_BYTES];
+      memcpy(cin, &w0, 8);
+      memcpy(cin + 8, &w1, 8);
+      if (memcmp(in, cin, in_len) != 0)
+         continue;
+
+      memcpy(out_bytes, &w2, 8);
+      memcpy(out_bytes + 8, &w3, 8);
+      *in_len_out = in_len;
+      *out_len_out = out_len;
+      *next_helper_base_out = ((w4 >> 18) & 1u) != 0u;
+      return true;
+   }
+   return false;
+}
+
+static void
+ioto_cache_insert(const uint8_t *in, unsigned avail, unsigned in_len,
+                  const uint8_t *out, unsigned out_len,
+                  const struct agx3_transcode_ioto *ioto,
+                  bool helper_base_next, bool next_helper_base,
+                  bool depends_ioto)
+{
+   if (in_len < 2 || in_len > IOTO_CACHE_MAX_BYTES ||
+       out_len < 2 || out_len > IOTO_CACHE_MAX_BYTES ||
+       ioto->shader_gprs > 0xffffu)
+      return;
+
+   const unsigned set = ioto_cache_set(in, avail, helper_base_next);
+   unsigned victim = IOTO_CACHE_WAYS;
+   for (unsigned way = 0; way < IOTO_CACHE_WAYS; ++way) {
+      if (atomic_load_explicit(&ioto_cache[set][way].seq, memory_order_relaxed) == 0u) {
+         victim = way;
+         break;
+      }
+   }
+   if (victim == IOTO_CACHE_WAYS) {
+      victim = atomic_fetch_add_explicit(&ioto_cache_rr[set], 1u, memory_order_relaxed) &
+               (IOTO_CACHE_WAYS - 1u);
+   }
+
+   struct ioto_cache_slot *slot = &ioto_cache[set][victim];
+   uint32_t s = atomic_load_explicit(&slot->seq, memory_order_relaxed);
+   if (s & 1u)
+      return;
+   if (!atomic_compare_exchange_strong_explicit(
+          &slot->seq, &s, s + 1u, memory_order_acquire, memory_order_relaxed))
+      return;
+   atomic_thread_fence(memory_order_release);
+
+   uint8_t cin[IOTO_CACHE_MAX_BYTES] = {0};
+   uint8_t cout[IOTO_CACHE_MAX_BYTES] = {0};
+   memcpy(cin, in, in_len);
+   memcpy(cout, out, out_len);
+   uint64_t w0, w1, w2, w3;
+   memcpy(&w0, cin, 8);
+   memcpy(&w1, cin + 8, 8);
+   memcpy(&w2, cout, 8);
+   memcpy(&w3, cout + 8, 8);
+   const uint64_t w4 = ioto_cache_pack_meta(
+      in_len, out_len, ioto->api_program, helper_base_next,
+      next_helper_base, depends_ioto, ioto->shader_gprs);
+
+   atomic_store_explicit(&slot->w[0], w0, memory_order_relaxed);
+   atomic_store_explicit(&slot->w[1], w1, memory_order_relaxed);
+   atomic_store_explicit(&slot->w[2], w2, memory_order_relaxed);
+   atomic_store_explicit(&slot->w[3], w3, memory_order_relaxed);
+   atomic_store_explicit(&slot->w[4], w4, memory_order_relaxed);
+   atomic_store_explicit(&slot->seq, s + 2u, memory_order_release);
+}
+
 #include "agx3_tex_core.h"
 
 #include <stdlib.h>
@@ -615,11 +800,12 @@ relocate_branches(struct util_dynarray *out, const struct util_dynarray *map,
 }
 
 static bool
-transcode(struct util_dynarray *binary, unsigned start,
-          const struct agx3_transcode_ioto *ioto,
-          unsigned *offsets, unsigned offset_count,
-          const bool *fragment_stage, bool long_tile_reads, const char **why,
-          unsigned *fail_offset)
+transcode_impl(struct util_dynarray *binary, unsigned start,
+               const struct agx3_transcode_ioto *ioto,
+               unsigned *offsets, unsigned offset_count,
+               const bool *fragment_stage, bool long_tile_reads,
+               bool allow_cache, const char **why,
+               unsigned *fail_offset)
 {
    const char *unused_why;
    unsigned unused_offset;
@@ -637,6 +823,102 @@ transcode(struct util_dynarray *binary, unsigned start,
 
    const unsigned len = binary->size - start;
    const uint8_t *in = (const uint8_t *)binary->data + start;
+   const bool use_cache = allow_cache && ioto && !fragment_stage && !long_tile_reads;
+
+   /* Fast stack-buffered path for branchless Ioto programs with no offset
+    * markers: avoids three util_dynarray heap allocations per vkCmdDispatch.
+    * Falls back transparently to the general path on any branch, flag op,
+    * or buffer exceeding 1024 output bytes. */
+   if (use_cache && offset_count == 0 && len <= 512) {
+      uint8_t out_buf[1024];
+      unsigned out_len = 0;
+      bool hb = false;
+      unsigned i = 0;
+      bool fell_back = false;
+      while (i < len) {
+         const bool prev_hb = hb;
+         uint8_t c_out[IOTO_CACHE_MAX_BYTES];
+         unsigned cin_len = 0, cout_len = 0;
+         bool next_hb = false;
+         if (ioto_cache_lookup(in + i, len - i, ioto, hb, c_out,
+                               &cin_len, &cout_len, &next_hb)) {
+            if (out_len + cout_len > sizeof(out_buf)) {
+               fell_back = true;
+               break;
+            }
+            memcpy(out_buf + out_len, c_out, cout_len);
+            out_len += cout_len;
+            hb = next_hb;
+            i += cin_len;
+            continue;
+         }
+         const char *display = NULL;
+         const signed n = agx3c_instr_length(in + i, len - i, &display);
+         *fail_offset = i;
+         if (n <= 0) {
+            *why = "not an agx3c instruction";
+            return false;
+         }
+         char mnemonic[32];
+         trim_display(display, mnemonic, sizeof(mnemonic));
+         uint64_t fields[AGX3_MAX_FIELDS];
+         int32_t form = agx3_decode(&agx3c_table, in + i, (unsigned)n, mnemonic, fields);
+         if (form < 0)
+            form = agx3_decode(&agx3c_table, in + i, (unsigned)n, NULL, fields);
+         if (form < 0) {
+            *why = "agx3c bytes do not decode to a field vector";
+            return false;
+         }
+         const char *name = agx3c_table.forms[form].mnemonic;
+         if (!strcmp(name, "b") || !strcmp(name, "bn") ||
+             flag_slot_field(name) >= 0 || !strcmp(name, "cndend")) {
+            fell_back = true;
+            break;
+         }
+         if (hb) {
+            if (strcmp(name, "ldimm") || fields[2] != 0 ||
+                (fields[14] != 0x100 && fields[14] != 0x200)) {
+               *why = "unrecognized Ioto SR14 helper base";
+               return false;
+            }
+            fields[14] *= 2;
+         }
+         hb = !strcmp(name, "rld") && fields[21] == 14;
+         if (!apply_g18g_rules(name, fields, ioto, NULL, why))
+            return false;
+         uint8_t bytes[2 * AGX3_MAX_WORDS];
+         const int32_t dform = agx3_compose_apple_order(&agx3d_table, name, fields, bytes);
+         if (dform < 0) {
+            *why = "field vector has no agx3d encoding";
+            return false;
+         }
+         const unsigned size = agx3d_table.forms[dform].size;
+         if (agx3d_instr_length(bytes, size, NULL) != (signed)size) {
+            *why = "agx3d encoding disagrees with the agx3d length rule";
+            return false;
+         }
+         if (out_len + size > sizeof(out_buf)) {
+            fell_back = true;
+            break;
+         }
+         const bool depends_ioto = !strcmp(name, "ldshdr") ||
+                                   !strcmp(name, "specTPR") ||
+                                   !strcmp(name, "specLM") ||
+                                   !strcmp(name, "cndcall");
+         ioto_cache_insert(in + i, len - i, (unsigned)n, bytes, size, ioto,
+                           prev_hb, hb, depends_ioto);
+         memcpy(out_buf + out_len, bytes, size);
+         out_len += size;
+         i += (unsigned)n;
+      }
+      if (!fell_back) {
+         *fail_offset = len;
+         binary->size = start;
+         memcpy(util_dynarray_grow_bytes(binary, 1, out_len), out_buf, out_len);
+         return true;
+      }
+   }
+
    struct util_dynarray out, map, branches;
    util_dynarray_init(&out, NULL);
    util_dynarray_init(&map, NULL);
@@ -646,6 +928,20 @@ transcode(struct util_dynarray *binary, unsigned start,
 
    unsigned i = 0;
    while (i < len) {
+      const bool prev_helper_base = helper_base_next;
+      if (use_cache && flags.pending < 0 && !flags.folded) {
+         uint8_t cached_out[IOTO_CACHE_MAX_BYTES];
+         unsigned cin_len = 0, cout_len = 0;
+         bool next_hb = false;
+         if (ioto_cache_lookup(in + i, len - i, ioto, helper_base_next,
+                               cached_out, &cin_len, &cout_len, &next_hb)) {
+            util_dynarray_append(&map, ((struct offset_pair){i, out.size}));
+            memcpy(util_dynarray_grow_bytes(&out, 1, cout_len), cached_out, cout_len);
+            helper_base_next = next_hb;
+            i += cin_len;
+            continue;
+         }
+      }
       const char *display = NULL;
       const signed n = agx3c_instr_length(in + i, len - i, &display);
       *fail_offset = i;
@@ -728,6 +1024,15 @@ transcode(struct util_dynarray *binary, unsigned start,
          *why = "agx3d encoding disagrees with the agx3d length rule";
          goto fail;
       }
+      if (use_cache && !branch && flags.pending < 0 && !flags.folded &&
+          flag_slot_field(name) < 0 && strcmp(name, "cndend") != 0) {
+         const bool depends_ioto = !strcmp(name, "ldshdr") ||
+                                   !strcmp(name, "specTPR") ||
+                                   !strcmp(name, "specLM") ||
+                                   !strcmp(name, "cndcall");
+         ioto_cache_insert(in + i, len - i, (unsigned)n, bytes, size, ioto,
+                           prev_helper_base, helper_base_next, depends_ioto);
+      }
       memcpy(util_dynarray_grow_bytes(&out, 1, size), bytes, size);
       i += n;
    }
@@ -778,6 +1083,41 @@ fail:
    util_dynarray_fini(&map);
    util_dynarray_fini(&branches);
    return false;
+}
+
+static bool
+transcode(struct util_dynarray *binary, unsigned start,
+          const struct agx3_transcode_ioto *ioto,
+          unsigned *offsets, unsigned offset_count,
+          const bool *fragment_stage, bool long_tile_reads, const char **why,
+          unsigned *fail_offset)
+{
+   const int mode = ioto ? ioto_cache_get_mode() : 0;
+   if (mode != 2) {
+      return transcode_impl(binary, start, ioto, offsets, offset_count,
+                            fragment_stage, long_tile_reads, mode == 1,
+                            why, fail_offset);
+   }
+   /* Verify mode: run both uncached and cached and abort on any mismatch. */
+   struct util_dynarray ref;
+   util_dynarray_init(&ref, NULL);
+   memcpy(util_dynarray_grow_bytes(&ref, 1, binary->size),
+          binary->data, binary->size);
+   const char *ref_why = NULL;
+   unsigned ref_at = 0;
+   const bool ref_ok = transcode_impl(&ref, start, ioto, NULL, 0,
+                                      fragment_stage, long_tile_reads, false,
+                                      &ref_why, &ref_at);
+   const bool fast_ok = transcode_impl(binary, start, ioto, offsets, offset_count,
+                                       fragment_stage, long_tile_reads, true,
+                                       why, fail_offset);
+   if (ref_ok != fast_ok ||
+       (ref_ok && (ref.size != binary->size ||
+                   memcmp(ref.data, binary->data, ref.size) != 0))) {
+      abort();
+   }
+   util_dynarray_fini(&ref);
+   return fast_ok;
 }
 
 bool
