@@ -111,10 +111,16 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
        d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
       /* Native886 G17G/G18G dynamic scalar/vector shuffles use the same
        * lifetime fields, half-register lane address and wait bank. G18
-       * additionally carries its operation selector in f42/f43. */
+       * additionally carries its operation selector in f42/f43. The
+       * register-lane AGX3c form keeps the lane address and selectors but
+       * has no witnessed wait bits, and its lane is a full register --
+       * G17P's 16-bit half-lane read does not extend to it. */
       const unsigned slots = is_c(enc) ? 8 : 6;
       const unsigned lane_limit = is_c(enc) ? 256 : 192;
-      if (d->lane >= lane_limit || (d->wait_mask >> slots) != 0 ||
+      if (d->lane >= lane_limit ||
+          (is_c(enc) ? d->wait_mask != 0
+                     : (d->wait_mask >> slots) != 0) ||
+          (is_c(enc) && (d->lane & 1) != 0) ||
           (d->src_cache && d->src_discard) ||
           (d->lane_cache && d->lane_discard))
          return false;
