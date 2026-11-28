@@ -299,6 +299,25 @@ enum drm_asahi_feature {
 	 * of at most 32 KiB and 48..128-byte samples in steps of 16.
 	 */
 	DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES = (1UL) << 9,
+	/**
+	 * @DRM_ASAHI_FEATURE_ASYNC_SUBMIT: QUEUE_CREATE accepts
+	 * DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT. Reported by GPUs whose
+	 * submission path can return once a submission is accepted instead of
+	 * blocking until it retires.
+	 */
+	DRM_ASAHI_FEATURE_ASYNC_SUBMIT = (1ULL) << 39,
+};
+
+/**
+ * enum drm_asahi_queue_create_flags - Flags for drm_asahi_queue_create::flags
+ */
+enum drm_asahi_queue_create_flags {
+	/**
+	 * @DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT: A submission to this queue
+	 * returns once accepted rather than waiting for the submission to
+	 * retire. Requires DRM_ASAHI_FEATURE_ASYNC_SUBMIT.
+	 */
+	DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT = (1U << 0),
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -738,7 +757,7 @@ enum drm_asahi_priority {
  * DRM_IOCTL_ASAHI_QUEUE_CREATE
  */
 struct drm_asahi_queue_create {
-	/** @flags: MBZ */
+	/** @flags: Zero or more of drm_asahi_queue_create_flags */
 	__u32 flags;
 
 	/** @vm_id: The ID of the VM this queue is bound to */
