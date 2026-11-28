@@ -9482,7 +9482,7 @@ TEST_F(AGX3PackBinary, ProjectiveMultiplyRefusesUnsupportedForms)
          /* The G17G/G18G witnesses use the general-register destination
           * form; f11 stays clear where AGX3b sets it. */
          const struct agx3_persp_mul_desc d = {
-            .dest = 4, .raw = 0, .reciprocal = 2, .vary_index = 1,
+            .dest = 4, .reciprocal = 2, .raw = 0, .vary_index = 1,
          };
          uint8_t mul[AGX3_FLTNORM_MAX_LENGTH], mul_len = 0;
          ASSERT_TRUE(agx3_persp_mul_encode(AGX_ISA_ENCODING_AGX3C, &d, mul,
