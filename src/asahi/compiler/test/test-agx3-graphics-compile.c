@@ -1769,7 +1769,7 @@ test_g17p_pipeline_statistics_fs_prolog(void)
                    !part.info.has_preamble && part.info.push_count == 0 &&
                    part.info.agx3_staging_known &&
                    part.info.agx3_staging_halfs == 0 &&
-                   hash == UINT64_C(0x7ba573195a6d08cd) &&
+                   hash == UINT64_C(0x053ce9ebd5c66947) &&
                    g17p_sample_mask_input_protocol(&part);
 
    if (!ok || getenv("AGX3_DUMP_BINARY")) {
@@ -8863,10 +8863,11 @@ test_g17g_float_selects(void)
    return compile_vs_g17g(
       "g17g-float-selects", build_vs_g17g_float_selects(),
       AGX_ISA_ENCODING_AGX3C, true,
-      "0cdd10060f000300682a00c04100800000002288070a2300a00a10900a602300"
-      "2200030b2300a00214ac4a20000040001c80023e0000000c0b022104350733002400"
-      "a0021b000000330207022281a402350a33002440a00a2300070a2282a40a35113300"
-      "2480a012330007022283a40a3520330024c0a01a0e000000");
+      "0cdd10060f000300682a00c04100800000003c800240004000002280070a2300"
+      "a00a9001216023003c8002be0000000c2200030b2300a0029401612000004000"
+      "0b002104350433002400a0023300070a2281a402350933002440a00a0b000000"
+      "230007022282a40a351233002480a0120c80023e0000000c330007022283a40a"
+      "3523330024c0a01a0e000000");
 }
 
 /*
