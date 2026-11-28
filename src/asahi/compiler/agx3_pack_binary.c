@@ -6062,6 +6062,13 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
           !(register_lane || agx3_subgroup_imm_lane(lane)))
          return false;
 
+      /* The AGX3c register-lane form has no witnessed scoreboard field:
+       * retire the producer first instead of passing the mask through. */
+      if (enc == AGX_ISA_ENCODING_AGX3C && wait_mask != 0) {
+         if (!agx3_retire_result_wait(emission, enc, I, wait_mask))
+            return false;
+         wait_mask = 0;
+      }
       const struct agx3_subgroup_shuffle_desc d = {
          .quad = quad,
          .op = op,
@@ -13231,7 +13238,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                          ? (I->dim == AGX_DIM_3D ? 32 : 16)
                     : (staged_scalar || staged_sample_offset ||
                        (I->dim == AGX_DIM_2D_ARRAY && !I->query_lod) ||
-                       I->dim == AGX_DIM_3D)
+                       I->dim == AGX_DIM_3D ||
+                       /* The explicit level occupies the G17G block's level
+                        * word (half 6) even when it is an immediate, so a
+                        * shadow comparison at a fixed level still publishes
+                        * the eight-half window. */
+                       (staged_compare &&
+                        I->lod_mode == AGX_LOD_MODE_LOD_MIN))
                        ? 8
                     : staged_compare ? 6
                     : (enc == AGX_ISA_ENCODING_AGX3B ||

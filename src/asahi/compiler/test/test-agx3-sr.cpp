@@ -105,8 +105,20 @@ TEST(AGX3SrCore, CoverageEntryMarker)
    ASSERT_EQ(len, sizeof(later));
    EXPECT_EQ(0, memcmp(out, later, len));
 
-   /* The marker is witnessed on nothing else. */
+   /* The marker is witnessed on nothing else. G17G and G18G open a
+    * [[sample_mask]] fragment with the same marked W16 SR39 read
+    * (m6-sample-mask-in). Other SRs and widths still refuse. */
    d.first = true;
+   d.dest = 10;
+   static const uint8_t c_marked[] =
+      {0x34, 0x82, 0x01, 0x00, 0x20, 0x00, 0xb0, 0x12};
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   ASSERT_EQ(len, sizeof(c_marked));
+   EXPECT_EQ(0, memcmp(out, c_marked, len));
+   d.sr = 41;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   d.sr = 39;
+   d.width = AGX3_SR_W32;
    EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
    d.sr = 41;
    EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
