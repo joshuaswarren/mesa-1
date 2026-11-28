@@ -662,8 +662,15 @@ agx3_try_float_modifier(struct util_dynarray *emission,
    /* All-zero runtime hints are meaningful too: the legacy specimen encoder
     * contains discard flags that would kill live loop invariants. Preserve
     * the actual source lifetimes and waits for every plain scalar register
-    * operation on G17G/G18G, including operations with no modifiers. */
-   if (!has_mod && !(enc == AGX_ISA_ENCODING_AGX3C && scalar_regs))
+    * operation on G17G/G18G, including operations with no modifiers. With
+    * nothing to deposit — no wait, no cache/discard/kill — the witnessed
+    * canonical no-modifier form is the encoding, not a minimal endpoint. */
+   bool deposit = wait != 0;
+   for (unsigned s = 0; s < I->nr_srcs; ++s)
+      deposit |= I->src[s].kill || I->src[s].cache || I->src[s].discard;
+   if (I->nr_dests == 1)
+      deposit |= I->dest[0].cache;
+   if (!has_mod && !(enc == AGX_ISA_ENCODING_AGX3C && scalar_regs && deposit))
       return 0; /* the compact no-modifier packer handles it */
 
    const unsigned want = is_fma ? 3 : 2;
@@ -16605,8 +16612,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (I->src[1].cache && I->src[1].discard) ||
                 !agx3_alu_integer_reg_shift_cache(
                    enc, op, I->dest[0].value, src, hints, (uint8_t)I->shift,
-                   enc == AGX_ISA_ENCODING_AGX3B,
-                   wait, bytes, &len) ||
+                   true, wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
