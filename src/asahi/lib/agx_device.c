@@ -1666,6 +1666,14 @@ agx_create_command_queue(struct agx_device *dev,
       .usc_exec_base = dev->shader_base,
    };
 
+   /* On G18 (t8152) the kernel submit path parks each ioctl until the
+    * submission retires, serialising even trivial dispatches. Where the
+    * driver advertises async submit, opt the queue in so submits return
+    * once accepted; HK_ASYNC_SUBMIT=0 restores the old behaviour. */
+   if ((dev->params.features & DRM_ASAHI_FEATURE_ASYNC_SUBMIT) &&
+       debug_get_bool_option("HK_ASYNC_SUBMIT", true))
+      queue_create.flags |= DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT;
+
    int ret =
       dev->ops.simple_ioctl(dev, DRM_IOCTL_ASAHI_QUEUE_CREATE, &queue_create);
    if (ret) {
