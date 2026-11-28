@@ -291,16 +291,19 @@ int32_t
 agx3_compose_apple_order(const agx3_table *t, const char *mnemonic,
                          const uint64_t fields[AGX3_MAX_FIELDS], uint8_t *out)
 {
-   int32_t lo = -1;
-   for (uint8_t ep = 0; ep < 64 && lo < 0; ++ep)
-      lo = agx3_form_index(t, mnemonic, ep);
-   if (lo < 0)
+   uint32_t lo = 0, hi = t->num_forms;
+   while (lo < hi) {
+      uint32_t mid = lo + ((hi - lo) >> 1);
+      if (strcmp(t->forms[mid].mnemonic, mnemonic) < 0)
+         lo = mid + 1;
+      else
+         hi = mid;
+   }
+   if (lo >= t->num_forms || strcmp(t->forms[lo].mnemonic, mnemonic) != 0)
       return -1;
 
-   uint32_t first = (uint32_t)lo;
-   while (first > 0 && strcmp(t->forms[first - 1].mnemonic, mnemonic) == 0)
-      first--;
-   uint32_t end = (uint32_t)lo;
+   uint32_t first = lo;
+   uint32_t end = lo + 1;
    while (end < t->num_forms && strcmp(t->forms[end].mnemonic, mnemonic) == 0)
       end++;
 
@@ -308,6 +311,13 @@ agx3_compose_apple_order(const agx3_table *t, const char *mnemonic,
    bool tried[64] = {false};
    if (end - first > 64)
       return -1;
+
+   uint64_t nonzero[3] = {0};
+   for (unsigned i = 0; i < AGX3_MAX_FIELDS; i++) {
+      if (fields[i])
+         bset(nonzero, i);
+   }
+
    for (unsigned n = 0; n < end - first; ++n) {
       int32_t best = -1;
       for (uint32_t f = first; f < end; ++f) {
@@ -319,7 +329,7 @@ agx3_compose_apple_order(const agx3_table *t, const char *mnemonic,
             best = (int32_t)f;
       }
       tried[best - first] = true;
-      if (agx3_compose(t, (uint32_t)best, fields, out))
+      if (agx3_compose_known(t, (uint32_t)best, fields, nonzero, out))
          return best;
    }
    return -1;
