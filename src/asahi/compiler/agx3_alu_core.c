@@ -2068,7 +2068,7 @@ agx3_alu_integer_reg_shift_cache(enum agx_isa_encoding enc,
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    if((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || !src || !hints || !out ||
       !len || (op != AGX3_ALU_IADD && op != AGX3_ALU_ISUB) ||
-      dest >= 256 || (dest & 1) || (gpu1 && dest_cache) ||
+      dest >= 256 || (dest & 1) ||
       (wait_mask & ~(uint16_t)(gpu1 ? 0xff : 0x3f)))
       return false;
    /* Only the subtract's shift is witnessed; the add reaches its shifted
