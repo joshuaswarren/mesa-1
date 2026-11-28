@@ -3008,8 +3008,25 @@ test_native_u16_shift_right_immediate(void)
       exact(out, len, witnesses[i].bytes);
    }
 
-   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 0, 0, 4,
+   /* applegpu_g17g and applegpu_g18g emit the same field vector for their
+    * [[sample_mask]] (bits 8..15, srl #8), with the G17-class dispatch
+    * f58 = 3 and f59 = 183 added (m6-sample-mask-in); pin the AGX3C form
+    * rather than refuse it. */
+   assert(agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 0, 0, 4,
+                            AGX3_ALU_HINT_DISCARD, true, 1, out, &len));
+   exact(out, len, "270400182e00a102308100340000");
+   assert(agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 15, 14, 4,
+                            AGX3_ALU_HINT_CACHE, true, 2, out, &len));
+   exact(out, len, "378a00792a00a11a308100340000");
+
+   /* AGX3C bounds are tighter: GPRs below 128 and eight wait bits. */
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 128, 0, 4,
                               AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 0, 128, 4,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 0, 0, 4,
+                              AGX3_ALU_HINT_NONE, false, 1u << 8, out,
+                              &len));
    assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 0, 0,
                               AGX3_ALU_HINT_NONE, false, 0, out, &len));
    assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 0, 32,
